@@ -43,14 +43,11 @@ class MidiTitleWindow(QMainWindow):
     SETTINGS_APP = "APSMIDImanager"
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
-    SETTING_SKIP_DELETION_CONFIRMATION = "skip_deletion_confirmation"
-
     def __init__(self):
         super().__init__()
         self.setWindowTitle("APS MIDI Manager")
         self.resize(860, 800)
         self.pendingEdits = {}         # keys: full file paths, values: new titles
-        self.pendingDeletions = set()    # set of full paths for files marked for deletion
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
 
         # Main widget and layout
@@ -72,7 +69,7 @@ class MidiTitleWindow(QMainWindow):
         # 0: Delete ("X"), 1: FullPath (hidden), 2: 📋, 3: Filename, 4: Title, 5: Compat warning (>32)
         self.table = DropTableWidget(0, 6)
         self.table.setStyleSheet("QTableWidget::item:selected { background-color: #FFB347; }")
-        self.table.setHorizontalHeaderLabels(["Delete", "FullPath", "📋", "Filename", "Title", "32+"])
+        self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "32+"])
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.setColumnWidth(0, 50)
@@ -237,7 +234,6 @@ class MidiTitleWindow(QMainWindow):
             self.table.setSortingEnabled(False)
             self.table.setRowCount(0)
             self.pendingEdits.clear()
-            self.pendingDeletions.clear()
             self.progressDialog = QProgressDialog("Processing MIDI files...", "Cancel", 0, 100, self)
             self.progressDialog.setWindowModality(Qt.WindowModal)
             self.progressDialog.setMinimumDuration(0)
@@ -277,7 +273,6 @@ class MidiTitleWindow(QMainWindow):
 
         self.table.setRowCount(0)
         self.pendingEdits.clear()
-        self.pendingDeletions.clear()
         self.status_label.setText("List cleared.")
 
     def _apply_path_remap(self, old_to_new):
@@ -286,10 +281,6 @@ class MidiTitleWindow(QMainWindow):
         self.pendingEdits = {
             old_to_new.get(path, path): title
             for path, title in self.pendingEdits.items()
-        }
-        self.pendingDeletions = {
-            old_to_new.get(path, path)
-            for path in self.pendingDeletions
         }
 
     def _update_table_paths(self, old_to_new):
@@ -421,61 +412,13 @@ class MidiTitleWindow(QMainWindow):
         self._update_compat_indicator(row, display_title)
 
     def handle_cell_clicked(self, row, column):
-        # Column 0: Delete/Restore column
+        # Column 0: remove from list
         if column == 0:
             full_path_item = self.table.item(row, 1)
-            if not full_path_item:
-                return
-            full_path = full_path_item.text()
-            # If already pending deletion, treat the click as a restore action.
-            if full_path in self.pendingDeletions:
-                self.pendingDeletions.remove(full_path)
-                # Restore row background to default.
-                for col in range(self.table.columnCount()):
-                    item = self.table.item(row, col)
-                    if item:
-                        item.setBackground(self.table.palette().base())
-                        item.setForeground(self.table.palette().text())
-                self.table.item(row, 0).setText("X")
-                self.status_label.setText("Deletion canceled; file restored.")
-            else:
-                # Check whether to show confirmation or skip it.
-                skip_deletion_confirmation = self.settings.value(
-                    self.SETTING_SKIP_DELETION_CONFIRMATION,
-                    False,
-                    type=bool,
-                )
-                if not skip_deletion_confirmation:
-                    msgBox = QMessageBox(self)
-                    msgBox.setIcon(QMessageBox.Question)
-                    msgBox.setWindowTitle("Delete File")
-                    msgBox.setText("Are you sure you want to mark this file for deletion?")
-                    msgBox.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-                    checkbox = QCheckBox("Do not show this again")
-                    msgBox.setCheckBox(checkbox)
-                    reply = msgBox.exec()
-                    if checkbox.isChecked():
-                        self.settings.setValue(self.SETTING_SKIP_DELETION_CONFIRMATION, True)
-                        skip_deletion_confirmation = True
-                    if reply != QMessageBox.Yes:
-                        return
-                # Mark file for deletion.
-                self.pendingDeletions.add(full_path)
-                # Set row background and text colors based on theme.
-                if is_dark_theme():
-                    bg_color = Qt.lightGray      # light gray background in dark theme
-                    text_color = Qt.darkGray     # dark gray text in dark theme
-                else:
-                    bg_color = Qt.darkGray       # dark gray background in light theme
-                    text_color = Qt.lightGray    # light gray text in light theme
-                for col in range(self.table.columnCount()):
-                    item = self.table.item(row, col)
-                    if item:
-                        item.setBackground(bg_color)
-                        item.setForeground(text_color)
-                # Change the symbol in column 0 to a restore symbol (↺).
-                self.table.item(row, 0).setText("↺")
-                self.status_label.setText("File marked for deletion.")
+            if full_path_item:
+                self.pendingEdits.pop(full_path_item.text(), None)
+            self.table.removeRow(row)
+            self.status_label.setText("File removed from the list.")
             return
 
         # Column 2: Clipboard copy (copies filename from col 3)
@@ -559,9 +502,6 @@ class MidiTitleWindow(QMainWindow):
         return "", False
 
     def edit_via_dialog(self, row):
-        full_path = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
-        if full_path in self.pendingDeletions:
-            return  # Do not allow editing if queued for deletion.
         title_item = self.table.item(row, 4)
         current_title = title_item.text() if title_item else ""
         if current_title == "No title found.":
@@ -598,22 +538,18 @@ class MidiTitleWindow(QMainWindow):
             self.table.setCurrentItem(None)
 
     def save_pending_changes(self):
-        if not self.pendingEdits and not self.pendingDeletions:
+        if not self.pendingEdits:
             QMessageBox.information(self, "No Changes", "There are no pending changes to save.")
             return
         
         errors = []
-        # First, update all pending title edits (skip files marked for deletion)
+        # Update all pending title edits.
         if self.pendingEdits:
             progressDialog = QProgressDialog("Saving title changes...", "Cancel", 0, len(self.pendingEdits), self)
             progressDialog.setWindowModality(Qt.WindowModal)
             progressDialog.setMinimumDuration(0)
-            total = len(self.pendingEdits)
             current = 0
             for full_path, new_title in list(self.pendingEdits.items()):
-                if full_path in self.pendingDeletions:
-                    continue
-
                 validation_error = validate_legacy_title_input(new_title)
                 if validation_error:
                     errors.append(f"Invalid title for {os.path.basename(full_path)}: {validation_error}")
@@ -645,43 +581,10 @@ class MidiTitleWindow(QMainWindow):
             progressDialog.close()
             self.pendingEdits.clear()
         
-        deletion_complete = True
-        # Now, if any files were marked for deletion, ask for confirmation.
-        if self.pendingDeletions:
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("Confirm Deletion")
-            msg_box.setText("You have marked some files for deletion.\nDo you want to permanently delete them from the directory?")
-            msg_box.setIcon(QMessageBox.Question)
-            
-            yes_button = msg_box.addButton("Yes, Delete Them", QMessageBox.YesRole)
-            no_button = msg_box.addButton("No, Just Rename", QMessageBox.NoRole)
-            msg_box.exec()
-            if msg_box.clickedButton() == yes_button:
-                print("Deletion starting")
-                deletion_errors = []
-                # Iterate in reverse order to remove rows safely.
-                for row in range(self.table.rowCount()-1, -1, -1):
-                    full_path = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
-                    if full_path in self.pendingDeletions:
-                        try:
-                            print("Removing ",full_path)
-                            os.remove(full_path)
-                            self.table.removeRow(row)
-                            self.pendingDeletions.remove(full_path)
-                        except Exception as e:
-                            deletion_errors.append(f"Error deleting {os.path.basename(full_path)}: {str(e)}")
-                if deletion_errors:
-                    QMessageBox.critical(self, "Deletion Errors", "\n".join(deletion_errors))
-                    deletion_complete = False
-            # If the reply is No, leave the grayed rows intact.
-        
         if errors:
             QMessageBox.critical(self, "Errors Occurred", "\n".join(errors))
         else:
-            if deletion_complete:
-                QMessageBox.information(self, "Save Complete", "All pending changes have been saved.")
-            else:
-                QMessageBox.information(self, "Save Complete", "Title changes have been saved, but some files were not deleted.")
+            QMessageBox.information(self, "Save Complete", "All pending changes have been saved.")
 
     def save_as_changes(self):
         dest_dir = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
@@ -707,9 +610,3 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.critical(self, "Errors Occurred", "\n".join(errors))
         else:
             QMessageBox.information(self, "Save As Complete", "Files have been saved to the new folder.")
-        # After Save As, remove rows that are pending deletion.
-        for row in range(self.table.rowCount()-1, -1, -1):
-            full_path = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
-            if full_path in self.pendingDeletions:
-                self.table.removeRow(row)
-                self.pendingDeletions.remove(full_path)
