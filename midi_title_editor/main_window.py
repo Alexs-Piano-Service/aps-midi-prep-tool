@@ -40,6 +40,12 @@ from .midi_type0_converter import convert_midi_files_to_type0
 from .ui_utils import is_dark_theme, pixmap_from_base64, embedded_logo_dt, embedded_logo_lt
 from .drop_table_widget import DropTableWidget
 from .midi_scan_worker import MidiProcessingWorker
+from .app_info import (
+    APP_TITLE_WITH_VERSION,
+    APP_WEBSITE,
+    SETTINGS_APP as APP_SETTINGS_APP,
+    SETTINGS_ORG as APP_SETTINGS_ORG,
+)
 
 
 class TitleOverflowDelegate(QStyledItemDelegate):
@@ -93,15 +99,15 @@ class TitleOverflowDelegate(QStyledItemDelegate):
 
 class MidiTitleWindow(QMainWindow):
     TITLE_COMPAT_LIMIT = 32
-    SETTINGS_ORG = "AlexPianoServiceLLC"
-    SETTINGS_APP = "APSMidiTitleEditor"
+    SETTINGS_ORG = APP_SETTINGS_ORG
+    SETTINGS_APP = APP_SETTINGS_APP
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
     SETTING_SKIP_TYPE0_WARNING = "skip_type0_warning"
     SETTING_SHOW_MIDI_TYPE_COLUMN = "show_midi_type_column"
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("APS MIDI Title Editor")
+        self.setWindowTitle(APP_TITLE_WITH_VERSION)
         self.resize(860, 800)
         self.pendingEdits = {}         # keys: full file paths, values: new titles
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
@@ -242,10 +248,10 @@ class MidiTitleWindow(QMainWindow):
         else:
             self.logo_label.setText("Logo image not found.")
         logo_layout.addWidget(self.logo_label)
-        prog_title = QLabel("APS MIDI Title Editor")
+        prog_title = QLabel(APP_TITLE_WITH_VERSION)
         prog_title.setFont(QFont("Helvetica", 12))
         prog_title.setAlignment(Qt.AlignCenter)
-        website = QLabel("https://www.alexanderpeppe.com/")
+        website = QLabel(APP_WEBSITE)
         website.setFont(QFont("Helvetica", 12))
         website.setAlignment(Qt.AlignCenter)
         logo_layout.addWidget(prog_title)

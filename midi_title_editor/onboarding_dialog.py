@@ -1,16 +1,25 @@
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QMessageBox, QCheckBox
 
+from .app_info import (
+    APP_TITLE_WITH_VERSION,
+    APP_WEBSITE,
+    COPYRIGHT_HOLDER,
+    COPYRIGHT_YEAR,
+    SETTINGS_APP,
+    SETTINGS_ORG,
+)
+
 
 def show_first_time_dialog():
-    settings = QSettings("AlexPianoServiceLLC", "APSMidiTitleEditor")
+    settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
     skip_dialog = settings.value("skip_first_time_dialog", False, type=bool)
 
     if not skip_dialog:
         msgBox = QMessageBox()
         msgBox.setIcon(QMessageBox.Information)
-        msgBox.setWindowTitle("Welcome to APS MIDI Title Editor")
-        msgBox.setText("""<html>
+        msgBox.setWindowTitle(f"Welcome to {APP_TITLE_WITH_VERSION}")
+        msgBox.setText(f"""<html>
       <head>
         <style type="text/css">
           body { font-family: "Helvetica", sans-serif; }
@@ -24,7 +33,7 @@ def show_first_time_dialog():
         </style>
       </head>
       <body>
-        <h1>APS MIDI Title Editor</h1>
+        <h1>{APP_TITLE_WITH_VERSION}</h1>
         <p>
           This tool is designed to help you quickly update and manage the titles of your MIDI files.
           Whether you have a few or many files, renaming them is a breeze.
@@ -49,8 +58,8 @@ def show_first_time_dialog():
         </ol>
         <p>
           For more details, visit our website at
-          <a href="https://www.alexanderpeppe.com/">alexanderpeppe.com</a>.<br />
-          Copyright 2025 Alex's Piano Service LLC
+          <a href="{APP_WEBSITE}">alexanderpeppe.com</a>.<br />
+          Copyright {COPYRIGHT_YEAR} {COPYRIGHT_HOLDER}
         </p>
         <p>Happy editing!</p>
       </body>
