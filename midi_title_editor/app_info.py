@@ -1,5 +1,5 @@
 APP_NAME = "APS MIDI Title Editor"
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.4.0"
 APP_TITLE_WITH_VERSION = f"{APP_NAME} v{APP_VERSION}"
 APP_WEBSITE = "https://www.alexanderpeppe.com/"
 

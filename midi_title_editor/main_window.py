@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QCheckBox,
+    QGroupBox,
     QToolButton,
     QMenu,
     QStyledItemDelegate,
@@ -125,6 +126,9 @@ class MidiTitleWindow(QMainWindow):
         self.choose_button = QPushButton("Choose MIDI Folder")
         self.choose_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.choose_button.setFont(QFont("Helvetica", 18, QFont.Bold))
+        self.choose_button.setToolTip(
+            "Select a folder to scan for .mid and .midi files."
+        )
         self.choose_button.clicked.connect(self.browse_directory)
         main_layout.addWidget(self.choose_button)
 
@@ -134,6 +138,9 @@ class MidiTitleWindow(QMainWindow):
         self.table = DropTableWidget(0, 7)
         self.table.setStyleSheet("QTableWidget::item:selected { background-color: #FFB347; }")
         self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "32+", "Type"])
+        self.table.setToolTip(
+            "Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename."
+        )
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setMinimumSectionSize(40)
@@ -150,6 +157,19 @@ class MidiTitleWindow(QMainWindow):
         self.table.cellDoubleClicked.connect(self.handle_cell_double_clicked)
         self.title_delegate = TitleOverflowDelegate(self.TITLE_COMPAT_LIMIT, self.table)
         self.table.setItemDelegateForColumn(4, self.title_delegate)
+        header_tooltips = {
+            0: "Remove this row from the list (does not delete the file on disk).",
+            1: "Internal full file path (hidden).",
+            2: "Copy filename to clipboard.",
+            3: "Filename on disk.",
+            4: "MIDI title metadata. Click to edit.",
+            5: f"Shows if title exceeds {self.TITLE_COMPAT_LIMIT} characters.",
+            6: "Detected MIDI type from the file header.",
+        }
+        for column, tooltip in header_tooltips.items():
+            item = self.table.horizontalHeaderItem(column)
+            if item is not None:
+                item.setToolTip(tooltip)
         main_layout.addWidget(self.table, stretch=1)
 
         # Bottom: Status label
@@ -157,22 +177,26 @@ class MidiTitleWindow(QMainWindow):
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumHeight(42)
+        self.status_label.setToolTip("Operation status, warnings, and progress messages.")
         main_layout.addWidget(self.status_label)
 
-        # Controls area: options stacked vertically on the left, action buttons on the right.
+        # Controls area: grouped into equally spaced sections for clarity.
         controls_layout = QHBoxLayout()
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(8)
+        controls_layout.setSpacing(10)
 
-        options_container = QWidget()
-        options_layout = QVBoxLayout(options_container)
-        options_layout.setContentsMargins(0, 0, 0, 0)
-        options_layout.setSpacing(2)
-        options_layout.addStretch()
+        options_group = QGroupBox("Options")
+        options_group.setToolTip("Display and compatibility preferences for the file list.")
+        options_layout = QVBoxLayout(options_group)
+        options_layout.setContentsMargins(10, 14, 10, 10)
+        options_layout.setSpacing(6)
 
         show_compat_warning = self.settings.value(self.SETTING_SHOW_COMPAT_WARNING, True, type=bool)
         self.compat_warning_checkbox = QCheckBox("Show >32-char warning")
         self.compat_warning_checkbox.setChecked(show_compat_warning)
+        self.compat_warning_checkbox.setToolTip(
+            "Highlight title characters beyond the 32-character legacy compatibility limit."
+        )
         self.compat_warning_checkbox.toggled.connect(self.toggle_compat_warnings)
         self.title_delegate.set_highlight_enabled(show_compat_warning)
         options_layout.addWidget(self.compat_warning_checkbox, alignment=Qt.AlignLeft)
@@ -180,52 +204,97 @@ class MidiTitleWindow(QMainWindow):
         show_midi_type_column = self.settings.value(self.SETTING_SHOW_MIDI_TYPE_COLUMN, False, type=bool)
         self.midi_type_column_checkbox = QCheckBox("Show MIDI type column")
         self.midi_type_column_checkbox.setChecked(show_midi_type_column)
+        self.midi_type_column_checkbox.setToolTip(
+            "Show an extra table column with each file's detected MIDI type."
+        )
         self.midi_type_column_checkbox.toggled.connect(self.toggle_midi_type_column)
         options_layout.addWidget(self.midi_type_column_checkbox, alignment=Qt.AlignLeft)
 
         store_backups = self.settings.value(self.SETTING_STORE_BACKUPS, False, type=bool)
         self.backup_checkbox = QCheckBox("Store backups on save")
         self.backup_checkbox.setChecked(store_backups)
+        self.backup_checkbox.setToolTip(
+            "Create a <filename>_backup.mid copy before save and utility operations."
+        )
         self.backup_checkbox.toggled.connect(self.toggle_store_backups)
         options_layout.addWidget(self.backup_checkbox, alignment=Qt.AlignLeft)
         options_layout.addStretch()
+
+        utilities_group = QGroupBox("Utilities")
+        utilities_group.setToolTip("Batch tools that run across every listed file immediately.")
+        utilities_layout = QVBoxLayout(utilities_group)
+        utilities_layout.setContentsMargins(10, 14, 10, 10)
+        utilities_layout.setSpacing(6)
+
+        utilities_hint = QLabel("Run these on all listed files:")
+        utilities_hint.setWordWrap(True)
+        utilities_hint.setAlignment(Qt.AlignCenter)
+        utilities_layout.addWidget(utilities_hint)
+
+        self.renameAllButton = QPushButton("Rename All to DOS 8.3")
+        self.renameAllButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.renameAllButton.setMinimumHeight(36)
+        self.renameAllButton.setToolTip(
+            "Utility: rename every listed file to DOS 8.3 format (00.MID, 01.MID, ...)."
+        )
+        self.renameAllButton.clicked.connect(self.rename_all_for_disk)
+        utilities_layout.addWidget(self.renameAllButton)
+
+        self.convertType0Button = QPushButton("Convert All to MIDI Type 0")
+        self.convertType0Button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.convertType0Button.setMinimumHeight(36)
+        self.convertType0Button.setToolTip(
+            "Utility: convert every listed file to MIDI Type 0 (single-track)."
+        )
+        self.convertType0Button.clicked.connect(self.convert_all_to_type0)
+        utilities_layout.addWidget(self.convertType0Button)
+        utilities_layout.addStretch()
+
+        actions_group = QGroupBox("Actions")
+        actions_group.setToolTip("List management and save actions.")
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.setContentsMargins(10, 14, 10, 10)
+        actions_layout.setSpacing(6)
 
         # Clear button (styled to match Save button)
         self.clearButton = QToolButton()
         self.clearButton.setText("Clear List")
         self.clearButton.setFont(QFont("Helvetica", 18, QFont.Bold))
-        self.clearButton.setFixedWidth(200)
+        self.clearButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.clearButton.setMinimumHeight(36)
+        self.clearButton.setToolTip("Remove all files from the current list.")
         self.clearButton.clicked.connect(self.clear_list)
 
         # Save button (using QToolButton with a menu)
         self.saveButton = QToolButton()
         self.saveButton.setText("Save")
         self.saveButton.setFont(QFont("Helvetica", 18, QFont.Bold))
-        # Instead of making it fixed to a very small width, we set its fixed width to 200.
-        self.saveButton.setFixedWidth(200)
+        self.saveButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.saveButton.setMinimumHeight(36)
+        self.saveButton.setToolTip(
+            "Save pending title edits to current files. Use the arrow for Save As..."
+        )
         self.saveButton.setPopupMode(QToolButton.MenuButtonPopup)
         menu = QMenu(self.saveButton)
         action_save = menu.addAction("Save")
+        action_save.setToolTip("Write pending title edits to the currently listed files.")
         action_save.triggered.connect(self.save_pending_changes)
         action_save_as = menu.addAction("Save As...")
+        action_save_as.setToolTip("Save copies with current titles to a selected destination folder.")
         action_save_as.triggered.connect(self.save_as_changes)
-        menu.addSeparator()
-        action_rename_all = menu.addAction("Rename All to DOS 8.3")
-        action_rename_all.triggered.connect(self.rename_all_for_disk)
-        action_convert_type0 = menu.addAction("Convert All to MIDI Type 0")
-        action_convert_type0.triggered.connect(self.convert_all_to_type0)
         self.saveButton.setMenu(menu)
         self.saveButton.clicked.connect(self.save_pending_changes)
 
-        buttons_container = QWidget()
-        buttons_layout = QVBoxLayout(buttons_container)
-        buttons_layout.setContentsMargins(0, 0, 0, 0)
-        buttons_layout.setSpacing(5)
-        buttons_layout.addWidget(self.clearButton)
-        buttons_layout.addWidget(self.saveButton)
+        actions_layout.addWidget(self.clearButton)
+        actions_layout.addWidget(self.saveButton)
+        actions_layout.addStretch()
 
-        controls_layout.addWidget(options_container, stretch=1)
-        controls_layout.addWidget(buttons_container, stretch=0, alignment=Qt.AlignRight | Qt.AlignVCenter)
+        for section in (options_group, utilities_group, actions_group):
+            section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        controls_layout.addWidget(options_group, stretch=1)
+        controls_layout.addWidget(utilities_group, stretch=1)
+        controls_layout.addWidget(actions_group, stretch=1)
         main_layout.addLayout(controls_layout)
 
         # Logo Area
@@ -254,6 +323,7 @@ class MidiTitleWindow(QMainWindow):
         website = QLabel(APP_WEBSITE)
         website.setFont(QFont("Helvetica", 12))
         website.setAlignment(Qt.AlignCenter)
+        website.setToolTip("Project website.")
         logo_layout.addWidget(prog_title)
         logo_layout.addWidget(website)
         main_layout.addWidget(logo_container)
@@ -264,13 +334,6 @@ class MidiTitleWindow(QMainWindow):
         # Set mouse tracking and install an event filter on the table viewport.
         self.table.viewport().setMouseTracking(True)
         self.table.viewport().installEventFilter(self)
-
-        buttons_height = (
-            self.clearButton.sizeHint().height() +
-            self.saveButton.sizeHint().height() +
-            buttons_layout.spacing()
-        )
-        options_container.setFixedHeight(buttons_height)
 
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
@@ -387,6 +450,10 @@ class MidiTitleWindow(QMainWindow):
                 f"Title is longer than {self.TITLE_COMPAT_LIMIT} characters; "
                 "older systems may truncate or reject it."
             )
+        else:
+            indicator.setToolTip(
+                f"Title length is within the {self.TITLE_COMPAT_LIMIT}-character compatibility limit."
+            )
         self.table.setItem(row, 5, indicator)
 
     def refresh_compat_indicators(self):
@@ -399,6 +466,11 @@ class MidiTitleWindow(QMainWindow):
         indicator = QTableWidgetItem(midi_type if midi_type else "Unknown")
         indicator.setTextAlignment(Qt.AlignCenter)
         indicator.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        indicator.setToolTip(
+            "Detected MIDI file type from header bytes."
+            if midi_type
+            else "MIDI type could not be determined for this file."
+        )
         self.table.setItem(row, 6, indicator)
 
     def refresh_midi_type_indicators(self):
@@ -655,6 +727,7 @@ class MidiTitleWindow(QMainWindow):
         delete_item = QTableWidgetItem("X")
         delete_item.setTextAlignment(Qt.AlignCenter)
         delete_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        delete_item.setToolTip("Remove this file from the list.")
         self.table.setItem(row, 0, delete_item)
 
         # Column 1: FullPath (hidden)
@@ -666,17 +739,20 @@ class MidiTitleWindow(QMainWindow):
         copy_item = QTableWidgetItem("📋")
         copy_item.setTextAlignment(Qt.AlignCenter)
         copy_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        copy_item.setToolTip("Copy filename to clipboard.")
         self.table.setItem(row, 2, copy_item)
 
         # Column 3: Filename
         filename_item = QTableWidgetItem(filename)
         filename_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        filename_item.setToolTip("Double-click to copy filename.")
         self.table.setItem(row, 3, filename_item)
 
         # Column 4: Title (fallback to filename only when no title is present)
         display_title = title if title != "" else filename
         title_item = QTableWidgetItem(display_title)
         title_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        title_item.setToolTip("Click to edit this MIDI title.")
         self.table.setItem(row, 4, title_item)
 
         # Column 5: Compatibility indicator for titles > 32 characters

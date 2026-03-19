@@ -1,7 +1,7 @@
 # APS MIDI Title Editor
 
 `APS MIDI Title Editor` is a desktop tool for editing MIDI track titles with legacy playback systems in mind.
-Current version: `0.3.4` (2026).
+Current version: `0.4.0` (2026).
 
 Built for the workflows at [AlexanderPeppe.com](https://www.alexanderpeppe.com/), this project helps players, technicians, and collectors keep MIDI files named properly and compatible with older Disklavier setups.
 
