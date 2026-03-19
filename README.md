@@ -1,6 +1,6 @@
-# APS MIDI Title Editor
+# APS MIDI Prep Tool
 
-`APS MIDI Title Editor` is a desktop tool for editing MIDI track titles with legacy playback systems in mind.
+`APS MIDI Prep Tool` is a desktop tool for editing MIDI track titles with legacy playback systems in mind.
 Current version: `0.4.0` (2026).
 
 Built for the workflows at [AlexanderPeppe.com](https://www.alexanderpeppe.com/), this project helps players, technicians, and collectors keep MIDI files named properly and compatible with older Disklavier setups.
@@ -50,6 +50,12 @@ This app includes tools for all of the above.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install PySide6
+python3 aps_midi_prep_tool.py
+```
+
+Legacy launcher alias still available:
+
+```bash
 python3 midi_title_editor.py
 ```
 
