@@ -1,6 +1,7 @@
 import sys
 
 from PySide6.QtCore import QSettings
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMessageBox, QCheckBox
 
 from .app_info import (
@@ -13,7 +14,7 @@ from .app_info import (
 )
 
 
-def show_first_time_dialog():
+def show_first_time_dialog(app_icon: QIcon | None = None):
     settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
     skip_dialog = settings.value("skip_first_time_dialog", False, type=bool)
 
@@ -26,6 +27,8 @@ def show_first_time_dialog():
             body_font_stack = '"Noto Sans", "DejaVu Sans", "Arial", sans-serif'
 
         msgBox = QMessageBox()
+        if app_icon is not None and not app_icon.isNull():
+            msgBox.setWindowIcon(app_icon)
         msgBox.setIcon(QMessageBox.Information)
         msgBox.setWindowTitle(f"Welcome to {APP_TITLE_WITH_VERSION}")
         msgBox.setText(f"""<html>

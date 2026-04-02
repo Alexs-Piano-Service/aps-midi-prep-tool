@@ -1,13 +1,12 @@
 import sys
-from pathlib import Path
 
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .app_info import APP_VERSION, LEGACY_SETTINGS_APP, SETTINGS_APP, SETTINGS_ORG
 from .onboarding_dialog import show_first_time_dialog
 from .main_window import MidiTitleWindow
+from .icon_utils import apply_window_icon, load_app_icon
 
 
 def _set_windows_app_id() -> None:
@@ -48,13 +47,12 @@ def main():
     app.setOrganizationName(SETTINGS_ORG)
     app.setApplicationName(SETTINGS_APP)
     app.setApplicationVersion(APP_VERSION)
-    app_icon = QIcon(str(Path(__file__).resolve().parent / "aps.ico"))
+    app_icon = load_app_icon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
-    show_first_time_dialog()
+    show_first_time_dialog(app_icon)
     window = MidiTitleWindow()
-    if not app_icon.isNull():
-        window.setWindowIcon(app_icon)
+    apply_window_icon(window)
     window.show()
     sys.exit(app.exec())

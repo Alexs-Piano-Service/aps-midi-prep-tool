@@ -41,6 +41,7 @@ from .midi_type0_converter import convert_midi_files_to_type0
 from .ui_utils import is_dark_theme, pixmap_from_base64, embedded_logo_dt, embedded_logo_lt
 from .drop_table_widget import DropTableWidget
 from .midi_scan_worker import MidiProcessingWorker
+from .icon_utils import apply_window_icon
 from .app_info import (
     APP_TITLE_WITH_VERSION,
     APP_WEBSITE,
@@ -109,6 +110,7 @@ class MidiTitleWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE_WITH_VERSION)
+        apply_window_icon(self)
         self.resize(860, 800)
         self.pendingEdits = {}         # keys: full file paths, values: new titles
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
@@ -637,6 +639,7 @@ class MidiTitleWindow(QMainWindow):
             return True
 
         warning_box = QMessageBox(self)
+        apply_window_icon(warning_box)
         warning_box.setIcon(QMessageBox.Warning)
         warning_box.setWindowTitle("Convert All to MIDI Type 0")
         warning_box.setText(
@@ -796,6 +799,7 @@ class MidiTitleWindow(QMainWindow):
 
     def _prompt_for_title(self, current_title):
         dialog = QDialog(self)
+        apply_window_icon(dialog)
         dialog.setWindowTitle("Edit Title")
         dialog.setModal(True)
         dialog.setMinimumWidth(760)
