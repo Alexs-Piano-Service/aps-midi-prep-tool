@@ -442,7 +442,7 @@ def _notify_progress(progress_callback, step, total, message):
         progress_callback(step, total, message)
 
 
-def list_floppy_drives():
+def _list_linux_floppy_drives():
     lsblk = shutil.which("lsblk")
     if not lsblk:
         return []
@@ -507,6 +507,192 @@ def list_floppy_drives():
 
     drives.sort(key=lambda item: (item.path, item.size_bytes))
     return drives
+
+
+def _windows_ctypes():
+    import ctypes
+    from ctypes import wintypes
+
+    return ctypes, wintypes, ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def _windows_last_error_message(prefix):
+    ctypes, _wintypes, _kernel32 = _windows_ctypes()
+    error_code = ctypes.get_last_error()
+    if error_code:
+        return f"{prefix}: {ctypes.FormatError(error_code).strip()}"
+    return f"{prefix}."
+
+
+def _windows_raw_volume_path(drive_path):
+    drive_path = str(drive_path or "").strip()
+    if drive_path.startswith("\\\\.\\"):
+        return drive_path
+    drive_path = drive_path.rstrip("\\/")
+    if re.fullmatch(r"[A-Za-z]:", drive_path):
+        return f"\\\\.\\{drive_path.upper()}"
+    if re.fullmatch(r"[A-Za-z]", drive_path):
+        return f"\\\\.\\{drive_path.upper()}:"
+    return drive_path
+
+
+def _windows_volume_label(root_path):
+    try:
+        ctypes, wintypes, kernel32 = _windows_ctypes()
+        kernel32.GetVolumeInformationW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+        ]
+        kernel32.GetVolumeInformationW.restype = wintypes.BOOL
+        label_buffer = ctypes.create_unicode_buffer(261)
+        fs_buffer = ctypes.create_unicode_buffer(261)
+        serial = wintypes.DWORD()
+        max_component = wintypes.DWORD()
+        flags = wintypes.DWORD()
+        ok = kernel32.GetVolumeInformationW(
+            root_path,
+            label_buffer,
+            len(label_buffer),
+            ctypes.byref(serial),
+            ctypes.byref(max_component),
+            ctypes.byref(flags),
+            fs_buffer,
+            len(fs_buffer),
+        )
+        if ok:
+            return label_buffer.value.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _windows_device_io_control(handle, control_code, out_buffer=None):
+    ctypes, wintypes, kernel32 = _windows_ctypes()
+    kernel32.DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.DeviceIoControl.restype = wintypes.BOOL
+    bytes_returned = wintypes.DWORD()
+    out_size = ctypes.sizeof(out_buffer) if out_buffer is not None else 0
+    ok = kernel32.DeviceIoControl(
+        handle,
+        control_code,
+        None,
+        0,
+        ctypes.byref(out_buffer) if out_buffer is not None else None,
+        out_size,
+        ctypes.byref(bytes_returned),
+        None,
+    )
+    return bool(ok)
+
+
+def _windows_detect_floppy_size(raw_path):
+    if os.name != "nt":
+        return 0
+
+    ctypes, wintypes, _kernel32 = _windows_ctypes()
+
+    class _DiskGeometry(ctypes.Structure):
+        _fields_ = [
+            ("Cylinders", ctypes.c_longlong),
+            ("MediaType", wintypes.DWORD),
+            ("TracksPerCylinder", wintypes.DWORD),
+            ("SectorsPerTrack", wintypes.DWORD),
+            ("BytesPerSector", wintypes.DWORD),
+        ]
+
+    class _LengthInfo(ctypes.Structure):
+        _fields_ = [("Length", ctypes.c_longlong)]
+
+    try:
+        with _WindowsVolumeHandle(raw_path, write=False) as volume:
+            geometry = _DiskGeometry()
+            if _windows_device_io_control(volume.handle, 0x00070000, geometry):
+                size = int(
+                    geometry.Cylinders
+                    * geometry.TracksPerCylinder
+                    * geometry.SectorsPerTrack
+                    * geometry.BytesPerSector
+                )
+                if size in DISK_FORMAT_BY_SIZE:
+                    return size
+
+            length_info = _LengthInfo()
+            if _windows_device_io_control(volume.handle, 0x0007405C, length_info):
+                size = int(length_info.Length)
+                if size in DISK_FORMAT_BY_SIZE:
+                    return size
+
+            for disk_format in sorted(DISK_FORMATS, key=lambda item: item.size_bytes, reverse=True):
+                try:
+                    volume.read_at(disk_format.size_bytes - 1, 1, "floppy size probe")
+                    return disk_format.size_bytes
+                except FloppyImageError:
+                    continue
+    except FloppyImageError:
+        return 0
+    return 0
+
+
+def _list_windows_floppy_drives():
+    if os.name != "nt":
+        return []
+    try:
+        ctypes, wintypes, kernel32 = _windows_ctypes()
+        kernel32.GetLogicalDrives.restype = wintypes.DWORD
+        kernel32.GetDriveTypeW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GetDriveTypeW.restype = wintypes.UINT
+        drive_mask = int(kernel32.GetLogicalDrives())
+    except Exception:
+        return []
+
+    drives = []
+    DRIVE_REMOVABLE = 2
+    for index in range(26):
+        if not (drive_mask & (1 << index)):
+            continue
+        letter = chr(ord("A") + index)
+        root_path = f"{letter}:\\"
+        if kernel32.GetDriveTypeW(root_path) != DRIVE_REMOVABLE:
+            continue
+
+        raw_path = _windows_raw_volume_path(f"{letter}:")
+        size_bytes = _windows_detect_floppy_size(raw_path)
+        if size_bytes not in DISK_FORMAT_BY_SIZE:
+            continue
+        drives.append(
+            FloppyDriveInfo(
+                path=f"{letter}:",
+                size_bytes=size_bytes,
+                transport="usb",
+                model=f"Windows removable drive {letter}:",
+                label=_windows_volume_label(root_path),
+                mountpoints=(),
+            )
+        )
+
+    drives.sort(key=lambda item: (item.path, item.size_bytes))
+    return drives
+
+
+def list_floppy_drives():
+    if os.name == "nt":
+        return _list_windows_floppy_drives()
+    return _list_linux_floppy_drives()
 
 
 def list_greaseweazle_devices():
@@ -924,7 +1110,195 @@ def _normalize_image_path(path):
     return cleaned
 
 
+class _WindowsVolumeHandle:
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x00000080
+    FILE_BEGIN = 0
+    FSCTL_LOCK_VOLUME = 0x00090018
+    FSCTL_UNLOCK_VOLUME = 0x0009001C
+    FSCTL_DISMOUNT_VOLUME = 0x00090020
+
+    def __init__(self, path, *, write=False):
+        if os.name != "nt":
+            raise FloppyImageError("Windows raw volume access is only available on Windows.")
+        self.path = _windows_raw_volume_path(path)
+        self.write = bool(write)
+        self._ctypes, self._wintypes, self._kernel32 = _windows_ctypes()
+        self._configure_api()
+        access = self.GENERIC_READ | (self.GENERIC_WRITE if self.write else 0)
+        self.handle = self._kernel32.CreateFileW(
+            self.path,
+            access,
+            self.FILE_SHARE_READ | self.FILE_SHARE_WRITE,
+            None,
+            self.OPEN_EXISTING,
+            self.FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        if self.handle == self._ctypes.c_void_p(-1).value:
+            raise FloppyImageError(_windows_last_error_message(f"Could not open floppy device {self.path}"))
+
+    def _configure_api(self):
+        self._kernel32.CreateFileW.argtypes = [
+            self._wintypes.LPCWSTR,
+            self._wintypes.DWORD,
+            self._wintypes.DWORD,
+            self._wintypes.LPVOID,
+            self._wintypes.DWORD,
+            self._wintypes.DWORD,
+            self._wintypes.HANDLE,
+        ]
+        self._kernel32.CreateFileW.restype = self._wintypes.HANDLE
+        self._kernel32.CloseHandle.argtypes = [self._wintypes.HANDLE]
+        self._kernel32.CloseHandle.restype = self._wintypes.BOOL
+        self._kernel32.SetFilePointerEx.argtypes = [
+            self._wintypes.HANDLE,
+            self._ctypes.c_longlong,
+            self._ctypes.POINTER(self._ctypes.c_longlong),
+            self._wintypes.DWORD,
+        ]
+        self._kernel32.SetFilePointerEx.restype = self._wintypes.BOOL
+        self._kernel32.ReadFile.argtypes = [
+            self._wintypes.HANDLE,
+            self._wintypes.LPVOID,
+            self._wintypes.DWORD,
+            self._ctypes.POINTER(self._wintypes.DWORD),
+            self._wintypes.LPVOID,
+        ]
+        self._kernel32.ReadFile.restype = self._wintypes.BOOL
+        self._kernel32.WriteFile.argtypes = [
+            self._wintypes.HANDLE,
+            self._wintypes.LPCVOID,
+            self._wintypes.DWORD,
+            self._ctypes.POINTER(self._wintypes.DWORD),
+            self._wintypes.LPVOID,
+        ]
+        self._kernel32.WriteFile.restype = self._wintypes.BOOL
+        self._kernel32.FlushFileBuffers.argtypes = [self._wintypes.HANDLE]
+        self._kernel32.FlushFileBuffers.restype = self._wintypes.BOOL
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        self.close()
+
+    def close(self):
+        handle = getattr(self, "handle", None)
+        if handle and handle != self._ctypes.c_void_p(-1).value:
+            self._kernel32.CloseHandle(handle)
+            self.handle = None
+
+    def _seek(self, offset, label):
+        new_pos = self._ctypes.c_longlong()
+        ok = self._kernel32.SetFilePointerEx(
+            self.handle,
+            int(offset),
+            self._ctypes.byref(new_pos),
+            self.FILE_BEGIN,
+        )
+        if not ok:
+            raise FloppyImageError(_windows_last_error_message(f"Could not seek to {label}"))
+
+    def read_at(self, offset, size, label):
+        self._seek(offset, label)
+        buffer = self._ctypes.create_string_buffer(int(size))
+        bytes_read = self._wintypes.DWORD()
+        ok = self._kernel32.ReadFile(
+            self.handle,
+            buffer,
+            int(size),
+            self._ctypes.byref(bytes_read),
+            None,
+        )
+        if not ok:
+            raise FloppyImageError(_windows_last_error_message(f"Could not read {label}"))
+        if bytes_read.value <= 0:
+            return b""
+        return buffer.raw[:bytes_read.value]
+
+    def lock_for_write(self):
+        if not self.write:
+            return
+        if not _windows_device_io_control(self.handle, self.FSCTL_LOCK_VOLUME):
+            raise FloppyImageError(
+                _windows_last_error_message(
+                    "Could not lock the floppy volume for writing. Close Explorer or other programs using the drive and try again"
+                )
+            )
+        _windows_device_io_control(self.handle, self.FSCTL_DISMOUNT_VOLUME)
+
+    def unlock_after_write(self):
+        if self.write:
+            _windows_device_io_control(self.handle, self.FSCTL_UNLOCK_VOLUME)
+
+    def write_file(self, input_path, progress_callback=None):
+        self._seek(0, "start of floppy device")
+        total_size = os.path.getsize(input_path)
+        written_total = 0
+        chunk_size = 64 * 1024
+        with open(input_path, "rb") as handle:
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                buffer = self._ctypes.create_string_buffer(chunk)
+                bytes_written = self._wintypes.DWORD()
+                ok = self._kernel32.WriteFile(
+                    self.handle,
+                    buffer,
+                    len(chunk),
+                    self._ctypes.byref(bytes_written),
+                    None,
+                )
+                if not ok or bytes_written.value != len(chunk):
+                    raise FloppyImageError(_windows_last_error_message(f"Could not write floppy device {self.path}"))
+                written_total += bytes_written.value
+                if progress_callback is not None and total_size > 0:
+                    progress = 4 + min(1, int((written_total / total_size) * 1))
+                    progress_callback(progress, 5, f"Writing USB floppy: {display_bytes(written_total)} of {display_bytes(total_size)}...")
+        if not self._kernel32.FlushFileBuffers(self.handle):
+            raise FloppyImageError(_windows_last_error_message(f"Could not flush floppy device {self.path}"))
+
+
+def _open_block_device_for_read(device_path):
+    if os.name == "nt":
+        return _WindowsVolumeHandle(device_path, write=False)
+    try:
+        return os.open(device_path, os.O_RDONLY)
+    except OSError as exc:
+        raise FloppyImageError(f"Could not open floppy device {device_path}: {exc}") from exc
+
+
+def _close_block_device(device):
+    if hasattr(device, "close"):
+        device.close()
+    else:
+        os.close(device)
+
+
 def _read_block_device(device_path, output_path, size_bytes):
+    if os.name == "nt":
+        if not size_bytes:
+            raise FloppyImageError("Could not read Windows floppy device: unknown disk size.")
+        with _WindowsVolumeHandle(device_path, write=False) as volume, open(output_path, "wb") as output:
+            remaining = int(size_bytes)
+            cursor = 0
+            chunk_size = 64 * 1024
+            while remaining > 0:
+                current_size = min(chunk_size, remaining)
+                chunk = volume.read_at(cursor, current_size, "floppy image")
+                if not chunk:
+                    raise FloppyImageError("Could not read floppy device: unexpected end of device.")
+                output.write(chunk)
+                cursor += len(chunk)
+                remaining -= len(chunk)
+        return
+
     dd = _require_command("dd")
     args = [
         dd,
@@ -939,7 +1313,27 @@ def _read_block_device(device_path, output_path, size_bytes):
     _run_command(args, f"Could not read floppy device {device_path}")
 
 
-def _write_block_device(input_path, device_path):
+def _write_block_device(input_path, device_path, progress_callback=None):
+    if os.name == "nt":
+        permission_hint = (
+            "Direct USB floppy writes on Windows require permission to lock and write the raw drive. "
+            "Close Explorer windows using the drive and run the app as administrator if Windows denies access. "
+            "You can also use Save As Image as a safer fallback."
+        )
+        try:
+            with _WindowsVolumeHandle(device_path, write=True) as volume:
+                volume.lock_for_write()
+                try:
+                    volume.write_file(input_path, progress_callback=progress_callback)
+                finally:
+                    volume.unlock_after_write()
+            return
+        except FloppyImageError as exc:
+            detail = str(exc)
+            if "Access is denied" in detail or "denied" in detail.lower() or "lock" in detail.lower():
+                detail = f"{detail}\n\n{permission_hint}"
+            raise FloppyImageError(detail) from exc
+
     dd = _require_command("dd")
     permission_hint = (
         "Direct USB floppy writes require write permission for the block device. "
@@ -1319,13 +1713,28 @@ def _yamaha_720_geometry():
     )
 
 
-def _read_device_exact(fd, offset, size, label):
+def _fat12_geometry_from_layout(layout):
+    return Fat12Geometry(
+        bytes_per_sector=int(layout["bytes_per_sector"]),
+        sectors_per_cluster=int(layout["sectors_per_cluster"]),
+        reserved_sectors=int(layout["reserved_sectors"]),
+        num_fats=int(layout["num_fats"]),
+        root_entries=int(layout["root_entries"]),
+        total_sectors=int(layout["total_sectors"]),
+        sectors_per_fat=int(layout["sectors_per_fat"]),
+    )
+
+
+def _read_device_exact(device, offset, size, label):
     chunks = []
     remaining = int(size)
     cursor = int(offset)
     while remaining > 0:
         try:
-            chunk = os.pread(fd, remaining, cursor)
+            if hasattr(device, "read_at"):
+                chunk = device.read_at(cursor, remaining, label)
+            else:
+                chunk = os.pread(device, remaining, cursor)
         except OSError as exc:
             raise FloppyImageError(f"Could not read {label}: {exc}") from exc
         if not chunk:
@@ -1336,9 +1745,9 @@ def _read_device_exact(fd, offset, size, label):
     return b"".join(chunks)
 
 
-def _try_read_device_exact(fd, offset, size):
+def _try_read_device_exact(device, offset, size):
     try:
-        return _read_device_exact(fd, offset, size, "floppy sector")
+        return _read_device_exact(device, offset, size, "floppy sector")
     except FloppyImageError:
         return None
 
@@ -1559,42 +1968,74 @@ def _reconstruct_yamaha_root_dir_from_pianodir(data):
 
 
 def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progress_callback=None):
-    try:
-        fd = os.open(device_path, os.O_RDONLY)
-    except OSError as exc:
-        raise FloppyImageError(f"Could not open floppy device {device_path}: {exc}") from exc
+    device = _open_block_device_for_read(device_path)
     try:
         _notify_progress(progress_callback, 0, 100, "Reading floppy directory...")
-        sector0 = _try_read_device_exact(fd, 0, _YAMAHA_BYTES_PER_SECTOR) or b"\x00" * _YAMAHA_BYTES_PER_SECTOR
+        sector0 = _try_read_device_exact(device, 0, _YAMAHA_BYTES_PER_SECTOR) or b"\x00" * _YAMAHA_BYTES_PER_SECTOR
         geometry = _geometry_from_boot_sector(sector0)
         repair_result = YamahaRepairResult("Fast USB floppy read: valid FAT12 boot sector present.", False)
         boot = sector0
+        fat_area = None
+        root_dir = None
 
         if geometry is None:
-            if size_bytes != _YAMAHA_TOTAL_SIZE:
-                raise FloppyImageError("Fast USB floppy read only supports valid FAT12 disks or Yamaha 720K protected disks.")
-            geometry = _yamaha_720_geometry()
-            boot = None
+            matched_layout = None
+            candidate_layouts = sorted(
+                _PROTECTED_FAT12_LAYOUTS,
+                key=lambda layout: (
+                    0 if int(layout["total_sectors"]) * int(layout["bytes_per_sector"]) == int(size_bytes or 0) else 1,
+                    int(layout["total_sectors"]) * int(layout["bytes_per_sector"]),
+                ),
+            )
+            for layout in candidate_layouts:
+                candidate_geometry = _fat12_geometry_from_layout(layout)
+                if size_bytes and candidate_geometry.total_size > size_bytes:
+                    continue
+                candidate_fat = _try_read_device_exact(
+                    device,
+                    candidate_geometry.fat_offset,
+                    candidate_geometry.fat_area_size,
+                )
+                candidate_root = _try_read_device_exact(
+                    device,
+                    candidate_geometry.root_offset,
+                    candidate_geometry.root_size,
+                )
+                if candidate_fat is None or candidate_root is None:
+                    continue
+                media_descriptor = int(layout["media_descriptor"])
+                if not _fat_signature_at(candidate_fat, 0, media_descriptor) or not _fat_signature_at(
+                    candidate_fat,
+                    candidate_geometry.fat_size,
+                    media_descriptor,
+                ):
+                    continue
+                if not _root_dir_looks_plausible(candidate_root, 0, candidate_geometry.root_dir_sectors):
+                    continue
 
-        if size_bytes and geometry.total_size > size_bytes:
-            raise FloppyImageError("The detected FAT12 geometry is larger than the selected floppy device.")
-
-        fat_area = _read_device_exact(fd, geometry.fat_offset, geometry.fat_area_size, "floppy FAT sectors")
-        root_dir = _read_device_exact(fd, geometry.root_offset, geometry.root_size, "floppy root directory")
-
-        if boot is None:
+                geometry = candidate_geometry
+                fat_area = candidate_fat
+                root_dir = candidate_root
+                matched_layout = layout
+                break
+            if geometry is None or matched_layout is None:
+                raise FloppyImageError("Fast USB floppy read only supports valid FAT12 disks or Yamaha protected FAT12 disks.")
             _notify_progress(progress_callback, 10, 100, "Yamaha protected disk recognized; creating working copy...")
-            if not _fat_signature_at(fat_area, 0) or not _fat_signature_at(fat_area, geometry.fat_size):
-                raise FloppyImageError("Yamaha protected floppy layout was not recognized.")
-            if not _root_dir_looks_plausible(root_dir, 0):
-                raise FloppyImageError("Yamaha protected floppy root directory was not recognized.")
             serial = zlib.crc32(fat_area + root_dir) & 0xFFFFFFFF
-            boot = _build_standard_yamaha_boot_sector(serial, _find_volume_label(root_dir))
+            boot = _build_standard_fat12_boot_sector(matched_layout, serial, _find_volume_label(root_dir))
             repair_result = YamahaRepairResult(
                 "Fast USB floppy read applied Yamaha copy-protection repair: sector 0 appears blank/corrupt.",
                 True,
             )
-        else:
+
+        if size_bytes and geometry.total_size > size_bytes:
+            raise FloppyImageError("The detected FAT12 geometry is larger than the selected floppy device.")
+
+        if fat_area is None:
+            fat_area = _read_device_exact(device, geometry.fat_offset, geometry.fat_area_size, "floppy FAT sectors")
+        if root_dir is None:
+            root_dir = _read_device_exact(device, geometry.root_offset, geometry.root_size, "floppy root directory")
+        if not repair_result.changed:
             _notify_progress(progress_callback, 10, 100, "Reading floppy file map...")
 
         total_size = geometry.total_size
@@ -1647,7 +2088,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             while run_cursor < run_size:
                 current_size = min(chunk_size, run_size - run_cursor)
                 chunk = _read_device_exact(
-                    fd,
+                    device,
                     offset + run_cursor,
                     current_size,
                     f"clusters {start_cluster}-{end_cluster}",
@@ -1672,7 +2113,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             handle.write(image)
         return repair_result
     finally:
-        os.close(fd)
+        _close_block_device(device)
 
 
 def prepare_yamaha_image(input_path, output_path):
@@ -2313,7 +2754,7 @@ class FloppyImageSession:
         try:
             if self.source_kind == "floppy_usb":
                 _notify_progress(progress_callback, 4, 5, f"Writing USB floppy {self.source_path}...")
-                _write_block_device(modified_img, self.source_path)
+                _write_block_device(modified_img, self.source_path, progress_callback=progress_callback)
             elif self.source_kind == "floppy_gw":
                 drive_name = self.gw_source.drive if self.gw_source is not None else "A"
                 _notify_progress(progress_callback, 4, 5, f"Writing Greaseweazle drive {drive_name}...")
