@@ -594,9 +594,9 @@ def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None, cc7_pol
     add_track_event(0, _write_midi_tempo(initial_mpqn))
     if parsed.time_signature_events:
         _, numerator, denominator_power = parsed.time_signature_events[0]
+        add_track_event(0, _write_midi_time_signature(numerator, denominator_power))
     else:
         numerator, denominator_power = DEFAULT_TIME_SIGNATURE
-    add_track_event(0, _write_midi_time_signature(numerator, denominator_power))
     add_track_event(0, _write_midi_key_signature(*DEFAULT_KEY_SIGNATURE))
     add_track_event(0, _write_midi_track_name(title))
     add_track_event(
@@ -764,17 +764,25 @@ def _decode_midi_sysex_event(raw):
     return bytes([raw[0]]) + raw[payload_start:payload_end]
 
 
-def _encode_eseq_delta(delta):
+def _encode_eseq_delta(delta, *, prefer_long=False):
     if delta < 0:
         raise EseqConversionError("Negative E-SEQ deltas are not supported.")
     out = bytearray()
     remaining = int(delta)
+    if prefer_long and 0 < remaining <= ESEQ_DELAY15_MAX:
+        return b"\xF4" + _encode_15(remaining)
     while remaining > 0:
+        if prefer_long and remaining <= ESEQ_DELAY15_MAX:
+            out.extend(b"\xF4" + _encode_15(remaining))
+            remaining = 0
+            continue
         if remaining <= 0xFF:
             out.extend(b"\xF3" + bytes([remaining]))
             remaining = 0
             continue
         chunk = min(remaining, ESEQ_DELAY15_MAX)
+        if prefer_long and 0 < remaining - chunk <= 0xFF:
+            chunk = max(1, remaining - 0x100)
         out.extend(b"\xF4" + _encode_15(chunk))
         remaining -= chunk
     return bytes(out)
@@ -949,7 +957,19 @@ def convert_midi_bytes_to_eseq_bytes(
             last_real_event_tick = max(tick for tick, _, _ in normalized_events)
             last_tick = max(last_tick, last_real_event_tick + int(desired_after))
 
-    marker_events = _build_time_signature_markers(time_signature_events, last_tick)
+    marker_events = _build_time_signature_markers(time_signature_events, last_tick) if time_signature_events else []
+    if timing_hint and normalized_events:
+        first_stream_tick = min(tick for tick, _, _ in normalized_events)
+        if first_stream_tick > 0:
+            marker_events = [
+                (
+                    first_stream_tick if tick < first_stream_tick else tick,
+                    numerator,
+                    denominator_power,
+                )
+                for tick, numerator, denominator_power in marker_events
+            ]
+            marker_events = sorted(set(marker_events), key=lambda item: (item[0], item[1], item[2]))
     combined_events = [(0, 0, b"\xF1\x00")]
     combined_events.extend((tick, 1, b"\xF9" + bytes([numerator, denominator_power])) for tick, numerator, denominator_power in marker_events)
 
@@ -966,15 +986,19 @@ def convert_midi_bytes_to_eseq_bytes(
     stream = bytearray()
     previous_tick = 0
     first_event = True
+    first_nonzero_delta = True
     for abs_tick, _, raw in combined_events:
         if first_event:
             first_event = False
         else:
-            stream.extend(_encode_eseq_delta(abs_tick - previous_tick))
+            delta = abs_tick - previous_tick
+            stream.extend(_encode_eseq_delta(delta, prefer_long=first_nonzero_delta and delta > 0))
+            if delta > 0:
+                first_nonzero_delta = False
         stream.extend(raw)
         previous_tick = abs_tick
     if last_tick > previous_tick:
-        stream.extend(_encode_eseq_delta(last_tick - previous_tick))
+        stream.extend(_encode_eseq_delta(last_tick - previous_tick, prefer_long=True))
         previous_tick = last_tick
     end_tick = previous_tick
     stream.extend(b"\xF2")
