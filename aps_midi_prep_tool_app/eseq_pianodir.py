@@ -1,8 +1,8 @@
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from .eseq_converter import derive_eseq_timing_fields, refresh_eseq_timing_fields_in_bytes
+from .eseq_converter import refresh_eseq_timing_fields_in_bytes
 
 
 PIANODIR_FILENAME = "PIANODIR.FIL"
@@ -63,6 +63,7 @@ class PianodirTrackEntry:
 class PianodirMetadata:
     catalog_number: str = ""
     disk_title: str = ""
+    raw_label_bytes: bytes = field(default=b"", repr=False, compare=False)
 
 
 def is_pianodir_path(path):
@@ -165,10 +166,10 @@ def _decode_disk_label(data):
     return block.split(b"\x00", 1)[0].decode("ascii", errors="replace").rstrip()
 
 
-def _split_disk_label(label_text):
+def _split_disk_label(label_text, raw_label_bytes=b""):
     clean_text = _ascii_text(label_text).replace("\x00", "").rstrip()
     if not clean_text.strip():
-        return PianodirMetadata()
+        return PianodirMetadata(raw_label_bytes=raw_label_bytes)
 
     match = PIANODIR_CATALOG_AND_TITLE_RE.match(clean_text)
     if match:
@@ -181,6 +182,7 @@ def _split_disk_label(label_text):
         return PianodirMetadata(
             catalog_number=catalog_text,
             disk_title=title_text,
+            raw_label_bytes=raw_label_bytes,
         )
 
     fallback_match = re.match(r"^\s*(?P<catalog>(?=.*\d).{1,16}?)\s{2,}(?P<title>.+?)\s*$", clean_text)
@@ -188,13 +190,17 @@ def _split_disk_label(label_text):
         return PianodirMetadata(
             catalog_number=_normalize_catalog_number(fallback_match.group("catalog")),
             disk_title=fallback_match.group("title").strip(),
+            raw_label_bytes=raw_label_bytes,
         )
 
-    return PianodirMetadata(disk_title=clean_text.strip())
+    return PianodirMetadata(disk_title=clean_text.strip(), raw_label_bytes=raw_label_bytes)
 
 
 def parse_pianodir_metadata(data):
-    return _split_disk_label(_decode_disk_label(data))
+    raw_label = bytes(data or b"")[
+        PIANODIR_DISK_METADATA_OFFSET:PIANODIR_DISK_METADATA_OFFSET + PIANODIR_DISK_METADATA_SIZE
+    ]
+    return _split_disk_label(_decode_disk_label(data), raw_label)
 
 
 def read_pianodir_metadata_from_file(path):
@@ -204,6 +210,15 @@ def read_pianodir_metadata_from_file(path):
 
 def build_pianodir_metadata_bytes(metadata=None, *, catalog_number="", disk_title=""):
     if metadata is not None:
+        if (
+            not catalog_number
+            and not disk_title
+            and getattr(metadata, "raw_label_bytes", b"")
+        ):
+            return bytes(metadata.raw_label_bytes)[:PIANODIR_DISK_METADATA_SIZE].ljust(
+                PIANODIR_DISK_METADATA_SIZE,
+                b"\x00",
+            )
         catalog_number = metadata.catalog_number
         disk_title = metadata.disk_title
 
@@ -211,7 +226,7 @@ def build_pianodir_metadata_bytes(metadata=None, *, catalog_number="", disk_titl
     title_text = _ascii_text(disk_title).strip()
 
     if catalog_text and title_text:
-        combined = f"{catalog_text}   {title_text}"
+        combined = f"{catalog_text:<16}{title_text}"
         if len(combined.encode("ascii", errors="replace")) > PIANODIR_DISK_METADATA_SIZE:
             combined = f"{catalog_text} {title_text}"
     else:
@@ -310,26 +325,6 @@ def update_eseq_order_key(path, order_key):
     return update_eseq_order_key_to_path(path, order_key, path)
 
 
-def _clamp_u16(value):
-    return max(0, min(int(value or 0), 0xFFFF))
-
-
-def _refresh_track_timing_fields_from_eseq(track, data):
-    try:
-        timing = derive_eseq_timing_fields(data)
-    except Exception:
-        return
-    track[
-        PIANODIR_TRACK_DURATION_OFFSET:PIANODIR_TRACK_DURATION_OFFSET + 4
-    ] = max(0, min(int(timing.duration_ticks), 0xFFFFFFFF)).to_bytes(4, "little")
-    track[
-        PIANODIR_TRACK_DELAY_BEFORE_OFFSET:PIANODIR_TRACK_DELAY_BEFORE_OFFSET + 2
-    ] = _clamp_u16(timing.delay_before_ticks).to_bytes(2, "little")
-    track[
-        PIANODIR_TRACK_DELAY_AFTER_OFFSET:PIANODIR_TRACK_DELAY_AFTER_OFFSET + 2
-    ] = _clamp_u16(timing.delay_after_ticks).to_bytes(2, "little")
-
-
 def _build_track_entry(track_entry):
     with open(track_entry.local_path, "rb") as handle:
         data = handle.read()
@@ -354,7 +349,6 @@ def _build_track_entry(track_entry):
     if len(track) != PIANODIR_TRACK_SIZE:
         raise ValueError(f"{os.path.basename(track_entry.image_path)} is too small to build a PIANODIR entry.")
     track[0x00:0x0B] = short_name
-    _refresh_track_timing_fields_from_eseq(track, data)
     return bytes(track)
 
 

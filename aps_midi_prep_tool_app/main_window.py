@@ -1379,12 +1379,18 @@ class MidiTitleWindow(QMainWindow):
     def _image_pianodir_metadata_for_save(self):
         if not self.is_image_mode() or not self.imageHasPianodir or self.pendingDeletePianodir:
             return None
-        return self._current_image_pianodir_metadata()
+        metadata = self._current_image_pianodir_metadata()
+        if metadata == self.loadedImagePianodirMetadata:
+            return self.loadedImagePianodirMetadata
+        return metadata
 
     def _regular_pianodir_metadata_for_save(self):
         if not self.is_local_eseq_mode() or not (self.regularHasPianodir or self.pendingGeneratePianodir):
             return None
-        return self._current_regular_pianodir_metadata()
+        metadata = self._current_regular_pianodir_metadata()
+        if metadata == self.loadedRegularPianodirMetadata:
+            return self.loadedRegularPianodirMetadata
+        return metadata
 
     def _pianodir_metadata_fields_should_show(self):
         if self.is_image_mode():

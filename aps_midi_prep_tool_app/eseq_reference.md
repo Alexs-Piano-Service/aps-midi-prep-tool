@@ -44,7 +44,7 @@ The most important implementation findings are:
    ```
 
 6. `PIANODIR.FIL` is not musical event data. It is the disk index: song order, active-song list, display titles, durations, and copied E-SEQ header metadata.
-7. For normal `.FIL` songs in the analyzed disk-image corpus, each `PIANODIR.FIL` song record is essentially `eseq_file[0x27:0x77]` with the first eleven bytes replaced by the actual DOS 8.3 filename. If the event stream has been delay-edited, refresh the duration and before/after delay words from the stream; copied header bytes can be stale.
+7. For normal `.FIL` songs in the analyzed disk-image corpus, each `PIANODIR.FIL` song record is essentially `eseq_file[0x27:0x77]` with the first eleven bytes replaced by the actual DOS 8.3 filename. If timing has been edited, update the E-SEQ header first; `PIANODIR.FIL` generation should then copy the header slice rather than recomputing fields independently.
 8. A second E-SEQ header variant, marked `Q11V1.00`, exists. Its event stream begins at `0x0200`, and its `PIANODIR.FIL` record must be built by a special recipe.
 9. Early MIDI `CC7 Channel Volume = 0` events on piano channels are significant. In generic MIDI playback they mute the channel, but in Yamaha/Disklavier workflows they may be intentional playback-control or compatibility behavior. APS MIDI Prep Tool should detect them and offer explicit handling policies.
 
@@ -246,7 +246,7 @@ For this variant:
 - The `PIANODIR` record must be constructed with the Q11 recipe in section 13.5.
 - The PIANODIR tempo byte comes from `file[0x24]`, not `file[0x33]`.
 
-E-SEQ-to-MIDI conversion should still parse the event stream with the same opcode grammar once the correct start offset is known, but Q11 files deserve separate regression tests.
+E-SEQ-to-MIDI conversion should still parse the event stream with the same opcode grammar once the correct start offset is known. For round-trip conversion through MIDI, preserve the Q11 prefix up to `0x0200` as private metadata and restore it on MIDI-to-E-SEQ output; otherwise a normal-header writer can accidentally read blank Q11 bytes as the normal `0x33` tempo byte.
 
 ---
 
@@ -413,7 +413,9 @@ In the matched set:
 
 ### 8.2 Initial tempo: MIDI to E-SEQ
 
-For a MIDI file with initial `MPQN`:
+For a MIDI file, the initial `MPQN` is the last set-tempo event at tick `0`. If there is no tick-0 set-tempo event, use the MIDI default of `500000` MPQN (120 BPM). Do not treat the first later tempo event as the initial tempo; it is an in-stream tempo change.
+
+For the selected initial `MPQN`:
 
 ```python
 desired_bpm = 60000000 / mpqn
@@ -636,7 +638,7 @@ For SMPTE-timed MIDI divisions, require a special conversion mode because E-SEQ 
 
 ### 11.2 Select base tempo and tempo factors
 
-1. Read the first MIDI tempo event, or assume 120 BPM if absent.
+1. Read the last MIDI tempo event at tick `0`, or assume 120 BPM if there is no tick-0 tempo.
 2. Choose `base_bpm` as a legal integer BPM.
 3. Write normal header tempo byte:
 
@@ -645,7 +647,7 @@ For SMPTE-timed MIDI divisions, require a special conversion mode because E-SEQ 
    header[0x24] = header[0x33]
    ```
 
-4. For each tempo event, including tick 0 if needed, write `FB lo hi` when the desired tempo differs from the base tempo beyond tolerance.
+4. For each tempo event, including tick 0 if needed, write `FB lo hi` when the desired tempo differs from the base tempo beyond tolerance. Later tempo events remain later tempo events even when no explicit tick-0 MIDI tempo was present.
 
 ### 11.3 Convert MIDI events to E-SEQ events
 
@@ -694,6 +696,8 @@ F1 00 F9 04 02
 ```
 
 Then write `F9 04 02` at later barlines if using bar-marker mode, but do not write generated bar markers before the first real stream event or at the exact final `F2`/end tick. `EEXPLORE.EXE`'s Song Properties dialog reads the visible before-delay from the physical opcode immediately after `F1 00`, and the visible after-delay from the physical opcode immediately before `F2`. If those positions contain `F9` rather than an `F4` delay, the dialog can display zero even though the musical tick stream still contains silence.
+
+The same is true for short `F3` delays in those two positions. They are real musical delays, but ESEQ Explorer does not display them as the Song Properties `Before` or `After` fields. Roundtrip conversion should therefore preserve both values: the derived musical delay and whether the original visible Explorer field was represented by an `F4` delay or by an Explorer-hidden `F3`/other event position.
 
 ### 11.6 Choose the E-SEQ end tick
 
@@ -874,14 +878,13 @@ For a normal E-SEQ file:
 ```python
 record = bytearray(eseq_file[0x27:0x77])
 record[0:11] = dos_8_3_short_name_bytes
-record[0x10:0x14] = end_tick.to_bytes(4, "little")
-record[0x14:0x16] = delay_before_ticks.to_bytes(2, "little")
-record[0x18:0x1A] = delay_after_ticks.to_bytes(2, "little")
 # record[0x29] is copied from file[0x50], preserving Solo/L-R Split/Ensemble.
 # record[0x28] is copied from file[0x4F], preserving write-protect on/off.
 ```
 
-Derive the timing values from the parsed event stream:
+The timing words inside that slice should already have been written into the E-SEQ file header. When converting from MIDI or editing timing, update the `.FIL` header before generating `PIANODIR.FIL`; then let the index copy the header bytes. This matches the corpus better than recomputing timing while writing the index, and it avoids changing untouched source indexes.
+
+When timing must be derived for a generated `.FIL` header, use:
 
 ```python
 end_tick = tick_at_F2
@@ -906,7 +909,7 @@ This corrected rule is backward compatible with the original corpus rule: most s
 
 `display_ms = ticks * 1000 / 750`, matching `EEXPLORE`'s `secs/1000` fields. Integer displays observed in the Windows tool truncate fractional milliseconds.
 
-With the timing refresh omitted, the older slice-copy rule exactly reproduced 1,116 of 1,211 normal records in the valid corpus. The remaining 95 differed only at `record[0x2A]`, where original `PIANODIR.FIL` had `0x00` and the source E-SEQ header had `0x01`. Because the field is not display-critical and `EEXPLORE.EXE` copies the source slice, the best new-index behavior is to copy the source byte rather than force zero.
+With the timing refresh omitted, the slice-copy rule exactly reproduced 1,116 of 1,211 normal records in the valid corpus. The remaining 95 differed only at `record[0x2A]`, where original `PIANODIR.FIL` had `0x00` and the source E-SEQ header had `0x01`. Because the field is not display-critical and `EEXPLORE.EXE` copies the source slice, the best new-index behavior is to copy the source byte rather than force zero.
 
 ### 13.5 Q11V1.00 `PIANODIR` record generation
 
@@ -937,6 +940,8 @@ The disk-info record begins at `0x12D0`.
 | `0x44` | `0x1314` | 2 | Secondary aggregate word. |
 | `0x46` | `0x1316` | 2 | Count field, normally active song count + 1. |
 | `0x48` | `0x1318` | 8 | Reserved/slack. |
+
+When editing an existing index, preserve the raw 64-byte disk-info block if the user has not changed the catalog/title fields. If the user does edit the catalog number, normalize spaces to dashes for the UI/output catalog value, but do not rewrite untouched old indexes merely to modernize spacing.
 
 Total duration:
 
