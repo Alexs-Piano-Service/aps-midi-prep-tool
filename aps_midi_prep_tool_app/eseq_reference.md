@@ -44,7 +44,7 @@ The most important implementation findings are:
    ```
 
 6. `PIANODIR.FIL` is not musical event data. It is the disk index: song order, active-song list, display titles, durations, and copied E-SEQ header metadata.
-7. For normal `.FIL` songs in the analyzed disk-image corpus, each `PIANODIR.FIL` song record is essentially `eseq_file[0x27:0x77]` with the first eleven bytes replaced by the actual DOS 8.3 filename.
+7. For normal `.FIL` songs in the analyzed disk-image corpus, each `PIANODIR.FIL` song record is essentially `eseq_file[0x27:0x77]` with the first eleven bytes replaced by the actual DOS 8.3 filename. If the event stream has been delay-edited, refresh the duration and before/after delay words from the stream; copied header bytes can be stale.
 8. A second E-SEQ header variant, marked `Q11V1.00`, exists. Its event stream begins at `0x0200`, and its `PIANODIR.FIL` record must be built by a special recipe.
 9. Early MIDI `CC7 Channel Volume = 0` events on piano channels are significant. In generic MIDI playback they mute the channel, but in Yamaha/Disklavier workflows they may be intentional playback-control or compatibility behavior. APS MIDI Prep Tool should detect them and offer explicit handling policies.
 
@@ -85,7 +85,7 @@ One image, `CSC1045.img`, had a `PIANODIR.FIL` root entry whose first data secto
 
 | Label | Meaning | Example |
 |---|---|---|
-| **Proven** | Confirmed by matched pairs, static converter behavior, and/or full disk-image corpus | `F3`/`F4` delays, normal `PIANODIR` record rule, `base_bpm = byte + 29` for the tested normal variant |
+| **Proven** | Confirmed by matched pairs, static converter behavior, and/or full disk-image corpus | `F3`/`F4` delays, normal `PIANODIR` record rule, `base_bpm = byte + 29` for the tested normal variant, duration/before/after delay fields, arrangement/type display code, write-protect flag |
 | **Strongly inferred** | Consistent across available samples and tooling, but may not cover every Yamaha variant | `F9 04 02` as a 4/4 bar marker |
 | **Compatibility rule** | Recommended writer behavior because it matches known converters or old media conventions | Uppercase DOS 8.3 filenames, 6144-byte `PIANODIR.FIL` output |
 | **Open** | Field or behavior not fully explained; copy/preserve rather than interpret | Several opaque header bytes and `PIANODIR` record byte `0x2A` |
@@ -146,7 +146,7 @@ Because `MPQN` is an integer, a DAW may display a value such as `117.000117 BPM`
 
 MIDI channel control-change messages have status bytes `0xB0..0xBF`, followed by controller number and value. MIDI controller 7 is Channel Volume, values `0..127`; MIDI controller 64 is Damper/Sustain Pedal, with values `0..63` off and `64..127` on under the standard MIDI convention.
 
-This matters because Disklavier piano playback often uses dense note and pedal data, and because early `CC7 = 0` can make a generic MIDI synthesizer produce no audible piano despite valid note events.
+This matters because Disklavier piano playback often uses dense note and pedal data, and because un-restored `CC7 = 0` can make a generic MIDI synthesizer produce no audible piano despite valid note events.
 
 ---
 
@@ -189,9 +189,14 @@ The following table is written for implementation. Some fields are fully interpr
 | `0x33` | 1 | Initial tempo byte for normal variant | `base_bpm = byte + 29`. | `tempo_byte = clamp(round(base_bpm) - 29, 0, 255)`. |
 | `0x34..0x35` | 2 | Time-signature display | Personal files use `04 04`; likely natural numerator/denominator. | For 4/4 write `04 04`; other meters are provisional. |
 | `0x37..0x3A` | 4 | Duration / end-tick accumulator | Little-endian. `EEXPLORE` displays this as seconds by dividing by `750`. In generated personal files it equals the cumulative E-SEQ tick at `F2`. | For generated files, write selected E-SEQ end tick. |
-| `0x3B..0x42` | 8 | Opaque playback/index metadata | Copy/preserve. | Copy from template; update only if future corpus proves semantics. |
+| `0x3B..0x3C` | 2 | Delay before first note | Little-endian E-SEQ ticks. `EEXPLORE` displays milliseconds as `ticks * 1000 / 750`. Setup/controller events may occur earlier and should not collapse this value. | Recalculate from the event stream. |
+| `0x3D..0x3E` | 2 | Per-song secondary word | Summed into the disk-info secondary aggregate in many indexes. Exact semantics still open. | Copy/preserve. |
+| `0x3F..0x40` | 2 | Delay after last real event | Little-endian E-SEQ ticks from last real event to `F2`/end tick. Display conversion matches delay-before. | Recalculate from the event stream. |
+| `0x41..0x42` | 2 | Opaque playback/index metadata | Copy/preserve. | Copy from template/source. |
 | `0x43..0x46` | 4 | Event-start helper bytes | Normal files show `00 77 00 00`; Q11 `PIANODIR` records show `02 00 00 00`. | For normal generated files write `00 77 00 00`. |
-| `0x47..0x50` | 10 | Opaque constants/metadata | Personal files show `10 7F 00 00 41 01 00 00 00 00`. | Copy from template. |
+| `0x47..0x4E` | 8 | Opaque constants/metadata | Personal files often show `10 7F 00 00 41 xx 00 00`. | Copy from template/source. |
+| `0x4F` | 1 | Write-protect flag | Bit `0x80` set means write-protected. `0x00` means write-protect off in tested samples. Mirrors `PIANODIR` record byte `0x28`. | Preserve from source, or write `0x80` for generated default write-protected files. |
+| `0x50` | 1 | Arrangement/type display code | Low two bits match `PIANODIR` record byte `0x29`: `0` Solo, `1` L-R Split, `2` Ensemble. | Preserve from source, or write `0` for generated default Solo. |
 | `0x51` | 1 | Controller/pedal-present flag | Often `1` when controller events are present. | Set consistently with event stream or copy template. |
 | `0x53` | 1 | Opaque constant | Often `41`. | Copy template. |
 | `0x54` | 1 | Event-class bitmask | Personal files: `0x01` notes, `0x04` controllers, `0x05` both. | Set `0x01` if notes, `0x04` if controllers, OR both. |
@@ -270,7 +275,7 @@ For conversion to Standard MIDI, one E-SEQ event tick maps to one MIDI tick in a
 | `0x80..0x8F` | 3 | MIDI Note Off | Copy status and two data bytes. |
 | `0x90..0x9F` | 3 | MIDI Note On | Copy status and two data bytes. Velocity `0` is note-off by MIDI convention. |
 | `0xA0..0xAF` | 3 | MIDI Polyphonic Key Pressure | Copy. |
-| `0xB0..0xBF` | 3 | MIDI Control Change | Copy, except optional policies for early CC7=0. |
+| `0xB0..0xBF` | 3 | MIDI Control Change | Copy, except optional policies for un-restored CC7=0 before later notes. |
 | `0xC0..0xCF` | 2 | MIDI Program Change | Copy or optionally insert/remove in compatibility modes. |
 | `0xD0..0xDF` | 2 | MIDI Channel Pressure | Copy. |
 | `0xE0..0xEF` | 3 | MIDI Pitch Bend | Copy. |
@@ -514,7 +519,7 @@ B0 07 00    ; channel 0, controller 7, value 0
 
 A standards-compliant MIDI player or synthesizer will treat controller 7 as channel volume, and value zero may mute that channel. Such a file can appear silent in generic playback even though note events are present.
 
-In a Disklavier/E-SEQ context, early `CC7 = 0` may have one of several meanings:
+In a Disklavier/E-SEQ context, `CC7 = 0` may have one of several meanings:
 
 - Intentional Yamaha-specific playback setup.
 - A compatibility barrier or crude copy-protection behavior.
@@ -526,9 +531,7 @@ APS MIDI Prep Tool should flag this condition when all are true:
 ```text
 controller == 7
 value == 0
-channel is piano-like
-absolute_tick <= configurable early-event threshold, e.g. first bar or first 384 ticks
-notes exist later on the same channel
+channel has note events later in the same stream
 no later CC7 restoration before the first notes, or restoration is ambiguous
 ```
 
@@ -538,9 +541,9 @@ Recommended policies:
 |---|---|
 | `preserve` | Leave `CC7=0` unchanged. Best for archival conversion. |
 | `warn_only` | Preserve but report a warning. Default for analysis. |
-| `playback_fix_100` | Rewrite early piano-channel `CC7=0` to `CC7=100`. Good for generic MIDI preview. |
+| `playback_fix_100` | Rewrite un-restored `CC7=0` before later notes to `CC7=100`. Good for generic MIDI preview. |
 | `playback_fix_127` | Rewrite to `127`. Louder preview; less conservative. |
-| `drop_early_cc7_zero` | Remove the early mute event. |
+| `drop_early_cc7_zero` | Remove the mute event. Legacy name retained for compatibility. |
 | `yamaha_profile` | Apply a future Yamaha-specific rule if proven by hardware/corpus behavior. |
 
 Store this in conversion reports because it may explain “silent MIDI” complaints.
@@ -830,13 +833,14 @@ Each song record is 80 bytes (`0x50`).
 | `0x0C` | 1 | Base tempo byte; normal `base_bpm = byte + 29`. |
 | `0x0D` | 3 | Time signature / opaque E-SEQ metadata copied from header. |
 | `0x10` | 4 | Duration/end-tick field, little-endian. `EEXPLORE` displays seconds as value / 750. |
-| `0x14` | 2 | Opaque playback/header metadata; copy. |
+| `0x14` | 2 | Delay before first note, little-endian E-SEQ ticks. Display milliseconds as `ticks * 1000 / 750`. If a song has no note-on events, fall back to the first real event. |
 | `0x16` | 2 | Per-song secondary word; summarized in disk-info field `0x44` in most indexes. |
-| `0x18` | 10 | Opaque playback/header metadata; copy. |
+| `0x18` | 2 | Delay after last real event, little-endian E-SEQ ticks. Display milliseconds as `ticks * 1000 / 750`. |
+| `0x1A` | 2 | Opaque playback/header metadata; copy. |
 | `0x1C` | 4 | Event-start/helper field. Normal record shows `00 77 00 00`; Q11 record shows `02 00 00 00`. |
 | `0x20` | 8 | Opaque constants/metadata; copy. |
-| `0x28` | 1 | Opaque metadata; copy. |
-| `0x29` | 1 | Low two bits are arrangement/type display code. |
+| `0x28` | 1 | Write-protect flag. Bit `0x80` set means write-protected; `0x00` means write-protect off. Mirrors file offset `0x4F` in normal E-SEQ files. |
+| `0x29` | 1 | Low two bits are arrangement/type display code. Mirrors file offset `0x50` in normal E-SEQ files. |
 | `0x2A` | 1 | Opaque flag. 95 corpus records differed here from the source file's header slice. |
 | `0x2B` | 5 | Opaque metadata; copy. |
 | `0x30` | 32 | Display title, often two 16-character display lines. |
@@ -846,9 +850,22 @@ Type display from `record[0x29] & 0x03`:
 | Code | Display |
 |---:|---|
 | 0 | Solo |
-| 1 | L-R |
+| 1 | L-R Split |
 | 2 | Ensemble |
 | 3 | ??? |
+
+The `Solo - LR Split - Combo` sample confirms this directly inside the 0x50-byte header/catalog record: `VAR` and `RONDO` changed this type byte from `0` to `1`, while `ROMANCE` and `MOMENTS` changed it from `0` to `2`; unchanged Solo tracks kept `0`. This confirms that code `2` is Ensemble for both solo-style and controller-rich source files.
+
+Write-protect behavior from the `Write Protect` sample:
+
+| Track | Arrangement | Write-protect byte |
+|---|---|---:|
+| `VAR` | L-R Split | `0x00` off |
+| `ORGAN` | Solo | `0x00` off |
+| `MOMENTS` | Ensemble | `0x00` off |
+| unchanged comparison tracks | Solo/L-R Split/Ensemble | `0x80` on |
+
+The tested program writes the same value at E-SEQ file offset `0x4F` and `PIANODIR` record offset `0x28`. APS MIDI Prep Tool reads and preserves this flag for display/catalog generation; it does not enforce it as a local editing lock.
 
 ### 13.4 Normal `PIANODIR` song-record generation
 
@@ -857,9 +874,39 @@ For a normal E-SEQ file:
 ```python
 record = bytearray(eseq_file[0x27:0x77])
 record[0:11] = dos_8_3_short_name_bytes
+record[0x10:0x14] = end_tick.to_bytes(4, "little")
+record[0x14:0x16] = delay_before_ticks.to_bytes(2, "little")
+record[0x18:0x1A] = delay_after_ticks.to_bytes(2, "little")
+# record[0x29] is copied from file[0x50], preserving Solo/L-R Split/Ensemble.
+# record[0x28] is copied from file[0x4F], preserving write-protect on/off.
 ```
 
-This exactly reproduced 1,116 of 1,211 normal records in the valid corpus. The remaining 95 differed only at `record[0x2A]`, where original `PIANODIR.FIL` had `0x00` and the source E-SEQ header had `0x01`. Because the field is not display-critical and `EEXPLORE.EXE` copies the source slice, the best new-index behavior is to copy the source byte rather than force zero.
+Derive the timing values from the parsed event stream:
+
+```python
+end_tick = tick_at_F2
+if note_on_events:
+    delay_before_ticks = min(tick for tick, event in note_on_events)
+elif real_events:
+    delay_before_ticks = min(tick for tick, event in real_events)
+else:
+    delay_before_ticks = 0
+delay_after_ticks = end_tick - max(tick for tick, event in real_events) if real_events else 0
+```
+
+For before-delay, prefer the first note-on event so pre-roll setup messages at tick 0 do not make the displayed lead-in become zero. `real_events` means channel events, SysEx, and other non-marker playback events. Do not count `F1`, `F9`, `FB`, padding, or the `F2` terminator as real events for after-delay calculation.
+
+This corrected rule is backward compatible with the original corpus rule: most source files already have matching header timing bytes, so a slice-copy reproduces them. The `Different Delays` sample set proves that third-party tooling may update the event stream while leaving copied header/catalog delay words stale. In that set, the first three tracks changed to:
+
+| Track | Before ticks | Before display | After ticks | After display |
+|---|---:|---:|---:|---:|
+| `FLUTE` | 4365 | 5820 ms | 6315 | 8420 ms |
+| `VAR` | 4365 | 5820 ms | 6315 | 8420 ms |
+| `ROMANCE` | 4365 | 5820 ms | 6315 | 8420 ms |
+
+`display_ms = ticks * 1000 / 750`, matching `EEXPLORE`'s `secs/1000` fields. Integer displays observed in the Windows tool truncate fractional milliseconds.
+
+With the timing refresh omitted, the older slice-copy rule exactly reproduced 1,116 of 1,211 normal records in the valid corpus. The remaining 95 differed only at `record[0x2A]`, where original `PIANODIR.FIL` had `0x00` and the source E-SEQ header had `0x01`. Because the field is not display-critical and `EEXPLORE.EXE` copies the source slice, the best new-index behavior is to copy the source byte rather than force zero.
 
 ### 13.5 Q11V1.00 `PIANODIR` record generation
 
@@ -1098,7 +1145,7 @@ For every disk image:
 
 For every MIDI pair:
 
-- Detect early `CC7=0` on piano-like channels.
+- Detect `CC7=0` on channels with later notes and no intervening positive CC7 restoration.
 - Record whether notes follow before volume restoration.
 - Test whether E-SEQ conversion preserves, removes, or rewrites the event.
 - Compare audible generic MIDI playback before/after policy modes.
@@ -1337,7 +1384,7 @@ The supplied `EEXPLORE.EXE` is a third-party `PIANODIR.FIL` utility, not a Yamah
 | Uses 60 song slots | Confirms the `60 * 80` record area |
 | Adds each record duration to an aggregate total | Confirms `PIANODIR+0x1310` total-duration construction |
 | Divides aggregate duration by `750` for display | Confirms E-SEQ Explorer's duration display unit |
-| Displays type from `record[0x29] & 3` | Confirms Solo/L-R/Ensemble display-code location |
+| Displays type from `record[0x29] & 3` | Confirms Solo/L-R Split/Ensemble display-code location |
 
 Limitation: this static behavior describes ordinary non-Q11 E-SEQ files. It does not explain the Q11 record template, which comes from disk-image corpus evidence.
 
@@ -1353,7 +1400,7 @@ These items should be resolved with the next, larger corpus and, ideally, hardwa
 4. Whether every non-Q11 variant with factory marker strings such as `714003` uses the same event grammar.
 5. Whether `0x03` length/control bytes have a variant-specific meaning beyond generated-file logical length.
 6. Sysex streams with embedded timing boundaries.
-7. Hardware behavior for early `CC7=0` on piano channels.
+7. Hardware behavior for un-restored `CC7=0` on piano channels.
 8. Whether Disklavier playback uses `PIANODIR` duration fields for playback, display only, or both.
 9. Behavior of compact unpadded `.FIL` files on old hardware.
 10. Whether old hardware depends on `PIANODIR.FIL` being physically first on disk.
@@ -1385,7 +1432,7 @@ Use this checklist before considering APS MIDI Prep Tool E-SEQ support complete:
 - [ ] Convert normal E-SEQ tempo byte and `FB` factors to MIDI tempo events.
 - [ ] Convert MIDI tempo map to normal E-SEQ tempo byte and `FB` factors.
 - [ ] Support selectable end-tick policies.
-- [ ] Detect and report early piano-channel `CC7=0` events.
+- [ ] Detect and report un-restored piano-channel `CC7=0` events.
 - [ ] Provide CC7 preservation/playback-fix policies.
 - [ ] Generate normal `0x77` `.FIL` files with coherent header, event stream, `F2`, and padding.
 - [ ] Parse `PIANODIR.FIL` size `0x1400` and `0x1800`.

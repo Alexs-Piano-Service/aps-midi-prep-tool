@@ -2,6 +2,8 @@ import os
 import re
 from dataclasses import dataclass
 
+from .eseq_converter import derive_eseq_timing_fields, refresh_eseq_timing_fields_in_bytes
+
 
 PIANODIR_FILENAME = "PIANODIR.FIL"
 PIANODIR_ROW_PATH = ":PIANODIR:"
@@ -14,13 +16,27 @@ PIANODIR_TOTAL_DURATION_OFFSET = PIANODIR_DISK_METADATA_OFFSET + 0x40
 PIANODIR_SECONDARY_AGGREGATE_OFFSET = PIANODIR_DISK_METADATA_OFFSET + 0x44
 PIANODIR_COUNT_OFFSET = PIANODIR_DISK_METADATA_OFFSET + 0x46
 PIANODIR_TRACK_SIZE = 0x50
+PIANODIR_TRACK_DURATION_OFFSET = 0x10
+PIANODIR_TRACK_DELAY_BEFORE_OFFSET = 0x14
+PIANODIR_TRACK_SECONDARY_WORD_OFFSET = 0x16
+PIANODIR_TRACK_DELAY_AFTER_OFFSET = 0x18
+PIANODIR_TRACK_WRITE_PROTECT_OFFSET = 0x28
+PIANODIR_TRACK_TYPE_OFFSET = 0x29
 ESEQ_ORDER_KEY_OFFSET = 0x27
 ESEQ_ORDER_KEY_SIZE = 12
 ESEQ_ORDER_KEY_END = ESEQ_ORDER_KEY_OFFSET + ESEQ_ORDER_KEY_SIZE
 PIANODIR_TRACK_SOURCE_START = ESEQ_ORDER_KEY_OFFSET
 PIANODIR_TRACK_SOURCE_END = PIANODIR_TRACK_SOURCE_START + PIANODIR_TRACK_SIZE
+ESEQ_WRITE_PROTECT_OFFSET = PIANODIR_TRACK_SOURCE_START + PIANODIR_TRACK_WRITE_PROTECT_OFFSET
+ESEQ_ARRANGEMENT_TYPE_OFFSET = PIANODIR_TRACK_SOURCE_START + PIANODIR_TRACK_TYPE_OFFSET
 ESEQ_SIGNATURE = b"COM-ESEQ"
 Q11_SIGNATURE = b"Q11V1.00"
+ESEQ_ARRANGEMENT_TYPE_LABELS = {
+    0: "Solo",
+    1: "L-R Split",
+    2: "Ensemble",
+    3: "Unknown",
+}
 PIANODIR_CATALOG_AND_TITLE_RE = re.compile(
     r"""
     ^\s*
@@ -67,12 +83,79 @@ def is_q11_eseq_bytes(data):
     return is_eseq_bytes(data) and data[0x0F:0x17] == Q11_SIGNATURE
 
 
+def eseq_arrangement_type_label(code):
+    return ESEQ_ARRANGEMENT_TYPE_LABELS.get(int(code) & 0x03, "Unknown")
+
+
+def extract_eseq_arrangement_type_code_from_bytes(data):
+    if is_q11_eseq_bytes(data):
+        return 2
+    if not is_eseq_bytes(data):
+        raise ValueError("File is not a valid E-SEQ file.")
+    if len(data) <= ESEQ_ARRANGEMENT_TYPE_OFFSET:
+        raise ValueError("File is too small to contain E-SEQ arrangement type metadata.")
+    return data[ESEQ_ARRANGEMENT_TYPE_OFFSET] & 0x03
+
+
+def extract_eseq_arrangement_type_label_from_bytes(data):
+    return eseq_arrangement_type_label(extract_eseq_arrangement_type_code_from_bytes(data))
+
+
+def read_eseq_arrangement_type_label_from_file(path):
+    with open(path, "rb") as handle:
+        return extract_eseq_arrangement_type_label_from_bytes(handle.read())
+
+
+def extract_eseq_write_protect_from_bytes(data):
+    if is_q11_eseq_bytes(data):
+        return None
+    if not is_eseq_bytes(data):
+        raise ValueError("File is not a valid E-SEQ file.")
+    if len(data) <= ESEQ_WRITE_PROTECT_OFFSET:
+        raise ValueError("File is too small to contain E-SEQ write-protect metadata.")
+    return bool(data[ESEQ_WRITE_PROTECT_OFFSET] & 0x80)
+
+
+def read_eseq_write_protect_from_file(path):
+    with open(path, "rb") as handle:
+        return extract_eseq_write_protect_from_bytes(handle.read())
+
+
+def eseq_type_display_label(file_kind, arrangement_type_label, write_protected=None):
+    file_kind = (file_kind or "FIL").strip() or "FIL"
+    arrangement_type_label = (arrangement_type_label or "").strip()
+    details = []
+    if arrangement_type_label:
+        details.append(arrangement_type_label)
+    if write_protected is not None:
+        details.append("WP" if write_protected else "WP Off")
+    if not details:
+        return file_kind
+    return f"{file_kind} ({', '.join(details)})"
+
+
 def pianodir_is_populated(size_bytes):
     return int(size_bytes or 0) > len(PIANODIR_HEADER)
 
 
 def _ascii_text(value):
     return (value or "").encode("ascii", errors="replace").decode("ascii", errors="replace")
+
+
+def _normalize_catalog_number(catalog_text):
+    clean_text = _ascii_text(catalog_text).replace("\x00", "").strip()
+    if not clean_text:
+        return ""
+    clean_text = re.sub(r"-\s+", "-", clean_text)
+    clean_text = re.sub(r"\s+", "-", clean_text)
+    match = re.match(r"^(?P<prefix>[A-Z]{2,5})\s*(?P<number>\d{3,5})(?P<suffix>[A-Z]?)$", clean_text)
+    if match and "-" not in clean_text:
+        return f"{match.group('prefix')}-{match.group('number')}{match.group('suffix')}"
+    return clean_text
+
+
+def normalize_pianodir_catalog_number(catalog_text):
+    return _normalize_catalog_number(catalog_text)
 
 
 def _decode_disk_label(data):
@@ -89,11 +172,11 @@ def _split_disk_label(label_text):
 
     match = PIANODIR_CATALOG_AND_TITLE_RE.match(clean_text)
     if match:
-        catalog_text = match.group("catalog").strip()
+        catalog_text = _normalize_catalog_number(match.group("catalog"))
         title_text = match.group("title").strip()
         suffix_match = re.match(r"^(?P<token>[A-Z0-9]{1,4})\s{2,}(?P<rest>.+)$", title_text)
         if catalog_text.endswith("-") and suffix_match:
-            catalog_text = f"{catalog_text} {suffix_match.group('token')}".strip()
+            catalog_text = _normalize_catalog_number(f"{catalog_text}{suffix_match.group('token')}")
             title_text = suffix_match.group("rest").strip()
         return PianodirMetadata(
             catalog_number=catalog_text,
@@ -103,7 +186,7 @@ def _split_disk_label(label_text):
     fallback_match = re.match(r"^\s*(?P<catalog>(?=.*\d).{1,16}?)\s{2,}(?P<title>.+?)\s*$", clean_text)
     if fallback_match:
         return PianodirMetadata(
-            catalog_number=fallback_match.group("catalog").strip(),
+            catalog_number=_normalize_catalog_number(fallback_match.group("catalog")),
             disk_title=fallback_match.group("title").strip(),
         )
 
@@ -124,7 +207,7 @@ def build_pianodir_metadata_bytes(metadata=None, *, catalog_number="", disk_titl
         catalog_number = metadata.catalog_number
         disk_title = metadata.disk_title
 
-    catalog_text = _ascii_text(catalog_number).strip()
+    catalog_text = _normalize_catalog_number(catalog_number)
     title_text = _ascii_text(disk_title).strip()
 
     if catalog_text and title_text:
@@ -212,8 +295,12 @@ def update_eseq_order_key_to_path(source_path, order_key, dest_path):
         if len(data) < ESEQ_ORDER_KEY_END:
             raise ValueError("File is too small to contain an E-SEQ order key.")
         data[ESEQ_ORDER_KEY_OFFSET:ESEQ_ORDER_KEY_END] = normalize_eseq_order_key(order_key)
+        try:
+            output = refresh_eseq_timing_fields_in_bytes(bytes(data))
+        except Exception:
+            output = bytes(data)
         with open(dest_path, "wb") as handle:
-            handle.write(data)
+            handle.write(output)
         return None
     except Exception as exc:
         return f"Error updating {os.path.basename(source_path)}: {exc}"
@@ -221,6 +308,26 @@ def update_eseq_order_key_to_path(source_path, order_key, dest_path):
 
 def update_eseq_order_key(path, order_key):
     return update_eseq_order_key_to_path(path, order_key, path)
+
+
+def _clamp_u16(value):
+    return max(0, min(int(value or 0), 0xFFFF))
+
+
+def _refresh_track_timing_fields_from_eseq(track, data):
+    try:
+        timing = derive_eseq_timing_fields(data)
+    except Exception:
+        return
+    track[
+        PIANODIR_TRACK_DURATION_OFFSET:PIANODIR_TRACK_DURATION_OFFSET + 4
+    ] = max(0, min(int(timing.duration_ticks), 0xFFFFFFFF)).to_bytes(4, "little")
+    track[
+        PIANODIR_TRACK_DELAY_BEFORE_OFFSET:PIANODIR_TRACK_DELAY_BEFORE_OFFSET + 2
+    ] = _clamp_u16(timing.delay_before_ticks).to_bytes(2, "little")
+    track[
+        PIANODIR_TRACK_DELAY_AFTER_OFFSET:PIANODIR_TRACK_DELAY_AFTER_OFFSET + 2
+    ] = _clamp_u16(timing.delay_after_ticks).to_bytes(2, "little")
 
 
 def _build_track_entry(track_entry):
@@ -247,6 +354,7 @@ def _build_track_entry(track_entry):
     if len(track) != PIANODIR_TRACK_SIZE:
         raise ValueError(f"{os.path.basename(track_entry.image_path)} is too small to build a PIANODIR entry.")
     track[0x00:0x0B] = short_name
+    _refresh_track_timing_fields_from_eseq(track, data)
     return bytes(track)
 
 
@@ -264,8 +372,19 @@ def build_pianodir_bytes(track_entries, metadata=None, *, catalog_number="", dis
         track_bytes = _build_track_entry(track_entry)
         offset = len(PIANODIR_HEADER) + slot * PIANODIR_TRACK_SIZE
         output[offset:offset + PIANODIR_TRACK_SIZE] = track_bytes
-        total_duration = (total_duration + int.from_bytes(track_bytes[0x10:0x14], "little")) & 0xFFFFFFFF
-        secondary_aggregate += int.from_bytes(track_bytes[0x16:0x18], "little")
+        total_duration = (
+            total_duration
+            + int.from_bytes(
+                track_bytes[PIANODIR_TRACK_DURATION_OFFSET:PIANODIR_TRACK_DURATION_OFFSET + 4],
+                "little",
+            )
+        ) & 0xFFFFFFFF
+        secondary_aggregate += int.from_bytes(
+            track_bytes[
+                PIANODIR_TRACK_SECONDARY_WORD_OFFSET:PIANODIR_TRACK_SECONDARY_WORD_OFFSET + 2
+            ],
+            "little",
+        )
 
     metadata_block = build_pianodir_metadata_bytes(
         metadata,

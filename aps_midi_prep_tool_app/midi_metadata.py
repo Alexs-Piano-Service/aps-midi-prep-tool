@@ -1,5 +1,7 @@
 import os
 
+from .eseq_converter import refresh_eseq_timing_fields_in_bytes
+
 _SYSTEM_MESSAGE_DATA_LENGTHS = {
     0xF1: 1,
     0xF2: 2,
@@ -243,11 +245,12 @@ def _set_eseq_title_in_bytes(data, new_title):
         raise ValueError(f"E-SEQ title must be {_ESEQ_TITLE_LENGTH} characters or fewer.")
 
     padded = title_bytes.ljust(_ESEQ_TITLE_LENGTH, b" ")
-    return (
+    patched = (
         data[:_ESEQ_TITLE_START]
         + padded
         + data[_ESEQ_TITLE_END + 1:]
     )
+    return refresh_eseq_timing_fields_in_bytes(patched)
 
 
 def _describe_char_for_error(ch):

@@ -11,6 +11,9 @@ from dataclasses import dataclass
 
 from .eseq_pianodir import (
     PIANODIR_FILENAME,
+    PIANODIR_HEADER,
+    PIANODIR_TARGET_FILE_SIZE,
+    PIANODIR_TRACK_SIZE,
     PianodirTrackEntry,
     build_pianodir_bytes,
     build_eseq_order_key_from_path,
@@ -308,6 +311,34 @@ _YAMAHA_TOTAL_SIZE = _YAMAHA_TOTAL_SECTORS * _YAMAHA_BYTES_PER_SECTOR
 _YAMAHA_ROOT_DIR_SECTORS = 7
 _YAMAHA_BOOT_SIGNATURE = b"\x55\xAA"
 _YAMAHA_FAT_SIGNATURE = b"\xF9\xFF\xFF"
+_PROTECTED_FAT12_LAYOUTS = (
+    {
+        "label": "IBM 720K DD",
+        "bytes_per_sector": 512,
+        "sectors_per_cluster": 2,
+        "reserved_sectors": 1,
+        "num_fats": 2,
+        "root_entries": 112,
+        "total_sectors": 1440,
+        "media_descriptor": 0xF9,
+        "sectors_per_fat": 3,
+        "sectors_per_track": 9,
+        "num_heads": 2,
+    },
+    {
+        "label": "IBM 1.44M HD",
+        "bytes_per_sector": 512,
+        "sectors_per_cluster": 1,
+        "reserved_sectors": 1,
+        "num_fats": 2,
+        "root_entries": 224,
+        "total_sectors": 2880,
+        "media_descriptor": 0xF0,
+        "sectors_per_fat": 9,
+        "sectors_per_track": 18,
+        "num_heads": 2,
+    },
+)
 
 
 def is_supported_image_path(file_path):
@@ -910,17 +941,33 @@ def _read_block_device(device_path, output_path, size_bytes):
 
 def _write_block_device(input_path, device_path):
     dd = _require_command("dd")
-    _run_command(
-        [
-            dd,
-            f"if={input_path}",
-            f"of={device_path}",
-            "bs=1024",
-            "conv=fsync",
-            "status=none",
-        ],
-        f"Could not write floppy device {device_path}",
+    permission_hint = (
+        "Direct USB floppy writes require write permission for the block device. "
+        "On Linux, make sure the disk is not mounted and that your user has write "
+        "access to the device, or run the app with appropriate elevated permissions. "
+        "You can also use Save As Image as a safer fallback."
     )
+    if os.name == "posix" and not os.access(device_path, os.W_OK):
+        raise FloppyImageError(
+            f"Could not write floppy device {device_path}: permission denied.\n\n{permission_hint}"
+        )
+    try:
+        _run_command(
+            [
+                dd,
+                f"if={input_path}",
+                f"of={device_path}",
+                "bs=1024",
+                "conv=fsync",
+                "status=none",
+            ],
+            f"Could not write floppy device {device_path}",
+        )
+    except FloppyImageError as exc:
+        detail = str(exc)
+        if "Permission denied" in detail or "Text file busy" in detail or "Device or resource busy" in detail:
+            detail = f"{detail}\n\n{permission_hint}"
+        raise FloppyImageError(detail) from exc
 
 
 def mtools_path(path):
@@ -1013,9 +1060,10 @@ def _looks_like_valid_yamaha_boot_sector(sector0):
     )
 
 
-def _fat_signature_at(data, offset):
-    end = offset + len(_YAMAHA_FAT_SIGNATURE)
-    return 0 <= offset and end <= len(data) and data[offset:end] == _YAMAHA_FAT_SIGNATURE
+def _fat_signature_at(data, offset, media_descriptor=_YAMAHA_MEDIA_DESCRIPTOR):
+    expected = bytes([int(media_descriptor) & 0xFF, 0xFF, 0xFF])
+    end = offset + len(expected)
+    return 0 <= offset and end <= len(data) and data[offset:end] == expected
 
 
 def _entry_name_looks_plausible(raw_name):
@@ -1023,8 +1071,8 @@ def _entry_name_looks_plausible(raw_name):
     return all(byte in allowed for byte in raw_name)
 
 
-def _root_dir_looks_plausible(data, offset):
-    end = offset + _YAMAHA_ROOT_DIR_SECTORS * _YAMAHA_BYTES_PER_SECTOR
+def _root_dir_looks_plausible(data, offset, root_dir_sectors=_YAMAHA_ROOT_DIR_SECTORS):
+    end = offset + int(root_dir_sectors) * _YAMAHA_BYTES_PER_SECTOR
     if end > len(data):
         return False
 
@@ -1050,6 +1098,77 @@ def _root_dir_looks_plausible(data, offset):
         found += 1
 
     return found > 0
+
+
+def _layout_root_dir_sectors(layout):
+    return int(math.ceil((int(layout["root_entries"]) * 32) / int(layout["bytes_per_sector"])))
+
+
+def _layout_fat_offset(layout):
+    return int(layout["reserved_sectors"]) * int(layout["bytes_per_sector"])
+
+
+def _layout_fat_size(layout):
+    return int(layout["sectors_per_fat"]) * int(layout["bytes_per_sector"])
+
+
+def _layout_root_offset(layout):
+    return (
+        int(layout["reserved_sectors"])
+        + int(layout["num_fats"]) * int(layout["sectors_per_fat"])
+    ) * int(layout["bytes_per_sector"])
+
+
+def _layout_total_size(layout):
+    return int(layout["total_sectors"]) * int(layout["bytes_per_sector"])
+
+
+def _detect_protected_fat12_layout(data):
+    size = len(data)
+    for layout in _PROTECTED_FAT12_LAYOUTS:
+        total_size = _layout_total_size(layout)
+        fat1_offset = _layout_fat_offset(layout)
+        fat_size = _layout_fat_size(layout)
+        fat2_offset = fat1_offset + fat_size
+        root_offset = _layout_root_offset(layout)
+        root_dir_sectors = _layout_root_dir_sectors(layout)
+        media_descriptor = layout["media_descriptor"]
+
+        if (
+            size == total_size
+            and _fat_signature_at(data, fat1_offset, media_descriptor)
+            and _fat_signature_at(data, fat2_offset, media_descriptor)
+            and _root_dir_looks_plausible(data, root_offset, root_dir_sectors)
+        ):
+            return {
+                "mode": "replace_sector0",
+                "layout": layout,
+                "fat1_offset": fat1_offset,
+                "root_offset": root_offset,
+                "root_dir_sectors": root_dir_sectors,
+                "notes": f"sector 0 appears blank/corrupt; {layout['label']} FATs and root directory are intact",
+            }
+
+        if (
+            size == total_size - int(layout["bytes_per_sector"])
+            and _fat_signature_at(data, 0, media_descriptor)
+            and _fat_signature_at(data, fat_size, media_descriptor)
+            and _root_dir_looks_plausible(
+                data,
+                int(layout["num_fats"]) * fat_size,
+                root_dir_sectors,
+            )
+        ):
+            return {
+                "mode": "prepend_sector0",
+                "layout": layout,
+                "fat1_offset": 0,
+                "root_offset": int(layout["num_fats"]) * fat_size,
+                "root_dir_sectors": root_dir_sectors,
+                "notes": f"first sector appears omitted; image needs a {layout['label']} boot sector prepended",
+            }
+
+    return None
 
 
 def _detect_yamaha_layout(data):
@@ -1120,22 +1239,27 @@ def _normalize_label(label):
     return text[:11].ljust(11).encode("ascii", errors="replace")
 
 
-def _build_standard_yamaha_boot_sector(serial, volume_label):
-    boot = bytearray(_YAMAHA_BYTES_PER_SECTOR)
+def _build_standard_fat12_boot_sector(layout, serial, volume_label):
+    bytes_per_sector = int(layout["bytes_per_sector"])
+    boot = bytearray(bytes_per_sector)
     boot[0:3] = b"\xEB\x3C\x90"
     boot[3:11] = b"MSDOS5.0"
-    boot[11:13] = _YAMAHA_BYTES_PER_SECTOR.to_bytes(2, "little")
-    boot[13] = _YAMAHA_SECTORS_PER_CLUSTER
-    boot[14:16] = _YAMAHA_RESERVED_SECTORS.to_bytes(2, "little")
-    boot[16] = _YAMAHA_NUM_FATS
-    boot[17:19] = _YAMAHA_ROOT_ENTRIES.to_bytes(2, "little")
-    boot[19:21] = _YAMAHA_TOTAL_SECTORS.to_bytes(2, "little")
-    boot[21] = _YAMAHA_MEDIA_DESCRIPTOR
-    boot[22:24] = _YAMAHA_SECTORS_PER_FAT.to_bytes(2, "little")
-    boot[24:26] = _YAMAHA_SECTORS_PER_TRACK.to_bytes(2, "little")
-    boot[26:28] = _YAMAHA_NUM_HEADS.to_bytes(2, "little")
+    boot[11:13] = bytes_per_sector.to_bytes(2, "little")
+    boot[13] = int(layout["sectors_per_cluster"])
+    boot[14:16] = int(layout["reserved_sectors"]).to_bytes(2, "little")
+    boot[16] = int(layout["num_fats"])
+    boot[17:19] = int(layout["root_entries"]).to_bytes(2, "little")
+    total_sectors = int(layout["total_sectors"])
+    if total_sectors <= 0xFFFF:
+        boot[19:21] = total_sectors.to_bytes(2, "little")
+    else:
+        boot[19:21] = (0).to_bytes(2, "little")
+        boot[32:36] = total_sectors.to_bytes(4, "little")
+    boot[21] = int(layout["media_descriptor"]) & 0xFF
+    boot[22:24] = int(layout["sectors_per_fat"]).to_bytes(2, "little")
+    boot[24:26] = int(layout["sectors_per_track"]).to_bytes(2, "little")
+    boot[26:28] = int(layout["num_heads"]).to_bytes(2, "little")
     boot[28:32] = (0).to_bytes(4, "little")
-    boot[32:36] = (0).to_bytes(4, "little")
     boot[36] = 0x00
     boot[37] = 0x00
     boot[38] = 0x29
@@ -1144,6 +1268,10 @@ def _build_standard_yamaha_boot_sector(serial, volume_label):
     boot[54:62] = b"FAT12   "
     boot[510:512] = _YAMAHA_BOOT_SIGNATURE
     return bytes(boot)
+
+
+def _build_standard_yamaha_boot_sector(serial, volume_label):
+    return _build_standard_fat12_boot_sector(_PROTECTED_FAT12_LAYOUTS[0], serial, volume_label)
 
 
 def _geometry_from_boot_sector(sector0):
@@ -1292,6 +1420,144 @@ def _fat12_cluster_chain(fat, first_cluster, size, geometry):
     return clusters[:needed_clusters]
 
 
+def _fat12_cluster_chain_from_start(fat, first_cluster):
+    clusters = []
+    seen = set()
+    cluster = first_cluster
+    while 2 <= cluster < 0xFF0 and cluster not in seen:
+        clusters.append(cluster)
+        seen.add(cluster)
+        next_cluster = _fat12_next_cluster(fat, cluster)
+        if next_cluster >= 0xFF8:
+            break
+        if next_cluster == 0xFF7:
+            raise FloppyImageError("FAT12 cluster chain contains a bad cluster marker.")
+        if next_cluster < 2:
+            break
+        cluster = next_cluster
+    return clusters
+
+
+def _cluster_offset(geometry, cluster):
+    return geometry.data_offset + ((int(cluster) - 2) * geometry.cluster_size)
+
+
+def _read_cluster_chain_from_image(data, geometry, clusters, size):
+    output = bytearray()
+    for cluster in clusters:
+        offset = _cluster_offset(geometry, cluster)
+        end = offset + geometry.cluster_size
+        if offset < geometry.data_offset or end > len(data):
+            raise FloppyImageError("A file points outside the floppy data area.")
+        output.extend(data[offset:end])
+        if len(output) >= size:
+            break
+    return bytes(output[:size])
+
+
+def _fat12_chain_starts(fat, geometry):
+    data_clusters = max(0, (geometry.total_size - geometry.data_offset) // geometry.cluster_size)
+    used = []
+    referenced = set()
+    for cluster in range(2, data_clusters + 2):
+        next_cluster = _fat12_next_cluster(fat, cluster)
+        if next_cluster == 0:
+            continue
+        used.append(cluster)
+        if 2 <= next_cluster < 0xFF0:
+            referenced.add(next_cluster)
+    return [cluster for cluster in used if cluster not in referenced]
+
+
+def _dos_directory_entry(name_bytes, first_cluster, size, attr=0x20):
+    entry = bytearray(32)
+    entry[0:11] = bytes(name_bytes)[:11].ljust(11, b" ")
+    entry[11] = attr & 0xFF
+    entry[26:28] = int(first_cluster).to_bytes(2, "little")
+    entry[28:32] = max(0, min(int(size), 0xFFFFFFFF)).to_bytes(4, "little")
+    return bytes(entry)
+
+
+def _reconstruct_yamaha_root_dir_from_pianodir(data):
+    if len(data) != _YAMAHA_TOTAL_SIZE:
+        return None
+
+    geometry = _yamaha_720_geometry()
+    fat_area = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_area_size]
+    if len(fat_area) != geometry.fat_area_size:
+        return None
+    if not _fat_signature_at(fat_area, 0) or not _fat_signature_at(fat_area, geometry.fat_size):
+        return None
+
+    fat = fat_area[:geometry.fat_size]
+    chain_starts = _fat12_chain_starts(fat, geometry)
+    pianodir_cluster = None
+    for cluster in chain_starts:
+        offset = _cluster_offset(geometry, cluster)
+        if data[offset:offset + len(PIANODIR_HEADER)] == PIANODIR_HEADER:
+            pianodir_cluster = cluster
+            break
+    if pianodir_cluster is None:
+        return None
+
+    try:
+        pianodir_chain = _fat12_cluster_chain(fat, pianodir_cluster, PIANODIR_TARGET_FILE_SIZE, geometry)
+        pianodir_bytes = _read_cluster_chain_from_image(
+            data,
+            geometry,
+            pianodir_chain,
+            PIANODIR_TARGET_FILE_SIZE,
+        )
+    except FloppyImageError:
+        return None
+
+    entries = [_dos_directory_entry(b"PIANODIRFIL", pianodir_cluster, PIANODIR_TARGET_FILE_SIZE)]
+    used_starts = {pianodir_cluster}
+    max_records = (PIANODIR_TARGET_FILE_SIZE - len(PIANODIR_HEADER)) // PIANODIR_TRACK_SIZE
+    for slot in range(max_records):
+        record_offset = len(PIANODIR_HEADER) + slot * PIANODIR_TRACK_SIZE
+        record = pianodir_bytes[record_offset:record_offset + PIANODIR_TRACK_SIZE]
+        if not record or not record.strip(b"\x00"):
+            continue
+        name_bytes = record[0:11]
+        if not name_bytes.strip():
+            continue
+
+        matched_cluster = None
+        matched_size = 0
+        for cluster in chain_starts:
+            if cluster in used_starts:
+                continue
+            offset = _cluster_offset(geometry, cluster)
+            if data[offset + 7:offset + 15] != b"COM-ESEQ":
+                continue
+            if data[offset + 0x27:offset + 0x77] != record:
+                continue
+            chain = _fat12_cluster_chain_from_start(fat, cluster)
+            allocated = len(chain) * geometry.cluster_size
+            declared_size = int.from_bytes(data[offset + 3:offset + 7], "little")
+            if declared_size <= 0 or declared_size > allocated:
+                declared_size = allocated
+            matched_cluster = cluster
+            matched_size = declared_size
+            break
+
+        if matched_cluster is None:
+            continue
+        entries.append(_dos_directory_entry(name_bytes, matched_cluster, matched_size))
+        used_starts.add(matched_cluster)
+
+    if len(entries) <= 1:
+        return None
+
+    root_dir = bytearray(geometry.root_size)
+    cursor = 0
+    for entry in entries[:geometry.root_entries]:
+        root_dir[cursor:cursor + 32] = entry
+        cursor += 32
+    return bytes(root_dir)
+
+
 def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progress_callback=None):
     try:
         fd = os.open(device_path, os.O_RDONLY)
@@ -1415,6 +1681,20 @@ def prepare_yamaha_image(input_path, output_path):
 
     detection = _detect_yamaha_layout(data)
     if detection is None:
+        detection = _detect_protected_fat12_layout(data)
+    if detection is None:
+        reconstructed_root = _reconstruct_yamaha_root_dir_from_pianodir(data)
+        if reconstructed_root is not None:
+            geometry = _yamaha_720_geometry()
+            detection = {
+                "mode": "replace_sector0",
+                "fat1_offset": geometry.fat_offset,
+                "root_offset": geometry.root_offset,
+                "root_dir_sectors": geometry.root_dir_sectors,
+                "root_dir": reconstructed_root,
+                "notes": "sector 0 and root directory were damaged; rebuilt root directory from PIANODIR.FIL and FAT chains",
+            }
+    if detection is None:
         shutil.copy2(input_path, output_path)
         return YamahaRepairResult("No Yamaha copy-protection repair needed.", False)
 
@@ -1422,19 +1702,35 @@ def prepare_yamaha_image(input_path, output_path):
         shutil.copy2(input_path, output_path)
         return YamahaRepairResult("Yamaha repair check: valid 720 KB FAT12 boot sector already present.", False)
 
-    root_dir = data[
-        int(detection["root_offset"]): int(detection["root_offset"]) + _YAMAHA_ROOT_DIR_SECTORS * _YAMAHA_BYTES_PER_SECTOR
-    ]
+    layout = detection.get("layout")
+    root_dir_sectors = int(detection.get("root_dir_sectors", _YAMAHA_ROOT_DIR_SECTORS))
+    bytes_per_sector = int(layout["bytes_per_sector"]) if layout else _YAMAHA_BYTES_PER_SECTOR
+    root_dir = detection.get("root_dir")
+    if root_dir is None:
+        root_dir = data[
+            int(detection["root_offset"]): int(detection["root_offset"]) + root_dir_sectors * bytes_per_sector
+        ]
     serial = zlib.crc32(data[int(detection["fat1_offset"]):]) & 0xFFFFFFFF
-    boot = _build_standard_yamaha_boot_sector(serial, _find_volume_label(root_dir))
+    if layout:
+        boot = _build_standard_fat12_boot_sector(layout, serial, _find_volume_label(root_dir))
+        expected_size = _layout_total_size(layout)
+    else:
+        boot = _build_standard_yamaha_boot_sector(serial, _find_volume_label(root_dir))
+        expected_size = _YAMAHA_TOTAL_SIZE
 
     if detection["mode"] == "prepend_sector0":
         repaired = boot + data
     else:
-        repaired = boot + data[_YAMAHA_BYTES_PER_SECTOR:]
+        repaired = boot + data[bytes_per_sector:]
 
-    if len(repaired) != _YAMAHA_TOTAL_SIZE:
-        raise FloppyImageError("Yamaha repair produced an unexpected image size.")
+    if len(repaired) != expected_size:
+        raise FloppyImageError("FAT12 repair produced an unexpected image size.")
+
+    if detection.get("root_dir") is not None:
+        root_offset = int(detection["root_offset"])
+        repaired_data = bytearray(repaired)
+        repaired_data[root_offset:root_offset + len(root_dir)] = root_dir
+        repaired = bytes(repaired_data)
 
     with open(output_path, "wb") as handle:
         handle.write(repaired)

@@ -12,8 +12,12 @@ Q11_EVENT_STREAM_START = 0x200
 ESEQ_TITLE_START = 0x57
 ESEQ_TITLE_END = 0x76
 ESEQ_TITLE_LENGTH = ESEQ_TITLE_END - ESEQ_TITLE_START + 1
+ESEQ_DURATION_TICKS_OFFSET = 0x37
+ESEQ_DELAY_BEFORE_TICKS_OFFSET = 0x3B
+ESEQ_DELAY_AFTER_TICKS_OFFSET = 0x3F
 ESEQ_MIDI_DIVISION = 384
 ESEQ_DELAY15_MAX = 0x3FFF
+ESEQ_DIRECTORY_U16_MAX = 0xFFFF
 DEFAULT_MIDI_MPQN = 500000
 DEFAULT_TIME_SIGNATURE = (4, 2)
 DEFAULT_KEY_SIGNATURE = (0, 0)
@@ -24,8 +28,8 @@ CC7_POLICY_PLAYBACK_FIX_100 = "playback_fix_100"
 CC7_POLICY_PLAYBACK_FIX_127 = "playback_fix_127"
 CC7_POLICY_DROP_EARLY_ZERO = "drop_early_cc7_zero"
 DEFAULT_CC7_POLICY = CC7_POLICY_PLAYBACK_FIX_100
-EARLY_CC7_TICK_LIMIT = ESEQ_MIDI_DIVISION
 _ESEQ_PADDING_BYTE = 0xF6
+_ESEQ_TIMING_META_PREFIX = "APS-ESEQ-TIMING"
 _LEGACY_ESEQ_TEMPLATE = bytes(
     [
         0xFE,
@@ -178,6 +182,13 @@ class ParsedEseqFile:
     end_tick: int
 
 
+@dataclass(frozen=True)
+class EseqTimingFields:
+    duration_ticks: int
+    delay_before_ticks: int
+    delay_after_ticks: int
+
+
 def is_eseq_file(file_path):
     try:
         with open(file_path, "rb") as handle:
@@ -271,7 +282,7 @@ def _encode_vlq(value):
     return bytes(out)
 
 
-def _build_midi_track(track_events):
+def _build_midi_track(track_events, end_tick=None):
     track = bytearray()
     previous_tick = 0
     for abs_tick, raw in track_events:
@@ -281,13 +292,25 @@ def _build_midi_track(track_events):
         track.extend(_encode_vlq(delta))
         track.extend(raw)
         previous_tick = abs_tick
-    track.extend(b"\x00\xFF\x2F\x00")
+    if end_tick is None:
+        end_delta = 0
+    else:
+        end_delta = int(end_tick) - previous_tick
+        if end_delta < 0:
+            raise EseqConversionError("MIDI end tick is before the last event.")
+    track.extend(_encode_vlq(end_delta))
+    track.extend(b"\xFF\x2F\x00")
     return bytes(track)
 
 
 def _write_midi_track_name(raw_title):
     title_bytes = (raw_title or "Untitled").encode("latin1", errors="replace")
     return b"\xFF\x03" + _encode_vlq(len(title_bytes)) + title_bytes
+
+
+def _write_midi_text(text):
+    text_bytes = (text or "").encode("ascii", errors="replace")
+    return b"\xFF\x01" + _encode_vlq(len(text_bytes)) + text_bytes
 
 
 def _write_midi_tempo(mpqn):
@@ -339,11 +362,13 @@ def _midi_channel(raw):
     return None
 
 
-def _early_zero_cc7_indexes(events, early_tick_limit=EARLY_CC7_TICK_LIMIT):
+def _zero_cc7_indexes_needing_playback_fix(events, tick_limit=None):
     candidates = set()
     indexed_events = list(enumerate(events))
     for index, (abs_tick, _, raw) in indexed_events:
-        if abs_tick > early_tick_limit or not _is_zero_channel_volume_event(raw):
+        if tick_limit is not None and abs_tick > tick_limit:
+            continue
+        if not _is_zero_channel_volume_event(raw):
             continue
         channel = _midi_channel(raw)
         if channel is None:
@@ -514,27 +539,80 @@ def parse_eseq_bytes(eseq_bytes):
     )
 
 
+def derive_eseq_timing_fields(eseq_bytes):
+    parsed = parse_eseq_bytes(eseq_bytes)
+    event_ticks = [tick for tick, _, _ in parsed.events]
+    note_ticks = [tick for tick, _, raw in parsed.events if _is_note_on_event(raw)]
+    if event_ticks:
+        delay_before_ticks = min(note_ticks) if note_ticks else min(event_ticks)
+        delay_after_ticks = max(0, parsed.end_tick - max(event_ticks))
+    else:
+        delay_before_ticks = 0
+        delay_after_ticks = 0
+    return EseqTimingFields(
+        duration_ticks=max(0, int(parsed.end_tick)),
+        delay_before_ticks=max(0, int(delay_before_ticks)),
+        delay_after_ticks=max(0, int(delay_after_ticks)),
+    )
+
+
+def _clamp_directory_u16(value):
+    return max(0, min(int(value or 0), ESEQ_DIRECTORY_U16_MAX))
+
+
+def refresh_eseq_timing_fields_in_bytes(eseq_bytes):
+    if _is_q11_eseq(eseq_bytes):
+        return bytes(eseq_bytes)
+    timing = derive_eseq_timing_fields(eseq_bytes)
+    data = bytearray(eseq_bytes)
+    if len(data) < ESEQ_DELAY_AFTER_TICKS_OFFSET + 2:
+        raise EseqConversionError("File is too small to contain E-SEQ timing metadata.")
+    data[ESEQ_DURATION_TICKS_OFFSET:ESEQ_DURATION_TICKS_OFFSET + 4] = timing.duration_ticks.to_bytes(4, "little")
+    data[ESEQ_DELAY_BEFORE_TICKS_OFFSET:ESEQ_DELAY_BEFORE_TICKS_OFFSET + 2] = _clamp_directory_u16(
+        timing.delay_before_ticks,
+    ).to_bytes(2, "little")
+    data[ESEQ_DELAY_AFTER_TICKS_OFFSET:ESEQ_DELAY_AFTER_TICKS_OFFSET + 2] = _clamp_directory_u16(
+        timing.delay_after_ticks,
+    ).to_bytes(2, "little")
+    return bytes(data)
+
+
 def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None, cc7_policy=DEFAULT_CC7_POLICY):
     parsed = parse_eseq_bytes(eseq_bytes)
+    timing = derive_eseq_timing_fields(eseq_bytes)
     track_events = []
-    title = (title_override or parsed.title or "Yamaha File").strip() or "Yamaha File"
+    event_sequence = 0
+    title_candidate = title_override if title_override is not None else parsed.title
+    title = title_candidate if title_candidate and title_candidate.strip() else "Yamaha File"
+
+    def add_track_event(abs_tick, raw):
+        nonlocal event_sequence
+        track_events.append((abs_tick, event_sequence, raw))
+        event_sequence += 1
 
     initial_mpqn = parsed.tempo_events[0][1] if parsed.tempo_events else DEFAULT_MIDI_MPQN
-    track_events.append((0, _write_midi_tempo(initial_mpqn)))
+    add_track_event(0, _write_midi_tempo(initial_mpqn))
     if parsed.time_signature_events:
         _, numerator, denominator_power = parsed.time_signature_events[0]
     else:
         numerator, denominator_power = DEFAULT_TIME_SIGNATURE
-    track_events.append((0, _write_midi_time_signature(numerator, denominator_power)))
-    track_events.append((0, _write_midi_key_signature(*DEFAULT_KEY_SIGNATURE)))
-    track_events.append((0, _write_midi_track_name(title)))
+    add_track_event(0, _write_midi_time_signature(numerator, denominator_power))
+    add_track_event(0, _write_midi_key_signature(*DEFAULT_KEY_SIGNATURE))
+    add_track_event(0, _write_midi_track_name(title))
+    add_track_event(
+        0,
+        _write_midi_text(
+            f"{_ESEQ_TIMING_META_PREFIX} before={timing.delay_before_ticks} "
+            f"after={timing.delay_after_ticks} duration={timing.duration_ticks}"
+        ),
+    )
 
     seen_tempos = set()
     for tick, mpqn in parsed.tempo_events:
         if (tick, mpqn) in seen_tempos or tick == 0:
             continue
         seen_tempos.add((tick, mpqn))
-        track_events.append((tick, _write_midi_tempo(mpqn)))
+        add_track_event(tick, _write_midi_tempo(mpqn))
 
     seen_signatures = set()
     for tick, numerator, denominator_power in parsed.time_signature_events:
@@ -542,37 +620,24 @@ def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None, cc7_pol
         if marker in seen_signatures or tick == 0:
             continue
         seen_signatures.add(marker)
-        track_events.append((tick, _write_midi_time_signature(numerator, denominator_power)))
+        add_track_event(tick, _write_midi_time_signature(numerator, denominator_power))
 
-    cc7_indexes = _early_zero_cc7_indexes(parsed.events)
+    cc7_indexes = _zero_cc7_indexes_needing_playback_fix(parsed.events)
     for index, (abs_tick, order, raw) in enumerate(parsed.events):
         raw = _apply_cc7_policy(raw, index in cc7_indexes, cc7_policy)
         if raw is None:
             continue
         if raw and raw[0] in (0xF0, 0xF7):
             raw = _encode_midi_sysex_event(raw)
-        track_events.append((abs_tick, raw))
+        add_track_event(abs_tick, raw)
 
-    track_events.sort(key=lambda item: (item[0], _event_sort_key(item[1])))
-    track_bytes = _build_midi_track(track_events)
+    track_events.sort(key=lambda item: (item[0], item[1]))
+    track_bytes = _build_midi_track(
+        ((abs_tick, raw) for abs_tick, _, raw in track_events),
+        end_tick=parsed.end_tick,
+    )
     header = struct.pack(">4sIHHH", b"MThd", 6, 0, 1, ESEQ_MIDI_DIVISION)
     return header + struct.pack(">4sI", b"MTrk", len(track_bytes)) + track_bytes
-
-
-def _event_sort_key(raw):
-    if raw[:2] == b"\xFF\x51":
-        return 0
-    if raw[:2] == b"\xFF\x58":
-        return 1
-    if raw[:2] == b"\xFF\x59":
-        return 2
-    if raw[:2] == b"\xFF\x03":
-        return 3
-    if raw[:2] == b"\xFF\x20":
-        return 4
-    if raw and raw[0] in (0xF0, 0xF7):
-        return 5
-    return 6
 
 
 def _parse_midi_header(midi_bytes):
@@ -588,7 +653,7 @@ def _parse_midi_header(midi_bytes):
     return format_type, division
 
 
-def _collect_merged_midi_events(midi_bytes):
+def _collect_merged_midi_events(midi_bytes, *, include_end_tick=False):
     format_type, division = _parse_midi_header(midi_bytes)
     if format_type == 2:
         raise EseqConversionError("MIDI format 2 files are not supported for E-SEQ conversion.")
@@ -599,13 +664,17 @@ def _collect_merged_midi_events(midi_bytes):
         raise EseqConversionError("No MIDI track chunks were found.")
 
     merged = []
+    max_end_tick = 0
     for track_index, chunk in enumerate(track_chunks):
         track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
-        events, _ = _parse_track_events(track_data)
+        events, end_tick = _parse_track_events(track_data)
+        max_end_tick = max(max_end_tick, end_tick)
         for abs_tick, order, raw in events:
             merged.append((abs_tick, track_index, order, raw))
 
     merged.sort(key=lambda item: (item[0], item[1], item[2]))
+    if include_end_tick:
+        return division, merged, max_end_tick
     return division, merged
 
 
@@ -624,10 +693,38 @@ def _extract_midi_titles(merged_events):
             continue
         meta_len, pos = _read_vlq_from_bytes(raw, 2)
         title_bytes = raw[pos:pos + meta_len]
-        title = title_bytes.decode("latin1", errors="replace").strip()
-        if title:
+        title = title_bytes.decode("latin1", errors="replace")
+        if title.strip():
             titles.append(title)
     return titles
+
+
+def _decode_midi_meta_text(raw):
+    if raw[:2] not in {b"\xFF\x01", b"\xFF\x06", b"\xFF\x7F"}:
+        return ""
+    meta_len, pos = _read_vlq_from_bytes(raw, 2)
+    return raw[pos:pos + meta_len].decode("latin1", errors="replace")
+
+
+def _extract_eseq_timing_hint(merged_events):
+    for _, _, _, raw in merged_events:
+        text = _decode_midi_meta_text(raw).strip()
+        if not text.startswith(_ESEQ_TIMING_META_PREFIX):
+            continue
+        fields = {}
+        for token in text[len(_ESEQ_TIMING_META_PREFIX):].strip().split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            try:
+                fields[key.strip().lower()] = max(0, int(value.strip()))
+            except ValueError:
+                continue
+        before = fields.get("before")
+        after = fields.get("after")
+        if before is not None or after is not None:
+            return before, after
+    return None
 
 
 def _read_vlq_from_bytes(data, offset):
@@ -646,12 +743,11 @@ def _read_vlq_from_bytes(data, offset):
 
 def _choose_eseq_title(merged_events, title_override, filename_hint):
     if title_override is not None:
-        title = title_override.strip()
-        if title:
-            return title
+        if title_override.strip():
+            return title_override
 
     for candidate in _extract_midi_titles(merged_events):
-        if candidate:
+        if candidate.strip():
             return candidate
 
     stem = os.path.splitext(os.path.basename(filename_hint or "UNTITLED"))[0].strip()
@@ -720,6 +816,8 @@ def _finalize_eseq_header(
     filename_hint,
     time_signature_events,
     end_tick,
+    delay_before_ticks,
+    delay_after_ticks,
     has_notes,
     has_controllers,
 ):
@@ -746,6 +844,8 @@ def _finalize_eseq_header(
     header[0x34] = max(1, min(numerator, 255))
     header[0x35] = max(1, min(denominator, 255))
     header[0x37:0x3B] = max(0, min(int(end_tick), 0xFFFFFFFF)).to_bytes(4, "little")
+    header[0x3B:0x3D] = _clamp_directory_u16(delay_before_ticks).to_bytes(2, "little")
+    header[0x3F:0x41] = _clamp_directory_u16(delay_after_ticks).to_bytes(2, "little")
     header[0x43:0x47] = bytes([0x00, 0x77, 0x00, 0x00])
     header[0x51] = 1 if has_controllers else 0
     header[0x54] = (0x01 if has_notes else 0) | (0x04 if has_controllers else 0)
@@ -766,10 +866,12 @@ def convert_midi_bytes_to_eseq_bytes(
     filename_hint="",
     cc7_policy=DEFAULT_CC7_POLICY,
 ):
-    division, merged_events = _collect_merged_midi_events(midi_bytes)
+    division, merged_events, midi_end_tick = _collect_merged_midi_events(midi_bytes, include_end_tick=True)
+    timing_hint = _extract_eseq_timing_hint(merged_events)
     normalized_events = []
     tempo_events = []
     time_signature_events = []
+    event_sequence = 0
 
     for abs_tick, _, _, raw in merged_events:
         scaled_tick = _rescale_tick(abs_tick, division, ESEQ_MIDI_DIVISION)
@@ -786,22 +888,25 @@ def convert_midi_bytes_to_eseq_bytes(
 
         if raw[:2] == b"\xFF\x20":
             if len(raw) >= 5 and raw[2] == 0x01:
-                normalized_events.append((scaled_tick, 1, b"\xFF" + bytes([raw[4] & 0x0F])))
+                normalized_events.append((scaled_tick, event_sequence, b"\xFF" + bytes([raw[4] & 0x0F])))
+                event_sequence += 1
             continue
 
         if raw and raw[0] == 0xFF:
             continue
 
         if raw and raw[0] in (0xF0, 0xF7):
-            normalized_events.append((scaled_tick, 3, _decode_midi_sysex_event(raw)))
+            normalized_events.append((scaled_tick, event_sequence, _decode_midi_sysex_event(raw)))
+            event_sequence += 1
             continue
 
-        normalized_events.append((scaled_tick, 2, raw))
+        normalized_events.append((scaled_tick, event_sequence, raw))
+        event_sequence += 1
 
     tempo_events.sort(key=lambda item: item[0])
     time_signature_events.sort(key=lambda item: item[0])
     normalized_events.sort(key=lambda item: (item[0], item[1]))
-    cc7_indexes = _early_zero_cc7_indexes(normalized_events)
+    cc7_indexes = _zero_cc7_indexes_needing_playback_fix(normalized_events)
     adjusted_events = []
     for index, (tick, order, raw) in enumerate(normalized_events):
         raw = _apply_cc7_policy(raw, index in cc7_indexes, cc7_policy)
@@ -809,6 +914,20 @@ def convert_midi_bytes_to_eseq_bytes(
             continue
         adjusted_events.append((tick, order, raw))
     normalized_events = adjusted_events
+
+    if timing_hint and normalized_events:
+        desired_before, _ = timing_hint
+        if desired_before is not None:
+            real_event_ticks = [tick for tick, _, _ in normalized_events]
+            note_ticks = [tick for tick, _, raw in normalized_events if _is_note_on_event(raw)]
+            current_before = min(note_ticks) if note_ticks else min(real_event_ticks)
+            shift_ticks = max(0, int(desired_before) - int(current_before))
+            if shift_ticks:
+                normalized_events = [
+                    (tick + shift_ticks, order, raw)
+                    for tick, order, raw in normalized_events
+                ]
+                normalized_events.sort(key=lambda item: (item[0], item[1]))
 
     initial_mpqn = tempo_events[0][1] if tempo_events else DEFAULT_MIDI_MPQN
     base_bpm = _clamp_base_bpm(_mpqn_to_bpm(initial_mpqn))
@@ -821,6 +940,12 @@ def convert_midi_bytes_to_eseq_bytes(
         last_tick = max(last_tick, tempo_events[-1][0])
     if time_signature_events:
         last_tick = max(last_tick, time_signature_events[-1][0])
+    last_tick = max(last_tick, _rescale_tick(midi_end_tick, division, ESEQ_MIDI_DIVISION))
+    if timing_hint and normalized_events:
+        _, desired_after = timing_hint
+        if desired_after is not None:
+            last_real_event_tick = max(tick for tick, _, _ in normalized_events)
+            last_tick = max(last_tick, last_real_event_tick + int(desired_after))
 
     marker_events = _build_time_signature_markers(time_signature_events, last_tick)
     combined_events = [(0, 0, b"\xF1\x00")]
@@ -846,8 +971,19 @@ def convert_midi_bytes_to_eseq_bytes(
             stream.extend(_encode_eseq_delta(abs_tick - previous_tick))
         stream.extend(raw)
         previous_tick = abs_tick
+    if last_tick > previous_tick:
+        stream.extend(_encode_eseq_delta(last_tick - previous_tick))
+        previous_tick = last_tick
     end_tick = previous_tick
     stream.extend(b"\xF2")
+    if normalized_events:
+        real_event_ticks = [tick for tick, _, _ in normalized_events]
+        note_ticks = [tick for tick, _, raw in normalized_events if _is_note_on_event(raw)]
+        delay_before_ticks = min(note_ticks) if note_ticks else min(real_event_ticks)
+        delay_after_ticks = max(0, end_tick - max(real_event_ticks))
+    else:
+        delay_before_ticks = 0
+        delay_after_ticks = 0
 
     header = _finalize_eseq_header(
         bytes(stream),
@@ -856,6 +992,8 @@ def convert_midi_bytes_to_eseq_bytes(
         filename_hint,
         marker_events,
         end_tick,
+        delay_before_ticks,
+        delay_after_ticks,
         has_notes,
         has_controllers,
     )
