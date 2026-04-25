@@ -14,6 +14,9 @@ _SYSTEM_MESSAGE_DATA_LENGTHS = {
 
 _LEGACY_TITLE_MIN_CODEPOINT = 0x20
 _LEGACY_TITLE_MAX_CODEPOINT = 0x7E
+_ESEQ_TITLE_START = 0x57
+_ESEQ_TITLE_END = 0x76
+_ESEQ_TITLE_LENGTH = _ESEQ_TITLE_END - _ESEQ_TITLE_START + 1
 
 
 def _extract_midi_format_type(midi_bytes):
@@ -42,6 +45,23 @@ def extract_midi_type_label_from_midi(midi_path):
     except Exception as e:
         print(f"Error detecting MIDI type for {midi_path}: {e}")
         return "Error"
+
+
+def is_midi_file(midi_path):
+    try:
+        with open(midi_path, "rb") as f:
+            midi_bytes = f.read(14)
+        _extract_midi_format_type(midi_bytes)
+        return True
+    except Exception:
+        return False
+
+
+def has_eseq_title_metadata(file_path):
+    try:
+        return os.path.getsize(file_path) >= (_ESEQ_TITLE_END + 1)
+    except OSError:
+        return False
 
 
 def _parse_vlq(data, offset, end):
@@ -206,6 +226,30 @@ def _decode_title_bytes(title_bytes):
     return title_bytes.decode("latin1")
 
 
+def _extract_eseq_title_from_bytes(data):
+    if len(data) < (_ESEQ_TITLE_END + 1):
+        raise ValueError("File is too small to contain E-SEQ title metadata.")
+
+    title_bytes = data[_ESEQ_TITLE_START:_ESEQ_TITLE_END + 1]
+    return _decode_title_bytes(title_bytes).split("\x00", 1)[0].rstrip(" ")
+
+
+def _set_eseq_title_in_bytes(data, new_title):
+    if len(data) < (_ESEQ_TITLE_END + 1):
+        raise ValueError("File is too small to contain E-SEQ title metadata.")
+
+    title_bytes = _encode_title_bytes(new_title)
+    if len(title_bytes) > _ESEQ_TITLE_LENGTH:
+        raise ValueError(f"E-SEQ title must be {_ESEQ_TITLE_LENGTH} characters or fewer.")
+
+    padded = title_bytes.ljust(_ESEQ_TITLE_LENGTH, b" ")
+    return (
+        data[:_ESEQ_TITLE_START]
+        + padded
+        + data[_ESEQ_TITLE_END + 1:]
+    )
+
+
 def _describe_char_for_error(ch):
     code = ord(ch)
     if ch == " ":
@@ -311,6 +355,18 @@ def extract_first_title_from_midi(midi_path):
         print(f"Error extracting title from {midi_path}: {e}")
         return f"Error: {str(e)}"
 
+
+def extract_eseq_title_from_file(file_path):
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+        result = _extract_eseq_title_from_bytes(data)
+        print(f"extract eseq: {os.path.basename(file_path)} => '{result}'")
+        return result
+    except Exception as e:
+        print(f"Error extracting E-SEQ title from {file_path}: {e}")
+        return f"Error: {str(e)}"
+
 def update_midi_title(midi_path, new_title):
     try:
         with open(midi_path, "rb") as f:
@@ -325,6 +381,21 @@ def update_midi_title(midi_path, new_title):
     except Exception as e:
         return f"Error updating MIDI title: {str(e)}"
 
+
+def update_eseq_title(file_path, new_title):
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+
+        patched = _set_eseq_title_in_bytes(data, new_title)
+
+        with open(file_path, "wb") as f:
+            f.write(patched)
+
+        return None
+    except Exception as e:
+        return f"Error updating E-SEQ title: {str(e)}"
+
 def update_midi_title_to_destination(source_path, new_title, dest_dir):
     try:
         with open(source_path, "rb") as f:
@@ -333,6 +404,36 @@ def update_midi_title_to_destination(source_path, new_title, dest_dir):
         patched = _set_first_title_in_midi_bytes(midi_bytes, new_title)
 
         dest_path = os.path.join(dest_dir, os.path.basename(source_path))
+
+        with open(dest_path, "wb") as f:
+            f.write(patched)
+
+        return None
+    except Exception as e:
+        return f"Error updating {os.path.basename(source_path)}: {str(e)}"
+
+
+def update_midi_title_to_path(source_path, new_title, dest_path):
+    try:
+        with open(source_path, "rb") as f:
+            midi_bytes = f.read()
+
+        patched = _set_first_title_in_midi_bytes(midi_bytes, new_title)
+
+        with open(dest_path, "wb") as f:
+            f.write(patched)
+
+        return None
+    except Exception as e:
+        return f"Error updating {os.path.basename(source_path)}: {str(e)}"
+
+
+def update_eseq_title_to_path(source_path, new_title, dest_path):
+    try:
+        with open(source_path, "rb") as f:
+            data = f.read()
+
+        patched = _set_eseq_title_in_bytes(data, new_title)
 
         with open(dest_path, "wb") as f:
             f.write(patched)

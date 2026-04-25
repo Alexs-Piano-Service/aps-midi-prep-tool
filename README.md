@@ -1,7 +1,7 @@
 # APS MIDI Prep Tool
 
 `APS MIDI Prep Tool` is a desktop tool for editing MIDI track titles with legacy playback systems in mind.
-Current version: `0.4.0` (2026).
+Current version: `0.5.1` (2026).
 
 Built for the workflows at [AlexanderPeppe.com](https://www.alexanderpeppe.com/), this project helps players, technicians, and collectors keep MIDI files named properly and compatible with older Disklavier setups.
 
@@ -23,6 +23,13 @@ Many older systems are sensitive to modern filenames and metadata. This app focu
 - Optional warning for titles longer than 32 characters
 - Save updates directly to source files
 - `Save As...` to write updated copies to another folder
+- Drop a floppy image (`.img`, `.hfe`, and other Greaseweazle-supported formats) to enter Image Mode
+- Read a 720K or 1.44M USB floppy directly into Floppy Mode and save changes back to the disk
+- Read a floppy into Floppy Mode through Greaseweazle, including drive selection (`0`, `1`, `2`, `A`, `B`)
+- Edit MIDI titles inside a fixed-size floppy image or floppy session, rename/remove/add files, and repair Yamaha 720K copy protection on save/export
+- Detect Yamaha E-SEQ disks, show `PIANODIR.FIL` as a separate status row, and offer to generate or refresh it on save
+- View and edit Yamaha E-SEQ title metadata stored in the fixed title field inside each E-SEQ file
+- Convert listed files inside Image Mode and Floppy Mode between Yamaha E-SEQ (`.FIL`) and SMF MIDI (`.MID`), including E-SEQ tempo metadata
 - One-click `Rename All to DOS 8.3`
 - Optional backup files (`*_backup.mid`) before changes
 
@@ -43,6 +50,9 @@ This app includes tools for all of the above.
 
 - Python 3.10+
 - `PySide6`
+- For Image Mode and Floppy Mode: `mtools`
+- For converted image formats such as HFE, and for Greaseweazle floppy import/write: Greaseweazle CLI (`gw`)
+- For direct USB floppy access on Linux: a readable/writable 720K or 1.44M floppy block device
 
 ### Run Locally
 
