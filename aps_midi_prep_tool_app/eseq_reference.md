@@ -693,7 +693,7 @@ At file start, write:
 F1 00 F9 04 02
 ```
 
-Then write `F9 04 02` at later barlines if using bar-marker mode.
+Then write `F9 04 02` at later barlines if using bar-marker mode, but do not write a generated `F9` at the exact final `F2`/end tick. ESEQ Explorer-style tools can treat a final marker as the last event and display the after-delay as zero even when the musical event stream has trailing silence.
 
 ### 11.6 Choose the E-SEQ end tick
 

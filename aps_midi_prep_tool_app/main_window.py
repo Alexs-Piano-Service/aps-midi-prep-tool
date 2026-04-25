@@ -67,6 +67,7 @@ from .ui_utils import (
 )
 from .drop_table_widget import DropTableWidget
 from .midi_scan_worker import MidiProcessingWorker
+from .disk_session_worker import DiskSessionLoadWorker
 from .icon_utils import apply_window_icon
 from .floppy_image import (
     DISK_FORMATS,
@@ -339,7 +340,6 @@ class MidiTitleWindow(QMainWindow):
     SETTING_SKIP_IMAGE_REMOVE_WARNING = "skip_image_remove_warning"
     SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING = "skip_image_delete_on_save_warning"
     SETTING_SKIP_FLOPPY_WRITE_WARNING = "skip_floppy_write_warning"
-    SETTING_SHOW_MIDI_TYPE_COLUMN = "show_midi_type_column"
     SETTING_ALLOW_FLOPPY_SAVE = "allow_floppy_save"
     SETTING_CONFIRM_IMAGE_SAVE = "confirm_image_save"
     SETTING_FORMAT_DISKLAVIER_SCREEN = "format_disklavier_screen"
@@ -389,6 +389,10 @@ class MidiTitleWindow(QMainWindow):
         self.regularPianodirSourcePath = ""
         self.loadedRegularPianodirMetadata = PianodirMetadata()
         self.loadedRegularEseqPaths = tuple()
+        self.diskLoadWorker = None
+        self.diskLoadProgressDialog = None
+        self.diskLoadFailureTitle = "Disk Load Failed"
+        self.diskLoadShouldOfferCapture = False
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         self._did_apply_initial_column_sizing = False
         self._is_adjusting_columns = False
@@ -547,15 +551,6 @@ class MidiTitleWindow(QMainWindow):
         self.compat_warning_checkbox.toggled.connect(self.toggle_compat_warnings)
         self.title_delegate.set_highlight_enabled(show_compat_warning)
         options_layout.addWidget(self.compat_warning_checkbox, alignment=Qt.AlignLeft)
-
-        show_midi_type_column = self.settings.value(self.SETTING_SHOW_MIDI_TYPE_COLUMN, False, type=bool)
-        self.midi_type_column_checkbox = QCheckBox("Show MIDI type column")
-        self.midi_type_column_checkbox.setChecked(show_midi_type_column)
-        self.midi_type_column_checkbox.setToolTip(
-            "Show an extra table column with each file's detected MIDI type."
-        )
-        self.midi_type_column_checkbox.toggled.connect(self.toggle_midi_type_column)
-        options_layout.addWidget(self.midi_type_column_checkbox, alignment=Qt.AlignLeft)
 
         format_disklavier_screen = self.settings.value(
             self.SETTING_FORMAT_DISKLAVIER_SCREEN, False, type=bool
@@ -802,7 +797,7 @@ class MidiTitleWindow(QMainWindow):
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
         self._update_compat_warning_ui()
-        self.table.setColumnHidden(6, not self.midi_type_column_checkbox.isChecked())
+        self.table.setColumnHidden(6, False)
 
         # Set mouse tracking and install an event filter on the table viewport.
         self.table.viewport().setMouseTracking(True)
@@ -847,6 +842,102 @@ class MidiTitleWindow(QMainWindow):
         dialog.setMinimumDuration(0)
         self._center_child_dialog(dialog)
         return dialog
+
+    def _apply_stage_progress(self, dialog, step, total, message):
+        if dialog is None:
+            return
+        if total and total > 0:
+            if dialog.maximum() != total:
+                dialog.setRange(0, total)
+            dialog.setValue(max(0, min(step, total)))
+        else:
+            dialog.setRange(0, 0)
+        dialog.setLabelText(message)
+        QApplication.processEvents()
+
+    def _set_disk_load_busy(self, busy):
+        is_busy = bool(busy)
+        self.choose_button.setEnabled(not is_busy)
+        self.open_image_button.setEnabled(not is_busy)
+        self.read_floppy_button.setEnabled(not is_busy)
+
+    def _start_disk_load_worker(
+        self,
+        *,
+        load_kind,
+        source,
+        progress_title,
+        progress_total,
+        initial_message,
+        final_message,
+        failure_title,
+        offer_greaseweazle_capture=False,
+    ):
+        if self.diskLoadWorker is not None:
+            QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
+            return False
+
+        progress_dialog = QProgressDialog(progress_title, None, 0, progress_total, self)
+        progress_dialog.setWindowTitle(progress_title)
+        self._prepare_progress_dialog(progress_dialog)
+        progress_dialog.setAutoClose(False)
+        progress_dialog.setCancelButton(None)
+        self._apply_stage_progress(progress_dialog, 0, progress_total, initial_message)
+
+        worker = DiskSessionLoadWorker(
+            load_kind,
+            source,
+            final_total=progress_total,
+            final_message=final_message,
+            parent=self,
+        )
+        worker.progressChanged.connect(
+            lambda step, total, message, dialog=progress_dialog: self._apply_stage_progress(
+                dialog, step, total, message
+            )
+        )
+        worker.sessionLoaded.connect(self._on_disk_load_success)
+        worker.loadFailed.connect(self._on_disk_load_failure)
+        worker.finished.connect(self._on_disk_load_finished)
+
+        self.diskLoadWorker = worker
+        self.diskLoadProgressDialog = progress_dialog
+        self.diskLoadFailureTitle = failure_title
+        self.diskLoadShouldOfferCapture = bool(offer_greaseweazle_capture)
+        self._set_disk_load_busy(True)
+        worker.start()
+        return True
+
+    def _on_disk_load_success(self, session, listing):
+        if self.diskLoadProgressDialog is not None:
+            self.diskLoadProgressDialog.close()
+            self.diskLoadProgressDialog = None
+
+        try:
+            self._activate_disk_session(session, listing)
+        except Exception as exc:
+            try:
+                session.cleanup()
+            except Exception:
+                pass
+            QMessageBox.critical(self, self.diskLoadFailureTitle, str(exc))
+            return
+
+        if self.diskLoadShouldOfferCapture:
+            self._offer_save_greaseweazle_capture()
+
+    def _on_disk_load_failure(self, message):
+        if self.diskLoadProgressDialog is not None:
+            self.diskLoadProgressDialog.close()
+            self.diskLoadProgressDialog = None
+        QMessageBox.critical(self, self.diskLoadFailureTitle, message)
+
+    def _on_disk_load_finished(self):
+        self._set_disk_load_busy(False)
+        self.diskLoadShouldOfferCapture = False
+        if self.diskLoadWorker is not None:
+            self.diskLoadWorker.deleteLater()
+            self.diskLoadWorker = None
 
     def _confirm_with_optional_skip(self, *, setting_key, title, message, icon=QMessageBox.Warning):
         if self.settings.value(setting_key, False, type=bool):
@@ -972,13 +1063,6 @@ class MidiTitleWindow(QMainWindow):
         self._resize_table_columns_to_fill()
         if self._compat_warning_is_active():
             self.refresh_compat_indicators()
-
-    def toggle_midi_type_column(self, state):
-        self.table.setColumnHidden(6, not state)
-        self.settings.setValue(self.SETTING_SHOW_MIDI_TYPE_COLUMN, bool(state))
-        self._resize_table_columns_to_fill()
-        if state:
-            self.refresh_midi_type_indicators()
 
     def toggle_format_disklavier_screen(self, state):
         self.settings.setValue(self.SETTING_FORMAT_DISKLAVIER_SCREEN, bool(state))
@@ -1865,7 +1949,8 @@ class MidiTitleWindow(QMainWindow):
                 if title.startswith("Error:"):
                     title = ""
                 title_mode = "midi"
-            midi_type = extract_midi_type_label_from_midi(file_path)
+            if title_mode != "eseq":
+                midi_type = extract_midi_type_label_from_midi(file_path)
 
         return title, midi_type, title_mode, is_midi, order_key
 
@@ -2313,12 +2398,11 @@ class MidiTitleWindow(QMainWindow):
         self.table.setToolTip(
             "Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename."
         )
-        self.midi_type_column_checkbox.setEnabled(True)
         self._set_rename_all_enabled(True)
         self._set_type0_enabled(True)
         self.convertEseqToMidiButton.setEnabled(False)
         self.convertMidiToEseqButton.setEnabled(False)
-        self.table.setColumnHidden(6, not self.midi_type_column_checkbox.isChecked())
+        self.table.setColumnHidden(6, False)
         self.saveButton.setVisible(True)
         self.saveAsButton.setVisible(True)
         self.saveAsImageButton.setVisible(True)
@@ -2349,12 +2433,11 @@ class MidiTitleWindow(QMainWindow):
         self.table.setToolTip(
             "E-SEQ Mode: edit local MIDI and E-SEQ titles, and manage the local PIANODIR.FIL row."
         )
-        self.midi_type_column_checkbox.setEnabled(True)
         self._set_rename_all_enabled(False, "Rename 8.3 is available for MIDI folders only.")
         self._set_type0_enabled(False, "SMF1 -> SMF0 is available for MIDI folders only.")
         self.convertEseqToMidiButton.setEnabled(True)
         self.convertMidiToEseqButton.setEnabled(True)
-        self.table.setColumnHidden(6, not self.midi_type_column_checkbox.isChecked())
+        self.table.setColumnHidden(6, False)
         self.table.setSortingEnabled(False)
         self.saveButton.setVisible(True)
         self.saveAsButton.setVisible(True)
@@ -2413,7 +2496,6 @@ class MidiTitleWindow(QMainWindow):
         self.table.setToolTip(
             f"{mode_banner}: edit titles, rename files, remove rows to delete files on Save, or drop files to add them."
         )
-        self.midi_type_column_checkbox.setEnabled(False)
         self._set_rename_all_enabled(False, "Rename 8.3 is available for MIDI folders only.")
         self._set_type0_enabled(False, "SMF1 -> SMF0 is available for MIDI folders only.")
         self.convertEseqToMidiButton.setEnabled(True)
@@ -2673,10 +2755,11 @@ class MidiTitleWindow(QMainWindow):
                     title_mode = "midi"
                 except Exception as exc:
                     title = f"Error: {exc}"
-            try:
-                midi_type = extract_midi_type_label_from_midi(extraction_path)
-            except Exception:
-                midi_type = "Error"
+            if title_mode != "eseq":
+                try:
+                    midi_type = extract_midi_type_label_from_midi(extraction_path)
+                except Exception:
+                    midi_type = "Error"
 
         self._set_image_file_info(
             image_path,
@@ -2691,14 +2774,7 @@ class MidiTitleWindow(QMainWindow):
 
     def _make_stage_progress_callback(self, dialog):
         def callback(step, total, message):
-            if total and total > 0:
-                if dialog.maximum() != total:
-                    dialog.setRange(0, total)
-                dialog.setValue(max(0, min(step, total)))
-            else:
-                dialog.setRange(0, 0)
-            dialog.setLabelText(message)
-            QApplication.processEvents()
+            self._apply_stage_progress(dialog, step, total, message)
 
         return callback
 
@@ -2925,29 +3001,15 @@ class MidiTitleWindow(QMainWindow):
         if not prevalidated and not self._prepare_for_disk_load("this floppy image"):
             return
 
-        progressDialog = QProgressDialog("Preparing floppy image...", None, 0, 4, self)
-        self._prepare_progress_dialog(progressDialog)
-        progressDialog.setAutoClose(False)
-        progressDialog.setCancelButton(None)
-        progress_callback = self._make_stage_progress_callback(progressDialog)
-        progress_callback(0, 4, "Preparing floppy image...")
-        QApplication.processEvents()
-
-        try:
-            session = FloppyImageSession.load(image_path, progress_callback=progress_callback)
-            progress_callback(4, 4, "Loading floppy view...")
-            listing = session.list_entries()
-        except FloppyImageError as exc:
-            progressDialog.close()
-            QMessageBox.critical(self, "Image Load Failed", str(exc))
-            return
-        except Exception as exc:
-            progressDialog.close()
-            QMessageBox.critical(self, "Image Load Failed", str(exc))
-            return
-
-        progressDialog.close()
-        self._activate_disk_session(session, listing)
+        self._start_disk_load_worker(
+            load_kind="image",
+            source=image_path,
+            progress_title="Preparing floppy image...",
+            progress_total=4,
+            initial_message="Preparing floppy image...",
+            final_message="Loading floppy view...",
+            failure_title="Image Load Failed",
+        )
 
     def load_floppy_drive(self):
         if not self._prepare_for_disk_load("this floppy disk"):
@@ -2972,35 +3034,16 @@ class MidiTitleWindow(QMainWindow):
             if selected_source.archival_quality:
                 progress_title = "Reading Floppy via Greaseweazle (Archival SCP)"
 
-        progressDialog = QProgressDialog(progress_title, None, 0, progress_total, self)
-        progressDialog.setWindowTitle(progress_title)
-        self._prepare_progress_dialog(progressDialog)
-        progressDialog.setAutoClose(False)
-        progressDialog.setCancelButton(None)
-        progress_callback = self._make_stage_progress_callback(progressDialog)
-        progress_callback(0, progress_total, progress_title)
-        QApplication.processEvents()
-
-        try:
-            if source_mode == "USB Floppy Drive":
-                session = FloppyImageSession.load_floppy(selected_source, progress_callback=progress_callback)
-            else:
-                session = FloppyImageSession.load_greaseweazle(selected_source, progress_callback=progress_callback)
-            progress_callback(progress_total, progress_total, "Opening floppy contents...")
-            listing = session.list_entries()
-        except FloppyImageError as exc:
-            progressDialog.close()
-            QMessageBox.critical(self, "Floppy Load Failed", str(exc))
-            return
-        except Exception as exc:
-            progressDialog.close()
-            QMessageBox.critical(self, "Floppy Load Failed", str(exc))
-            return
-
-        progressDialog.close()
-        self._activate_disk_session(session, listing)
-        if source_mode == "Greaseweazle":
-            self._offer_save_greaseweazle_capture()
+        self._start_disk_load_worker(
+            load_kind="floppy_usb" if source_mode == "USB Floppy Drive" else "floppy_gw",
+            source=selected_source,
+            progress_title=progress_title,
+            progress_total=progress_total,
+            initial_message=progress_title,
+            final_message="Opening floppy contents...",
+            failure_title="Floppy Load Failed",
+            offer_greaseweazle_capture=(source_mode == "Greaseweazle"),
+        )
 
     def _load_image_rows(self, entries, *, auto_enable_format=False):
         self.imageFileInfo.clear()

@@ -803,7 +803,9 @@ def _build_time_signature_markers(time_signature_events, last_tick):
         stop_tick = max(next_tick, tick)
         if index == len(deduped) - 1 and last_tick > stop_tick:
             stop_tick = last_tick
-        while cursor <= stop_tick:
+        markers.add((cursor, numerator, denominator_power))
+        cursor += measure_ticks
+        while cursor < stop_tick:
             markers.add((cursor, numerator, denominator_power))
             cursor += measure_ticks
     return sorted(markers, key=lambda item: (item[0], item[1], item[2]))

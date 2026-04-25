@@ -1281,22 +1281,42 @@ def _close_block_device(device):
         os.close(device)
 
 
-def _read_block_device(device_path, output_path, size_bytes):
+def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=None):
     if os.name == "nt":
         if not size_bytes:
             raise FloppyImageError("Could not read Windows floppy device: unknown disk size.")
-        with _WindowsVolumeHandle(device_path, write=False) as volume, open(output_path, "wb") as output:
-            remaining = int(size_bytes)
-            cursor = 0
-            chunk_size = 64 * 1024
+        chunks = []
+        remaining = int(size_bytes)
+        cursor = 0
+        chunk_size = 64 * 1024
+        last_progress = -1
+        with _WindowsVolumeHandle(device_path, write=False) as volume:
             while remaining > 0:
                 current_size = min(chunk_size, remaining)
                 chunk = volume.read_at(cursor, current_size, "floppy image")
                 if not chunk:
                     raise FloppyImageError("Could not read floppy device: unexpected end of device.")
-                output.write(chunk)
+                chunks.append(chunk)
                 cursor += len(chunk)
                 remaining -= len(chunk)
+                if progress_callback is not None and size_bytes > 0:
+                    progress = min(70, int((cursor / int(size_bytes)) * 70))
+                    if progress > last_progress:
+                        last_progress = progress
+                        progress_callback(
+                            progress,
+                            100,
+                            f"Reading floppy image: {display_bytes(cursor)} of {display_bytes(size_bytes)}...",
+                        )
+        return b"".join(chunks)
+    raise FloppyImageError("Windows raw floppy byte reads are only available on Windows.")
+
+
+def _read_block_device(device_path, output_path, size_bytes):
+    if os.name == "nt":
+        data = _read_windows_block_device_bytes(device_path, size_bytes)
+        with open(output_path, "wb") as output:
+            output.write(data)
         return
 
     dd = _require_command("dd")
@@ -1375,9 +1395,9 @@ def _parse_int(value, fallback=0):
         return fallback
 
 
-def read_image_listing(img_path):
-    _require_command("7z")
-    output = _run_command(["7z", "l", "-slt", img_path], "Could not read image contents")
+def _read_image_listing_with_7z(img_path):
+    seven_zip = _require_command("7z")
+    output = _run_command([seven_zip, "l", "-slt", img_path], "Could not read image contents")
 
     in_records = False
     record = {}
@@ -1429,6 +1449,15 @@ def read_image_listing(img_path):
     flush_record()
     entries.sort(key=lambda item: item.path.lower())
     return ImageListing(entries=entries, free_space=free_space, cluster_size=cluster_size)
+
+
+def read_image_listing(img_path):
+    try:
+        return _read_fat12_image_listing(img_path)
+    except FloppyImageError as fat_exc:
+        if not shutil.which("7z"):
+            raise fat_exc
+        return _read_image_listing_with_7z(img_path)
 
 
 def _u16le(data, offset):
@@ -1864,8 +1893,154 @@ def _read_cluster_chain_from_image(data, geometry, clusters, size):
     return bytes(output[:size])
 
 
+def _fat12_data_cluster_count(geometry):
+    return max(0, (geometry.total_size - geometry.data_offset) // geometry.cluster_size)
+
+
+def _iter_fat_directory_entries(directory_bytes):
+    for pos in range(0, len(directory_bytes), 32):
+        entry = directory_bytes[pos:pos + 32]
+        if len(entry) < 32:
+            break
+        first = entry[0]
+        attr = entry[11]
+        if first == 0x00:
+            break
+        if first == 0xE5 or attr == 0x0F:
+            continue
+        name = _decode_dos_directory_name(entry[:11])
+        if not name or name in {".", ".."}:
+            continue
+        yield {
+            "name": name,
+            "attr": attr,
+            "cluster": _u16le(entry, 26),
+            "size": int.from_bytes(entry[28:32], "little"),
+        }
+
+
+def _read_directory_chain_from_image(data, geometry, fat, first_cluster):
+    if first_cluster < 2:
+        return b""
+    clusters = _fat12_cluster_chain_from_start(fat, first_cluster)
+    if not clusters:
+        return b""
+    return _read_cluster_chain_from_image(data, geometry, clusters, len(clusters) * geometry.cluster_size)
+
+
+def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_path=""):
+    entries = []
+    for entry in _iter_fat_directory_entries(directory_bytes):
+        attr = entry["attr"]
+        image_path = entry["name"] if not parent_path else f"{parent_path}/{entry['name']}"
+        image_path = _normalize_image_path(image_path)
+        if attr & 0x08:
+            continue
+        if attr & 0x10:
+            child_dir = _read_directory_chain_from_image(data, geometry, fat, entry["cluster"])
+            entries.extend(_collect_fat12_listing_entries(data, geometry, fat, child_dir, image_path))
+            continue
+
+        cluster_chain = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
+        entries.append(
+            ImageEntry(
+                path=image_path,
+                size=entry["size"],
+                packed_size=len(cluster_chain) * geometry.cluster_size,
+                attributes=f"{attr:02X}",
+            )
+        )
+    return entries
+
+
+def _read_fat12_image_context(img_path):
+    with open(img_path, "rb") as handle:
+        data = handle.read()
+
+    geometry = _geometry_from_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR])
+    if geometry is None:
+        raise FloppyImageError("Could not parse the FAT12 boot sector for this image.")
+    if len(data) < geometry.total_size:
+        raise FloppyImageError("The floppy image ended before the FAT12 data area was complete.")
+
+    fat = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size]
+    if len(fat) != geometry.fat_size:
+        raise FloppyImageError("Could not read the FAT12 allocation table from this image.")
+
+    root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
+    if len(root_dir) != geometry.root_size:
+        raise FloppyImageError("Could not read the FAT12 root directory from this image.")
+
+    return data, geometry, fat, root_dir
+
+
+def _read_fat12_image_listing(img_path):
+    data, geometry, fat, root_dir = _read_fat12_image_context(img_path)
+    entries = _collect_fat12_listing_entries(data, geometry, fat, root_dir)
+    free_clusters = sum(
+        1
+        for cluster in range(2, _fat12_data_cluster_count(geometry) + 2)
+        if _fat12_next_cluster(fat, cluster) == 0
+    )
+    entries.sort(key=lambda item: item.path.lower())
+    return ImageListing(
+        entries=entries,
+        free_space=free_clusters * geometry.cluster_size,
+        cluster_size=geometry.cluster_size,
+    )
+
+
+def _split_image_path_components(image_path):
+    return [part for part in _normalize_image_path(image_path).split("/") if part]
+
+
+def _locate_fat12_entry(data, geometry, fat, directory_bytes, path_parts, *, original_path):
+    if not path_parts:
+        raise FloppyImageError(f"Could not extract {original_path} from image: invalid image path.")
+
+    target_name = path_parts[0].upper()
+    for entry in _iter_fat_directory_entries(directory_bytes):
+        if entry["name"].upper() != target_name:
+            continue
+        if len(path_parts) == 1:
+            return entry
+        if not (entry["attr"] & 0x10):
+            raise FloppyImageError(
+                f"Could not extract {original_path} from image: {entry['name']} is not a directory."
+            )
+        child_dir = _read_directory_chain_from_image(data, geometry, fat, entry["cluster"])
+        return _locate_fat12_entry(
+            data,
+            geometry,
+            fat,
+            child_dir,
+            path_parts[1:],
+            original_path=original_path,
+        )
+
+    raise FloppyImageError(f"Could not extract {original_path} from image: file was not found.")
+
+
+def _read_fat12_file_bytes(img_path, image_path):
+    normalized_path = _normalize_image_path(image_path)
+    path_parts = _split_image_path_components(normalized_path)
+    data, geometry, fat, root_dir = _read_fat12_image_context(img_path)
+    entry = _locate_fat12_entry(
+        data,
+        geometry,
+        fat,
+        root_dir,
+        path_parts,
+        original_path=normalized_path,
+    )
+    if entry["attr"] & 0x10:
+        raise FloppyImageError(f"Could not extract {normalized_path} from image: path is a directory.")
+    clusters = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
+    return _read_cluster_chain_from_image(data, geometry, clusters, entry["size"])
+
+
 def _fat12_chain_starts(fat, geometry):
-    data_clusters = max(0, (geometry.total_size - geometry.data_offset) // geometry.cluster_size)
+    data_clusters = _fat12_data_cluster_count(geometry)
     used = []
     referenced = set()
     for cluster in range(2, data_clusters + 2):
@@ -2120,6 +2295,14 @@ def prepare_yamaha_image(input_path, output_path):
     with open(input_path, "rb") as handle:
         data = handle.read()
 
+    return prepare_yamaha_bytes(data, output_path)
+
+
+def prepare_yamaha_bytes(data, output_path):
+    def write_output(payload):
+        with open(output_path, "wb") as handle:
+            handle.write(payload)
+
     detection = _detect_yamaha_layout(data)
     if detection is None:
         detection = _detect_protected_fat12_layout(data)
@@ -2136,11 +2319,11 @@ def prepare_yamaha_image(input_path, output_path):
                 "notes": "sector 0 and root directory were damaged; rebuilt root directory from PIANODIR.FIL and FAT chains",
             }
     if detection is None:
-        shutil.copy2(input_path, output_path)
+        write_output(data)
         return YamahaRepairResult("No Yamaha copy-protection repair needed.", False)
 
     if detection["mode"] == "already_valid":
-        shutil.copy2(input_path, output_path)
+        write_output(data)
         return YamahaRepairResult("Yamaha repair check: valid 720 KB FAT12 boot sector already present.", False)
 
     layout = detection.get("layout")
@@ -2173,8 +2356,7 @@ def prepare_yamaha_image(input_path, output_path):
         repaired_data[root_offset:root_offset + len(root_dir)] = root_dir
         repaired = bytes(repaired_data)
 
-    with open(output_path, "wb") as handle:
-        handle.write(repaired)
+    write_output(repaired)
 
     return YamahaRepairResult("Yamaha copy-protection repair applied: " + detection["notes"] + ".", True)
 
@@ -2255,31 +2437,64 @@ class FloppyImageSession:
         try:
             source_copy = os.path.join(temp_dir, "source.img")
             working_img = os.path.join(temp_dir, "working.img")
-            try:
-                repair_result = _read_floppy_device_fast_image(
-                    drive_info.path,
-                    working_img,
-                    drive_info.size_bytes,
-                    progress_callback=progress_callback,
-                )
-                disk_format = _disk_format_for_image(working_img)
-                read_image_listing(working_img)
-            except Exception as fast_exc:
-                _notify_progress(
-                    progress_callback,
-                    0,
-                    4,
-                    f"Reading full floppy image from {drive_info.path}...",
-                )
-                _read_block_device(drive_info.path, source_copy, drive_info.size_bytes)
-                _notify_progress(progress_callback, 1, 4, "Creating working copy...")
-                repair_result = prepare_yamaha_image(source_copy, working_img)
-                repair_result = YamahaRepairResult(
-                    repair_result.note + f" Fast USB file-level read was unavailable: {fast_exc}",
-                    repair_result.changed,
-                )
-                disk_format = _disk_format_for_image(working_img)
-                read_image_listing(working_img)
+            if os.name == "nt":
+                try:
+                    repair_result = _read_floppy_device_fast_image(
+                        drive_info.path,
+                        working_img,
+                        drive_info.size_bytes,
+                        progress_callback=progress_callback,
+                    )
+                    disk_format = _disk_format_for_image(working_img)
+                    read_image_listing(working_img)
+                except Exception as fast_exc:
+                    _notify_progress(
+                        progress_callback,
+                        0,
+                        100,
+                        f"Reading full floppy image from {drive_info.path}...",
+                    )
+                    raw_data = _read_windows_block_device_bytes(
+                        drive_info.path,
+                        drive_info.size_bytes,
+                        progress_callback=progress_callback,
+                    )
+                    _notify_progress(progress_callback, 75, 100, "Creating working copy...")
+                    repair_result = prepare_yamaha_bytes(raw_data, working_img)
+                    repair_result = YamahaRepairResult(
+                        repair_result.note + f" Fast USB file-level read was unavailable: {fast_exc}",
+                        repair_result.changed,
+                    )
+                    disk_format = _disk_format_for_image(working_img)
+                    _notify_progress(progress_callback, 90, 100, "Scanning floppy contents...")
+                    read_image_listing(working_img)
+            else:
+                try:
+                    repair_result = _read_floppy_device_fast_image(
+                        drive_info.path,
+                        working_img,
+                        drive_info.size_bytes,
+                        progress_callback=progress_callback,
+                    )
+                    disk_format = _disk_format_for_image(working_img)
+                    read_image_listing(working_img)
+                except Exception as fast_exc:
+                    _notify_progress(
+                        progress_callback,
+                        0,
+                        100,
+                        f"Reading full floppy image from {drive_info.path}...",
+                    )
+                    _read_block_device(drive_info.path, source_copy, drive_info.size_bytes)
+                    _notify_progress(progress_callback, 75, 100, "Creating working copy...")
+                    repair_result = prepare_yamaha_image(source_copy, working_img)
+                    repair_result = YamahaRepairResult(
+                        repair_result.note + f" Fast USB file-level read was unavailable: {fast_exc}",
+                        repair_result.changed,
+                    )
+                    disk_format = _disk_format_for_image(working_img)
+                    _notify_progress(progress_callback, 90, 100, "Scanning floppy contents...")
+                    read_image_listing(working_img)
             _notify_progress(progress_callback, 100, 100, "Opening floppy contents...")
             return cls(
                 drive_info.path,
@@ -2407,13 +2622,22 @@ class FloppyImageSession:
         _run_command(args, message)
 
     def _extract_from_image(self, source_img, image_path, dest_path):
-        mcopy = _require_command("mcopy")
         if os.path.exists(dest_path):
             os.remove(dest_path)
-        self._run_mtools(
-            [mcopy, "-i", source_img, mtools_path(image_path), dest_path],
-            f"Could not extract {image_path} from image",
-        )
+        try:
+            data = _read_fat12_file_bytes(source_img, image_path)
+        except FloppyImageError as fat_exc:
+            mcopy = shutil.which("mcopy")
+            if not mcopy:
+                raise fat_exc
+            self._run_mtools(
+                [mcopy, "-i", source_img, mtools_path(image_path), dest_path],
+                f"Could not extract {image_path} from image",
+            )
+            return
+
+        with open(dest_path, "wb") as handle:
+            handle.write(data)
 
     def extract_file(self, image_path):
         normalized = _normalize_image_path(image_path)
