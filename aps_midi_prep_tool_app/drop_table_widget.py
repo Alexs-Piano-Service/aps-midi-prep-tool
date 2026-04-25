@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QApplication, QProgressDialog, QTableWidget
 
 from .floppy_image import is_supported_image_path
 from .midi_metadata import extract_first_title_from_midi, extract_midi_type_label_from_midi
+from .ui_utils import center_dialog_on_parent
 
 
 class DropTableWidget(QTableWidget):
@@ -63,6 +64,7 @@ class DropTableWidget(QTableWidget):
                 progressDialog = QProgressDialog("Adding MIDI files...", "Cancel", 0, total, main_window)
                 progressDialog.setWindowModality(Qt.WindowModal)
                 progressDialog.setMinimumDuration(0)
+                center_dialog_on_parent(progressDialog, main_window)
             for i, url in enumerate(urls):
                 file_path = url.toLocalFile()
                 if file_path.lower().endswith(('.mid', '.midi')):
@@ -75,6 +77,8 @@ class DropTableWidget(QTableWidget):
                     QApplication.processEvents()
             if progressDialog:
                 progressDialog.close()
+            if hasattr(main_window, "_reapply_regular_centered_title_assumption"):
+                main_window._reapply_regular_centered_title_assumption()
             event.acceptProposedAction()
         else:
             event.ignore()

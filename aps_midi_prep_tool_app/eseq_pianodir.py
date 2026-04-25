@@ -9,16 +9,18 @@ PIANODIR_TARGET_FILE_SIZE = 6 * 1024
 PIANODIR_MAX_TRACKS = 60
 PIANODIR_HEADER = b"\xFE\x00\x00\x00\x14\x00\x00PIANODIR\x00"
 PIANODIR_DISK_METADATA_OFFSET = 0x12D0
-PIANODIR_DISK_METADATA_SIZE = 48
+PIANODIR_DISK_METADATA_SIZE = 0x40
+PIANODIR_TOTAL_DURATION_OFFSET = PIANODIR_DISK_METADATA_OFFSET + 0x40
+PIANODIR_SECONDARY_AGGREGATE_OFFSET = PIANODIR_DISK_METADATA_OFFSET + 0x44
+PIANODIR_COUNT_OFFSET = PIANODIR_DISK_METADATA_OFFSET + 0x46
 PIANODIR_TRACK_SIZE = 0x50
 ESEQ_ORDER_KEY_OFFSET = 0x27
 ESEQ_ORDER_KEY_SIZE = 12
 ESEQ_ORDER_KEY_END = ESEQ_ORDER_KEY_OFFSET + ESEQ_ORDER_KEY_SIZE
 PIANODIR_TRACK_SOURCE_START = ESEQ_ORDER_KEY_OFFSET
 PIANODIR_TRACK_SOURCE_END = PIANODIR_TRACK_SOURCE_START + PIANODIR_TRACK_SIZE
-PIANODIR_TRACK_TEMPLATE = (
-    b"00000000000\x00X\x04\x04\x00TRK\x00\x00\x00\x00\x00\x00\x00ZZ\x00w\x00\x00\x10\x7f\x00\x00A\x01\x00\x00\x80\x00\x00\x00\x00\x00\x00\x00 "
-)
+ESEQ_SIGNATURE = b"COM-ESEQ"
+Q11_SIGNATURE = b"Q11V1.00"
 PIANODIR_CATALOG_AND_TITLE_RE = re.compile(
     r"""
     ^\s*
@@ -55,6 +57,14 @@ def is_eseq_filename(path):
     filename = os.path.basename(path)
     stem, ext = os.path.splitext(filename)
     return bool(stem) and ext.lower() in {"", ".fil"}
+
+
+def is_eseq_bytes(data):
+    return len(data) >= PIANODIR_TRACK_SOURCE_END and data[7:15] == ESEQ_SIGNATURE
+
+
+def is_q11_eseq_bytes(data):
+    return is_eseq_bytes(data) and data[0x0F:0x17] == Q11_SIGNATURE
 
 
 def pianodir_is_populated(size_bytes):
@@ -154,6 +164,26 @@ def build_eseq_order_key_from_path(path, *, sort_last=False):
     return stem_bytes + ext_bytes + b"\x00"
 
 
+def build_dos83_name_bytes(path, *, uppercase=False):
+    filename = os.path.basename(path or "")
+    stem, ext = os.path.splitext(filename)
+    ext = ext.lstrip(".")
+    if uppercase:
+        stem = stem.upper()
+        ext = ext.upper()
+    stem = "".join(
+        ch if ch.isascii() and ch.isprintable() else "_"
+        for ch in stem
+    )
+    ext = "".join(
+        ch if ch.isascii() and ch.isprintable() else "_"
+        for ch in ext
+    )
+    stem_bytes = stem.encode("ascii", errors="replace")[:8].ljust(8, b" ")
+    ext_bytes = ext.encode("ascii", errors="replace")[:3].ljust(3, b" ")
+    return stem_bytes + ext_bytes
+
+
 def normalize_eseq_order_key(order_key):
     if order_key is None:
         return b""
@@ -197,52 +227,46 @@ def _build_track_entry(track_entry):
     with open(track_entry.local_path, "rb") as handle:
         data = handle.read()
 
-    if len(data) < PIANODIR_TRACK_SOURCE_END:
+    if not is_eseq_bytes(data):
+        raise ValueError(f"{os.path.basename(track_entry.image_path)} is not a valid E-SEQ file.")
+
+    short_name = build_dos83_name_bytes(track_entry.image_path)
+    if is_q11_eseq_bytes(data):
+        track = bytearray(PIANODIR_TRACK_SIZE)
+        track[0x00:0x0B] = short_name
+        track[0x0B] = 0x00
+        track[0x0C] = data[0x24]
+        track[0x1C:0x20] = bytes.fromhex("02 00 00 00")
+        track[0x20:0x24] = bytes.fromhex("10 7F 00 00")
+        track[0x24:0x28] = bytes.fromhex("41 01 00 00")
+        track[0x28:0x2C] = bytes.fromhex("00 02 00 00")
+        track[0x30:0x50] = data[0x57:0x77]
+        return bytes(track)
+
+    track = bytearray(data[PIANODIR_TRACK_SOURCE_START:PIANODIR_TRACK_SOURCE_END])
+    if len(track) != PIANODIR_TRACK_SIZE:
         raise ValueError(f"{os.path.basename(track_entry.image_path)} is too small to build a PIANODIR entry.")
-
-    track = bytes(data[PIANODIR_TRACK_SOURCE_START:PIANODIR_TRACK_SOURCE_END])
-
-    checksum_triplet = [data[55], data[56], data[57]]
-    return track, checksum_triplet
+    track[0x00:0x0B] = short_name
+    return bytes(track)
 
 
 def build_pianodir_bytes(track_entries, metadata=None, *, catalog_number="", disk_title=""):
+    track_entries = list(track_entries)
     if len(track_entries) > PIANODIR_MAX_TRACKS:
         raise ValueError(f"Yamaha E-SEQ supports at most {PIANODIR_MAX_TRACKS} files per set.")
 
-    data = bytearray()
-    data.extend(PIANODIR_HEADER)
+    output = bytearray(PIANODIR_TARGET_FILE_SIZE)
+    output[0:len(PIANODIR_HEADER)] = PIANODIR_HEADER
+    total_duration = 0
+    secondary_aggregate = 0
 
-    checksum_totals = [0, 0, 0]
-    counter = 1
+    for slot, track_entry in enumerate(track_entries):
+        track_bytes = _build_track_entry(track_entry)
+        offset = len(PIANODIR_HEADER) + slot * PIANODIR_TRACK_SIZE
+        output[offset:offset + PIANODIR_TRACK_SIZE] = track_bytes
+        total_duration = (total_duration + int.from_bytes(track_bytes[0x10:0x14], "little")) & 0xFFFFFFFF
+        secondary_aggregate += int.from_bytes(track_bytes[0x16:0x18], "little")
 
-    for track_entry in track_entries:
-        track_bytes, checksum_triplet = _build_track_entry(track_entry)
-        data.extend(track_bytes)
-        checksum_totals[0] += checksum_triplet[0]
-        checksum_totals[1] += checksum_triplet[1]
-        checksum_totals[2] += checksum_triplet[2]
-        counter += 1
-
-    while len(data) < PIANODIR_TARGET_FILE_SIZE:
-        if len(data) == 4880:
-            data.extend(
-                bytes(
-                    [
-                        checksum_totals[0] % 256,
-                        checksum_totals[1] % 256,
-                        checksum_totals[2] % 256,
-                        0x00,
-                        0x00,
-                        0x00,
-                        counter % 256,
-                    ]
-                )
-            )
-        else:
-            data.append(0x00)
-
-    output = bytearray(data[:PIANODIR_TARGET_FILE_SIZE])
     metadata_block = build_pianodir_metadata_bytes(
         metadata,
         catalog_number=catalog_number,
@@ -251,4 +275,10 @@ def build_pianodir_bytes(track_entries, metadata=None, *, catalog_number="", dis
     output[
         PIANODIR_DISK_METADATA_OFFSET:PIANODIR_DISK_METADATA_OFFSET + PIANODIR_DISK_METADATA_SIZE
     ] = metadata_block
+    output[PIANODIR_TOTAL_DURATION_OFFSET:PIANODIR_TOTAL_DURATION_OFFSET + 4] = total_duration.to_bytes(4, "little")
+    output[PIANODIR_SECONDARY_AGGREGATE_OFFSET:PIANODIR_SECONDARY_AGGREGATE_OFFSET + 2] = min(
+        secondary_aggregate,
+        0xFFFF,
+    ).to_bytes(2, "little")
+    output[PIANODIR_COUNT_OFFSET:PIANODIR_COUNT_OFFSET + 2] = (len(track_entries) + 1).to_bytes(2, "little")
     return bytes(output)

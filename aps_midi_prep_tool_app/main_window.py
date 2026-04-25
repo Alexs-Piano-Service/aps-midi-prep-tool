@@ -56,7 +56,13 @@ from .eseq_converter import (
 )
 from .dos83_renamer import rename_midi_files_dos83
 from .midi_type0_converter import convert_midi_files_to_type0
-from .ui_utils import is_dark_theme, pixmap_from_base64, embedded_logo_dt, embedded_logo_lt
+from .ui_utils import (
+    center_dialog_on_parent,
+    embedded_logo_dt,
+    embedded_logo_lt,
+    is_dark_theme,
+    pixmap_from_base64,
+)
 from .drop_table_widget import DropTableWidget
 from .midi_scan_worker import MidiProcessingWorker
 from .icon_utils import apply_window_icon
@@ -76,6 +82,7 @@ from .floppy_image import (
 )
 from .eseq_pianodir import (
     PIANODIR_FILENAME,
+    PIANODIR_DISK_METADATA_SIZE,
     PIANODIR_MAX_TRACKS,
     PIANODIR_ROW_PATH,
     PIANODIR_TARGET_FILE_SIZE,
@@ -206,6 +213,7 @@ class MidiTitleWindow(QMainWindow):
         self.listedFileInfo = {}
         self.regularModeContextPath = ""
         self.regularEseqMode = False
+        self.regularTitlesLikelyCentered = False
         self.regularHasPianodir = False
         self.regularPianodirPopulated = False
         self.regularPianodirSourcePath = ""
@@ -530,7 +538,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.imagePianodirTitleEdit = QLineEdit()
         self.imagePianodirTitleEdit.setPlaceholderText("Album title")
-        self.imagePianodirTitleEdit.setMaxLength(48)
+        self.imagePianodirTitleEdit.setMaxLength(PIANODIR_DISK_METADATA_SIZE)
         self.imagePianodirTitleEdit.setToolTip(
             "Album title stored in PIANODIR.FIL for Yamaha E-SEQ images and floppies."
         )
@@ -544,7 +552,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.imagePianodirCatalogEdit = QLineEdit()
         self.imagePianodirCatalogEdit.setPlaceholderText("Catalog number")
-        self.imagePianodirCatalogEdit.setMaxLength(48)
+        self.imagePianodirCatalogEdit.setMaxLength(PIANODIR_DISK_METADATA_SIZE)
         self.imagePianodirCatalogEdit.setToolTip(
             "Catalog number stored in PIANODIR.FIL for Yamaha E-SEQ images and floppies."
         )
@@ -620,6 +628,20 @@ class MidiTitleWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._resize_table_columns_to_fill()
+
+    def _center_child_dialog(self, dialog):
+        center_dialog_on_parent(dialog, self)
+
+    def _exec_child_dialog(self, dialog):
+        dialog.setWindowModality(Qt.WindowModal)
+        self._center_child_dialog(dialog)
+        return dialog.exec()
+
+    def _prepare_progress_dialog(self, dialog):
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        self._center_child_dialog(dialog)
+        return dialog
 
     def closeEvent(self, event):
         if self.is_image_mode() and not self._confirm_discard_image_changes():
@@ -984,6 +1006,7 @@ class MidiTitleWindow(QMainWindow):
         self.pendingEdits.clear()
         self.listedFileInfo.clear()
         self.regularEseqMode = False
+        self.regularTitlesLikelyCentered = False
         self.regularHasPianodir = False
         self.regularPianodirPopulated = False
         self.regularPianodirSourcePath = ""
@@ -1437,6 +1460,13 @@ class MidiTitleWindow(QMainWindow):
         else:
             self._apply_midi_mode_ui()
 
+        self._update_regular_centered_title_assumption(
+            candidate_titles=[
+                spec[2]
+                for spec in regular_specs
+                if spec[2] and spec[4] in {"midi", "eseq"}
+            ]
+        )
         for full_path, filename, title, midi_type, title_mode, order_key in regular_specs:
             self.add_table_row(
                 full_path,
@@ -1452,6 +1482,7 @@ class MidiTitleWindow(QMainWindow):
         else:
             self.table.setSortingEnabled(True)
             self.table.sortItems(3, order=Qt.AscendingOrder)
+        self._refresh_regular_title_display_items()
         self.refresh_compat_indicators()
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
@@ -1797,14 +1828,20 @@ class MidiTitleWindow(QMainWindow):
         self._set_regular_mode_context(file_paths=[spec[0] for spec in midi_specs])
         self._apply_midi_mode_ui()
 
-        for full_path, filename, title, midi_type in sorted(
+        sorted_specs = sorted(
             midi_specs,
             key=lambda spec: (spec[1].upper(), spec[0].upper()),
-        ):
+        )
+        self._update_regular_centered_title_assumption(
+            candidate_titles=[spec[2] for spec in sorted_specs if spec[2]]
+        )
+
+        for full_path, filename, title, midi_type in sorted_specs:
             self.add_table_row(full_path, filename, title, midi_type, title_mode="midi")
 
         self.table.setSortingEnabled(True)
         self.table.sortItems(3, order=Qt.AscendingOrder)
+        self._refresh_regular_title_display_items()
         self.refresh_compat_indicators()
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
@@ -1930,6 +1967,12 @@ class MidiTitleWindow(QMainWindow):
         if self._is_special_pianodir_path(image_path) or is_pianodir_path(image_path):
             return False
         info = self._image_info_for_path(image_path)
+        if not info:
+            normalized_target = image_path.replace("\\", "/").upper()
+            for source_path, source_info in self.imageFileInfo.items():
+                if self._final_image_path(source_path).replace("\\", "/").upper() == normalized_target:
+                    info = source_info
+                    break
         if info.get("title_mode") == "eseq":
             return True
         if is_midi is None:
@@ -2222,7 +2265,7 @@ class MidiTitleWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        if dialog.exec() != QDialog.Accepted:
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
             return None
 
         selected_device = devices[device_combo.currentIndex()]
@@ -2306,8 +2349,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         progressDialog = QProgressDialog("Preparing floppy image...", None, 0, 4, self)
-        progressDialog.setWindowModality(Qt.WindowModal)
-        progressDialog.setMinimumDuration(0)
+        self._prepare_progress_dialog(progressDialog)
         progressDialog.setAutoClose(False)
         progressDialog.setCancelButton(None)
         progress_callback = self._make_stage_progress_callback(progressDialog)
@@ -2355,8 +2397,7 @@ class MidiTitleWindow(QMainWindow):
 
         progressDialog = QProgressDialog(progress_title, None, 0, progress_total, self)
         progressDialog.setWindowTitle(progress_title)
-        progressDialog.setWindowModality(Qt.WindowModal)
-        progressDialog.setMinimumDuration(0)
+        self._prepare_progress_dialog(progressDialog)
         progressDialog.setAutoClose(False)
         progressDialog.setCancelButton(None)
         progress_callback = self._make_stage_progress_callback(progressDialog)
@@ -2534,18 +2575,23 @@ class MidiTitleWindow(QMainWindow):
     def _centered_title_plain_text(self, title):
         if not title:
             return ""
-        if not self._title_looks_centered(title) and len(title) > 32:
-            return title
+        if not self._title_looks_centered(title):
+            return title if len(title) > 32 else title.strip()
         padded_title = title[:32].ljust(32)
         first_half = padded_title[:16].strip()
         second_half = padded_title[16:32].strip()
         plain_text = " ".join(part for part in (first_half, second_half) if part)
         return plain_text or title.strip()
 
-    def _image_centered_title_threshold(self, titled_count):
+    def _centered_title_threshold(self, titled_count):
         if titled_count < 2:
             return 99
         return min(self.CENTERED_TITLE_DISK_THRESHOLD, titled_count)
+
+    def _active_titles_likely_centered(self):
+        if self.is_image_mode():
+            return self.imageTitlesLikelyCentered
+        return self.regularTitlesLikelyCentered
 
     def _update_image_centered_title_assumption(self, candidate_titles=None):
         titles = []
@@ -2560,9 +2606,30 @@ class MidiTitleWindow(QMainWindow):
                     titles.append(raw_title)
 
         centered_count = sum(1 for title in titles if self._title_looks_centered(title))
-        threshold = self._image_centered_title_threshold(len(titles))
+        threshold = self._centered_title_threshold(len(titles))
         self.imageTitlesLikelyCentered = centered_count >= threshold
         return self.imageTitlesLikelyCentered
+
+    def _update_regular_centered_title_assumption(self, candidate_titles=None):
+        titles = []
+        if candidate_titles is not None:
+            titles = [str(title) for title in candidate_titles if title]
+        elif not self.is_image_mode():
+            for row in self._regular_file_rows():
+                full_path_item = self.table.item(row, 1)
+                if full_path_item is None:
+                    continue
+                title_mode = self._listed_file_title_mode(full_path_item.text())
+                if title_mode not in {"midi", "eseq"}:
+                    continue
+                raw_title = self._row_raw_title(row)
+                if raw_title:
+                    titles.append(raw_title)
+
+        centered_count = sum(1 for title in titles if self._title_looks_centered(title))
+        threshold = self._centered_title_threshold(len(titles))
+        self.regularTitlesLikelyCentered = centered_count >= threshold
+        return self.regularTitlesLikelyCentered
 
     def _should_display_centered_title(self, raw_title, *, title_mode=""):
         if not raw_title:
@@ -2570,8 +2637,7 @@ class MidiTitleWindow(QMainWindow):
         if self._title_looks_centered(raw_title):
             return True
         return (
-            self.is_image_mode()
-            and self.imageTitlesLikelyCentered
+            self._active_titles_likely_centered()
             and title_mode in {"midi", "eseq"}
             and len(raw_title) <= 32
         )
@@ -2596,12 +2662,11 @@ class MidiTitleWindow(QMainWindow):
         if raw_title and self._should_display_centered_title(raw_title, title_mode=title_mode):
             tooltip += " Displayed without padding; the stored title remains centered."
             if (
-                self.is_image_mode()
-                and self.imageTitlesLikelyCentered
+                self._active_titles_likely_centered()
                 and not self._title_looks_centered(raw_title)
                 and len(raw_title) <= 32
             ):
-                tooltip += " This disk matched the centered Yamaha title pattern across several files."
+                tooltip += " This set matched the centered Yamaha title pattern across several files."
         return tooltip
 
     def _make_title_item(self, raw_title, *, title_mode="", fallback_title=""):
@@ -2649,11 +2714,39 @@ class MidiTitleWindow(QMainWindow):
             )
             title_item.setToolTip(self._title_item_tooltip(title_mode, raw_title))
 
+    def _refresh_regular_title_display_items(self):
+        if self.is_image_mode():
+            return
+        for row in self._regular_file_rows():
+            full_path_item = self.table.item(row, 1)
+            filename_item = self.table.item(row, 3)
+            title_item = self.table.item(row, 4)
+            if full_path_item is None or title_item is None:
+                continue
+            full_path = full_path_item.text()
+            raw_title = self._row_raw_title(row)
+            title_mode = self._listed_file_title_mode(full_path)
+            fallback_title = filename_item.text() if filename_item is not None else os.path.basename(full_path)
+            title_item.setText(
+                self._display_title_text(
+                    raw_title,
+                    title_mode=title_mode,
+                    fallback_title=fallback_title,
+                )
+            )
+            title_item.setToolTip(self._title_item_tooltip(title_mode, raw_title))
+
     def _reapply_image_centered_title_assumption(self):
         if not self.is_image_mode():
             return
         self._update_image_centered_title_assumption()
         self._refresh_image_title_display_items()
+
+    def _reapply_regular_centered_title_assumption(self):
+        if self.is_image_mode():
+            return
+        self._update_regular_centered_title_assumption()
+        self._refresh_regular_title_display_items()
 
     def _create_backup_if_enabled(self, file_path):
         if not self.backup_checkbox.isChecked():
@@ -2734,8 +2827,7 @@ class MidiTitleWindow(QMainWindow):
             self.table.setSortingEnabled(False)
             self._clear_regular_list_state()
             self.progressDialog = QProgressDialog("Processing MIDI files...", "Cancel", 0, 100, self)
-            self.progressDialog.setWindowModality(Qt.WindowModal)
-            self.progressDialog.setMinimumDuration(0)
+            self._prepare_progress_dialog(self.progressDialog)
             self.worker = MidiProcessingWorker(directory)
             self.worker.progressChanged.connect(self.progressDialog.setValue)
             self.worker.fileProcessed.connect(self.add_table_row)
@@ -2746,6 +2838,7 @@ class MidiTitleWindow(QMainWindow):
         self.progressDialog.close()
         self.table.setSortingEnabled(True)
         self.table.sortItems(3, order=Qt.AscendingOrder)  # sort by filename (col 3)
+        self._reapply_regular_centered_title_assumption()
         self.refresh_compat_indicators()
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
@@ -2922,7 +3015,7 @@ class MidiTitleWindow(QMainWindow):
         warning_box.setCheckBox(dont_show_checkbox)
         warning_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         warning_box.setDefaultButton(QMessageBox.No)
-        result = warning_box.exec()
+        result = self._exec_child_dialog(warning_box)
         confirmed = result == QMessageBox.Yes
         if confirmed and dont_show_checkbox.isChecked():
             self.settings.setValue(self.SETTING_SKIP_TYPE0_WARNING, True)
@@ -3138,7 +3231,7 @@ class MidiTitleWindow(QMainWindow):
         prompt_box.button(QMessageBox.Yes).setText("Convert and Exit")
         prompt_box.button(QMessageBox.No).setText("Cancel")
 
-        should_switch = prompt_box.exec() == QMessageBox.Yes
+        should_switch = self._exec_child_dialog(prompt_box) == QMessageBox.Yes
         if remember_checkbox.isChecked():
             self.settings.setValue(
                 self.SETTING_ESEQ_TO_MIDI_SWITCH_MODE,
@@ -3305,8 +3398,7 @@ class MidiTitleWindow(QMainWindow):
             len(applicable_paths),
             self,
         )
-        progressDialog.setWindowModality(Qt.WindowModal)
-        progressDialog.setMinimumDuration(0)
+        self._prepare_progress_dialog(progressDialog)
 
         converted_paths = []
         errors = []
@@ -3452,8 +3544,7 @@ class MidiTitleWindow(QMainWindow):
             len(applicable_rows),
             self,
         )
-        progressDialog.setWindowModality(Qt.WindowModal)
-        progressDialog.setMinimumDuration(0)
+        self._prepare_progress_dialog(progressDialog)
 
         converted = []
         errors = []
@@ -3556,6 +3647,7 @@ class MidiTitleWindow(QMainWindow):
                 self.pendingEdits.pop(full_path, None)
                 self.listedFileInfo.pop(full_path, None)
             self.table.removeRow(row)
+            self._reapply_regular_centered_title_assumption()
             self._refresh_regular_mode_action_state()
             self._refresh_regular_pianodir_row()
             self.status_label.setText("File removed from the list.")
@@ -3809,7 +3901,7 @@ class MidiTitleWindow(QMainWindow):
         editor.selectAll()
         editor.setFocus()
 
-        if dialog.exec() == QDialog.Accepted:
+        if self._exec_child_dialog(dialog) == QDialog.Accepted:
             return self._normalize_image_filename(editor.text()), True
         return "", False
 
@@ -4358,7 +4450,7 @@ class MidiTitleWindow(QMainWindow):
             editor.selectAll()
             editor.setFocus()
 
-        if dialog.exec() == QDialog.Accepted:
+        if self._exec_child_dialog(dialog) == QDialog.Accepted:
             return composed_title(), True
         return "", False
 
@@ -4395,6 +4487,7 @@ class MidiTitleWindow(QMainWindow):
             new_title_item = self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename)
             self.table.setItem(row, 4, new_title_item)
             self._update_compat_indicator(row, new_title)
+            self._reapply_regular_centered_title_assumption()
             warning = ""
             if self._compat_warning_is_active() and self._is_title_too_long(new_title):
                 warning = f"\nCompatibility warning: over {self.TITLE_COMPAT_LIMIT} characters."
@@ -4498,8 +4591,7 @@ class MidiTitleWindow(QMainWindow):
         else:
             progress_text = "Saving floppy image..."
         progressDialog = QProgressDialog(progress_text, None, 0, 5, self)
-        progressDialog.setWindowModality(Qt.WindowModal)
-        progressDialog.setMinimumDuration(0)
+        self._prepare_progress_dialog(progressDialog)
         progressDialog.setAutoClose(False)
         progressDialog.setCancelButton(None)
         progress_callback = self._make_stage_progress_callback(progressDialog)
@@ -4574,7 +4666,7 @@ class MidiTitleWindow(QMainWindow):
         buttons.button(QDialogButtonBox.Close).clicked.connect(dialog.accept)
         layout.addWidget(buttons)
 
-        dialog.exec()
+        self._exec_child_dialog(dialog)
 
     def _extension_from_filter(self, selected_filter):
         if "*." not in selected_filter:
@@ -4626,8 +4718,7 @@ class MidiTitleWindow(QMainWindow):
         renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
         order_key_edits = self._image_eseq_order_key_edits()
         progressDialog = QProgressDialog("Exporting floppy image...", None, 0, 5, self)
-        progressDialog.setWindowModality(Qt.WindowModal)
-        progressDialog.setMinimumDuration(0)
+        self._prepare_progress_dialog(progressDialog)
         progressDialog.setAutoClose(False)
         progressDialog.setCancelButton(None)
         progress_callback = self._make_stage_progress_callback(progressDialog)
@@ -4744,7 +4835,7 @@ class MidiTitleWindow(QMainWindow):
         refresh_type_combo()
         refresh_disk_combo()
 
-        if dialog.exec() != QDialog.Accepted:
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
             return None
 
         output_ext = type_combo.currentData()
@@ -4892,8 +4983,7 @@ class MidiTitleWindow(QMainWindow):
         output_path, output_ext, disk_format = options
         staging_dir = tempfile.mkdtemp(prefix="aps_save_image_")
         progressDialog = QProgressDialog("Preparing files for image export...", None, 0, max(1, self._regular_file_count()), self)
-        progressDialog.setWindowModality(Qt.WindowModal)
-        progressDialog.setMinimumDuration(0)
+        self._prepare_progress_dialog(progressDialog)
         progressDialog.setAutoClose(False)
         progressDialog.setCancelButton(None)
         progress_callback = self._make_stage_progress_callback(progressDialog)
@@ -4977,8 +5067,7 @@ class MidiTitleWindow(QMainWindow):
 
         if file_updates:
             progressDialog = QProgressDialog("Saving title and order changes...", "Cancel", 0, len(file_updates), self)
-            progressDialog.setWindowModality(Qt.WindowModal)
-            progressDialog.setMinimumDuration(0)
+            self._prepare_progress_dialog(progressDialog)
             current = 0
             for full_path, update_spec in file_updates.items():
                 new_title = update_spec.get("title")
@@ -5057,8 +5146,7 @@ class MidiTitleWindow(QMainWindow):
                 return
 
             progressDialog = QProgressDialog("Saving files to new folder...", None, 0, max(1, self.table.rowCount()), self)
-            progressDialog.setWindowModality(Qt.WindowModal)
-            progressDialog.setMinimumDuration(0)
+            self._prepare_progress_dialog(progressDialog)
             progressDialog.setAutoClose(False)
             progressDialog.setCancelButton(None)
             progress_callback = self._make_stage_progress_callback(progressDialog)
@@ -5092,8 +5180,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         progressDialog = QProgressDialog("Saving files to new folder...", "Cancel", 0, max(1, self._regular_file_count()), self)
-        progressDialog.setWindowModality(Qt.WindowModal)
-        progressDialog.setMinimumDuration(0)
+        self._prepare_progress_dialog(progressDialog)
         row_count = self._regular_file_count()
         regular_order_key_edits = self._regular_eseq_order_key_edits() if self.is_local_eseq_mode() else {}
         errors = []

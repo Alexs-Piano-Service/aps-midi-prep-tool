@@ -6,17 +6,27 @@ from .midi_type0_converter import _parse_midi_chunks, _parse_track_events
 
 
 ESEQ_SIGNATURE = b"COM-ESEQ"
+Q11_SIGNATURE = b"Q11V1.00"
 ESEQ_HEADER_SIZE = 0x77
+Q11_EVENT_STREAM_START = 0x200
 ESEQ_TITLE_START = 0x57
 ESEQ_TITLE_END = 0x76
 ESEQ_TITLE_LENGTH = ESEQ_TITLE_END - ESEQ_TITLE_START + 1
 ESEQ_MIDI_DIVISION = 384
+ESEQ_DELAY15_MAX = 0x3FFF
 DEFAULT_MIDI_MPQN = 500000
 DEFAULT_TIME_SIGNATURE = (4, 2)
 DEFAULT_KEY_SIGNATURE = (0, 0)
 CHANNEL_VOLUME_CONTROLLER = 7
+CC7_POLICY_PRESERVE = "preserve"
+CC7_POLICY_WARN_ONLY = "warn_only"
+CC7_POLICY_PLAYBACK_FIX_100 = "playback_fix_100"
+CC7_POLICY_PLAYBACK_FIX_127 = "playback_fix_127"
+CC7_POLICY_DROP_EARLY_ZERO = "drop_early_cc7_zero"
+DEFAULT_CC7_POLICY = CC7_POLICY_PLAYBACK_FIX_100
+EARLY_CC7_TICK_LIMIT = ESEQ_MIDI_DIVISION
 _ESEQ_PADDING_BYTE = 0xF6
-_ESEQ_TEMPLATE = bytes(
+_LEGACY_ESEQ_TEMPLATE = bytes(
     [
         0xFE,
         0x00,
@@ -139,6 +149,21 @@ _ESEQ_TEMPLATE = bytes(
 )
 
 
+def _build_eseq_template():
+    header = bytearray(ESEQ_HEADER_SIZE)
+    header[0] = 0xFE
+    header[7:15] = ESEQ_SIGNATURE
+    header[0x17:0x1F] = bytes.fromhex("80 00 40 00 50 00 00 00")
+    header[0x23] = 0x01
+    header[0x34:0x36] = bytes([4, 4])
+    header[0x43:0x47] = bytes([0x00, 0x77, 0x00, 0x00])
+    header[0x47:0x51] = bytes.fromhex("10 7F 00 00 41 01 00 00 80 00")
+    return bytes(header)
+
+
+_ESEQ_TEMPLATE = _build_eseq_template()
+
+
 class EseqConversionError(ValueError):
     """Raised when E-SEQ or MIDI conversion fails."""
 
@@ -150,6 +175,7 @@ class ParsedEseqFile:
     time_signature_events: list[tuple[int, int, int]]
     base_bpm: int
     title: str
+    end_tick: int
 
 
 def is_eseq_file(file_path):
@@ -161,22 +187,43 @@ def is_eseq_file(file_path):
         return False
 
 
+def _is_q11_eseq(data):
+    return len(data) >= ESEQ_TITLE_END + 1 and data[7:15] == ESEQ_SIGNATURE and data[0x0F:0x17] == Q11_SIGNATURE
+
+
+def _eseq_base_bpm(data):
+    if _is_q11_eseq(data):
+        return _clamp_base_bpm(data[0x24] + 29)
+    return _clamp_base_bpm(data[0x33] + 29)
+
+
+def _eseq_event_stream_start(data):
+    if _is_q11_eseq(data):
+        return min(len(data), Q11_EVENT_STREAM_START)
+    return ESEQ_HEADER_SIZE
+
+
 def _decode_15(lo, hi):
     return ((hi & 0x7F) << 7) | (lo & 0x7F)
 
 
 def _encode_15(value):
-    if value < 0 or value > 0x7FFF:
-        raise EseqConversionError("15-bit E-SEQ value out of range.")
+    if value < 0 or value > ESEQ_DELAY15_MAX:
+        raise EseqConversionError("14-bit E-SEQ value out of range.")
     return bytes([value & 0x7F, (value >> 7) & 0x7F])
 
 
-def _read_used_length(data):
+def _declared_stream_end(data, stream_start):
+    if len(data) >= 0x23:
+        stream_length = int.from_bytes(data[0x1F:0x23], "little")
+        stream_end = stream_start + stream_length
+        if stream_length > 0 and stream_start <= stream_end <= len(data):
+            return stream_end
     if len(data) >= 7:
         used_length = int.from_bytes(data[3:7], "little")
-        if used_length >= ESEQ_HEADER_SIZE:
-            return min(len(data), used_length)
-    return len(data)
+        if stream_start < used_length <= len(data):
+            return used_length
+    return None
 
 
 def _decode_title_bytes(raw_title):
@@ -189,11 +236,16 @@ def _encode_title_bytes(title):
 
 def _sanitize_ascii_filename_key(filename):
     stem, ext = os.path.splitext(os.path.basename(filename or ""))
-    raw = (stem + ext.lstrip(".")).upper()
-    cleaned = "".join(ch if 0x20 <= ord(ch) <= 0x7E else "_" for ch in raw)
-    if not cleaned:
-        cleaned = "PIANO000FIL"
-    return cleaned[:11].ljust(11).encode("ascii", errors="replace")
+    if not stem:
+        stem = "PIANO000"
+        ext = ext or ".FIL"
+
+    def clean(text):
+        return "".join(ch if 0x20 <= ord(ch) <= 0x7E else "_" for ch in text.upper())
+
+    stem_bytes = clean(stem).encode("ascii", errors="replace")[:8].ljust(8)
+    ext_bytes = clean(ext.lstrip(".")).encode("ascii", errors="replace")[:3].ljust(3)
+    return stem_bytes + ext_bytes
 
 
 def _clamp_base_bpm(bpm):
@@ -269,25 +321,100 @@ def _is_zero_channel_volume_event(raw):
     )
 
 
+def _is_channel_volume_event(raw):
+    return (
+        len(raw) >= 3
+        and (raw[0] & 0xF0) == 0xB0
+        and raw[1] == CHANNEL_VOLUME_CONTROLLER
+    )
+
+
+def _is_note_on_event(raw):
+    return len(raw) >= 3 and (raw[0] & 0xF0) == 0x90 and raw[2] > 0
+
+
+def _midi_channel(raw):
+    if raw and 0x80 <= raw[0] <= 0xEF:
+        return raw[0] & 0x0F
+    return None
+
+
+def _early_zero_cc7_indexes(events, early_tick_limit=EARLY_CC7_TICK_LIMIT):
+    candidates = set()
+    indexed_events = list(enumerate(events))
+    for index, (abs_tick, _, raw) in indexed_events:
+        if abs_tick > early_tick_limit or not _is_zero_channel_volume_event(raw):
+            continue
+        channel = _midi_channel(raw)
+        if channel is None:
+            continue
+
+        note_later = False
+        restored_before_note = False
+        for _, (later_tick, _, later_raw) in indexed_events[index + 1:]:
+            if later_tick < abs_tick or _midi_channel(later_raw) != channel:
+                continue
+            if _is_channel_volume_event(later_raw) and later_raw[2] > 0:
+                restored_before_note = True
+                break
+            if _is_note_on_event(later_raw):
+                note_later = True
+                break
+        if note_later and not restored_before_note:
+            candidates.add(index)
+    return candidates
+
+
+def _apply_cc7_policy(raw, should_adjust, cc7_policy):
+    if not should_adjust:
+        return raw
+    if cc7_policy in (CC7_POLICY_PRESERVE, CC7_POLICY_WARN_ONLY):
+        return raw
+    if cc7_policy == CC7_POLICY_DROP_EARLY_ZERO:
+        return None
+    if cc7_policy == CC7_POLICY_PLAYBACK_FIX_100:
+        return raw[:2] + bytes([100])
+    if cc7_policy == CC7_POLICY_PLAYBACK_FIX_127:
+        return raw[:2] + bytes([127])
+    raise EseqConversionError(f"Unsupported CC7 policy '{cc7_policy}'.")
+
+
+def _event_class_flags(events):
+    has_notes = False
+    has_controllers = False
+    for _, _, raw in events:
+        if not raw:
+            continue
+        status = raw[0] & 0xF0
+        if status in (0x80, 0x90):
+            has_notes = True
+        elif status == 0xB0:
+            has_controllers = True
+    return has_notes, has_controllers
+
+
 def parse_eseq_bytes(eseq_bytes):
     if len(eseq_bytes) < ESEQ_HEADER_SIZE:
         raise EseqConversionError("File is too small to be a valid E-SEQ file.")
     if eseq_bytes[7:15] != ESEQ_SIGNATURE:
         raise EseqConversionError("Missing COM-ESEQ signature.")
 
-    used_length = _read_used_length(eseq_bytes)
-    data = eseq_bytes[:used_length]
+    data = eseq_bytes
     title = _decode_title_bytes(data[ESEQ_TITLE_START:ESEQ_TITLE_END + 1])
-    base_bpm = _clamp_base_bpm(data[0x33] + 29)
+    base_bpm = _eseq_base_bpm(data)
 
     abs_tick = 0
-    pos = ESEQ_HEADER_SIZE
+    pos = _eseq_event_stream_start(data)
+    declared_stream_end = _declared_stream_end(data, pos)
     events = []
     tempo_events = [(0, 60_000_000 // base_bpm)]
     time_signature_events = []
     last_time_signature = None
 
     while pos < len(data):
+        if declared_stream_end is not None and pos >= declared_stream_end:
+            if all(byte in (0x00, _ESEQ_PADDING_BYTE) for byte in data[pos:]):
+                break
         status = data[pos]
         pos += 1
 
@@ -383,10 +510,11 @@ def parse_eseq_bytes(eseq_bytes):
         time_signature_events=time_signature_events,
         base_bpm=base_bpm,
         title=title,
+        end_tick=abs_tick,
     )
 
 
-def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None):
+def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None, cc7_policy=DEFAULT_CC7_POLICY):
     parsed = parse_eseq_bytes(eseq_bytes)
     track_events = []
     title = (title_override or parsed.title or "Yamaha File").strip() or "Yamaha File"
@@ -400,8 +528,6 @@ def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None):
     track_events.append((0, _write_midi_time_signature(numerator, denominator_power)))
     track_events.append((0, _write_midi_key_signature(*DEFAULT_KEY_SIGNATURE)))
     track_events.append((0, _write_midi_track_name(title)))
-    if not any(abs_tick == 0 and raw and (raw[0] & 0xF0) == 0xC0 for abs_tick, _, raw in parsed.events):
-        track_events.append((0, b"\xC0\x00"))
 
     seen_tempos = set()
     for tick, mpqn in parsed.tempo_events:
@@ -418,9 +544,10 @@ def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None):
         seen_signatures.add(marker)
         track_events.append((tick, _write_midi_time_signature(numerator, denominator_power)))
 
-    for abs_tick, order, raw in parsed.events:
-        # Avoid carrying a channel-volume mute into converted piano files.
-        if _is_zero_channel_volume_event(raw):
+    cc7_indexes = _early_zero_cc7_indexes(parsed.events)
+    for index, (abs_tick, order, raw) in enumerate(parsed.events):
+        raw = _apply_cc7_policy(raw, index in cc7_indexes, cc7_policy)
+        if raw is None:
             continue
         if raw and raw[0] in (0xF0, 0xF7):
             raw = _encode_midi_sysex_event(raw)
@@ -551,7 +678,7 @@ def _encode_eseq_delta(delta):
             out.extend(b"\xF3" + bytes([remaining]))
             remaining = 0
             continue
-        chunk = min(remaining, 0x7FFF)
+        chunk = min(remaining, ESEQ_DELAY15_MAX)
         out.extend(b"\xF4" + _encode_15(chunk))
         remaining -= chunk
     return bytes(out)
@@ -586,7 +713,16 @@ def _build_time_signature_markers(time_signature_events, last_tick):
     return sorted(markers, key=lambda item: (item[0], item[1], item[2]))
 
 
-def _finalize_eseq_header(stream_bytes, base_bpm, title, filename_hint, time_signature_events):
+def _finalize_eseq_header(
+    stream_bytes,
+    base_bpm,
+    title,
+    filename_hint,
+    time_signature_events,
+    end_tick,
+    has_notes,
+    has_controllers,
+):
     used_length = ESEQ_HEADER_SIZE + len(stream_bytes)
     if used_length > 0xFFFFFFFF:
         raise EseqConversionError("E-SEQ output is too large.")
@@ -596,19 +732,23 @@ def _finalize_eseq_header(stream_bytes, base_bpm, title, filename_hint, time_sig
         time_signature_events[0][2],
     ) if time_signature_events else DEFAULT_TIME_SIGNATURE
     denominator = 1 << denominator_power
-    marker_count = max(1, len(time_signature_events) - 1) if time_signature_events else 1
-
     header = bytearray(_ESEQ_TEMPLATE)
+    if len(header) != ESEQ_HEADER_SIZE:
+        raise EseqConversionError("Internal E-SEQ header template has the wrong size.")
+    header[0] = 0xFE
+    header[7:15] = ESEQ_SIGNATURE
     header[3:7] = used_length.to_bytes(4, "little")
-    header[31:35] = len(stream_bytes).to_bytes(4, "little")
+    header[0x1F:0x23] = len(stream_bytes).to_bytes(4, "little")
     header[0x24] = max(0, min(base_bpm - 29, 255))
     header[0x33] = max(0, min(base_bpm - 29, 255))
     header[0x27:0x32] = _sanitize_ascii_filename_key(filename_hint)
     header[ESEQ_TITLE_START:ESEQ_TITLE_END + 1] = _encode_title_bytes(title)
     header[0x34] = max(1, min(numerator, 255))
     header[0x35] = max(1, min(denominator, 255))
-    header[0x38:0x3A] = (marker_count * 6).to_bytes(2, "little")
-    header[0x41:0x43] = ((used_length - 1) & 0xFFFF).to_bytes(2, "big")
+    header[0x37:0x3B] = max(0, min(int(end_tick), 0xFFFFFFFF)).to_bytes(4, "little")
+    header[0x43:0x47] = bytes([0x00, 0x77, 0x00, 0x00])
+    header[0x51] = 1 if has_controllers else 0
+    header[0x54] = (0x01 if has_notes else 0) | (0x04 if has_controllers else 0)
     return bytes(header)
 
 
@@ -619,7 +759,13 @@ def _pad_eseq_output(data):
     return data + bytes([_ESEQ_PADDING_BYTE]) * (2048 - remainder)
 
 
-def convert_midi_bytes_to_eseq_bytes(midi_bytes, *, title_override=None, filename_hint=""):
+def convert_midi_bytes_to_eseq_bytes(
+    midi_bytes,
+    *,
+    title_override=None,
+    filename_hint="",
+    cc7_policy=DEFAULT_CC7_POLICY,
+):
     division, merged_events = _collect_merged_midi_events(midi_bytes)
     normalized_events = []
     tempo_events = []
@@ -650,15 +796,19 @@ def convert_midi_bytes_to_eseq_bytes(midi_bytes, *, title_override=None, filenam
             normalized_events.append((scaled_tick, 3, _decode_midi_sysex_event(raw)))
             continue
 
-        # Avoid carrying a channel-volume mute into converted piano files.
-        if _is_zero_channel_volume_event(raw):
-            continue
-
         normalized_events.append((scaled_tick, 2, raw))
 
     tempo_events.sort(key=lambda item: item[0])
     time_signature_events.sort(key=lambda item: item[0])
     normalized_events.sort(key=lambda item: (item[0], item[1]))
+    cc7_indexes = _early_zero_cc7_indexes(normalized_events)
+    adjusted_events = []
+    for index, (tick, order, raw) in enumerate(normalized_events):
+        raw = _apply_cc7_policy(raw, index in cc7_indexes, cc7_policy)
+        if raw is None:
+            continue
+        adjusted_events.append((tick, order, raw))
+    normalized_events = adjusted_events
 
     initial_mpqn = tempo_events[0][1] if tempo_events else DEFAULT_MIDI_MPQN
     base_bpm = _clamp_base_bpm(_mpqn_to_bpm(initial_mpqn))
@@ -677,13 +827,14 @@ def convert_midi_bytes_to_eseq_bytes(midi_bytes, *, title_override=None, filenam
     combined_events.extend((tick, 1, b"\xF9" + bytes([numerator, denominator_power])) for tick, numerator, denominator_power in marker_events)
 
     for tick, mpqn in tempo_events:
-        factor = max(1, min(int(round((_mpqn_to_bpm(mpqn) * 1000.0) / base_bpm)), 0x7FFF))
+        factor = max(1, min(int(round((_mpqn_to_bpm(mpqn) * 1000.0) / base_bpm)), ESEQ_DELAY15_MAX))
         if tick == 0 and factor == 1000:
             continue
         combined_events.append((tick, 2, b"\xFB" + _encode_15(factor)))
 
     combined_events.extend((tick, order + 10, raw) for tick, order, raw in normalized_events)
     combined_events.sort(key=lambda item: (item[0], item[1]))
+    has_notes, has_controllers = _event_class_flags(normalized_events)
 
     stream = bytearray()
     previous_tick = 0
@@ -695,9 +846,19 @@ def convert_midi_bytes_to_eseq_bytes(midi_bytes, *, title_override=None, filenam
             stream.extend(_encode_eseq_delta(abs_tick - previous_tick))
         stream.extend(raw)
         previous_tick = abs_tick
+    end_tick = previous_tick
     stream.extend(b"\xF2")
 
-    header = _finalize_eseq_header(bytes(stream), base_bpm, title, filename_hint, marker_events)
+    header = _finalize_eseq_header(
+        bytes(stream),
+        base_bpm,
+        title,
+        filename_hint,
+        marker_events,
+        end_tick,
+        has_notes,
+        has_controllers,
+    )
     return _pad_eseq_output(header + bytes(stream))
 
 
@@ -712,19 +873,37 @@ def _write_destination_bytes(dest_path, payload):
             os.remove(temp_path)
 
 
-def convert_eseq_file_to_midi_path(source_path, dest_path, *, title_override=None):
+def convert_eseq_file_to_midi_path(
+    source_path,
+    dest_path,
+    *,
+    title_override=None,
+    cc7_policy=DEFAULT_CC7_POLICY,
+):
     with open(source_path, "rb") as handle:
         eseq_bytes = handle.read()
-    payload = convert_eseq_bytes_to_midi_bytes(eseq_bytes, title_override=title_override)
+    payload = convert_eseq_bytes_to_midi_bytes(
+        eseq_bytes,
+        title_override=title_override,
+        cc7_policy=cc7_policy,
+    )
     _write_destination_bytes(dest_path, payload)
 
 
-def convert_midi_file_to_eseq_path(source_path, dest_path, *, title_override=None, filename_hint=""):
+def convert_midi_file_to_eseq_path(
+    source_path,
+    dest_path,
+    *,
+    title_override=None,
+    filename_hint="",
+    cc7_policy=DEFAULT_CC7_POLICY,
+):
     with open(source_path, "rb") as handle:
         midi_bytes = handle.read()
     payload = convert_midi_bytes_to_eseq_bytes(
         midi_bytes,
         title_override=title_override,
         filename_hint=filename_hint or os.path.basename(dest_path),
+        cc7_policy=cc7_policy,
     )
     _write_destination_bytes(dest_path, payload)

@@ -1,9 +1,10 @@
 import sys
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMessageBox, QCheckBox
 
+from .ui_utils import center_dialog_on_parent
 from .app_info import (
     APP_TITLE_WITH_VERSION,
     APP_WEBSITE,
@@ -14,7 +15,7 @@ from .app_info import (
 )
 
 
-def show_first_time_dialog(app_icon: QIcon | None = None):
+def show_first_time_dialog(app_icon: QIcon | None = None, parent=None):
     settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
     skip_dialog = settings.value("skip_first_time_dialog", False, type=bool)
 
@@ -26,7 +27,9 @@ def show_first_time_dialog(app_icon: QIcon | None = None):
         else:
             body_font_stack = '"Noto Sans", "DejaVu Sans", "Arial", sans-serif'
 
-        msgBox = QMessageBox()
+        msgBox = QMessageBox(parent)
+        if parent is not None:
+            msgBox.setWindowModality(Qt.WindowModal)
         if app_icon is not None and not app_icon.isNull():
             msgBox.setWindowIcon(app_icon)
         msgBox.setIcon(QMessageBox.Information)
@@ -80,6 +83,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None):
         dont_show_checkbox.setStyleSheet("margin-top: 10px")
         msgBox.setCheckBox(dont_show_checkbox)
         msgBox.setStandardButtons(QMessageBox.Ok)
+        center_dialog_on_parent(msgBox, parent)
         msgBox.exec()
         if dont_show_checkbox.isChecked():
             settings.setValue("skip_first_time_dialog", True)

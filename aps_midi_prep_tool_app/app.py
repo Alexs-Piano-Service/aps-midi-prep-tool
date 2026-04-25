@@ -51,8 +51,9 @@ def main():
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
-    show_first_time_dialog(app_icon)
     window = MidiTitleWindow()
     apply_window_icon(window)
     window.show()
+    app.processEvents()
+    show_first_time_dialog(app_icon, parent=window)
     sys.exit(app.exec())

@@ -14,15 +14,13 @@ from .eseq_pianodir import (
     PianodirTrackEntry,
     build_pianodir_bytes,
     build_eseq_order_key_from_path,
-    is_eseq_filename,
     is_pianodir_path,
     read_eseq_order_key_from_file,
     update_eseq_order_key,
-    update_eseq_order_key_to_path,
 )
+from .eseq_converter import is_eseq_file
 from .midi_metadata import (
     extract_eseq_title_from_file,
-    extract_first_title_from_midi,
     has_eseq_title_metadata,
     is_midi_file,
     update_eseq_title_to_path,
@@ -32,6 +30,10 @@ from .midi_metadata import (
 
 class FloppyImageError(Exception):
     """Raised when a floppy image cannot be loaded or edited."""
+
+
+def _host_file_is_eseq(path):
+    return os.path.isfile(path) and is_eseq_file(path) and has_eseq_title_metadata(path)
 
 
 @dataclass(frozen=True)
@@ -1690,7 +1692,7 @@ class FloppyImageSession:
 
     def _patched_metadata_path(self, source_path, image_path=None, *, new_title=None, order_key=None):
         dest_path = os.path.join(self.patched_dir, f"{uuid.uuid4().hex}_{os.path.basename(source_path)}")
-        if image_path and is_eseq_filename(image_path) and has_eseq_title_metadata(source_path):
+        if image_path and _host_file_is_eseq(source_path):
             if new_title is not None:
                 error_msg = update_eseq_title_to_path(source_path, new_title, dest_path)
             else:
@@ -1708,7 +1710,7 @@ class FloppyImageSession:
             shutil.copy2(source_path, dest_path)
             return dest_path
 
-        if image_path and is_eseq_filename(image_path):
+        if image_path and _host_file_is_eseq(source_path):
             error_msg = update_eseq_title_to_path(source_path, new_title, dest_path)
         else:
             error_msg = update_midi_title_to_path(source_path, new_title, dest_path)
@@ -1721,7 +1723,7 @@ class FloppyImageSession:
         track_entries = []
 
         for entry in listing.entries:
-            if is_pianodir_path(entry.path) or not is_eseq_filename(entry.path):
+            if is_pianodir_path(entry.path):
                 continue
 
             extracted_path = os.path.join(
@@ -1729,13 +1731,12 @@ class FloppyImageSession:
                 f"{uuid.uuid4().hex}_{os.path.basename(_normalize_image_path(entry.path))}",
             )
             self._extract_from_image(target_img, entry.path, extracted_path)
+            if not is_eseq_file(extracted_path):
+                continue
 
-            if has_eseq_title_metadata(extracted_path):
-                title = extract_eseq_title_from_file(extracted_path)
-                if title.startswith("Error:") or title == "":
-                    title = extract_first_title_from_midi(extracted_path)
-            else:
-                title = extract_first_title_from_midi(extracted_path)
+            title = extract_eseq_title_from_file(extracted_path)
+            if title.startswith("Error:"):
+                title = ""
             track_entries.append(
                 PianodirTrackEntry(
                     image_path=entry.path,
