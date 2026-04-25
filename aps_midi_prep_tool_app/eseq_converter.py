@@ -14,6 +14,7 @@ ESEQ_MIDI_DIVISION = 384
 DEFAULT_MIDI_MPQN = 500000
 DEFAULT_TIME_SIGNATURE = (4, 2)
 DEFAULT_KEY_SIGNATURE = (0, 0)
+CHANNEL_VOLUME_CONTROLLER = 7
 _ESEQ_PADDING_BYTE = 0xF6
 _ESEQ_TEMPLATE = bytes(
     [
@@ -259,6 +260,15 @@ def _encode_midi_sysex_event(raw):
     return bytes([raw[0]]) + _encode_vlq(len(raw) - 1) + raw[1:]
 
 
+def _is_zero_channel_volume_event(raw):
+    return (
+        len(raw) >= 3
+        and (raw[0] & 0xF0) == 0xB0
+        and raw[1] == CHANNEL_VOLUME_CONTROLLER
+        and raw[2] == 0
+    )
+
+
 def parse_eseq_bytes(eseq_bytes):
     if len(eseq_bytes) < ESEQ_HEADER_SIZE:
         raise EseqConversionError("File is too small to be a valid E-SEQ file.")
@@ -409,6 +419,9 @@ def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None):
         track_events.append((tick, _write_midi_time_signature(numerator, denominator_power)))
 
     for abs_tick, order, raw in parsed.events:
+        # Avoid carrying a channel-volume mute into converted piano files.
+        if _is_zero_channel_volume_event(raw):
+            continue
         if raw and raw[0] in (0xF0, 0xF7):
             raw = _encode_midi_sysex_event(raw)
         track_events.append((abs_tick, raw))
@@ -635,6 +648,10 @@ def convert_midi_bytes_to_eseq_bytes(midi_bytes, *, title_override=None, filenam
 
         if raw and raw[0] in (0xF0, 0xF7):
             normalized_events.append((scaled_tick, 3, _decode_midi_sysex_event(raw)))
+            continue
+
+        # Avoid carrying a channel-volume mute into converted piano files.
+        if _is_zero_channel_volume_event(raw):
             continue
 
         normalized_events.append((scaled_tick, 2, raw))

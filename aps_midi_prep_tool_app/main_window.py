@@ -102,6 +102,8 @@ from .app_info import (
 
 
 class TitleOverflowDelegate(QStyledItemDelegate):
+    RAW_TITLE_ROLE = Qt.UserRole + 1
+
     def __init__(self, limit, parent=None):
         super().__init__(parent)
         self.limit = limit
@@ -113,10 +115,15 @@ class TitleOverflowDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         text = index.data(Qt.DisplayRole) or ""
+        raw_text = index.data(self.RAW_TITLE_ROLE)
+        measured_text = str(raw_text) if raw_text is not None else text
+        suffix = " (centered)"
+        display_base = text[:-len(suffix)] if text.endswith(suffix) else text
         if (
             not self.highlight_enabled
             or index.column() != 4
-            or len(text) <= self.limit
+            or len(measured_text) <= self.limit
+            or len(display_base) <= self.limit
             or option.state & QStyle.State_Selected
         ):
             super().paint(painter, option, index)
@@ -125,6 +132,10 @@ class TitleOverflowDelegate(QStyledItemDelegate):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         full_text = opt.text
+        centered_suffix = ""
+        if full_text.endswith(suffix):
+            full_text = full_text[:-len(suffix)]
+            centered_suffix = suffix
         normal_text = full_text[:self.limit]
         overflow_text = full_text[self.limit:]
 
@@ -147,13 +158,18 @@ class TitleOverflowDelegate(QStyledItemDelegate):
 
         painter.setPen(self.warning_color)
         painter.drawText(x, baseline, overflow_text)
+        x += fm.horizontalAdvance(overflow_text)
+
+        if centered_suffix:
+            painter.setPen(opt.palette.color(QPalette.Text))
+            painter.drawText(x, baseline, centered_suffix)
         painter.restore()
 
 
 class MidiTitleWindow(QMainWindow):
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
-    TITLE_RAW_ROLE = Qt.UserRole + 1
+    TITLE_RAW_ROLE = TitleOverflowDelegate.RAW_TITLE_ROLE
     CENTERED_TITLE_DISK_THRESHOLD = 3
     SETTINGS_ORG = APP_SETTINGS_ORG
     SETTINGS_APP = APP_SETTINGS_APP
@@ -1460,10 +1476,11 @@ class MidiTitleWindow(QMainWindow):
                 unknown_count += 1
 
         has_only_midi = row_count > 0 and midi_count == row_count
+        has_only_eseq = row_count > 0 and eseq_count == row_count
         self.renameAllButton.setEnabled(has_only_midi and not self.is_local_eseq_mode())
         self.convertType0Button.setEnabled(has_only_midi and not self.is_local_eseq_mode())
-        self.convertMidiToEseqButton.setEnabled(midi_count > 0)
-        self.convertEseqToMidiButton.setEnabled(eseq_count > 0)
+        self.convertMidiToEseqButton.setEnabled(has_only_midi)
+        self.convertEseqToMidiButton.setEnabled(has_only_eseq)
 
         if row_count == 0:
             self.renameAllButton.setEnabled(not self.is_local_eseq_mode())
@@ -1474,6 +1491,38 @@ class MidiTitleWindow(QMainWindow):
             self.renameAllButton.setEnabled(False)
             self.convertType0Button.setEnabled(False)
         self._refresh_eseq_reorder_buttons()
+        self._update_menu_actions()
+
+    def _image_mode_file_counts(self):
+        midi_count = 0
+        eseq_count = 0
+        unknown_count = 0
+        for row in range(self.table.rowCount()):
+            if self._is_special_pianodir_row(row):
+                continue
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            source_path = path_item.text()
+            final_path = self._final_image_path(source_path)
+            is_midi = self._image_path_is_midi(source_path)
+            if self._is_eseq_candidate(final_path, is_midi=is_midi):
+                eseq_count += 1
+            elif is_midi:
+                midi_count += 1
+            else:
+                unknown_count += 1
+        return midi_count, eseq_count, unknown_count
+
+    def _refresh_image_mode_action_state(self):
+        if not self.is_image_mode():
+            return
+        midi_count, eseq_count, unknown_count = self._image_mode_file_counts()
+        row_count = midi_count + eseq_count + unknown_count
+        has_only_midi = row_count > 0 and midi_count == row_count
+        has_only_eseq = row_count > 0 and eseq_count == row_count
+        self.convertMidiToEseqButton.setEnabled(has_only_midi)
+        self.convertEseqToMidiButton.setEnabled(has_only_eseq)
         self._update_menu_actions()
 
     def _write_listed_file_to_path(self, source_path, new_title, dest_path, *, order_key=None):
@@ -1803,6 +1852,7 @@ class MidiTitleWindow(QMainWindow):
         self._update_floppy_save_option_ui()
         self._update_image_pianodir_metadata_ui()
         self._refresh_eseq_reorder_buttons()
+        self._refresh_image_mode_action_state()
         self._resize_table_columns_to_fill()
 
     def _image_mode_summary(self):
@@ -2292,22 +2342,25 @@ class MidiTitleWindow(QMainWindow):
             selected_source = self._choose_usb_floppy_drive()
             if selected_source is None:
                 return
-            progress_title = "Reading USB floppy..."
+            progress_title = "Reading USB Floppy"
+            progress_total = 100
         else:
             selected_source = self._choose_greaseweazle_source()
             if selected_source is None:
                 return
-            progress_title = "Reading floppy via Greaseweazle..."
+            progress_title = "Reading Floppy via Greaseweazle"
+            progress_total = 4
             if selected_source.archival_quality:
-                progress_title = "Reading floppy via Greaseweazle (archival SCP)..."
+                progress_title = "Reading Floppy via Greaseweazle (Archival SCP)"
 
-        progressDialog = QProgressDialog(progress_title, None, 0, 4, self)
+        progressDialog = QProgressDialog(progress_title, None, 0, progress_total, self)
+        progressDialog.setWindowTitle(progress_title)
         progressDialog.setWindowModality(Qt.WindowModal)
         progressDialog.setMinimumDuration(0)
         progressDialog.setAutoClose(False)
         progressDialog.setCancelButton(None)
         progress_callback = self._make_stage_progress_callback(progressDialog)
-        progress_callback(0, 4, progress_title)
+        progress_callback(0, progress_total, progress_title)
         QApplication.processEvents()
 
         try:
@@ -2315,7 +2368,7 @@ class MidiTitleWindow(QMainWindow):
                 session = FloppyImageSession.load_floppy(selected_source, progress_callback=progress_callback)
             else:
                 session = FloppyImageSession.load_greaseweazle(selected_source, progress_callback=progress_callback)
-            progress_callback(4, 4, "Loading floppy view...")
+            progress_callback(progress_total, progress_total, "Opening floppy contents...")
             listing = session.list_entries()
         except FloppyImageError as exc:
             progressDialog.close()

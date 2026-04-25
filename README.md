@@ -25,6 +25,7 @@ Many older systems are sensitive to modern filenames and metadata. This app focu
 - `Save As...` to write updated copies to another folder
 - Drop a floppy image (`.img`, `.hfe`, and other Greaseweazle-supported formats) to enter Image Mode
 - Read a 720K or 1.44M USB floppy directly into Floppy Mode and save changes back to the disk
+- On Linux, USB floppy reads use a fast FAT12 file-level path when possible, including Yamaha 720K disks with a blank/corrupt sector 0
 - Read a floppy into Floppy Mode through Greaseweazle, including drive selection (`0`, `1`, `2`, `A`, `B`)
 - Edit MIDI titles inside a fixed-size floppy image or floppy session, rename/remove/add files, and repair Yamaha 720K copy protection on save/export
 - Detect Yamaha E-SEQ disks, show `PIANODIR.FIL` as a separate status row, and offer to generate or refresh it on save
