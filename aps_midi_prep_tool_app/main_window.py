@@ -57,7 +57,7 @@ from .eseq_converter import (
     is_eseq_file,
 )
 from .dos83_renamer import rename_midi_files_dos83
-from .midi_type0_converter import convert_midi_files_to_type0
+from .midi_type0_converter import convert_midi_file_to_type0_path
 from .ui_utils import (
     center_dialog_on_parent,
     embedded_logo_dt,
@@ -748,7 +748,7 @@ class MidiTitleWindow(QMainWindow):
         pianodir_meta_layout.addWidget(self.imagePianodirCatalogEdit, stretch=1)
 
         use_album_subfolder = self.settings.value(
-            self.SETTING_ESEQ_EXPORT_ALBUM_SUBFOLDER, False, type=bool
+            self.SETTING_ESEQ_EXPORT_ALBUM_SUBFOLDER, True, type=bool
         )
         self.album_subfolder_checkbox = QCheckBox("Create Album Subfolder")
         self.album_subfolder_checkbox.setChecked(use_album_subfolder)
@@ -1519,9 +1519,11 @@ class MidiTitleWindow(QMainWindow):
         return f"{self.image_session.mode_name} ({self._disk_content_label()})"
 
     def _clear_regular_list_state(self):
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.pendingEdits.clear()
         self.listedFileInfo.clear()
+        self.regularModeContextPath = ""
         self.regularEseqMode = False
         self.regularTitlesLikelyCentered = False
         self.regularHasPianodir = False
@@ -1846,7 +1848,7 @@ class MidiTitleWindow(QMainWindow):
             return True
         if self._eseq_order_changed():
             return True
-        if for_export and self._current_regular_eseq_paths() != self.loadedRegularEseqPaths:
+        if self._current_regular_eseq_paths() != self.loadedRegularEseqPaths:
             return True
         return False
 
@@ -1964,6 +1966,165 @@ class MidiTitleWindow(QMainWindow):
                 midi_type = extract_midi_type_label_from_midi(file_path)
 
         return title, midi_type, title_mode, is_midi, order_key
+
+    def _regular_drop_file_kind(self, file_path):
+        if not file_path or not os.path.isfile(file_path):
+            return ""
+        if is_midi_file(file_path):
+            return "midi"
+        if is_eseq_file(file_path) and has_eseq_title_metadata(file_path):
+            return "eseq"
+        return ""
+
+    def can_accept_regular_drop_path(self, file_path):
+        return not self.is_image_mode() and self._regular_drop_file_kind(file_path) in {"midi", "eseq"}
+
+    def _find_regular_row_for_path(self, full_path):
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            if item is not None and item.text() == full_path:
+                return row
+        return -1
+
+    def _remove_regular_row_for_path(self, full_path):
+        row = self._find_regular_row_for_path(full_path)
+        if row >= 0:
+            self.table.removeRow(row)
+        self.pendingEdits.pop(full_path, None)
+        self.pendingRegularConversions.pop(full_path, None)
+        self.listedFileInfo.pop(full_path, None)
+
+    def _stage_regular_row_conversion(self, row, full_path, target_kind):
+        target_filename = self._converted_regular_filename_for_kind(full_path, target_kind)
+        output_temp_path = os.path.join(
+            self._ensure_midi_scratch_dir(),
+            f"{uuid.uuid4().hex}_{target_filename}",
+        )
+        source_material_path = self._regular_source_material_path(full_path)
+        title_override = self._row_raw_title(row) or None
+
+        if target_kind == "midi":
+            convert_eseq_file_to_midi_path(
+                source_material_path,
+                output_temp_path,
+                title_override=title_override,
+            )
+        else:
+            convert_midi_file_to_eseq_path(
+                source_material_path,
+                output_temp_path,
+                title_override=title_override,
+                filename_hint=target_filename,
+            )
+
+        self._apply_regular_row_pending_conversion(
+            row,
+            full_path,
+            target_filename,
+            output_temp_path,
+            target_kind,
+        )
+
+    def add_regular_file_from_drop(self, file_path):
+        full_path = os.path.abspath(file_path)
+        file_kind = self._regular_drop_file_kind(full_path)
+        if file_kind not in {"midi", "eseq"}:
+            return {"status": "error", "path": full_path, "message": "Unsupported file type."}
+
+        title, midi_type, title_mode, _is_midi, order_key = self._probe_regular_file(full_path)
+        if title_mode not in {"midi", "eseq"}:
+            return {"status": "error", "path": full_path, "message": "Could not read file metadata."}
+
+        target_kind = ""
+        if self.is_local_eseq_mode() and title_mode == "midi":
+            target_kind = "eseq"
+        elif not self.is_local_eseq_mode() and title_mode == "eseq":
+            target_kind = "midi"
+
+        will_add_eseq = self.is_local_eseq_mode() and (title_mode == "eseq" or target_kind == "eseq")
+        if will_add_eseq and not self._ensure_eseq_file_limit(
+            self._current_eseq_file_count() + 1,
+            action_text="Dropping this file",
+        ):
+            return {"status": "error", "path": full_path, "message": "E-SEQ file limit exceeded."}
+
+        self.add_table_row(
+            full_path,
+            os.path.basename(full_path),
+            title,
+            midi_type,
+            title_mode=title_mode,
+            order_key=order_key,
+        )
+
+        if not target_kind:
+            return {"status": "added", "path": full_path, "message": "Added."}
+
+        row = self._find_regular_row_for_path(full_path)
+        if row < 0:
+            return {"status": "error", "path": full_path, "message": "Could not find added row."}
+
+        try:
+            self._stage_regular_row_conversion(row, full_path, target_kind)
+            if target_kind == "eseq" and not self.regularHasPianodir:
+                self.pendingGeneratePianodir = True
+            return {
+                "status": "converted",
+                "path": full_path,
+                "message": f"Staged {title_mode.upper()} -> {target_kind.upper()} conversion.",
+            }
+        except Exception as exc:
+            self._remove_regular_row_for_path(full_path)
+            return {"status": "error", "path": full_path, "message": str(exc)}
+
+    def finish_regular_file_drop(self, results):
+        results = [result for result in (results or []) if result]
+        accepted_paths = [
+            result.get("path", "")
+            for result in results
+            if result.get("status") in {"added", "converted"}
+        ]
+        if accepted_paths and not self.regularModeContextPath:
+            self._set_regular_mode_context(file_paths=accepted_paths)
+
+        self._refresh_regular_eseq_mode()
+        if self.regularEseqMode:
+            self._refresh_regular_pianodir_row()
+        else:
+            self._apply_midi_mode_ui()
+
+        self._reapply_regular_centered_title_assumption()
+        self.refresh_compat_indicators()
+        self.refresh_midi_type_indicators()
+        self._refresh_regular_mode_action_state()
+
+        added_count = sum(1 for result in results if result.get("status") == "added")
+        converted_count = sum(1 for result in results if result.get("status") == "converted")
+        skipped_count = sum(1 for result in results if result.get("status") == "skipped")
+        errors = [result for result in results if result.get("status") == "error"]
+
+        status_parts = []
+        if added_count:
+            status_parts.append(f"Added {added_count} file(s).")
+        if converted_count:
+            status_parts.append(f"Staged {converted_count} dropped file(s) for automatic conversion.")
+            status_parts.append("Use Save, Save As, or Save As Image to write the converted files.")
+        if skipped_count:
+            status_parts.append(f"Skipped {skipped_count} duplicate file(s).")
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) could not be added.")
+        if status_parts:
+            self.status_label.setText("\n".join(status_parts))
+
+        if errors:
+            max_rows = 10
+            details = "\n".join(
+                f"{os.path.basename(result.get('path', ''))}: {result.get('message', '')}"
+                for result in errors[:max_rows]
+            )
+            if len(errors) > max_rows:
+                details += f"\n...and {len(errors) - max_rows} more."
+            QMessageBox.warning(self, "Drop Issues", details)
 
     def _load_regular_files(self, file_paths, status_text):
         self.table.setSortingEnabled(False)
@@ -3565,6 +3726,10 @@ class MidiTitleWindow(QMainWindow):
             self.status_label.setText("Image Mode closed.")
             return
         if self.table.rowCount() == 0:
+            self._clear_regular_list_state()
+            self._refresh_regular_mode_action_state()
+            self._cleanup_midi_scratch_dir()
+            self._apply_midi_mode_ui()
             self.status_label.setText("List is already empty.")
             return
 
@@ -3581,6 +3746,7 @@ class MidiTitleWindow(QMainWindow):
         self._clear_regular_list_state()
         self._refresh_regular_mode_action_state()
         self._cleanup_midi_scratch_dir()
+        self._apply_midi_mode_ui()
         self.status_label.setText("List cleared.")
 
     def _apply_path_remap(self, old_to_new):
@@ -3707,15 +3873,16 @@ class MidiTitleWindow(QMainWindow):
         warning_box.setIcon(QMessageBox.Warning)
         warning_box.setWindowTitle("Convert All to MIDI Type 0")
         warning_box.setText(
-            f"This will convert all {file_count} listed file(s) to MIDI Type 0 (single track).\n\n"
+            f"This will stage {file_count} listed file(s) for MIDI Type 0 (single track) conversion.\n\n"
+            "Nothing will be written to disk until you use Save or Save As.\n\n"
             "This conversion is not compatible with Yamaha XG files."
         )
 
         backup_hint = (
-            "Backup recommendation: backups are currently enabled."
+            "Backup recommendation: backups are currently enabled and will be created when you save."
             if self.backup_checkbox.isChecked()
             else (
-                "Backup recommendation: enable \"Back up before saving\" before running this utility."
+                "Backup recommendation: enable \"Back up before saving\" before saving the staged conversion."
             )
         )
         warning_box.setInformativeText(
@@ -3741,17 +3908,23 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(self, "No Files", "Add one or more files first.")
             return
 
-        all_paths = []
+        midi_rows = []
+        rows_to_convert = []
         for row in self._regular_file_rows():
             full_path_item = self.table.item(row, 1)
             if not full_path_item:
                 continue
-            all_paths.append(full_path_item.text())
+            full_path = full_path_item.text()
+            if self._listed_file_title_mode(full_path) != "midi":
+                continue
+            midi_rows.append((row, full_path))
+            if self._row_midi_type_label(row, full_path) != "Type 0":
+                rows_to_convert.append((row, full_path))
 
-        if not all_paths:
+        if not midi_rows:
             QMessageBox.information(self, "No Valid Files", "No valid files are currently listed.")
             return
-        if not self._regular_midi_files_need_type0_conversion():
+        if not rows_to_convert:
             QMessageBox.information(
                 self,
                 "Conversion Not Needed",
@@ -3760,39 +3933,75 @@ class MidiTitleWindow(QMainWindow):
             self._refresh_regular_mode_action_state()
             return
 
-        if not self._confirm_type0_conversion(len(all_paths)):
+        if not self._confirm_type0_conversion(len(rows_to_convert)):
             return
 
-        result = convert_midi_files_to_type0(
-            all_paths,
-            create_backups=self.backup_checkbox.isChecked(),
-            backup_path_builder=self._get_backup_path,
+        progressDialog = QProgressDialog(
+            "Staging MIDI Type 0 conversions...",
+            "Cancel",
+            0,
+            len(rows_to_convert),
+            self,
         )
+        self._prepare_progress_dialog(progressDialog)
 
-        converted_count = len(result.converted)
-        unchanged_count = len(result.unchanged)
-        backup_count = len(result.backups_created)
-        failed_count = len(result.failed)
+        converted_count = 0
+        unchanged_count = 0
+        errors = []
+        scratch_dir = self._ensure_midi_scratch_dir()
+        for index, (_initial_row, full_path) in enumerate(rows_to_convert, start=1):
+            if progressDialog.wasCanceled():
+                break
 
-        status_parts = [f"Converted {converted_count} file(s) to MIDI Type 0."]
+            row = None
+            for candidate_row in range(self.table.rowCount()):
+                item = self.table.item(candidate_row, 1)
+                if item is not None and item.text() == full_path:
+                    row = candidate_row
+                    break
+            if row is None:
+                continue
+
+            target_filename = self._regular_row_output_filename(row)
+            output_temp_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
+            source_material_path = self._regular_source_material_path(full_path)
+            try:
+                changed = convert_midi_file_to_type0_path(source_material_path, output_temp_path)
+                if not changed:
+                    unchanged_count += 1
+                    continue
+                self._apply_regular_row_pending_conversion(
+                    row,
+                    full_path,
+                    target_filename,
+                    output_temp_path,
+                    "midi_type0",
+                    overwrite_original=True,
+                )
+                converted_count += 1
+            except Exception as exc:
+                errors.append(f"{os.path.basename(full_path)}: {exc}")
+            finally:
+                progressDialog.setValue(index)
+                QApplication.processEvents()
+        progressDialog.close()
+
+        status_parts = [f"Staged {converted_count} file(s) for MIDI Type 0 conversion."]
         if unchanged_count:
             status_parts.append(f"{unchanged_count} already Type 0 and were left unchanged.")
-        if backup_count:
-            status_parts.append(f"Created {backup_count} backup file(s).")
-        if failed_count:
-            status_parts.append(f"{failed_count} file(s) failed conversion.")
+        if converted_count:
+            status_parts.append("Use Save to overwrite the originals, or Save As to write copies.")
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) failed conversion.")
         self.status_label.setText("\n".join(status_parts))
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
 
-        if failed_count:
+        if errors:
             max_rows = 10
-            details = "\n".join(
-                f"{os.path.basename(path)}: {error}"
-                for path, error in result.failed[:max_rows]
-            )
-            if failed_count > max_rows:
-                details += f"\n...and {failed_count - max_rows} more."
+            details = "\n".join(errors[:max_rows])
+            if len(errors) > max_rows:
+                details += f"\n...and {len(errors) - max_rows} more."
             QMessageBox.warning(self, "Type 0 Conversion Issues", details)
 
     def _converted_image_path_for_kind(self, image_path, target_kind):
@@ -4080,12 +4289,15 @@ class MidiTitleWindow(QMainWindow):
         target_filename,
         temp_path,
         target_kind,
+        *,
+        overwrite_original=False,
     ):
         title, midi_type, title_mode, is_midi, order_key = self._probe_regular_file(temp_path)
         self.pendingRegularConversions[source_path] = {
             "temp_path": temp_path,
             "target_kind": target_kind,
             "target_filename": target_filename,
+            "overwrite_original": bool(overwrite_original),
         }
         self.pendingEdits.pop(source_path, None)
         self._set_listed_file_info(
@@ -4359,51 +4571,65 @@ class MidiTitleWindow(QMainWindow):
         self._convert_all_image_rows("midi", "eseq")
 
     def add_table_row(self, full_path, filename, title, midi_type="", title_mode="midi", order_key=b""):
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        self._set_listed_file_info(
-            full_path,
-            title_mode=title_mode,
-            midi_type=midi_type,
-            is_midi=(title_mode == "midi"),
-            order_key=order_key,
-        )
+        sorting_enabled = self.table.isSortingEnabled()
+        header = self.table.horizontalHeader()
+        sort_section = header.sortIndicatorSection()
+        sort_order = header.sortIndicatorOrder()
+        if sorting_enabled:
+            self.table.setSortingEnabled(False)
 
-        # Column 0: Delete cell with "X"
-        delete_item = QTableWidgetItem("X")
-        delete_item.setTextAlignment(Qt.AlignCenter)
-        delete_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        delete_item.setToolTip("Remove this file from the list.")
-        self.table.setItem(row, 0, delete_item)
+        try:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self._set_listed_file_info(
+                full_path,
+                title_mode=title_mode,
+                midi_type=midi_type,
+                is_midi=(title_mode == "midi"),
+                order_key=order_key,
+            )
 
-        # Column 1: FullPath (hidden)
-        fullpath_item = QTableWidgetItem(full_path)
-        fullpath_item.setFlags(fullpath_item.flags() & ~Qt.ItemIsEditable)
-        self.table.setItem(row, 1, fullpath_item)
+            # Column 0: Delete cell with "X"
+            delete_item = QTableWidgetItem("X")
+            delete_item.setTextAlignment(Qt.AlignCenter)
+            delete_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            delete_item.setToolTip("Remove this file from the list.")
+            self.table.setItem(row, 0, delete_item)
 
-        # Column 2: Clipboard emoji
-        copy_item = QTableWidgetItem("📋")
-        copy_item.setTextAlignment(Qt.AlignCenter)
-        copy_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        copy_item.setToolTip("Copy filename to clipboard.")
-        self.table.setItem(row, 2, copy_item)
+            # Column 1: FullPath (hidden)
+            fullpath_item = QTableWidgetItem(full_path)
+            fullpath_item.setFlags(fullpath_item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, 1, fullpath_item)
 
-        # Column 3: Filename
-        filename_item = QTableWidgetItem(filename)
-        filename_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        filename_item.setToolTip("Double-click to copy filename.")
-        self.table.setItem(row, 3, filename_item)
+            # Column 2: Clipboard emoji
+            copy_item = QTableWidgetItem("📋")
+            copy_item.setTextAlignment(Qt.AlignCenter)
+            copy_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            copy_item.setToolTip("Copy filename to clipboard.")
+            self.table.setItem(row, 2, copy_item)
 
-        # Column 4: Title (fallback to filename only when no title is present)
-        stored_title = title if title != "" else (filename if title_mode == "midi" else "")
-        title_item = self._make_title_item(stored_title, title_mode=title_mode, fallback_title=filename)
-        self.table.setItem(row, 4, title_item)
+            # Column 3: Filename
+            filename_item = QTableWidgetItem(filename)
+            filename_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            filename_item.setToolTip("Double-click to copy filename.")
+            self.table.setItem(row, 3, filename_item)
 
-        # Column 5: Compatibility indicator for titles > 32 characters
-        self._update_compat_indicator(row, stored_title)
+            # Column 4: Title (fallback to filename only when no title is present)
+            stored_title = title if title != "" else (filename if title_mode == "midi" else "")
+            title_item = self._make_title_item(stored_title, title_mode=title_mode, fallback_title=filename)
+            self.table.setItem(row, 4, title_item)
 
-        # Column 6: MIDI type from file header bytes
-        self._update_midi_type_indicator(row, midi_type)
+            # Column 5: Compatibility indicator for titles > 32 characters
+            self._update_compat_indicator(row, stored_title)
+
+            # Column 6: MIDI type from file header bytes
+            self._update_midi_type_indicator(row, midi_type)
+        finally:
+            if sorting_enabled:
+                self.table.setSortingEnabled(True)
+                if 0 <= sort_section < self.table.columnCount():
+                    self.table.sortItems(sort_section, sort_order)
+
         self._refresh_regular_mode_action_state()
 
     def handle_cell_clicked(self, row, column):
@@ -4420,6 +4646,7 @@ class MidiTitleWindow(QMainWindow):
             if full_path_item:
                 full_path = full_path_item.text()
                 self.pendingEdits.pop(full_path, None)
+                self.pendingRegularConversions.pop(full_path, None)
                 self.listedFileInfo.pop(full_path, None)
             self.table.removeRow(row)
             self._reapply_regular_centered_title_assumption()
@@ -4924,6 +5151,19 @@ class MidiTitleWindow(QMainWindow):
     def _build_default_image_filename(self, host_path, used_paths):
         return self._build_dos_image_filename(os.path.basename(host_path), used_paths)
 
+    def _stage_image_addition_host_file(self, host_path):
+        if self.image_session is None:
+            raise FloppyImageError("No image or floppy is currently loaded.")
+        if not os.path.isfile(host_path):
+            raise FloppyImageError(f"File to add no longer exists: {host_path}")
+
+        staged_path = os.path.join(
+            self.image_session.patched_dir,
+            f"{uuid.uuid4().hex}_{os.path.basename(host_path)}",
+        )
+        shutil.copy2(host_path, staged_path)
+        return staged_path
+
     def _build_dos_image_filename(self, filename, used_paths):
         stem, ext = os.path.splitext(filename)
         ext = ext.lstrip(".")
@@ -5077,8 +5317,20 @@ class MidiTitleWindow(QMainWindow):
                 skipped.append(f"{original_name}: not enough free space in image")
                 continue
 
-            size = os.path.getsize(host_path)
-            is_midi, title, midi_type, title_mode, order_key = self._probe_image_file(target_path, size, host_path)
+            try:
+                staged_host_path = self._stage_image_addition_host_file(host_path)
+            except Exception as exc:
+                pending_extra.pop(target_path, None)
+                skipped.append(f"{original_name}: {exc}")
+                continue
+
+            pending_extra[target_path] = staged_host_path
+            size = os.path.getsize(staged_host_path)
+            is_midi, title, midi_type, title_mode, order_key = self._probe_image_file(
+                target_path,
+                size,
+                staged_host_path,
+            )
             would_be_eseq_mode = self.imageEseqMode or title_mode == "eseq" or self._is_eseq_candidate(
                 target_path,
                 is_midi=is_midi,
@@ -5086,13 +5338,17 @@ class MidiTitleWindow(QMainWindow):
             if would_be_eseq_mode and (self._image_song_file_count() + 1) > self.ESEQ_FILE_LIMIT:
                 pending_extra.pop(target_path, None)
                 self.imageFileInfo.pop(target_path, None)
+                try:
+                    os.remove(staged_host_path)
+                except OSError:
+                    pass
                 skipped.append(
                     f"{original_name}: Yamaha E-SEQ supports at most {self.ESEQ_FILE_LIMIT} files"
                 )
                 continue
             used_paths.add(target_path.upper())
-            self.pendingImageAdditions[target_path] = host_path
-            if is_eseq_file(host_path) and target_name.upper() != original_name.upper():
+            self.pendingImageAdditions[target_path] = staged_host_path
+            if is_eseq_file(staged_host_path) and target_name.upper() != original_name.upper():
                 shortened.append(f"{original_name} -> {target_name}")
             if not title_mode:
                 title = ""
@@ -5857,13 +6113,14 @@ class MidiTitleWindow(QMainWindow):
             if full_path_item is None:
                 continue
             full_path = full_path_item.text()
-            if full_path not in self.pendingRegularConversions:
+            conversion = self.pendingRegularConversions.get(full_path)
+            if not conversion:
                 continue
             dest_path = os.path.join(
                 os.path.dirname(full_path),
                 self._regular_row_output_filename(row),
             )
-            converted_items.append((row, full_path, dest_path))
+            converted_items.append((row, full_path, dest_path, conversion))
 
         if not converted_items:
             self.pendingRegularConversions.clear()
@@ -5872,17 +6129,21 @@ class MidiTitleWindow(QMainWindow):
         errors = []
         output_paths = []
         output_path_map = {}
-        for _row, full_path, dest_path in converted_items:
-            if os.path.normcase(os.path.abspath(dest_path)) == os.path.normcase(os.path.abspath(full_path)):
+        for _row, full_path, dest_path, conversion in converted_items:
+            is_original_path = (
+                os.path.normcase(os.path.abspath(dest_path))
+                == os.path.normcase(os.path.abspath(full_path))
+            )
+            if is_original_path and not conversion.get("overwrite_original"):
                 errors.append(f"{os.path.basename(full_path)}: target path matches source path")
-            elif os.path.exists(dest_path):
+            elif not is_original_path and os.path.exists(dest_path):
                 errors.append(f"{os.path.basename(dest_path)} already exists")
         if errors:
             return errors
 
         progressDialog = QProgressDialog("Saving converted files...", "Cancel", 0, len(converted_items), self)
         self._prepare_progress_dialog(progressDialog)
-        for index, (row, full_path, dest_path) in enumerate(converted_items, start=1):
+        for index, (row, full_path, dest_path, _conversion) in enumerate(converted_items, start=1):
             if progressDialog.wasCanceled():
                 break
 

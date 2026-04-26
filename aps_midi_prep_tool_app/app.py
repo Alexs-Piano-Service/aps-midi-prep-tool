@@ -1,4 +1,16 @@
+import os
 import sys
+
+
+def _prefer_xcb_for_appimage() -> None:
+    if not sys.platform.startswith("linux") or not os.environ.get("APPIMAGE"):
+        return
+    # Qt Wayland can resize AppImage windows unpredictably while they are moved
+    # on some GNOME/PopOS desktops. Let users override this when needed.
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
+
+_prefer_xcb_for_appimage()
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication

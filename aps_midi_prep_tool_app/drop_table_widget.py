@@ -4,7 +4,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QProgressDialog, QTableWidget
 
 from .floppy_image import is_supported_image_path
-from .midi_metadata import extract_first_title_from_midi, extract_midi_type_label_from_midi
 from .ui_utils import center_dialog_on_parent
 
 
@@ -32,7 +31,7 @@ class DropTableWidget(QTableWidget):
                 if getattr(main_window, "is_image_mode", lambda: False)() and os.path.isfile(file_path):
                     event.acceptProposedAction()
                     return
-                if file_path.lower().endswith(('.mid', '.midi')):
+                if getattr(main_window, "can_accept_regular_drop_path", lambda _path: False)(file_path):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -58,27 +57,31 @@ class DropTableWidget(QTableWidget):
                 event.acceptProposedAction()
                 return
 
-            total = len(urls)
+            regular_paths = [
+                path
+                for path in local_paths
+                if getattr(main_window, "can_accept_regular_drop_path", lambda _path: False)(path)
+            ]
+            total = len(regular_paths)
             progressDialog = None
             if total > 1:
-                progressDialog = QProgressDialog("Adding MIDI files...", "Cancel", 0, total, main_window)
+                progressDialog = QProgressDialog("Adding files...", "Cancel", 0, total, main_window)
                 progressDialog.setWindowModality(Qt.WindowModal)
                 progressDialog.setMinimumDuration(0)
                 center_dialog_on_parent(progressDialog, main_window)
-            for i, url in enumerate(urls):
-                file_path = url.toLocalFile()
-                if file_path.lower().endswith(('.mid', '.midi')):
-                    if not self.file_exists(file_path) and hasattr(main_window, "add_table_row"):
-                        title = extract_first_title_from_midi(file_path)
-                        midi_type = extract_midi_type_label_from_midi(file_path)
-                        main_window.add_table_row(file_path, os.path.basename(file_path), title, midi_type)
+            results = []
+            for i, file_path in enumerate(regular_paths):
+                if self.file_exists(file_path):
+                    results.append({"status": "skipped", "path": file_path, "message": "Already listed."})
+                elif hasattr(main_window, "add_regular_file_from_drop"):
+                    results.append(main_window.add_regular_file_from_drop(file_path))
                 if progressDialog:
                     progressDialog.setValue(i + 1)
                     QApplication.processEvents()
             if progressDialog:
                 progressDialog.close()
-            if hasattr(main_window, "_reapply_regular_centered_title_assumption"):
-                main_window._reapply_regular_centered_title_assumption()
+            if hasattr(main_window, "finish_regular_file_drop"):
+                main_window.finish_regular_file_drop(results)
             event.acceptProposedAction()
         else:
             event.ignore()

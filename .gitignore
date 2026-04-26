@@ -1,3 +1,20 @@
 # Python bytecode/cache
 __pycache__/
 *.py[cod]
+
+# Local environments
+.venv/
+.venv-appimage/
+
+# Build and release artifacts
+build/
+dist/
+release/*.AppImage
+release/*.AppImage.zsync
+*.spec
+
+# Local AppImage build task
+.vscode/
+Makefile
+requirements-build.txt
+scripts/build_appimage.sh

@@ -254,6 +254,29 @@ def _default_backup_path(file_path):
     return f"{stem}_backup{ext}"
 
 
+def convert_midi_file_to_type0_path(source_path, dest_path):
+    if not os.path.isfile(source_path):
+        raise ValueError("File does not exist.")
+
+    with open(source_path, "rb") as handle:
+        midi_bytes = handle.read()
+
+    converted_bytes, changed = _convert_midi_bytes_to_type0(midi_bytes)
+    if not changed:
+        return False
+
+    temp_path = f"{dest_path}.aps_type0_{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "wb") as handle:
+            handle.write(converted_bytes)
+        os.replace(temp_path, dest_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    return True
+
+
 def convert_midi_files_to_type0(file_paths, create_backups=False, backup_path_builder=None):
     unique_paths = _unique_abs_paths(file_paths)
     backup_path_builder = backup_path_builder or _default_backup_path
