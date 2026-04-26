@@ -1,7 +1,7 @@
 # APS MIDI Prep Tool
 
 `APS MIDI Prep Tool` is a desktop tool for editing MIDI track titles with legacy playback systems in mind.
-Current version: `0.5.1` (2026).
+Current version: `0.5.2` (2026).
 
 Built for the workflows at [AlexanderPeppe.com](https://www.alexanderpeppe.com/), this project helps players, technicians, and collectors keep MIDI files named properly and compatible with older Disklavier setups.
 

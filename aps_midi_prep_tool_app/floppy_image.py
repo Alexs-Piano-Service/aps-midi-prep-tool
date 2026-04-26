@@ -2393,6 +2393,8 @@ class FloppyImageSession:
         source_name=None,
         drive_info=None,
         gw_source=None,
+        capture_path=None,
+        capture_ext=None,
     ):
         self.source_path = source_path
         self.source_ext = source_ext
@@ -2403,6 +2405,8 @@ class FloppyImageSession:
         self.source_name = source_name or os.path.basename(source_path)
         self.drive_info = drive_info
         self.gw_source = gw_source
+        self.capture_path = capture_path
+        self.capture_ext = capture_ext
         self.repair_note = repair_result.note
         self.repair_changed = repair_result.changed
         self.extracted_dir = os.path.join(temp_dir, "extracted")
@@ -2558,6 +2562,8 @@ class FloppyImageSession:
                 source_kind="floppy_gw",
                 source_name=gw_source.display_name,
                 gw_source=gw_source,
+                capture_path=source_capture,
+                capture_ext="scp" if gw_source.archival_quality else "img",
             )
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)

@@ -69,6 +69,7 @@ from .drop_table_widget import DropTableWidget
 from .midi_scan_worker import MidiProcessingWorker
 from .disk_session_worker import DiskSessionLoadWorker
 from .icon_utils import apply_window_icon
+from .onboarding_dialog import show_first_time_dialog
 from .floppy_image import (
     DISK_FORMATS,
     PREFERRED_OUTPUT_EXTENSIONS,
@@ -793,6 +794,10 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesMenu.addAction(self.utilitiesMidiToEseqAction)
 
         help_menu = self.menuBar().addMenu("&Help")
+        welcome_action = QAction("Show Welcome Screen", self)
+        welcome_action.triggered.connect(self.show_welcome_dialog)
+        help_menu.addAction(welcome_action)
+
         about_action = QAction("About APS MIDI Prep Tool", self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
@@ -2960,15 +2965,54 @@ class MidiTitleWindow(QMainWindow):
     def _offer_save_greaseweazle_capture(self):
         if not self.is_floppy_mode() or self.image_session.source_kind != "floppy_gw":
             return
+        capture_path = getattr(self.image_session, "capture_path", None)
+        capture_ext = (getattr(self.image_session, "capture_ext", "") or "").lower()
+        is_archival_scp = (
+            self.image_session.gw_source is not None
+            and self.image_session.gw_source.archival_quality
+            and capture_ext == "scp"
+            and capture_path
+            and os.path.isfile(capture_path)
+        )
+        prompt_text = "Save the imported Greaseweazle floppy as an image file now?"
+        if is_archival_scp:
+            prompt_text = "Save the raw archival Greaseweazle SCP flux capture now?"
         reply = QMessageBox.question(
             self,
-            "Save Captured Image",
-            "Save the imported Greaseweazle floppy as an image file now?",
+            "Save Greaseweazle Capture",
+            prompt_text,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
-        if reply == QMessageBox.Yes:
-            self.save_image_as()
+        if reply != QMessageBox.Yes:
+            return
+        if is_archival_scp:
+            drive_name = self.image_session.gw_source.drive.lower()
+            default_path = os.path.join(
+                os.path.expanduser("~"),
+                f"gw_drive_{drive_name}_archival.scp",
+            )
+            output_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Raw SCP Capture",
+                default_path,
+                "SCP flux capture (*.scp *.SCP)",
+            )
+            if not output_path:
+                return
+            if image_extension(output_path) != "scp":
+                output_path = f"{output_path}.scp"
+            try:
+                shutil.copy2(capture_path, output_path)
+                QMessageBox.information(
+                    self,
+                    "SCP Capture Saved",
+                    f"Raw SCP capture saved as {os.path.basename(output_path)}.",
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "SCP Save Failed", str(exc))
+            return
+        self.save_image_as()
 
     def open_image_dialog(self):
         common_exts = ("img", "hfe", "bin")
@@ -5432,6 +5476,9 @@ class MidiTitleWindow(QMainWindow):
         layout.addWidget(buttons)
 
         self._exec_child_dialog(dialog)
+
+    def show_welcome_dialog(self):
+        show_first_time_dialog(self.windowIcon(), parent=self, force_show=True)
 
     def _extension_from_filter(self, selected_filter):
         if "*." not in selected_filter:
