@@ -147,10 +147,11 @@ The SMF1-to-SMF0 conversion merges tracks into one track. It does not remap MIDI
 
 - Python 3.10+
 - `PySide6`
-- For Image Mode and Floppy Mode: `mtools`
-- For HFE and other converted image formats: Greaseweazle CLI (`gw`)
-- For Greaseweazle floppy import/write: Greaseweazle CLI (`gw`)
+- For source/local runs with Image Mode and Floppy Mode: `mtools`
+- For source/local runs with HFE, Greaseweazle floppy import, or Greaseweazle floppy write: Greaseweazle CLI (`gw`)
 - For direct USB floppy access on Linux: a readable/writable 720K or 1.44M floppy block device
+
+Release AppImages built with the included script bundle the needed `mtools` commands and the Greaseweazle CLI. Direct USB floppy access still depends on normal Linux device access and permissions.
 
 ## Run Locally
 
@@ -172,6 +173,24 @@ make appimage
 You can also run the default VS Code task, **Build AppImage**.
 
 The task creates `release/APSMidiPrepTool-<version>-<arch>.AppImage`, for example `release/APSMidiPrepTool-0.5.2-x86_64.AppImage`. Upload that file as the release artifact. The first build creates `.venv-appimage/`, installs the build requirements, downloads `appimagetool`, and packages the PySide6 app with PyInstaller.
+
+By default, the AppImage build also bundles:
+
+- `mformat`, `mcopy`, `mdel`, `mren`, and `mdir` from `mtools`
+- Greaseweazle CLI as `gw`
+
+The build machine needs `mtools`, `git`, and network access for the default bundle. To skip either bundled dependency, run:
+
+```bash
+BUNDLE_MTOOLS=0 make appimage
+BUNDLE_GREASEWEAZLE=0 make appimage
+```
+
+To pin Greaseweazle to a specific source or revision, set `GREASEWEAZLE_REQUIREMENT`, for example:
+
+```bash
+GREASEWEAZLE_REQUIREMENT='git+https://github.com/keirf/greaseweazle.git@v1.23' make appimage
+```
 
 For the widest Linux compatibility, build releases on an older supported distro, such as Ubuntu 22.04.
 

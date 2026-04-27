@@ -62,6 +62,8 @@ class DropTableWidget(QTableWidget):
                 for path in local_paths
                 if getattr(main_window, "can_accept_regular_drop_path", lambda _path: False)(path)
             ]
+            if hasattr(main_window, "prepare_regular_file_drop"):
+                main_window.prepare_regular_file_drop(regular_paths)
             total = len(regular_paths)
             progressDialog = None
             if total > 1:

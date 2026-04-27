@@ -1,4 +1,3 @@
-import gc
 import os
 import re
 import shutil
@@ -66,7 +65,6 @@ from .ui_utils import (
     pixmap_from_base64,
 )
 from .drop_table_widget import DropTableWidget
-from .midi_scan_worker import MidiProcessingWorker
 from .disk_session_worker import DiskSessionLoadWorker
 from .icon_utils import apply_window_icon
 from .onboarding_dialog import show_first_time_dialog
@@ -390,6 +388,8 @@ class MidiTitleWindow(QMainWindow):
         self.regularPianodirSourcePath = ""
         self.loadedRegularPianodirMetadata = PianodirMetadata()
         self.loadedRegularEseqPaths = tuple()
+        self.regularDropBatchPrepared = False
+        self.regularDropBatchPromotesToEseq = False
         self.diskLoadWorker = None
         self.diskLoadProgressDialog = None
         self.diskLoadFailureTitle = "Disk Load Failed"
@@ -1573,6 +1573,13 @@ class MidiTitleWindow(QMainWindow):
     def _regular_file_count(self):
         return len(self.listedFileInfo)
 
+    def _regular_midi_file_count(self):
+        return sum(
+            1
+            for info in self.listedFileInfo.values()
+            if info.get("title_mode") == "midi"
+        )
+
     def _pending_regular_conversion(self, full_path):
         return self.pendingRegularConversions.get(full_path, {})
 
@@ -1979,6 +1986,39 @@ class MidiTitleWindow(QMainWindow):
     def can_accept_regular_drop_path(self, file_path):
         return not self.is_image_mode() and self._regular_drop_file_kind(file_path) in {"midi", "eseq"}
 
+    def _regular_folder_file_paths(self, directory):
+        file_paths = []
+        try:
+            file_names = os.listdir(directory)
+        except OSError:
+            return file_paths
+        for file_name in file_names:
+            full_path = os.path.join(directory, file_name)
+            if not os.path.isfile(full_path):
+                continue
+            if file_name.upper() == PIANODIR_FILENAME:
+                file_paths.append(full_path)
+                continue
+            if self._regular_drop_file_kind(full_path) in {"midi", "eseq"}:
+                file_paths.append(full_path)
+        return file_paths
+
+    def _should_promote_regular_drop_to_eseq(self, file_kinds):
+        if self.is_image_mode() or self.is_local_eseq_mode() or self._regular_midi_file_count() > 0:
+            return False
+        accepted_kinds = [kind for kind in file_kinds if kind in {"midi", "eseq"}]
+        return bool(accepted_kinds) and all(kind == "eseq" for kind in accepted_kinds)
+
+    def prepare_regular_file_drop(self, file_paths):
+        file_kinds = [
+            self._regular_drop_file_kind(os.path.abspath(path))
+            for path in (file_paths or [])
+        ]
+        self.regularDropBatchPrepared = True
+        self.regularDropBatchPromotesToEseq = self._should_promote_regular_drop_to_eseq(file_kinds)
+        if self.regularDropBatchPromotesToEseq:
+            self.regularEseqMode = True
+
     def _find_regular_row_for_path(self, full_path):
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 1)
@@ -2030,6 +2070,12 @@ class MidiTitleWindow(QMainWindow):
         file_kind = self._regular_drop_file_kind(full_path)
         if file_kind not in {"midi", "eseq"}:
             return {"status": "error", "path": full_path, "message": "Unsupported file type."}
+        if self.regularDropBatchPrepared:
+            should_promote = self.regularDropBatchPromotesToEseq
+        else:
+            should_promote = self._should_promote_regular_drop_to_eseq([file_kind])
+        if should_promote:
+            self.regularEseqMode = True
 
         title, midi_type, title_mode, _is_midi, order_key = self._probe_regular_file(full_path)
         if title_mode not in {"midi", "eseq"}:
@@ -2078,6 +2124,8 @@ class MidiTitleWindow(QMainWindow):
             return {"status": "error", "path": full_path, "message": str(exc)}
 
     def finish_regular_file_drop(self, results):
+        self.regularDropBatchPrepared = False
+        self.regularDropBatchPromotesToEseq = False
         results = [result for result in (results or []) if result]
         accepted_paths = [
             result.get("path", "")
@@ -2234,8 +2282,9 @@ class MidiTitleWindow(QMainWindow):
             else:
                 unknown_count += 1
 
+        has_midi = midi_count > 0
+        has_eseq = eseq_count > 0
         has_only_midi = row_count > 0 and midi_count == row_count
-        has_only_eseq = row_count > 0 and eseq_count == row_count
         rename_needed = has_only_midi and self._regular_filenames_need_dos83_rename()
         type0_needed = has_only_midi and self._regular_midi_files_need_type0_conversion()
         if self.is_local_eseq_mode():
@@ -2244,8 +2293,8 @@ class MidiTitleWindow(QMainWindow):
         else:
             self._set_rename_all_enabled(rename_needed)
             self._set_type0_enabled(type0_needed)
-        self.convertMidiToEseqButton.setEnabled(has_only_midi)
-        self.convertEseqToMidiButton.setEnabled(has_only_eseq)
+        self.convertMidiToEseqButton.setEnabled(has_midi)
+        self.convertEseqToMidiButton.setEnabled(has_eseq)
 
         if row_count == 0:
             self._set_rename_all_enabled(False, "Add MIDI files before using Rename 8.3.")
@@ -3683,35 +3732,8 @@ class MidiTitleWindow(QMainWindow):
                 self._reset_image_state()
                 self._apply_midi_mode_ui()
             self._cleanup_midi_scratch_dir()
-            self.choose_button.setEnabled(False)
-            self.open_image_button.setEnabled(False)
-            self.read_floppy_button.setEnabled(False)
-            self.table.setSortingEnabled(False)
-            self._clear_regular_list_state()
-            self.progressDialog = QProgressDialog("Processing MIDI files...", "Cancel", 0, 100, self)
-            self._prepare_progress_dialog(self.progressDialog)
-            self.worker = MidiProcessingWorker(directory)
-            self.worker.progressChanged.connect(self.progressDialog.setValue)
-            self.worker.fileProcessed.connect(self.add_table_row)
-            self.worker.finished.connect(lambda: self.on_worker_finished(directory))
-            self.worker.start()
-
-    def on_worker_finished(self, directory):
-        self.progressDialog.close()
-        self.table.setSortingEnabled(True)
-        self.table.sortItems(3, order=Qt.AscendingOrder)  # sort by filename (col 3)
-        self._reapply_regular_centered_title_assumption()
-        self.refresh_compat_indicators()
-        self.refresh_midi_type_indicators()
-        self._refresh_regular_mode_action_state()
-        self._set_regular_mode_context(preferred_path=directory)
-        self._set_mode_banner("MIDI Mode", self._regular_mode_context_label())
-        self.status_label.setText(f"Selected Folder: \"{directory}\"")
-        self.choose_button.setEnabled(True)
-        self.open_image_button.setEnabled(True)
-        self.read_floppy_button.setEnabled(True)
-        self.worker = None
-        gc.collect()
+            file_paths = self._regular_folder_file_paths(directory)
+            self._load_regular_files(file_paths, f"Selected Folder: \"{directory}\"")
 
     def clear_list(self):
         if not self.choose_button.isEnabled():
@@ -4348,11 +4370,17 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(self, "Nothing To Convert", f"No {kind_label} files are currently listed.")
             return True
 
-        if target_kind == "eseq" and not self._ensure_eseq_file_limit(
-            len(applicable_paths),
-            action_text="Converting these files to E-SEQ",
-        ):
-            return True
+        if target_kind == "eseq":
+            existing_eseq_count = sum(
+                1
+                for info in self.listedFileInfo.values()
+                if info.get("title_mode") == "eseq"
+            )
+            if not self._ensure_eseq_file_limit(
+                existing_eseq_count + len(applicable_paths),
+                action_text="Converting these files to E-SEQ",
+            ):
+                return True
 
         reply = QMessageBox.question(
             self,
