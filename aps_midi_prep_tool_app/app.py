@@ -15,7 +15,7 @@ _prefer_xcb_for_appimage()
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from .app_info import APP_VERSION, LEGACY_SETTINGS_APP, SETTINGS_APP, SETTINGS_ORG
+from .app_info import APP_NAME, APP_VERSION, LEGACY_SETTINGS_APP, SETTINGS_APP, SETTINGS_ORG
 from .onboarding_dialog import show_first_time_dialog
 from .main_window import MidiTitleWindow
 from .icon_utils import apply_window_icon, load_app_icon
@@ -57,7 +57,7 @@ def main():
     app = QApplication(sys.argv)
     _migrate_legacy_settings()
     app.setOrganizationName(SETTINGS_ORG)
-    app.setApplicationName(SETTINGS_APP)
+    app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app_icon = load_app_icon()
     if not app_icon.isNull():
@@ -68,4 +68,5 @@ def main():
     window.show()
     app.processEvents()
     show_first_time_dialog(app_icon, parent=window)
+    window.schedule_startup_update_check()
     sys.exit(app.exec())

@@ -356,7 +356,7 @@ def extract_first_title_from_midi(midi_path):
         return result
     except Exception as e:
         print(f"Error extracting title from {midi_path}: {e}")
-        return f"Error: {str(e)}"
+        return f"Error reading MIDI title from {os.path.basename(midi_path)}: {e}"
 
 
 def extract_eseq_title_from_file(file_path):
@@ -368,7 +368,7 @@ def extract_eseq_title_from_file(file_path):
         return result
     except Exception as e:
         print(f"Error extracting E-SEQ title from {file_path}: {e}")
-        return f"Error: {str(e)}"
+        return f"Error reading E-SEQ title from {os.path.basename(file_path)}: {e}"
 
 def update_midi_title(midi_path, new_title):
     try:
@@ -382,7 +382,7 @@ def update_midi_title(midi_path, new_title):
 
         return None
     except Exception as e:
-        return f"Error updating MIDI title: {str(e)}"
+        return f"Could not update MIDI title in {os.path.basename(midi_path)}: {e}"
 
 
 def update_eseq_title(file_path, new_title):
@@ -397,7 +397,7 @@ def update_eseq_title(file_path, new_title):
 
         return None
     except Exception as e:
-        return f"Error updating E-SEQ title: {str(e)}"
+        return f"Could not update E-SEQ title in {os.path.basename(file_path)}: {e}"
 
 def update_midi_title_to_destination(source_path, new_title, dest_dir):
     try:
@@ -413,7 +413,7 @@ def update_midi_title_to_destination(source_path, new_title, dest_dir):
 
         return None
     except Exception as e:
-        return f"Error updating {os.path.basename(source_path)}: {str(e)}"
+        return f"Could not write updated title for {os.path.basename(source_path)}: {e}"
 
 
 def update_midi_title_to_path(source_path, new_title, dest_path):
@@ -428,7 +428,7 @@ def update_midi_title_to_path(source_path, new_title, dest_path):
 
         return None
     except Exception as e:
-        return f"Error updating {os.path.basename(source_path)}: {str(e)}"
+        return f"Could not write updated title for {os.path.basename(source_path)}: {e}"
 
 
 def update_eseq_title_to_path(source_path, new_title, dest_path):
@@ -443,4 +443,4 @@ def update_eseq_title_to_path(source_path, new_title, dest_path):
 
         return None
     except Exception as e:
-        return f"Error updating {os.path.basename(source_path)}: {str(e)}"
+        return f"Could not write updated E-SEQ title for {os.path.basename(source_path)}: {e}"

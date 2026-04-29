@@ -2,7 +2,7 @@
 
 `APS MIDI Prep Tool` is a desktop utility for preparing MIDI, Yamaha E-SEQ, floppy disk, and Nalbantov virtual disk workflows for Disklaviers and other legacy player-piano systems.
 
-Current version: `0.5.2` (2026).
+Current version: `0.5.3` (2026).
 
 The tool was built for the real-world workflows documented at [AlexanderPeppe.com](https://www.alexanderpeppe.com/): extracting songs from Yamaha floppies, cleaning up MIDI titles, converting SMF1 files to SMF0, copying PianoSoft disks to Nalbantov USB sticks, and editing HFE virtual floppy images.
 
@@ -149,9 +149,10 @@ The SMF1-to-SMF0 conversion merges tracks into one track. It does not remap MIDI
 - `PySide6`
 - For source/local runs with Image Mode and Floppy Mode: `mtools`
 - For source/local runs with HFE, Greaseweazle floppy import, or Greaseweazle floppy write: Greaseweazle CLI (`gw`)
+- For acoustic previews in `Utilities -> File Inspection...`: bundled `fluidsynth` plus a bundled GM/piano SoundFont, or local equivalents when running from source
 - For direct USB floppy access on Linux: a readable/writable 720K or 1.44M floppy block device
 
-Release AppImages built with the included script bundle the needed `mtools` commands and the Greaseweazle CLI. Direct USB floppy access still depends on normal Linux device access and permissions.
+Release AppImages built with the included script bundle the needed `mtools` commands, the Greaseweazle CLI, FluidSynth, and a detected or provided GM SoundFont. Direct USB floppy access still depends on normal Linux device access and permissions.
 
 ## Run Locally
 
@@ -161,6 +162,22 @@ source .venv/bin/activate
 pip install PySide6
 python3 aps_midi_prep_tool.py
 ```
+
+## Update Checks
+
+`Help -> Check for Updates...` reads a small public JSON file and compares its
+`latest_version` with the running app version. Startup checks are enabled by
+default and can be disabled from the Help menu or from the startup update
+notice.
+
+Upload the included [`update-check.json`](update-check.json) file to:
+
+```text
+https://www.alexanderpeppe.com/aps-midi-prep-tool/update.json
+```
+
+When publishing a release, update at least `latest_version`, `download_url`,
+`release_notes_url`, and `published_at`.
 
 ## Build a Release AppImage
 
@@ -172,19 +189,33 @@ make appimage
 
 You can also run the default VS Code task, **Build AppImage**.
 
-The task creates `release/APSMidiPrepTool-<version>-<arch>.AppImage`, for example `release/APSMidiPrepTool-0.5.2-x86_64.AppImage`. Upload that file as the release artifact. The first build creates `.venv-appimage/`, installs the build requirements, downloads `appimagetool`, and packages the PySide6 app with PyInstaller.
+The task creates `release/APSMidiPrepTool-<version>-<arch>.AppImage`, for example `release/APSMidiPrepTool-0.5.3-x86_64.AppImage`. Upload that file as the release artifact. The first build creates `.venv-appimage/`, installs the build requirements, downloads `appimagetool`, and packages the PySide6 app with PyInstaller.
+
+For consistent File Inspection playback across platforms, bundle a redistributable SoundFont with the app as `aps_midi_prep_tool_app/soundfonts/default.sf2` or `default.sf3`. Runtime lookup prefers this bundled file before user environment variables or system SoundFonts. FluidR3 GM is MIT-licensed and sounds good, though it is large; a smaller redistributable piano-focused SoundFont is also suitable.
+
+For PyInstaller builds, include the bundled SoundFont data folder:
+
+```bash
+pyinstaller --add-data "aps_midi_prep_tool_app/soundfonts:aps_midi_prep_tool_app/soundfonts" aps_midi_prep_tool.py
+```
+
+On Windows, also include `fluidsynth.exe` and its required DLLs beside the app executable or in a bundled `bin` folder. The preview renderer will also honor `APS_MIDI_PREP_FLUIDSYNTH` and `APS_MIDI_PREP_SOUNDFONT` for local testing.
 
 By default, the AppImage build also bundles:
 
 - `mformat`, `mcopy`, `mdel`, `mren`, and `mdir` from `mtools`
 - Greaseweazle CLI as `gw`
+- FluidSynth plus the first available GM SoundFont found from common Linux locations
 
-The build machine needs `mtools`, `git`, and network access for the default bundle. To skip either bundled dependency, run:
+The build machine needs `mtools`, `fluidsynth`, a GM SoundFont, `git`, and network access for the default bundle. To skip bundled dependencies, run:
 
 ```bash
 BUNDLE_MTOOLS=0 make appimage
 BUNDLE_GREASEWEAZLE=0 make appimage
+BUNDLE_FLUIDSYNTH=0 make appimage
 ```
+
+To bundle a specific SoundFont for File Inspection previews, set `SOUNDFONT_PATH=/path/to/soundfont.sf2`.
 
 To pin Greaseweazle to a specific source or revision, set `GREASEWEAZLE_REQUIREMENT`, for example:
 

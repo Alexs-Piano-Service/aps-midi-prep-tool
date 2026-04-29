@@ -1,10 +1,13 @@
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import uuid
 import zlib
 from dataclasses import dataclass
@@ -14,6 +17,8 @@ from .eseq_pianodir import (
     PIANODIR_HEADER,
     PIANODIR_TARGET_FILE_SIZE,
     PIANODIR_TRACK_SIZE,
+    PIANODIR_TRACK_SOURCE_START,
+    PIANODIR_TRACK_SOURCE_END,
     PianodirTrackEntry,
     build_pianodir_bytes,
     build_eseq_order_key_from_path,
@@ -33,6 +38,15 @@ from .midi_metadata import (
 
 class FloppyImageError(Exception):
     """Raised when a floppy image cannot be loaded or edited."""
+
+
+class FloppyOperationCancelled(FloppyImageError):
+    """Raised when the user cancels a long floppy operation."""
+
+
+def _raise_if_cancelled(cancel_callback=None):
+    if cancel_callback is not None and cancel_callback():
+        raise FloppyOperationCancelled("Operation cancelled.")
 
 
 def _host_file_is_eseq(path):
@@ -73,6 +87,15 @@ class ImageListing:
 class YamahaRepairResult:
     note: str
     changed: bool
+
+
+@dataclass(frozen=True)
+class RecoveredFile:
+    image_path: str
+    data: bytes
+    kind: str
+    source_offset: int = -1
+    origin: str = ""
 
 
 @dataclass(frozen=True)
@@ -188,6 +211,19 @@ class GreaseweazleFloppySource:
         if extras:
             detail += ", " + ", ".join(extras)
         return f"Greaseweazle {self.drive} on {self.device_path} ({detail})"
+
+
+@dataclass(frozen=True)
+class ImageRecoverySource:
+    path: str
+    disk_format: DiskFormat | None = None
+
+    @property
+    def display_name(self):
+        name = os.path.basename(self.path)
+        if self.disk_format is None:
+            return f"{name} (autodetect)"
+        return f"{name} ({self.disk_format.label})"
 
 
 DISK_FORMATS = [
@@ -388,17 +424,54 @@ def _volume_label_for_mformat(label):
     return _normalize_label((label or "NO NAME").encode("ascii", errors="replace")).decode("ascii").strip()
 
 
-def _run_command(args, error_prefix):
-    result = subprocess.run(args, text=True, capture_output=True, check=False)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
+def _terminate_process(process):
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=2)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=2)
+        except Exception:
+            pass
+
+
+def _run_command(args, error_prefix, *, cancel_callback=None):
+    if cancel_callback is None:
+        result = subprocess.run(args, text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            if detail:
+                raise FloppyImageError(f"{error_prefix}: {detail}")
+            raise FloppyImageError(f"{error_prefix}.")
+        return result.stdout
+
+    _raise_if_cancelled(cancel_callback)
+    process = subprocess.Popen(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        while process.poll() is None:
+            _raise_if_cancelled(cancel_callback)
+            time.sleep(0.1)
+        stdout, stderr = process.communicate()
+    except FloppyOperationCancelled:
+        _terminate_process(process)
+        raise
+
+    if process.returncode != 0:
+        detail = (stderr or stdout or "").strip()
         if detail:
             raise FloppyImageError(f"{error_prefix}: {detail}")
         raise FloppyImageError(f"{error_prefix}.")
-    return result.stdout
+    return stdout
 
 
-def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None):
+def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None, cancel_callback=None):
+    _raise_if_cancelled(cancel_callback)
     process = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
@@ -409,22 +482,51 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None):
     )
 
     output_lines = []
+    line_queue = queue.Queue()
+    stream_done = object()
+
+    def _read_output():
+        try:
+            if process.stdout is not None:
+                for raw_line in process.stdout:
+                    line_queue.put(raw_line)
+        finally:
+            line_queue.put(stream_done)
+
+    reader = threading.Thread(target=_read_output, daemon=True)
+    reader.start()
 
     try:
-        if process.stdout is not None:
-            for raw_line in process.stdout:
-                line = raw_line.rstrip("\r\n")
-                stripped = line.strip()
-                if stripped:
-                    output_lines.append(stripped)
-                    if len(output_lines) > 40:
-                        output_lines = output_lines[-40:]
-                if line_callback is not None:
-                    line_callback(line)
+        while True:
+            _raise_if_cancelled(cancel_callback)
+            try:
+                raw_line = line_queue.get(timeout=0.1)
+            except queue.Empty:
+                if process.poll() is not None and not reader.is_alive():
+                    break
+                continue
+            if raw_line is stream_done:
+                break
+            line = raw_line.rstrip("\r\n")
+            stripped = line.strip()
+            if stripped:
+                output_lines.append(stripped)
+                if len(output_lines) > 40:
+                    output_lines = output_lines[-40:]
+            if line_callback is not None:
+                line_callback(line)
+            _raise_if_cancelled(cancel_callback)
         returncode = process.wait()
+    except FloppyOperationCancelled:
+        _terminate_process(process)
+        raise
+    except Exception:
+        _terminate_process(process)
+        raise
     finally:
         if process.stdout is not None:
             process.stdout.close()
+        reader.join(timeout=0.2)
 
     if returncode != 0:
         detail = "\n".join(output_lines).strip()
@@ -435,6 +537,46 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None):
 
 def _find_gw():
     return shutil.which("gw") or shutil.which("greaseweazle")
+
+
+def _dependency_command_message(command_name):
+    command = str(command_name or "").strip()
+    mtools_commands = {"mformat", "mcopy", "mdel", "mren", "mdir"}
+    if command in mtools_commands:
+        return (
+            f"Required mtools command '{command}' was not found. "
+            "Install mtools, or run an AppImage build that bundles mtools, then try again."
+        )
+    if command == "7z":
+        return (
+            "Required 7-Zip command '7z' was not found. "
+            "Install 7-Zip/p7zip so this image type can be inspected."
+        )
+    if command == "dd":
+        return (
+            "Required system command 'dd' was not found. "
+            "Direct USB floppy reads and writes on Linux need dd on PATH."
+        )
+    return f"Required command '{command}' was not found. Install it and make sure it is on PATH."
+
+
+def _missing_greaseweazle_message(action):
+    return (
+        f"Greaseweazle CLI was not found, so the app cannot {action}. "
+        "Install Greaseweazle or run an AppImage build that bundles it, and make sure "
+        "the command is available as 'gw' or 'greaseweazle'."
+    )
+
+
+def _supported_image_type_hint():
+    return "Supported floppy image types include IMG, BIN, IMA, and HFE."
+
+
+def _unsupported_image_type_message(output_ext, *, for_output=False):
+    ext = (output_ext or "").lower().lstrip(".")
+    label = ext.upper() if ext else "(none)"
+    action = "write" if for_output else "open"
+    return f"Unsupported image type '{label}'. The app cannot {action} that format. {_supported_image_type_hint()}"
 
 
 def _notify_progress(progress_callback, step, total, message):
@@ -733,7 +875,7 @@ def list_greaseweazle_devices():
 def _require_command(command_name):
     path = shutil.which(command_name)
     if not path:
-        raise FloppyImageError(f"Required command not found: {command_name}")
+        raise FloppyImageError(_dependency_command_message(command_name))
     return path
 
 
@@ -742,7 +884,10 @@ def _mformat_args_for_disk_format(disk_format):
         raise FloppyImageError("Invalid disk format.")
     args = MFORMAT_SIZE_OPTIONS.get(disk_format.key)
     if not args:
-        raise FloppyImageError(f"Unsupported disk format for image creation: {disk_format.label}")
+        raise FloppyImageError(
+            f"Unsupported disk format for image creation: {disk_format.label}. "
+            "Choose one of the IBM floppy formats listed in the dialog."
+        )
     return list(args)
 
 
@@ -752,17 +897,18 @@ def _write_image_direct(source_img, output_path, output_ext, disk_format):
         shutil.copy2(source_img, output_path)
         return
     if output_ext not in SUPPORTED_IMAGE_EXTENSIONS:
-        raise FloppyImageError(f"Unsupported output image type: {output_ext.upper()}")
+        raise FloppyImageError(_unsupported_image_type_message(output_ext, for_output=True))
     _gw_convert(source_img, output_path, disk_format.key)
 
 
-def create_blank_floppy_image(output_path, disk_format, volume_label="NO NAME"):
+def create_blank_floppy_image(output_path, disk_format, volume_label="NO NAME", cancel_callback=None):
     mformat = _require_command("mformat")
     output_path = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if os.path.exists(output_path):
         os.remove(output_path)
 
+    _raise_if_cancelled(cancel_callback)
     _run_command(
         [
             mformat,
@@ -775,18 +921,28 @@ def create_blank_floppy_image(output_path, disk_format, volume_label="NO NAME"):
             "::",
         ],
         f"Could not create a blank {disk_format.label} image",
+        cancel_callback=cancel_callback,
     )
+    _raise_if_cancelled(cancel_callback)
     read_image_listing(output_path)
     return output_path
 
 
-def _copy_host_file_into_image(target_img, host_path, image_path):
+def _write_empty_pianodir_to_image(target_img, temp_dir, metadata=None):
+    pianodir_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}_{PIANODIR_FILENAME}")
+    with open(pianodir_path, "wb") as handle:
+        handle.write(build_pianodir_bytes([], metadata=metadata))
+    _copy_host_file_into_image(target_img, pianodir_path, PIANODIR_FILENAME)
+
+
+def _copy_host_file_into_image(target_img, host_path, image_path, cancel_callback=None):
     if not os.path.isfile(host_path):
         raise FloppyImageError(f"File to add no longer exists: {host_path}")
     mcopy = _require_command("mcopy")
     _run_command(
         [mcopy, "-i", target_img, host_path, mtools_path(image_path)],
         f"Could not add {os.path.basename(host_path)} to image",
+        cancel_callback=cancel_callback,
     )
 
 
@@ -805,7 +961,7 @@ def create_floppy_images_from_files(
     progress_callback=None,
 ):
     if not file_specs:
-        raise FloppyImageError("There are no files to save into an image.")
+        raise FloppyImageError("There are no files to save into an image. Add MIDI or E-SEQ files first.")
 
     output_path = os.path.abspath(output_path)
     output_dir = os.path.dirname(output_path)
@@ -856,7 +1012,8 @@ def create_floppy_images_from_files(
 
             if current_count == 0:
                 raise FloppyImageError(
-                    f"'{display_name}' is too large to fit on a {disk_format.label} image."
+                    f"'{display_name}' is too large to fit on a {disk_format.label} image. "
+                    "Remove the file, choose a larger disk format, or split the set across multiple images."
                 )
 
             raw_images.append(current_img)
@@ -869,7 +1026,8 @@ def create_floppy_images_from_files(
             except FloppyImageError as exc:
                 if _is_image_capacity_error(exc):
                     raise FloppyImageError(
-                        f"'{display_name}' is too large to fit on a {disk_format.label} image."
+                        f"'{display_name}' is too large to fit on a {disk_format.label} image. "
+                        "Remove the file, choose a larger disk format, or split the set across multiple images."
                     ) from exc
                 raise
 
@@ -912,15 +1070,16 @@ def create_floppy_images_from_files(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _gw_convert(input_path, output_path, disk_format):
+def _gw_convert(input_path, output_path, disk_format, cancel_callback=None):
     gw = _find_gw()
     if not gw:
-        raise FloppyImageError("Greaseweazle CLI was not found; cannot convert this image format.")
+        raise FloppyImageError(_missing_greaseweazle_message("convert this image format"))
     if os.path.exists(output_path):
         os.remove(output_path)
     _run_command(
         [gw, "convert", f"--format={disk_format}", input_path, output_path],
         "Image conversion failed",
+        cancel_callback=cancel_callback,
     )
 
 
@@ -980,14 +1139,14 @@ def _gw_short_status(status_text):
     return status
 
 
-def _handle_gw_read_progress_line(progress_callback, state, line):
+def _handle_gw_track_progress_line(progress_callback, state, line, *, action="Reading"):
     clean_line = (line or "").strip()
     if not clean_line:
         return
     if clean_line.startswith("*** "):
         return
 
-    header_match = re.match(r"^Reading\s+(?P<trackspec>.+?)\s+revs=\d+$", clean_line)
+    header_match = re.match(r"^(?:Reading|Writing)\s+(?P<trackspec>.+?)(?:\s+revs=\d+)?$", clean_line)
     if header_match:
         total_tracks = _extract_gw_track_total(header_match.group("trackspec"))
         state["total_tracks"] = total_tracks
@@ -997,7 +1156,7 @@ def _handle_gw_read_progress_line(progress_callback, state, line):
                 progress_callback,
                 0,
                 total_tracks,
-                f"Reading floppy via Greaseweazle (0/{total_tracks} tracks)...",
+                f"{action} floppy via Greaseweazle (0/{total_tracks} tracks)...",
             )
         else:
             _notify_progress(progress_callback, 0, 0, clean_line)
@@ -1016,7 +1175,7 @@ def _handle_gw_read_progress_line(progress_callback, state, line):
         track_label = f"T{track_match.group('cyl')}.{track_match.group('head')}"
         status = _gw_short_status(track_match.group("status"))
         if total_tracks > 0:
-            message = f"Reading {track_label} ({completed_tracks}/{total_tracks})..."
+            message = f"{action} {track_label} ({completed_tracks}/{total_tracks})..."
             if status:
                 message = f"{message} {status}"
             _notify_progress(progress_callback, completed_tracks, total_tracks, message)
@@ -1037,10 +1196,18 @@ def _handle_gw_read_progress_line(progress_callback, state, line):
         _notify_progress(progress_callback, 0, 0, clean_line)
 
 
-def _gw_read_floppy(source, output_path, progress_callback=None):
+def _handle_gw_read_progress_line(progress_callback, state, line):
+    _handle_gw_track_progress_line(progress_callback, state, line, action="Reading")
+
+
+def _handle_gw_write_progress_line(progress_callback, state, line):
+    _handle_gw_track_progress_line(progress_callback, state, line, action="Writing")
+
+
+def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback=None):
     gw = _find_gw()
     if not gw:
-        raise FloppyImageError("Greaseweazle CLI was not found; cannot read from floppy drive.")
+        raise FloppyImageError(_missing_greaseweazle_message("read from a floppy drive"))
     if os.path.exists(output_path):
         os.remove(output_path)
 
@@ -1077,16 +1244,20 @@ def _gw_read_floppy(source, output_path, progress_callback=None):
         "Greaseweazle read failed",
         line_callback=_progress_line_callback,
         env=env,
+        cancel_callback=cancel_callback,
     )
     if progress_state["command_failed"]:
         detail = progress_state["command_failed"].split(":", 1)[1].strip()
-        raise FloppyImageError(f"Greaseweazle read failed: {detail}")
+        raise FloppyImageError(
+            f"Greaseweazle read failed: {detail}. "
+            "Check the selected drive, disk format, cable orientation, and that a readable disk is inserted."
+        )
 
 
-def _gw_write_floppy(source, input_path):
+def _gw_write_floppy(source, input_path, progress_callback=None, cancel_callback=None):
     gw = _find_gw()
     if not gw:
-        raise FloppyImageError("Greaseweazle CLI was not found; cannot write to floppy drive.")
+        raise FloppyImageError(_missing_greaseweazle_message("write to a floppy drive"))
 
     args = [
         gw,
@@ -1097,7 +1268,21 @@ def _gw_write_floppy(source, input_path):
     if source.device_path:
         args.append(f"--device={source.device_path}")
     args.append(input_path)
-    _run_command(args, "Greaseweazle write failed")
+
+    progress_state = {"total_tracks": 0, "seen_tracks": set()}
+
+    def _progress_line_callback(line):
+        _handle_gw_write_progress_line(progress_callback, progress_state, line)
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    _run_streaming_command(
+        args,
+        "Greaseweazle write failed",
+        line_callback=_progress_line_callback,
+        env=env,
+        cancel_callback=cancel_callback,
+    )
 
 
 def _normalize_image_path(path):
@@ -1236,13 +1421,14 @@ class _WindowsVolumeHandle:
         if self.write:
             _windows_device_io_control(self.handle, self.FSCTL_UNLOCK_VOLUME)
 
-    def write_file(self, input_path, progress_callback=None):
+    def write_file(self, input_path, progress_callback=None, cancel_callback=None):
         self._seek(0, "start of floppy device")
         total_size = os.path.getsize(input_path)
         written_total = 0
         chunk_size = 64 * 1024
         with open(input_path, "rb") as handle:
             while True:
+                _raise_if_cancelled(cancel_callback)
                 chunk = handle.read(chunk_size)
                 if not chunk:
                     break
@@ -1259,8 +1445,9 @@ class _WindowsVolumeHandle:
                     raise FloppyImageError(_windows_last_error_message(f"Could not write floppy device {self.path}"))
                 written_total += bytes_written.value
                 if progress_callback is not None and total_size > 0:
-                    progress = 4 + min(1, int((written_total / total_size) * 1))
-                    progress_callback(progress, 5, f"Writing USB floppy: {display_bytes(written_total)} of {display_bytes(total_size)}...")
+                    progress = min(100, int((written_total / total_size) * 100))
+                    progress_callback(progress, 100, f"Writing USB floppy: {display_bytes(written_total)} of {display_bytes(total_size)}...")
+        _raise_if_cancelled(cancel_callback)
         if not self._kernel32.FlushFileBuffers(self.handle):
             raise FloppyImageError(_windows_last_error_message(f"Could not flush floppy device {self.path}"))
 
@@ -1271,7 +1458,18 @@ def _open_block_device_for_read(device_path):
     try:
         return os.open(device_path, os.O_RDONLY)
     except OSError as exc:
-        raise FloppyImageError(f"Could not open floppy device {device_path}: {exc}") from exc
+        detail = f"Could not open floppy device {device_path}: {exc}"
+        lower = str(exc).lower()
+        if "permission denied" in lower:
+            detail += (
+                "\n\nDirect USB floppy reads require read permission for the block device. "
+                "Make sure the disk is not mounted and that your user has access to the device."
+            )
+        elif "no medium" in lower or "no media" in lower:
+            detail += "\n\nInsert a floppy disk and try again."
+        elif "busy" in lower:
+            detail += "\n\nClose programs using the disk, unmount it if needed, and try again."
+        raise FloppyImageError(detail) from exc
 
 
 def _close_block_device(device):
@@ -1281,10 +1479,13 @@ def _close_block_device(device):
         os.close(device)
 
 
-def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=None):
+def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=None, cancel_callback=None):
     if os.name == "nt":
         if not size_bytes:
-            raise FloppyImageError("Could not read Windows floppy device: unknown disk size.")
+            raise FloppyImageError(
+                "Could not read the Windows floppy device because its disk size could not be detected. "
+                "Insert a formatted 720K or 1.44M floppy, or use Greaseweazle with an explicit disk format."
+            )
         chunks = []
         remaining = int(size_bytes)
         cursor = 0
@@ -1292,10 +1493,14 @@ def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=
         last_progress = -1
         with _WindowsVolumeHandle(device_path, write=False) as volume:
             while remaining > 0:
+                _raise_if_cancelled(cancel_callback)
                 current_size = min(chunk_size, remaining)
                 chunk = volume.read_at(cursor, current_size, "floppy image")
                 if not chunk:
-                    raise FloppyImageError("Could not read floppy device: unexpected end of device.")
+                    raise FloppyImageError(
+                        "Could not read floppy device: the drive stopped returning data before the full disk was read. "
+                        "Check that a disk is inserted and that the selected format matches the disk."
+                    )
                 chunks.append(chunk)
                 cursor += len(chunk)
                 remaining -= len(chunk)
@@ -1308,32 +1513,128 @@ def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=
                             100,
                             f"Reading floppy image: {display_bytes(cursor)} of {display_bytes(size_bytes)}...",
                         )
+        _raise_if_cancelled(cancel_callback)
         return b"".join(chunks)
     raise FloppyImageError("Windows raw floppy byte reads are only available on Windows.")
 
 
-def _read_block_device(device_path, output_path, size_bytes):
+def _read_block_device(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None):
     if os.name == "nt":
-        data = _read_windows_block_device_bytes(device_path, size_bytes)
+        data = _read_windows_block_device_bytes(
+            device_path,
+            size_bytes,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
         with open(output_path, "wb") as output:
             output.write(data)
         return
 
-    dd = _require_command("dd")
-    args = [
-        dd,
-        f"if={device_path}",
-        f"of={output_path}",
-        "bs=1024",
-        "iflag=fullblock",
-        "status=none",
-    ]
-    if size_bytes and size_bytes % 1024 == 0:
-        args.append(f"count={size_bytes // 1024}")
-    _run_command(args, f"Could not read floppy device {device_path}")
+    total_size = int(size_bytes or 0)
+    copied = 0
+    chunk_size = 64 * 1024
+    try:
+        with open(device_path, "rb", buffering=0) as source, open(output_path, "wb") as output:
+            while True:
+                _raise_if_cancelled(cancel_callback)
+                if total_size:
+                    remaining = total_size - copied
+                    if remaining <= 0:
+                        break
+                    chunk = source.read(min(chunk_size, remaining))
+                else:
+                    chunk = source.read(chunk_size)
+                if not chunk:
+                    break
+                output.write(chunk)
+                copied += len(chunk)
+                if progress_callback is not None and total_size > 0:
+                    progress = min(70, int((copied / total_size) * 70))
+                    progress_callback(
+                        progress,
+                        100,
+                        f"Reading floppy image: {display_bytes(copied)} of {display_bytes(total_size)}...",
+                    )
+        if total_size and copied < total_size:
+            raise FloppyImageError(
+                "Could not read floppy device: the drive stopped returning data before the full disk was read. "
+                "Check that a disk is inserted and that the selected format matches the disk."
+            )
+    except OSError as exc:
+        raise FloppyImageError(f"Could not read floppy device {device_path}: {exc}") from exc
 
 
-def _write_block_device(input_path, device_path, progress_callback=None):
+def _read_device_chunk_for_recovery(device, offset, size):
+    if hasattr(device, "read_at"):
+        return device.read_at(offset, size, "floppy recovery image")
+    return os.pread(device, size, offset)
+
+
+def _read_block_device_recovery_image(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None):
+    total_size = int(size_bytes or 0)
+    if total_size <= 0:
+        total_size = _YAMAHA_TOTAL_SIZE
+
+    image = bytearray(total_size)
+    bad_ranges = []
+    chunk_size = 64 * 1024
+    sector_size = _YAMAHA_BYTES_PER_SECTOR
+    last_progress = -1
+    device = _open_block_device_for_read(device_path)
+    try:
+        offset = 0
+        while offset < total_size:
+            _raise_if_cancelled(cancel_callback)
+            current_size = min(chunk_size, total_size - offset)
+            try:
+                chunk = _read_device_chunk_for_recovery(device, offset, current_size)
+                if len(chunk) != current_size:
+                    raise FloppyImageError("short read")
+                image[offset:offset + current_size] = chunk
+            except Exception:
+                sector_end = offset + current_size
+                sector_offset = offset
+                while sector_offset < sector_end:
+                    _raise_if_cancelled(cancel_callback)
+                    sector_read_size = min(sector_size, sector_end - sector_offset)
+                    try:
+                        sector = _read_device_chunk_for_recovery(device, sector_offset, sector_read_size)
+                        if len(sector) != sector_read_size:
+                            raise FloppyImageError("short read")
+                        image[sector_offset:sector_offset + sector_read_size] = sector
+                    except Exception:
+                        bad_ranges.append((sector_offset, sector_read_size))
+                    sector_offset += sector_read_size
+
+            offset += current_size
+            if progress_callback is not None and total_size > 0:
+                progress = min(70, int((offset / total_size) * 70))
+                if progress > last_progress:
+                    last_progress = progress
+                    unreadable = ""
+                    if bad_ranges:
+                        unreadable = f" ({len(bad_ranges)} unreadable sector(s) filled with zeros)"
+                    progress_callback(
+                        progress,
+                        100,
+                        f"Copying full floppy image for recovery: {display_bytes(offset)} of {display_bytes(total_size)}{unreadable}...",
+                    )
+        _raise_if_cancelled(cancel_callback)
+    finally:
+        _close_block_device(device)
+
+    with open(output_path, "wb") as output:
+        output.write(image)
+
+    if bad_ranges:
+        return (
+            f"Full recovery image copied with {len(bad_ranges)} unreadable sector(s) replaced by zeros; "
+            "songs touching those sectors may be incomplete."
+        )
+    return "Full recovery image copied successfully."
+
+
+def _write_block_device(input_path, device_path, progress_callback=None, cancel_callback=None):
     if os.name == "nt":
         permission_hint = (
             "Direct USB floppy writes on Windows require permission to lock and write the raw drive. "
@@ -1344,17 +1645,22 @@ def _write_block_device(input_path, device_path, progress_callback=None):
             with _WindowsVolumeHandle(device_path, write=True) as volume:
                 volume.lock_for_write()
                 try:
-                    volume.write_file(input_path, progress_callback=progress_callback)
+                    volume.write_file(
+                        input_path,
+                        progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
+                    )
                 finally:
                     volume.unlock_after_write()
             return
+        except FloppyOperationCancelled:
+            raise
         except FloppyImageError as exc:
             detail = str(exc)
             if "Access is denied" in detail or "denied" in detail.lower() or "lock" in detail.lower():
                 detail = f"{detail}\n\n{permission_hint}"
             raise FloppyImageError(detail) from exc
 
-    dd = _require_command("dd")
     permission_hint = (
         "Direct USB floppy writes require write permission for the block device. "
         "On Linux, make sure the disk is not mounted and that your user has write "
@@ -1366,17 +1672,34 @@ def _write_block_device(input_path, device_path, progress_callback=None):
             f"Could not write floppy device {device_path}: permission denied.\n\n{permission_hint}"
         )
     try:
-        _run_command(
-            [
-                dd,
-                f"if={input_path}",
-                f"of={device_path}",
-                "bs=1024",
-                "conv=fsync",
-                "status=none",
-            ],
-            f"Could not write floppy device {device_path}",
-        )
+        total_size = os.path.getsize(input_path)
+        written = 0
+        chunk_size = 64 * 1024
+        with open(input_path, "rb") as source, open(device_path, "r+b", buffering=0) as target:
+            while True:
+                _raise_if_cancelled(cancel_callback)
+                chunk = source.read(chunk_size)
+                if not chunk:
+                    break
+                target.write(chunk)
+                written += len(chunk)
+                if progress_callback is not None and total_size > 0:
+                    progress = min(100, int((written / total_size) * 100))
+                    progress_callback(
+                        progress,
+                        100,
+                        f"Writing USB floppy: {display_bytes(written)} of {display_bytes(total_size)}...",
+                    )
+            target.flush()
+            os.fsync(target.fileno())
+        _raise_if_cancelled(cancel_callback)
+    except OSError as exc:
+        detail = f"Could not write floppy device {device_path}: {exc}"
+        if "Permission denied" in detail or "Text file busy" in detail or "Device or resource busy" in detail:
+            detail = f"{detail}\n\n{permission_hint}"
+        raise FloppyImageError(detail) from exc
+    except FloppyOperationCancelled:
+        raise
     except FloppyImageError as exc:
         detail = str(exc)
         if "Permission denied" in detail or "Text file busy" in detail or "Device or resource busy" in detail:
@@ -1754,11 +2077,12 @@ def _fat12_geometry_from_layout(layout):
     )
 
 
-def _read_device_exact(device, offset, size, label):
+def _read_device_exact(device, offset, size, label, cancel_callback=None):
     chunks = []
     remaining = int(size)
     cursor = int(offset)
     while remaining > 0:
+        _raise_if_cancelled(cancel_callback)
         try:
             if hasattr(device, "read_at"):
                 chunk = device.read_at(cursor, remaining, label)
@@ -1767,16 +2091,22 @@ def _read_device_exact(device, offset, size, label):
         except OSError as exc:
             raise FloppyImageError(f"Could not read {label}: {exc}") from exc
         if not chunk:
-            raise FloppyImageError(f"Could not read {label}: unexpected end of device.")
+            raise FloppyImageError(
+                f"Could not read {label}: the floppy stopped returning data before the requested sector was read. "
+                "Check the disk and try again, or use Greaseweazle for a lower-level read."
+            )
         chunks.append(chunk)
         cursor += len(chunk)
         remaining -= len(chunk)
+    _raise_if_cancelled(cancel_callback)
     return b"".join(chunks)
 
 
-def _try_read_device_exact(device, offset, size):
+def _try_read_device_exact(device, offset, size, cancel_callback=None):
     try:
-        return _read_device_exact(device, offset, size, "floppy sector")
+        return _read_device_exact(device, offset, size, "floppy sector", cancel_callback=cancel_callback)
+    except FloppyOperationCancelled:
+        raise
     except FloppyImageError:
         return None
 
@@ -1807,7 +2137,10 @@ def _iter_root_file_entries(root_dir):
         if attr & 0x08:
             continue
         if attr & 0x10:
-            raise FloppyImageError("Fast USB floppy read does not support subdirectories.")
+            raise FloppyImageError(
+                "Fast USB floppy read does not support disks with subdirectories. "
+                "Use image loading or Greaseweazle for this disk."
+            )
 
         name = _decode_dos_directory_name(entry[:11])
         if not name:
@@ -1848,13 +2181,13 @@ def _fat12_cluster_chain(fat, first_cluster, size, geometry):
         if next_cluster >= 0xFF8:
             break
         if next_cluster == 0xFF7:
-            raise FloppyImageError("FAT12 cluster chain contains a bad cluster marker.")
+            raise FloppyImageError("FAT12 cluster chain contains a bad cluster marker; the disk or image may be damaged.")
         if next_cluster < 2:
             break
         cluster = next_cluster
 
     if len(clusters) < needed_clusters:
-        raise FloppyImageError("FAT12 cluster chain ended before the file data was complete.")
+        raise FloppyImageError("FAT12 cluster chain ended before the file data was complete; the disk or image may be damaged.")
     return clusters[:needed_clusters]
 
 
@@ -1869,7 +2202,7 @@ def _fat12_cluster_chain_from_start(fat, first_cluster):
         if next_cluster >= 0xFF8:
             break
         if next_cluster == 0xFF7:
-            raise FloppyImageError("FAT12 cluster chain contains a bad cluster marker.")
+            raise FloppyImageError("FAT12 cluster chain contains a bad cluster marker; the disk or image may be damaged.")
         if next_cluster < 2:
             break
         cluster = next_cluster
@@ -1886,7 +2219,7 @@ def _read_cluster_chain_from_image(data, geometry, clusters, size):
         offset = _cluster_offset(geometry, cluster)
         end = offset + geometry.cluster_size
         if offset < geometry.data_offset or end > len(data):
-            raise FloppyImageError("A file points outside the floppy data area.")
+            raise FloppyImageError("A file points outside the floppy data area; the FAT directory appears corrupt.")
         output.extend(data[offset:end])
         if len(output) >= size:
             break
@@ -1959,17 +2292,23 @@ def _read_fat12_image_context(img_path):
 
     geometry = _geometry_from_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR])
     if geometry is None:
-        raise FloppyImageError("Could not parse the FAT12 boot sector for this image.")
+        raise FloppyImageError(
+            "Could not parse a FAT12 boot sector in this image. "
+            "The file may not be an IBM/Yamaha floppy image, or it may need to be read with Greaseweazle first."
+        )
     if len(data) < geometry.total_size:
-        raise FloppyImageError("The floppy image ended before the FAT12 data area was complete.")
+        raise FloppyImageError(
+            "The floppy image ended before the FAT12 data area was complete. "
+            "The image appears truncated or the selected disk format is wrong."
+        )
 
     fat = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size]
     if len(fat) != geometry.fat_size:
-        raise FloppyImageError("Could not read the FAT12 allocation table from this image.")
+        raise FloppyImageError("Could not read the FAT12 allocation table from this image; the image may be corrupt.")
 
     root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
     if len(root_dir) != geometry.root_size:
-        raise FloppyImageError("Could not read the FAT12 root directory from this image.")
+        raise FloppyImageError("Could not read the FAT12 root directory from this image; the image may be corrupt.")
 
     return data, geometry, fat, root_dir
 
@@ -2142,11 +2481,17 @@ def _reconstruct_yamaha_root_dir_from_pianodir(data):
     return bytes(root_dir)
 
 
-def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progress_callback=None):
+def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None):
     device = _open_block_device_for_read(device_path)
     try:
+        _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 0, 100, "Reading floppy directory...")
-        sector0 = _try_read_device_exact(device, 0, _YAMAHA_BYTES_PER_SECTOR) or b"\x00" * _YAMAHA_BYTES_PER_SECTOR
+        sector0 = _try_read_device_exact(
+            device,
+            0,
+            _YAMAHA_BYTES_PER_SECTOR,
+            cancel_callback=cancel_callback,
+        ) or b"\x00" * _YAMAHA_BYTES_PER_SECTOR
         geometry = _geometry_from_boot_sector(sector0)
         repair_result = YamahaRepairResult("Fast USB floppy read: valid FAT12 boot sector present.", False)
         boot = sector0
@@ -2163,6 +2508,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                 ),
             )
             for layout in candidate_layouts:
+                _raise_if_cancelled(cancel_callback)
                 candidate_geometry = _fat12_geometry_from_layout(layout)
                 if size_bytes and candidate_geometry.total_size > size_bytes:
                     continue
@@ -2170,11 +2516,13 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                     device,
                     candidate_geometry.fat_offset,
                     candidate_geometry.fat_area_size,
+                    cancel_callback=cancel_callback,
                 )
                 candidate_root = _try_read_device_exact(
                     device,
                     candidate_geometry.root_offset,
                     candidate_geometry.root_size,
+                    cancel_callback=cancel_callback,
                 )
                 if candidate_fat is None or candidate_root is None:
                     continue
@@ -2194,7 +2542,10 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                 matched_layout = layout
                 break
             if geometry is None or matched_layout is None:
-                raise FloppyImageError("Fast USB floppy read only supports valid FAT12 disks or Yamaha protected FAT12 disks.")
+                raise FloppyImageError(
+                    "Fast USB floppy read only supports valid FAT12 disks or Yamaha protected FAT12 disks. "
+                    "If this is a non-FAT disk or a difficult original, try reading it with Greaseweazle."
+                )
             _notify_progress(progress_callback, 10, 100, "Yamaha protected disk recognized; creating working copy...")
             serial = zlib.crc32(fat_area + root_dir) & 0xFFFFFFFF
             boot = _build_standard_fat12_boot_sector(matched_layout, serial, _find_volume_label(root_dir))
@@ -2204,12 +2555,27 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             )
 
         if size_bytes and geometry.total_size > size_bytes:
-            raise FloppyImageError("The detected FAT12 geometry is larger than the selected floppy device.")
+            raise FloppyImageError(
+                "The detected FAT12 geometry is larger than the selected floppy device. "
+                "Check that the inserted disk matches the selected drive/format."
+            )
 
         if fat_area is None:
-            fat_area = _read_device_exact(device, geometry.fat_offset, geometry.fat_area_size, "floppy FAT sectors")
+            fat_area = _read_device_exact(
+                device,
+                geometry.fat_offset,
+                geometry.fat_area_size,
+                "floppy FAT sectors",
+                cancel_callback=cancel_callback,
+            )
         if root_dir is None:
-            root_dir = _read_device_exact(device, geometry.root_offset, geometry.root_size, "floppy root directory")
+            root_dir = _read_device_exact(
+                device,
+                geometry.root_offset,
+                geometry.root_size,
+                "floppy root directory",
+                cancel_callback=cancel_callback,
+            )
         if not repair_result.changed:
             _notify_progress(progress_callback, 10, 100, "Reading floppy file map...")
 
@@ -2224,6 +2590,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
         file_chains = []
         _notify_progress(progress_callback, 20, 100, f"Planning read for {len(file_entries)} file(s)...")
         for entry in file_entries:
+            _raise_if_cancelled(cancel_callback)
             clusters = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
             file_chains.append((entry, clusters))
 
@@ -2255,18 +2622,21 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
         last_progress = 25
         chunk_size = max(geometry.cluster_size, 16 * 1024)
         for start_cluster, end_cluster in cluster_runs:
+            _raise_if_cancelled(cancel_callback)
             offset = geometry.data_offset + ((start_cluster - 2) * geometry.cluster_size)
             run_size = ((end_cluster - start_cluster) + 1) * geometry.cluster_size
             if offset < geometry.data_offset or offset + run_size > total_size:
-                raise FloppyImageError("A file points outside the floppy data area.")
+                raise FloppyImageError("A file points outside the floppy data area; the FAT directory appears corrupt.")
             run_cursor = 0
             while run_cursor < run_size:
+                _raise_if_cancelled(cancel_callback)
                 current_size = min(chunk_size, run_size - run_cursor)
                 chunk = _read_device_exact(
                     device,
                     offset + run_cursor,
                     current_size,
                     f"clusters {start_cluster}-{end_cluster}",
+                    cancel_callback=cancel_callback,
                 )
                 image[offset + run_cursor:offset + run_cursor + len(chunk)] = chunk
                 run_cursor += len(chunk)
@@ -2283,9 +2653,11 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         )
 
         _notify_progress(progress_callback, 97, 100, "Preparing floppy contents...")
+        _raise_if_cancelled(cancel_callback)
 
         with open(output_path, "wb") as handle:
             handle.write(image)
+        _raise_if_cancelled(cancel_callback)
         return repair_result
     finally:
         _close_block_device(device)
@@ -2348,7 +2720,10 @@ def prepare_yamaha_bytes(data, output_path):
         repaired = boot + data[bytes_per_sector:]
 
     if len(repaired) != expected_size:
-        raise FloppyImageError("FAT12 repair produced an unexpected image size.")
+        raise FloppyImageError(
+            "FAT12 repair produced an unexpected image size. "
+            "The source may not match a supported Yamaha/IBM floppy layout."
+        )
 
     if detection.get("root_dir") is not None:
         root_offset = int(detection["root_offset"])
@@ -2378,6 +2753,407 @@ def _looks_like_editable_fat_image(img_path):
         return True
     except FloppyImageError:
         return False
+
+
+def _is_probably_pianodir_bytes(data):
+    return len(data) >= len(PIANODIR_HEADER) and data[:len(PIANODIR_HEADER)] == PIANODIR_HEADER
+
+
+def _padded_pianodir_bytes(data):
+    payload = bytes(data or b"")[:PIANODIR_TARGET_FILE_SIZE]
+    if len(payload) < PIANODIR_TARGET_FILE_SIZE:
+        payload += b"\x00" * (PIANODIR_TARGET_FILE_SIZE - len(payload))
+    return payload
+
+
+def _valid_recovery_filename(name, fallback):
+    normalized = _normalize_image_path(name or "").upper()
+    basename = os.path.basename(normalized)
+    if not basename or basename in {".", ".."}:
+        return fallback
+    stem, ext = os.path.splitext(basename)
+    stem = re.sub(r"[^A-Z0-9_$~!#%&'{}()@^`-]", "_", stem)[:8].strip("._ ")
+    ext = re.sub(r"[^A-Z0-9_$~!#%&'{}()@^`-]", "", ext.lstrip("."))[:3]
+    if not stem:
+        return fallback
+    return f"{stem}.{ext}" if ext else stem
+
+
+def _unique_recovery_path(preferred_path, used_paths, fallback_prefix, extension, index):
+    fallback = f"{fallback_prefix}{index:03d}.{extension}"
+    candidate = _valid_recovery_filename(preferred_path, fallback)
+    stem, ext = os.path.splitext(candidate)
+    if not ext and extension:
+        ext = f".{extension}"
+    if not stem:
+        stem = fallback_prefix
+    counter = 1
+    unique = f"{stem[:8]}{ext[:4]}".upper()
+    while unique.upper() in used_paths or is_pianodir_path(unique):
+        suffix = str(counter)
+        unique_stem = f"{stem[:max(1, 8 - len(suffix))]}{suffix}"
+        unique = f"{unique_stem}{ext[:4]}".upper()
+        counter += 1
+    used_paths.add(unique.upper())
+    return unique
+
+
+def _is_probably_eseq_bytes(data):
+    return len(data) >= 0x77 and data[7:15] == b"COM-ESEQ"
+
+
+def _eseq_declared_size(data, start):
+    if start < 0 or start + 0x77 > len(data):
+        return 0
+    declared = int.from_bytes(data[start + 3:start + 7], "little")
+    if 0x77 <= declared <= len(data) - start:
+        return declared
+    stream_length = int.from_bytes(data[start + 0x1F:start + 0x23], "little") if start + 0x23 <= len(data) else 0
+    if stream_length > 0:
+        stream_end = 0x77 + stream_length
+        if 0x77 <= stream_end <= len(data) - start:
+            return stream_end
+    return 0
+
+
+def _eseq_recovery_filename(data, fallback_index):
+    fallback = f"REC{fallback_index:03d}.FIL"
+    if len(data) >= 0x32:
+        name = _decode_dos_directory_name(data[0x27:0x32])
+        if name:
+            stem, ext = os.path.splitext(name)
+            if not ext:
+                name = f"{stem}.FIL"
+            return _valid_recovery_filename(name, fallback)
+    return fallback
+
+
+def _extract_midi_blob_for_recovery(data, start):
+    if start < 0 or start + 14 > len(data) or data[start:start + 4] != b"MThd":
+        return None
+    header_size = int.from_bytes(data[start + 4:start + 8], "big")
+    if header_size < 6 or start + 8 + header_size > len(data):
+        return None
+
+    header = data[start + 8:start + 8 + header_size]
+    fmt = int.from_bytes(header[0:2], "big")
+    declared_tracks = int.from_bytes(header[2:4], "big")
+    division = int.from_bytes(header[4:6], "big")
+    if fmt > 2 or declared_tracks <= 0 or declared_tracks > 128 or division == 0:
+        return None
+
+    cursor = start + 8 + header_size
+    chunks = []
+    track_count = 0
+    while cursor + 8 <= len(data) and track_count < declared_tracks:
+        chunk_type = data[cursor:cursor + 4]
+        chunk_size = int.from_bytes(data[cursor + 4:cursor + 8], "big")
+        chunk_end = cursor + 8 + chunk_size
+        if chunk_size < 0 or chunk_end > len(data):
+            break
+        chunk = data[cursor:chunk_end]
+        cursor = chunk_end
+        if chunk_type == b"MTrk":
+            chunks.append(chunk)
+            track_count += 1
+        elif track_count == 0 and chunk_type.isalpha():
+            continue
+        else:
+            break
+
+    if track_count <= 0:
+        return None
+
+    recovered_format = fmt if track_count > 1 else 0
+    recovered_header = (
+        b"MThd"
+        + (6).to_bytes(4, "big")
+        + int(recovered_format).to_bytes(2, "big")
+        + int(track_count).to_bytes(2, "big")
+        + int(division).to_bytes(2, "big")
+    )
+    return recovered_header + b"".join(chunks)
+
+
+def _recover_files_from_fat_context(data, geometry):
+    files = []
+    if len(data) < geometry.root_offset + geometry.root_size:
+        return files
+    if len(data) < geometry.fat_offset + geometry.fat_size:
+        return files
+
+    fat = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size]
+    root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
+    for entry in _iter_fat_directory_entries(root_dir):
+        if entry["attr"] & 0x10:
+            continue
+        name = _valid_recovery_filename(entry["name"], "")
+        if not name:
+            continue
+        size = int(entry["size"] or 0)
+        if size <= 0:
+            continue
+        try:
+            clusters = _fat12_cluster_chain(fat, entry["cluster"], size, geometry)
+            payload = _read_cluster_chain_from_image(data, geometry, clusters, size)
+        except FloppyImageError:
+            start_offset = _cluster_offset(geometry, entry["cluster"])
+            if start_offset < geometry.data_offset or start_offset >= len(data):
+                continue
+            payload = data[start_offset:min(len(data), start_offset + size)]
+
+        if is_pianodir_path(name) and _is_probably_pianodir_bytes(payload):
+            files.append(
+                RecoveredFile(
+                    PIANODIR_FILENAME,
+                    _padded_pianodir_bytes(payload),
+                    "PIANODIR",
+                    _cluster_offset(geometry, entry["cluster"]),
+                    "fat",
+                )
+            )
+        elif _is_probably_eseq_bytes(payload):
+            files.append(RecoveredFile(name, payload, "E-SEQ", _cluster_offset(geometry, entry["cluster"]), "fat"))
+        elif payload[:4] == b"MThd":
+            midi_payload = _extract_midi_blob_for_recovery(payload, 0) or payload
+            files.append(RecoveredFile(name, midi_payload, "MIDI", _cluster_offset(geometry, entry["cluster"]), "fat"))
+    return files
+
+
+def _geometry_for_disk_format_hint(disk_format):
+    if not isinstance(disk_format, DiskFormat):
+        return None
+    for layout in _PROTECTED_FAT12_LAYOUTS:
+        if _layout_total_size(layout) == disk_format.size_bytes:
+            return _fat12_geometry_from_layout(layout)
+    return None
+
+
+def _recovery_geometries_for_data(data, disk_format_hint=None):
+    geometries = []
+    hinted_geometry = _geometry_for_disk_format_hint(disk_format_hint)
+    if hinted_geometry is not None and hinted_geometry.total_size <= len(data):
+        geometries.append(hinted_geometry)
+    geometry = _geometry_from_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR])
+    if geometry is not None and all(existing.total_size != geometry.total_size for existing in geometries):
+        geometries.append(geometry)
+    for layout in _PROTECTED_FAT12_LAYOUTS:
+        candidate = _fat12_geometry_from_layout(layout)
+        if candidate.total_size <= len(data) and all(existing.total_size != candidate.total_size for existing in geometries):
+            geometries.append(candidate)
+    if len(data) >= _YAMAHA_TOTAL_SIZE and all(existing.total_size != _YAMAHA_TOTAL_SIZE for existing in geometries):
+        geometries.append(_yamaha_720_geometry())
+    return geometries
+
+
+def _carve_recovery_files_from_bytes(data):
+    files = []
+    pianodir_offset = data.find(PIANODIR_HEADER)
+    if pianodir_offset >= 0:
+        pianodir = data[pianodir_offset:pianodir_offset + PIANODIR_TARGET_FILE_SIZE]
+        files.append(RecoveredFile(PIANODIR_FILENAME, _padded_pianodir_bytes(pianodir), "PIANODIR", pianodir_offset, "carve"))
+
+    eseq_index = 1
+    search_start = 0
+    eseq_starts = set()
+    while True:
+        marker = data.find(b"COM-ESEQ", search_start)
+        if marker < 0:
+            break
+        start = marker - 7
+        search_start = marker + 1
+        if start < 0 or start in eseq_starts:
+            continue
+        eseq_starts.add(start)
+        size = _eseq_declared_size(data, start)
+        if size <= 0:
+            next_marker = data.find(b"COM-ESEQ", marker + 1)
+            following = next_marker - 7 if next_marker >= 7 else len(data)
+            size = min(following - start, 256 * 1024)
+        if size < 0x77:
+            continue
+        payload = data[start:min(len(data), start + size)]
+        if not _is_probably_eseq_bytes(payload):
+            continue
+        files.append(RecoveredFile(_eseq_recovery_filename(payload, eseq_index), payload, "E-SEQ", start, "carve"))
+        eseq_index += 1
+
+    midi_index = 1
+    search_start = 0
+    while True:
+        start = data.find(b"MThd", search_start)
+        if start < 0:
+            break
+        search_start = start + 1
+        payload = _extract_midi_blob_for_recovery(data, start)
+        if not payload:
+            continue
+        files.append(RecoveredFile(f"REC{midi_index:03d}.MID", payload, "MIDI", start, "carve"))
+        midi_index += 1
+
+    return files
+
+
+def _recovered_file_identity_key(item, payload):
+    if item.kind == "E-SEQ" and len(payload) >= PIANODIR_TRACK_SOURCE_END:
+        return (item.kind, bytes(payload[PIANODIR_TRACK_SOURCE_START:PIANODIR_TRACK_SOURCE_END]))
+    return None
+
+
+def _dedupe_recovered_files(files):
+    selected = []
+    seen_payloads = set()
+    seen_offsets = {}
+    seen_identity_keys = {}
+    used_paths = set()
+    counters = {"MIDI": 1, "E-SEQ": 1, "PIANODIR": 1, "FILE": 1}
+
+    def priority(item):
+        kind_rank = {"PIANODIR": 0, "E-SEQ": 1, "MIDI": 2}.get(item.kind, 3)
+        origin_rank = 1 if item.origin == "carve" else 0
+        named_rank = 1 if os.path.basename(item.image_path).upper().startswith("REC") else 0
+        size_rank = len(item.data or b"")
+        return (kind_rank, origin_rank, named_rank, item.source_offset if item.source_offset >= 0 else 10**9, size_rank)
+
+    for item in sorted(files, key=priority):
+        payload = bytes(item.data or b"")
+        if not payload:
+            continue
+        offset_key = None
+        if item.kind in {"E-SEQ", "MIDI"} and item.source_offset >= 0:
+            offset_key = (item.kind, item.source_offset)
+            if offset_key in seen_offsets:
+                continue
+        identity_key = _recovered_file_identity_key(item, payload)
+        if identity_key is not None and identity_key in seen_identity_keys:
+            continue
+        payload_key = (item.kind, len(payload), zlib.crc32(payload) & 0xFFFFFFFF)
+        if payload_key in seen_payloads and item.kind != "PIANODIR":
+            continue
+        if item.kind == "PIANODIR":
+            if PIANODIR_FILENAME.upper() in used_paths:
+                continue
+            image_path = PIANODIR_FILENAME
+            used_paths.add(image_path.upper())
+        elif item.kind == "MIDI":
+            index = counters["MIDI"]
+            image_path = _unique_recovery_path(item.image_path, used_paths, "REC", "MID", index)
+            counters["MIDI"] += 1
+        elif item.kind == "E-SEQ":
+            index = counters["E-SEQ"]
+            image_path = _unique_recovery_path(item.image_path, used_paths, "REC", "FIL", index)
+            counters["E-SEQ"] += 1
+        else:
+            index = counters["FILE"]
+            image_path = _unique_recovery_path(item.image_path, used_paths, "REC", "BIN", index)
+            counters["FILE"] += 1
+        seen_payloads.add(payload_key)
+        if offset_key is not None:
+            seen_offsets[offset_key] = image_path
+        if identity_key is not None:
+            seen_identity_keys[identity_key] = image_path
+        selected.append(RecoveredFile(image_path, payload, item.kind, item.source_offset, item.origin))
+    return selected
+
+
+def _preferred_recovery_formats_for_data(data, files, disk_format_hint=None):
+    exact = DISK_FORMAT_BY_SIZE.get(len(data))
+    total_payload = sum(len(item.data or b"") for item in files)
+    formats = []
+    if isinstance(disk_format_hint, DiskFormat):
+        formats.append(disk_format_hint)
+    if exact is not None:
+        if exact not in formats:
+            formats.append(exact)
+    default = DISK_FORMAT_BY_SIZE.get(_YAMAHA_TOTAL_SIZE, DISK_FORMATS[0])
+    if default not in formats:
+        formats.append(default)
+    for disk_format in sorted(DISK_FORMATS, key=lambda item: item.size_bytes):
+        if disk_format in formats:
+            continue
+        if disk_format.size_bytes >= total_payload + 32 * 1024:
+            formats.append(disk_format)
+    for disk_format in DISK_FORMATS:
+        if disk_format not in formats:
+            formats.append(disk_format)
+    return formats
+
+
+def _write_recovered_files_to_image(
+    files,
+    temp_dir,
+    source_data,
+    disk_format_hint=None,
+    progress_callback=None,
+    cancel_callback=None,
+):
+    if not files:
+        raise FloppyImageError(
+            "Recovery did not find any PIANODIR.FIL, MIDI, or E-SEQ song data in the copied image."
+        )
+
+    last_error = None
+    files_dir = os.path.join(temp_dir, "recovered_files")
+    os.makedirs(files_dir, exist_ok=True)
+
+    for disk_format in _preferred_recovery_formats_for_data(source_data, files, disk_format_hint=disk_format_hint):
+        _raise_if_cancelled(cancel_callback)
+        recovered_img = os.path.join(temp_dir, f"recovered_{disk_format.key.replace('.', '_')}.img")
+        try:
+            _notify_progress(progress_callback, 82, 100, f"Creating recovered {disk_format.label} image...")
+            create_blank_floppy_image(
+                recovered_img,
+                disk_format,
+                volume_label="RECOVER",
+                cancel_callback=cancel_callback,
+            )
+            total = len(files)
+            for index, item in enumerate(files, start=1):
+                _raise_if_cancelled(cancel_callback)
+                host_path = os.path.join(files_dir, f"{uuid.uuid4().hex}_{os.path.basename(item.image_path)}")
+                with open(host_path, "wb") as handle:
+                    handle.write(item.data)
+                _notify_progress(
+                    progress_callback,
+                    82 + int((index / max(1, total)) * 15),
+                    100,
+                    f"Adding recovered file {index} of {total}: {item.image_path}...",
+                )
+                _copy_host_file_into_image(
+                    recovered_img,
+                    host_path,
+                    item.image_path,
+                    cancel_callback=cancel_callback,
+                )
+            _notify_progress(progress_callback, 98, 100, "Verifying recovered image...")
+            read_image_listing(recovered_img)
+            return recovered_img, disk_format
+        except FloppyOperationCancelled:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if os.path.exists(recovered_img):
+                os.remove(recovered_img)
+
+    detail = f" Last error: {last_error}" if last_error else ""
+    raise FloppyImageError(
+        "Recovery found data, but could not build a recovered floppy image. "
+        "The recovered files may be too large for the supported disk formats or mtools could not write them."
+        + detail
+    )
+
+
+def _recover_files_from_raw_image_bytes(data, disk_format_hint=None):
+    recovered = []
+    for geometry in _recovery_geometries_for_data(data, disk_format_hint=disk_format_hint):
+        try:
+            recovered.extend(_recover_files_from_fat_context(data, geometry))
+        except FloppyOperationCancelled:
+            raise
+        except Exception:
+            continue
+    recovered.extend(_carve_recovery_files_from_bytes(data))
+    return _dedupe_recovered_files(recovered)
 
 
 class FloppyImageSession:
@@ -2416,24 +3192,37 @@ class FloppyImageSession:
         os.makedirs(self.patched_dir, exist_ok=True)
 
     @classmethod
-    def load(cls, source_path, progress_callback=None):
+    def load(cls, source_path, progress_callback=None, cancel_callback=None):
         source_path = os.path.abspath(source_path)
         source_ext = image_extension(source_path)
         if source_ext not in SUPPORTED_IMAGE_EXTENSIONS:
-            raise FloppyImageError("Unsupported image type.")
+            raise FloppyImageError(_unsupported_image_type_message(source_ext))
 
         temp_dir = tempfile.mkdtemp(prefix="aps_floppy_image_")
         try:
+            _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 0, 4, "Preparing floppy image...")
             if source_ext in RAW_IMAGE_EXTENSIONS:
-                return cls._load_raw(source_path, source_ext, temp_dir, progress_callback=progress_callback)
-            return cls._load_converted(source_path, source_ext, temp_dir, progress_callback=progress_callback)
+                return cls._load_raw(
+                    source_path,
+                    source_ext,
+                    temp_dir,
+                    progress_callback=progress_callback,
+                    cancel_callback=cancel_callback,
+                )
+            return cls._load_converted(
+                source_path,
+                source_ext,
+                temp_dir,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
 
     @classmethod
-    def load_floppy(cls, drive_info, progress_callback=None):
+    def load_floppy(cls, drive_info, progress_callback=None, cancel_callback=None):
         if not isinstance(drive_info, FloppyDriveInfo):
             raise FloppyImageError("Invalid floppy drive selection.")
 
@@ -2448,9 +3237,12 @@ class FloppyImageSession:
                         working_img,
                         drive_info.size_bytes,
                         progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
                     )
                     disk_format = _disk_format_for_image(working_img)
                     read_image_listing(working_img)
+                except FloppyOperationCancelled:
+                    raise
                 except Exception as fast_exc:
                     _notify_progress(
                         progress_callback,
@@ -2462,7 +3254,9 @@ class FloppyImageSession:
                         drive_info.path,
                         drive_info.size_bytes,
                         progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
                     )
+                    _raise_if_cancelled(cancel_callback)
                     _notify_progress(progress_callback, 75, 100, "Creating working copy...")
                     repair_result = prepare_yamaha_bytes(raw_data, working_img)
                     repair_result = YamahaRepairResult(
@@ -2479,9 +3273,12 @@ class FloppyImageSession:
                         working_img,
                         drive_info.size_bytes,
                         progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
                     )
                     disk_format = _disk_format_for_image(working_img)
                     read_image_listing(working_img)
+                except FloppyOperationCancelled:
+                    raise
                 except Exception as fast_exc:
                     _notify_progress(
                         progress_callback,
@@ -2489,7 +3286,14 @@ class FloppyImageSession:
                         100,
                         f"Reading full floppy image from {drive_info.path}...",
                     )
-                    _read_block_device(drive_info.path, source_copy, drive_info.size_bytes)
+                    _read_block_device(
+                        drive_info.path,
+                        source_copy,
+                        drive_info.size_bytes,
+                        progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
+                    )
+                    _raise_if_cancelled(cancel_callback)
                     _notify_progress(progress_callback, 75, 100, "Creating working copy...")
                     repair_result = prepare_yamaha_image(source_copy, working_img)
                     repair_result = YamahaRepairResult(
@@ -2500,6 +3304,7 @@ class FloppyImageSession:
                     _notify_progress(progress_callback, 90, 100, "Scanning floppy contents...")
                     read_image_listing(working_img)
             _notify_progress(progress_callback, 100, 100, "Opening floppy contents...")
+            _raise_if_cancelled(cancel_callback)
             return cls(
                 drive_info.path,
                 "img",
@@ -2516,7 +3321,7 @@ class FloppyImageSession:
             raise
 
     @classmethod
-    def load_greaseweazle(cls, gw_source, progress_callback=None):
+    def load_greaseweazle(cls, gw_source, progress_callback=None, cancel_callback=None):
         if not isinstance(gw_source, GreaseweazleFloppySource):
             raise FloppyImageError("Invalid Greaseweazle source selection.")
 
@@ -2536,22 +3341,34 @@ class FloppyImageSession:
                 total_steps,
                 f"Reading floppy via Greaseweazle drive {gw_source.drive}...",
             )
-            _gw_read_floppy(gw_source, source_capture, progress_callback=progress_callback)
+            _gw_read_floppy(
+                gw_source,
+                source_capture,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
             progress_step += 1
             if gw_source.archival_quality:
                 _notify_progress(progress_callback, progress_step, total_steps, "Converting archival SCP capture...")
-                _gw_convert(source_capture, source_copy, gw_source.disk_format.key)
+                _gw_convert(source_capture, source_copy, gw_source.disk_format.key, cancel_callback=cancel_callback)
                 progress_step += 1
+            _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, progress_step, total_steps, "Preparing editable floppy image...")
             repair_result = prepare_yamaha_image(source_copy, working_img)
             progress_step += 1
+            _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, progress_step, total_steps, "Detecting floppy format...")
             disk_format = _disk_format_for_image(working_img)
             if disk_format.size_bytes != gw_source.disk_format.size_bytes:
-                raise FloppyImageError("Greaseweazle read did not match the selected disk size.")
+                raise FloppyImageError(
+                    "Greaseweazle read did not match the selected disk size. "
+                    f"Selected {gw_source.disk_format.label}, but the captured image looks like {disk_format.label}. "
+                    "Choose the matching disk format and read the floppy again."
+                )
             progress_step += 1
             _notify_progress(progress_callback, progress_step, total_steps, "Scanning floppy contents...")
             read_image_listing(working_img)
+            _raise_if_cancelled(cancel_callback)
             return cls(
                 source_copy,
                 "img",
@@ -2569,27 +3386,486 @@ class FloppyImageSession:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
 
-    @property
-    def mode_name(self):
-        return "Floppy Mode" if self.source_kind.startswith("floppy") else "Image Mode"
+    @classmethod
+    def format_usb_floppy(
+        cls,
+        drive_info,
+        disk_format,
+        *,
+        eseq_disk=False,
+        volume_label="YAMAHA",
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        if not isinstance(drive_info, FloppyDriveInfo):
+            raise FloppyImageError("Invalid USB floppy drive selection.")
+        if not isinstance(disk_format, DiskFormat):
+            raise FloppyImageError("Invalid disk format.")
+
+        temp_dir = tempfile.mkdtemp(prefix="aps_format_usb_floppy_")
+        try:
+            working_img = os.path.join(temp_dir, "working.img")
+            _notify_progress(progress_callback, 0, 5, f"Creating blank {disk_format.label} image...")
+            create_blank_floppy_image(
+                working_img,
+                disk_format,
+                volume_label=volume_label,
+                cancel_callback=cancel_callback,
+            )
+            if eseq_disk:
+                _raise_if_cancelled(cancel_callback)
+                _notify_progress(progress_callback, 1, 5, "Adding empty PIANODIR.FIL...")
+                _write_empty_pianodir_to_image(working_img, temp_dir)
+            _notify_progress(progress_callback, 2, 5, f"Writing USB floppy {drive_info.path}...")
+            _write_block_device(
+                working_img,
+                drive_info.path,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(progress_callback, 4, 5, "Verifying formatted floppy...")
+            read_image_listing(working_img)
+            _notify_progress(progress_callback, 5, 5, "Opening formatted floppy...")
+            _raise_if_cancelled(cancel_callback)
+            return cls(
+                drive_info.path,
+                "img",
+                temp_dir,
+                working_img,
+                disk_format,
+                YamahaRepairResult("Formatted blank Yamaha Disklavier floppy.", False),
+                source_kind="floppy_usb",
+                source_name=f"{drive_info.path} - {disk_format.label}",
+                drive_info=drive_info,
+            )
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
 
     @classmethod
-    def _load_raw(cls, source_path, source_ext, temp_dir, progress_callback=None):
+    def format_greaseweazle_floppy(
+        cls,
+        gw_source,
+        *,
+        eseq_disk=False,
+        volume_label="YAMAHA",
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        if not isinstance(gw_source, GreaseweazleFloppySource):
+            raise FloppyImageError("Invalid Greaseweazle source selection.")
+
+        temp_dir = tempfile.mkdtemp(prefix="aps_format_gw_floppy_")
+        try:
+            working_img = os.path.join(temp_dir, "working.img")
+            _notify_progress(progress_callback, 0, 5, f"Creating blank {gw_source.disk_format.label} image...")
+            create_blank_floppy_image(
+                working_img,
+                gw_source.disk_format,
+                volume_label=volume_label,
+                cancel_callback=cancel_callback,
+            )
+            if eseq_disk:
+                _raise_if_cancelled(cancel_callback)
+                _notify_progress(progress_callback, 1, 5, "Adding empty PIANODIR.FIL...")
+                _write_empty_pianodir_to_image(working_img, temp_dir)
+            _notify_progress(progress_callback, 2, 5, f"Writing Greaseweazle drive {gw_source.drive}...")
+            _gw_write_floppy(
+                gw_source,
+                working_img,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(progress_callback, 4, 5, "Verifying formatted floppy...")
+            read_image_listing(working_img)
+            _notify_progress(progress_callback, 5, 5, "Opening formatted floppy...")
+            _raise_if_cancelled(cancel_callback)
+            return cls(
+                working_img,
+                "img",
+                temp_dir,
+                working_img,
+                gw_source.disk_format,
+                YamahaRepairResult("Formatted blank Yamaha Disklavier floppy.", False),
+                source_kind="floppy_gw",
+                source_name=gw_source.display_name,
+                gw_source=gw_source,
+            )
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+    @classmethod
+    def create_blank_session(
+        cls,
+        disk_format,
+        *,
+        source_ext="img",
+        eseq_disk=False,
+        volume_label="YAMAHA",
+        pianodir_metadata=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        if not isinstance(disk_format, DiskFormat):
+            raise FloppyImageError("Invalid disk format.")
+
+        source_ext = (source_ext or "img").lower().lstrip(".")
+        if source_ext not in SUPPORTED_IMAGE_EXTENSIONS:
+            raise FloppyImageError(_unsupported_image_type_message(source_ext, for_output=True))
+
+        temp_dir = tempfile.mkdtemp(prefix="aps_new_image_")
+        try:
+            working_img = os.path.join(temp_dir, "working.img")
+            source_name = f"Untitled {disk_format.label} {source_ext.upper()} image"
+            _notify_progress(progress_callback, 0, 4, f"Creating blank {disk_format.label} image...")
+            create_blank_floppy_image(
+                working_img,
+                disk_format,
+                volume_label=volume_label,
+                cancel_callback=cancel_callback,
+            )
+            if eseq_disk:
+                _raise_if_cancelled(cancel_callback)
+                _notify_progress(progress_callback, 1, 4, "Adding empty PIANODIR.FIL...")
+                _write_empty_pianodir_to_image(working_img, temp_dir, metadata=pianodir_metadata)
+                source_name = f"Untitled {disk_format.label} E-SEQ {source_ext.upper()} image"
+            _notify_progress(progress_callback, 2, 4, "Verifying blank image...")
+            read_image_listing(working_img)
+            _notify_progress(progress_callback, 4, 4, "Opening new image...")
+            _raise_if_cancelled(cancel_callback)
+            return cls(
+                os.path.join(temp_dir, f"untitled.{source_ext}"),
+                source_ext,
+                temp_dir,
+                working_img,
+                disk_format,
+                YamahaRepairResult("New blank image created.", False),
+                source_kind="new_image",
+                source_name=source_name,
+            )
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+    @classmethod
+    def recover(cls, load_kind, source, progress_callback=None, cancel_callback=None):
+        if load_kind == "image":
+            return cls._recover_image(source, progress_callback=progress_callback, cancel_callback=cancel_callback)
+        if load_kind == "floppy_usb":
+            return cls._recover_usb_floppy(source, progress_callback=progress_callback, cancel_callback=cancel_callback)
+        if load_kind == "floppy_gw":
+            return cls._recover_greaseweazle(source, progress_callback=progress_callback, cancel_callback=cancel_callback)
+        raise FloppyImageError(f"Unsupported disk recovery kind: {load_kind}")
+
+    @classmethod
+    def _recover_image(cls, source, progress_callback=None, cancel_callback=None):
+        disk_format_hint = None
+        if isinstance(source, ImageRecoverySource):
+            source_path = source.path
+            disk_format_hint = source.disk_format
+        else:
+            source_path = source
+        source_path = os.path.abspath(source_path)
+        source_ext = image_extension(source_path)
+        if source_ext not in SUPPORTED_IMAGE_EXTENSIONS:
+            raise FloppyImageError(_unsupported_image_type_message(source_ext))
+
+        temp_dir = tempfile.mkdtemp(prefix="aps_recover_image_")
+        try:
+            _raise_if_cancelled(cancel_callback)
+            hint_note = ""
+            if isinstance(disk_format_hint, DiskFormat):
+                hint_note = f" Recovery was run with the disk format hint: {disk_format_hint.label}."
+            if source_ext in RAW_IMAGE_EXTENSIONS:
+                source_copy = os.path.join(temp_dir, "source_recovery.img")
+                _notify_progress(progress_callback, 5, 100, "Copying image for recovery...")
+                shutil.copy2(source_path, source_copy)
+                return cls._recover_from_raw_image(
+                    source_copy,
+                    temp_dir,
+                    source_name=f"Recovered from {os.path.basename(source_path)}",
+                    extra_note="The original image file was not modified." + hint_note,
+                    disk_format_hint=disk_format_hint,
+                    progress_callback=progress_callback,
+                    cancel_callback=cancel_callback,
+                )
+
+            last_error = None
+            candidate_formats = [disk_format_hint] if isinstance(disk_format_hint, DiskFormat) else DISK_FORMATS
+            for disk_format in candidate_formats:
+                _raise_if_cancelled(cancel_callback)
+                converted = os.path.join(temp_dir, f"source_recovery_{disk_format.key.replace('.', '_')}.img")
+                try:
+                    _notify_progress(
+                        progress_callback,
+                        10,
+                        100,
+                        f"Converting {source_ext.upper()} image for {disk_format.label} recovery...",
+                    )
+                    _gw_convert(source_path, converted, disk_format.key, cancel_callback=cancel_callback)
+                    return cls._recover_from_raw_image(
+                        converted,
+                        temp_dir,
+                        source_name=f"Recovered from {os.path.basename(source_path)}",
+                        extra_note="The original image file was not modified." + hint_note,
+                        disk_format_hint=disk_format_hint,
+                        progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
+                    )
+                except FloppyOperationCancelled:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+
+            detail = f" Last error: {last_error}" if last_error else ""
+            raise FloppyImageError(
+                "Recovery could not convert this image into raw floppy sectors. "
+                "Try Autodetect, choose a different disk format, or use a raw IMG/BIN capture if one is available."
+                + detail
+            )
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+    @classmethod
+    def _recover_usb_floppy(cls, drive_info, progress_callback=None, cancel_callback=None):
+        if not isinstance(drive_info, FloppyDriveInfo):
+            raise FloppyImageError("Invalid floppy drive selection.")
+
+        temp_dir = tempfile.mkdtemp(prefix="aps_recover_floppy_")
+        try:
+            source_copy = os.path.join(temp_dir, "source_recovery.img")
+            _notify_progress(
+                progress_callback,
+                0,
+                100,
+                "Copying a full floppy image for recovery. This may take a long time...",
+            )
+            read_note = _read_block_device_recovery_image(
+                drive_info.path,
+                source_copy,
+                drive_info.size_bytes,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+            return cls._recover_from_raw_image(
+                source_copy,
+                temp_dir,
+                source_name=f"Recovered from {drive_info.display_name}",
+                extra_note=f"{read_note} The source floppy was not modified.",
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+    @classmethod
+    def _recover_greaseweazle(cls, gw_source, progress_callback=None, cancel_callback=None):
+        if not isinstance(gw_source, GreaseweazleFloppySource):
+            raise FloppyImageError("Invalid Greaseweazle source selection.")
+
+        temp_dir = tempfile.mkdtemp(prefix="aps_recover_gw_")
+        try:
+            attempts = [
+                GreaseweazleFloppySource(
+                    device_path=gw_source.device_path,
+                    drive=gw_source.drive,
+                    disk_format=gw_source.disk_format,
+                    archival_quality=gw_source.archival_quality,
+                    revs=gw_source.revs,
+                    retries=max(gw_source.retries, 5),
+                )
+            ]
+            if not gw_source.archival_quality:
+                attempts.append(
+                    GreaseweazleFloppySource(
+                        device_path=gw_source.device_path,
+                        drive=gw_source.drive,
+                        disk_format=gw_source.disk_format,
+                        archival_quality=True,
+                        revs=max(gw_source.revs, 3),
+                        retries=max(gw_source.retries, 5),
+                    )
+                )
+
+            last_error = None
+            for attempt_index, attempt in enumerate(attempts, start=1):
+                _raise_if_cancelled(cancel_callback)
+                capture_ext = "scp" if attempt.archival_quality else "img"
+                capture = os.path.join(temp_dir, f"source_recovery_{attempt_index}.{capture_ext}")
+                source_img = capture
+                read_note = ""
+                try:
+                    _notify_progress(
+                        progress_callback,
+                        0,
+                        100,
+                        f"Reading floppy via Greaseweazle for recovery ({attempt.display_name})...",
+                    )
+                    _gw_read_floppy(
+                        attempt,
+                        capture,
+                        progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
+                    )
+                except FloppyOperationCancelled:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    if not os.path.isfile(capture) or os.path.getsize(capture) <= 0:
+                        continue
+                    read_note = f"Greaseweazle reported a read error, but a partial {capture_ext.upper()} capture was available: {exc}"
+
+                if attempt.archival_quality:
+                    source_img = os.path.join(temp_dir, f"source_recovery_{attempt_index}.img")
+                    try:
+                        _notify_progress(progress_callback, 70, 100, "Converting archival SCP capture for recovery...")
+                        _gw_convert(capture, source_img, attempt.disk_format.key, cancel_callback=cancel_callback)
+                    except FloppyOperationCancelled:
+                        raise
+                    except Exception as exc:
+                        last_error = exc
+                        continue
+
+                try:
+                    note = read_note or "Greaseweazle recovery read completed. The source floppy was not modified."
+                    return cls._recover_from_raw_image(
+                        source_img,
+                        temp_dir,
+                        source_name=f"Recovered from {attempt.display_name}",
+                        extra_note=note,
+                        progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
+                    )
+                except FloppyOperationCancelled:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+
+            detail = f" Last error: {last_error}" if last_error else ""
+            raise FloppyImageError(
+                "Greaseweazle recovery could not produce recoverable sector data."
+                + detail
+            )
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+    @classmethod
+    def _recover_from_raw_image(
+        cls,
+        source_img,
+        temp_dir,
+        *,
+        source_name,
+        extra_note="",
+        disk_format_hint=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        source_img = os.path.abspath(source_img)
+        prepared = os.path.join(temp_dir, "recovery_prepared.img")
+        working_img = os.path.join(temp_dir, "working.img")
+        try:
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(progress_callback, 72, 100, "Trying Yamaha/FAT repair before carving files...")
+            prepare_yamaha_image(source_img, prepared)
+            disk_format = _disk_format_for_image(prepared)
+            listing = read_image_listing(prepared)
+            if listing.entries:
+                shutil.copy2(prepared, working_img)
+                return cls(
+                    working_img,
+                    "img",
+                    temp_dir,
+                    working_img,
+                    disk_format,
+                    YamahaRepairResult(
+                        "Recovery opened a repaired editable image copy. Review before saving.",
+                        True,
+                    ),
+                    source_kind="recovered_image",
+                    source_name=source_name,
+                )
+        except FloppyOperationCancelled:
+            raise
+        except Exception:
+            pass
+
+        _raise_if_cancelled(cancel_callback)
+        _notify_progress(progress_callback, 78, 100, "Scanning raw image for recoverable songs...")
+        with open(source_img, "rb") as handle:
+            source_data = handle.read()
+
+        recovered_files = _recover_files_from_raw_image_bytes(source_data, disk_format_hint=disk_format_hint)
+        if os.path.isfile(prepared):
+            try:
+                with open(prepared, "rb") as handle:
+                    prepared_data = handle.read()
+                if prepared_data != source_data:
+                    recovered_files = _dedupe_recovered_files(
+                        recovered_files + _recover_files_from_raw_image_bytes(
+                            prepared_data,
+                            disk_format_hint=disk_format_hint,
+                        )
+                    )
+            except OSError:
+                pass
+
+        recovered_img, disk_format = _write_recovered_files_to_image(
+            recovered_files,
+            temp_dir,
+            source_data,
+            disk_format_hint=disk_format_hint,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        shutil.copy2(recovered_img, working_img)
+        return cls(
+            working_img,
+            "img",
+            temp_dir,
+            working_img,
+            disk_format,
+            YamahaRepairResult(
+                f"Recovery created an editable image copy from {len(recovered_files)} recovered file(s). "
+                "Some names, order, or damaged song data may be missing.",
+                True,
+            ),
+            source_kind="recovered_image",
+            source_name=source_name,
+        )
+
+    @property
+    def mode_name(self):
+        return "Floppy Disk" if self.source_kind.startswith("floppy") else "Image Mode"
+
+    @classmethod
+    def _load_raw(cls, source_path, source_ext, temp_dir, progress_callback=None, cancel_callback=None):
         source_copy = os.path.join(temp_dir, "source.img")
         working_img = os.path.join(temp_dir, "working.img")
+        _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 1, 4, "Copying raw floppy image...")
         shutil.copy2(source_path, source_copy)
+        _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 2, 4, "Preparing editable floppy image...")
         repair_result = prepare_yamaha_image(source_copy, working_img)
+        _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 3, 4, "Scanning floppy contents...")
         disk_format = _disk_format_for_image(working_img)
         read_image_listing(working_img)
+        _raise_if_cancelled(cancel_callback)
         return cls(source_path, source_ext, temp_dir, working_img, disk_format, repair_result)
 
     @classmethod
-    def _load_converted(cls, source_path, source_ext, temp_dir, progress_callback=None):
+    def _load_converted(cls, source_path, source_ext, temp_dir, progress_callback=None, cancel_callback=None):
         last_error = None
         for disk_format in DISK_FORMATS:
+            _raise_if_cancelled(cancel_callback)
             candidate = os.path.join(temp_dir, f"candidate_{disk_format.key.replace('.', '_')}.img")
             prepared = os.path.join(temp_dir, f"prepared_{disk_format.key.replace('.', '_')}.img")
             try:
@@ -2599,23 +3875,33 @@ class FloppyImageSession:
                     4,
                     f"Converting image to editable {disk_format.label}...",
                 )
-                _gw_convert(source_path, candidate, disk_format.key)
+                _gw_convert(source_path, candidate, disk_format.key, cancel_callback=cancel_callback)
+                _raise_if_cancelled(cancel_callback)
                 _notify_progress(progress_callback, 2, 4, "Preparing editable floppy image...")
                 repair_result = prepare_yamaha_image(candidate, prepared)
+                _raise_if_cancelled(cancel_callback)
                 _notify_progress(progress_callback, 3, 4, "Scanning floppy contents...")
                 detected_format = _disk_format_for_image(prepared)
                 if detected_format.size_bytes != disk_format.size_bytes:
-                    raise FloppyImageError("Converted image did not match the requested disk size.")
+                    raise FloppyImageError(
+                        "Converted image did not match the requested disk size. "
+                        f"Requested {disk_format.label}, but the converted image looks like {detected_format.label}."
+                    )
                 read_image_listing(prepared)
                 working_img = os.path.join(temp_dir, "working.img")
                 shutil.move(prepared, working_img)
+                _raise_if_cancelled(cancel_callback)
                 return cls(source_path, source_ext, temp_dir, working_img, disk_format, repair_result)
+            except FloppyOperationCancelled:
+                raise
             except Exception as exc:
                 last_error = exc
 
         detail = f" Last error: {last_error}" if last_error else ""
         raise FloppyImageError(
-            "Could not convert this image into an editable FAT floppy image." + detail
+            "Could not convert this image into an editable FAT floppy image. "
+            "Make sure the source is a supported floppy image and that Greaseweazle can convert it."
+            + detail
         )
 
     def cleanup(self):
@@ -2624,12 +3910,13 @@ class FloppyImageSession:
     def list_entries(self):
         return read_image_listing(self.working_img_path)
 
-    def _run_mtools(self, args, message):
-        _run_command(args, message)
+    def _run_mtools(self, args, message, cancel_callback=None):
+        _run_command(args, message, cancel_callback=cancel_callback)
 
-    def _extract_from_image(self, source_img, image_path, dest_path):
+    def _extract_from_image(self, source_img, image_path, dest_path, cancel_callback=None):
         if os.path.exists(dest_path):
             os.remove(dest_path)
+        _raise_if_cancelled(cancel_callback)
         try:
             data = _read_fat12_file_bytes(source_img, image_path)
         except FloppyImageError as fat_exc:
@@ -2639,11 +3926,13 @@ class FloppyImageSession:
             self._run_mtools(
                 [mcopy, "-i", source_img, mtools_path(image_path), dest_path],
                 f"Could not extract {image_path} from image",
+                cancel_callback=cancel_callback,
             )
             return
 
         with open(dest_path, "wb") as handle:
             handle.write(data)
+        _raise_if_cancelled(cancel_callback)
 
     def extract_file(self, image_path):
         normalized = _normalize_image_path(image_path)
@@ -2685,11 +3974,12 @@ class FloppyImageSession:
             raise FloppyImageError(error_msg)
         return dest_path
 
-    def _write_generated_pianodir(self, target_img, pianodir_metadata=None):
+    def _write_generated_pianodir(self, target_img, pianodir_metadata=None, cancel_callback=None):
         listing = read_image_listing(target_img)
         track_entries = []
 
         for entry in listing.entries:
+            _raise_if_cancelled(cancel_callback)
             if is_pianodir_path(entry.path):
                 continue
 
@@ -2697,12 +3987,17 @@ class FloppyImageSession:
                 self.extracted_dir,
                 f"{uuid.uuid4().hex}_{os.path.basename(_normalize_image_path(entry.path))}",
             )
-            self._extract_from_image(target_img, entry.path, extracted_path)
+            self._extract_from_image(
+                target_img,
+                entry.path,
+                extracted_path,
+                cancel_callback=cancel_callback,
+            )
             if not is_eseq_file(extracted_path):
                 continue
 
             title = extract_eseq_title_from_file(extracted_path)
-            if title.startswith("Error:"):
+            if title.startswith("Error"):
                 title = ""
             track_entries.append(
                 PianodirTrackEntry(
@@ -2728,28 +4023,33 @@ class FloppyImageSession:
         mdel = _require_command("mdel")
         mcopy = _require_command("mcopy")
         for entry in listing.entries:
+            _raise_if_cancelled(cancel_callback)
             if not is_pianodir_path(entry.path):
                 continue
             self._run_mtools(
                 [mdel, "-i", target_img, mtools_path(entry.path)],
                 "Could not replace existing PIANODIR.FIL in image",
+                cancel_callback=cancel_callback,
             )
             break
 
         self._run_mtools(
             [mcopy, "-i", target_img, generated_path, mtools_path(PIANODIR_FILENAME)],
             "Could not write PIANODIR.FIL into image",
+            cancel_callback=cancel_callback,
         )
 
-    def _delete_existing_pianodir(self, target_img):
+    def _delete_existing_pianodir(self, target_img, cancel_callback=None):
         listing = read_image_listing(target_img)
         mdel = _require_command("mdel")
         for entry in listing.entries:
+            _raise_if_cancelled(cancel_callback)
             if not is_pianodir_path(entry.path):
                 continue
             self._run_mtools(
                 [mdel, "-i", target_img, mtools_path(entry.path)],
                 "Could not delete PIANODIR.FIL from image",
+                cancel_callback=cancel_callback,
             )
             break
 
@@ -2765,6 +4065,7 @@ class FloppyImageSession:
         generate_pianodir=False,
         delete_pianodir=False,
         progress_callback=None,
+        cancel_callback=None,
     ):
         renames = renames or {}
         deletes = set(deletes or set())
@@ -2780,24 +4081,34 @@ class FloppyImageSession:
         mcopy = _require_command("mcopy")
 
         try:
+            _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 1, 4, "Applying pending changes to floppy image...")
             for image_path in sorted(deletes, key=lambda item: item.lower(), reverse=True):
+                _raise_if_cancelled(cancel_callback)
                 self._run_mtools(
                     [mdel, "-i", target_img, mtools_path(image_path)],
                     f"Could not delete {image_path} from image",
+                    cancel_callback=cancel_callback,
                 )
 
             if delete_pianodir:
-                self._delete_existing_pianodir(target_img)
+                _raise_if_cancelled(cancel_callback)
+                self._delete_existing_pianodir(target_img, cancel_callback=cancel_callback)
 
             for image_path, new_title in sorted(title_edits.items(), key=lambda item: item[0].lower()):
+                _raise_if_cancelled(cancel_callback)
                 if image_path in deletes or image_path in additions or image_path in replacements:
                     continue
                 extracted_path = os.path.join(
                     self.extracted_dir,
                     f"{uuid.uuid4().hex}_{os.path.basename(_normalize_image_path(image_path))}",
                 )
-                self._extract_from_image(target_img, image_path, extracted_path)
+                self._extract_from_image(
+                    target_img,
+                    image_path,
+                    extracted_path,
+                    cancel_callback=cancel_callback,
+                )
                 patched_path = self._patched_metadata_path(
                     extracted_path,
                     image_path=image_path,
@@ -2807,13 +4118,16 @@ class FloppyImageSession:
                 self._run_mtools(
                     [mdel, "-i", target_img, mtools_path(image_path)],
                     f"Could not replace {image_path} in image",
+                    cancel_callback=cancel_callback,
                 )
                 self._run_mtools(
                     [mcopy, "-i", target_img, patched_path, mtools_path(image_path)],
                     f"Could not write updated title for {image_path} into image",
+                    cancel_callback=cancel_callback,
                 )
 
             for image_path, host_path in sorted(replacements.items(), key=lambda item: item[0].lower()):
+                _raise_if_cancelled(cancel_callback)
                 if image_path in deletes or image_path in additions:
                     continue
                 if not os.path.isfile(host_path):
@@ -2829,13 +4143,16 @@ class FloppyImageSession:
                 self._run_mtools(
                     [mdel, "-i", target_img, mtools_path(image_path)],
                     f"Could not replace {image_path} in image",
+                    cancel_callback=cancel_callback,
                 )
                 self._run_mtools(
                     [mcopy, "-i", target_img, source_path, mtools_path(image_path)],
                     f"Could not write converted data for {image_path} into image",
+                    cancel_callback=cancel_callback,
                 )
 
             for source_path, target_path in sorted(renames.items(), key=lambda item: item[0].lower()):
+                _raise_if_cancelled(cancel_callback)
                 if source_path in deletes:
                     continue
                 if _normalize_image_path(source_path).lower() == _normalize_image_path(target_path).lower():
@@ -2843,9 +4160,11 @@ class FloppyImageSession:
                 self._run_mtools(
                     [mren, "-i", target_img, mtools_path(source_path), mtools_path(target_path)],
                     f"Could not rename {source_path} in image",
+                    cancel_callback=cancel_callback,
                 )
 
             for image_path, host_path in sorted(additions.items(), key=lambda item: item[0].lower()):
+                _raise_if_cancelled(cancel_callback)
                 if not os.path.isfile(host_path):
                     raise FloppyImageError(f"File to add no longer exists: {host_path}")
                 source_path = host_path
@@ -2859,16 +4178,23 @@ class FloppyImageSession:
                 self._run_mtools(
                     [mcopy, "-i", target_img, source_path, mtools_path(image_path)],
                     f"Could not add {os.path.basename(host_path)} to image",
+                    cancel_callback=cancel_callback,
                 )
 
             for image_path, order_key in sorted(order_key_edits.items(), key=lambda item: item[0].lower()):
+                _raise_if_cancelled(cancel_callback)
                 if image_path in deletes or image_path in additions or image_path in replacements or image_path in title_edits:
                     continue
                 extracted_path = os.path.join(
                     self.extracted_dir,
                     f"{uuid.uuid4().hex}_{os.path.basename(_normalize_image_path(image_path))}",
                 )
-                self._extract_from_image(target_img, image_path, extracted_path)
+                self._extract_from_image(
+                    target_img,
+                    image_path,
+                    extracted_path,
+                    cancel_callback=cancel_callback,
+                )
                 patched_path = self._patched_metadata_path(
                     extracted_path,
                     image_path=image_path,
@@ -2877,34 +4203,45 @@ class FloppyImageSession:
                 self._run_mtools(
                     [mdel, "-i", target_img, mtools_path(image_path)],
                     f"Could not replace {image_path} in image",
+                    cancel_callback=cancel_callback,
                 )
                 self._run_mtools(
                     [mcopy, "-i", target_img, patched_path, mtools_path(image_path)],
                     f"Could not write updated order for {image_path} into image",
+                    cancel_callback=cancel_callback,
                 )
 
             if generate_pianodir:
+                _raise_if_cancelled(cancel_callback)
                 _notify_progress(progress_callback, 2, 4, "Generating PIANODIR.FIL...")
-                self._write_generated_pianodir(target_img, pianodir_metadata=pianodir_metadata)
+                self._write_generated_pianodir(
+                    target_img,
+                    pianodir_metadata=pianodir_metadata,
+                    cancel_callback=cancel_callback,
+                )
 
+            _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 3, 4, "Verifying updated floppy image...")
             read_image_listing(target_img)
+            _raise_if_cancelled(cancel_callback)
             return target_img
         except Exception:
             if os.path.exists(target_img):
                 os.remove(target_img)
             raise
 
-    def _write_image_direct(self, source_img, output_path, output_ext):
+    def _write_image_direct(self, source_img, output_path, output_ext, cancel_callback=None):
         output_ext = output_ext.lower().lstrip(".")
         if output_ext in RAW_IMAGE_EXTENSIONS:
+            _raise_if_cancelled(cancel_callback)
             shutil.copy2(source_img, output_path)
+            _raise_if_cancelled(cancel_callback)
             return
         if output_ext not in SUPPORTED_IMAGE_EXTENSIONS:
-            raise FloppyImageError(f"Unsupported output image type: {output_ext.upper()}")
-        _gw_convert(source_img, output_path, self.disk_format.key)
+            raise FloppyImageError(_unsupported_image_type_message(output_ext, for_output=True))
+        _gw_convert(source_img, output_path, self.disk_format.key, cancel_callback=cancel_callback)
 
-    def write_image(self, source_img, output_path, output_ext, progress_callback=None):
+    def write_image(self, source_img, output_path, output_ext, progress_callback=None, cancel_callback=None):
         output_path = os.path.abspath(output_path)
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
@@ -2917,7 +4254,8 @@ class FloppyImageSession:
                 _notify_progress(progress_callback, 4, 5, "Writing raw floppy image...")
             else:
                 _notify_progress(progress_callback, 4, 5, f"Converting floppy image to {output_ext.upper()}...")
-            self._write_image_direct(source_img, temp_output, output_ext)
+            self._write_image_direct(source_img, temp_output, output_ext, cancel_callback=cancel_callback)
+            _raise_if_cancelled(cancel_callback)
             os.replace(temp_output, output_path)
         finally:
             if os.path.exists(temp_output):
@@ -2937,6 +4275,7 @@ class FloppyImageSession:
         generate_pianodir=False,
         delete_pianodir=False,
         progress_callback=None,
+        cancel_callback=None,
     ):
         modified_img = self.create_modified_image(
             renames=renames,
@@ -2949,9 +4288,16 @@ class FloppyImageSession:
             generate_pianodir=generate_pianodir,
             delete_pianodir=delete_pianodir,
             progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
         )
         try:
-            self.write_image(modified_img, output_path, output_ext, progress_callback=progress_callback)
+            self.write_image(
+                modified_img,
+                output_path,
+                output_ext,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
         finally:
             if os.path.exists(modified_img):
                 os.remove(modified_img)
@@ -2968,6 +4314,7 @@ class FloppyImageSession:
         generate_pianodir=False,
         delete_pianodir=False,
         progress_callback=None,
+        cancel_callback=None,
     ):
         modified_img = self.create_modified_image(
             renames=renames,
@@ -2980,15 +4327,26 @@ class FloppyImageSession:
             generate_pianodir=generate_pianodir,
             delete_pianodir=delete_pianodir,
             progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
         )
         try:
             if self.source_kind == "floppy_usb":
                 _notify_progress(progress_callback, 4, 5, f"Writing USB floppy {self.source_path}...")
-                _write_block_device(modified_img, self.source_path, progress_callback=progress_callback)
+                _write_block_device(
+                    modified_img,
+                    self.source_path,
+                    progress_callback=progress_callback,
+                    cancel_callback=cancel_callback,
+                )
             elif self.source_kind == "floppy_gw":
                 drive_name = self.gw_source.drive if self.gw_source is not None else "A"
                 _notify_progress(progress_callback, 4, 5, f"Writing Greaseweazle drive {drive_name}...")
-                _gw_write_floppy(self.gw_source, modified_img)
+                _gw_write_floppy(
+                    self.gw_source,
+                    modified_img,
+                    progress_callback=progress_callback,
+                    cancel_callback=cancel_callback,
+                )
             else:
                 output_ext = self.source_ext if self.source_ext else "img"
                 source_dir = os.path.dirname(self.source_path)
@@ -3000,8 +4358,11 @@ class FloppyImageSession:
                     _notify_progress(progress_callback, 4, 5, "Saving raw floppy image...")
                 else:
                     _notify_progress(progress_callback, 4, 5, f"Converting image back to {output_ext.upper()}...")
-                self._write_image_direct(modified_img, temp_output, output_ext)
+                self._write_image_direct(modified_img, temp_output, output_ext, cancel_callback=cancel_callback)
+                _raise_if_cancelled(cancel_callback)
                 os.replace(temp_output, self.source_path)
+            if not self.source_kind.startswith("floppy"):
+                _raise_if_cancelled(cancel_callback)
             os.replace(modified_img, self.working_img_path)
             self._extracted_files.clear()
             self.repair_changed = False
@@ -3010,5 +4371,62 @@ class FloppyImageSession:
             temp_output = locals().get("temp_output")
             if temp_output and os.path.exists(temp_output):
                 os.remove(temp_output)
+            if os.path.exists(modified_img):
+                os.remove(modified_img)
+
+    def write_to_floppy_target(
+        self,
+        target_kind,
+        target,
+        renames=None,
+        deletes=None,
+        additions=None,
+        replacements=None,
+        title_edits=None,
+        order_key_edits=None,
+        pianodir_metadata=None,
+        generate_pianodir=False,
+        delete_pianodir=False,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        modified_img = self.create_modified_image(
+            renames=renames,
+            deletes=deletes,
+            additions=additions,
+            replacements=replacements,
+            title_edits=title_edits,
+            order_key_edits=order_key_edits,
+            pianodir_metadata=pianodir_metadata,
+            generate_pianodir=generate_pianodir,
+            delete_pianodir=delete_pianodir,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        try:
+            if target_kind == "floppy_usb":
+                if not isinstance(target, FloppyDriveInfo):
+                    raise FloppyImageError("Invalid USB floppy drive selection.")
+                _notify_progress(progress_callback, 4, 5, f"Writing USB floppy {target.path}...")
+                _write_block_device(
+                    modified_img,
+                    target.path,
+                    progress_callback=progress_callback,
+                    cancel_callback=cancel_callback,
+                )
+            elif target_kind == "floppy_gw":
+                if not isinstance(target, GreaseweazleFloppySource):
+                    raise FloppyImageError("Invalid Greaseweazle source selection.")
+                _notify_progress(progress_callback, 4, 5, f"Writing Greaseweazle drive {target.drive}...")
+                _gw_write_floppy(
+                    target,
+                    modified_img,
+                    progress_callback=progress_callback,
+                    cancel_callback=cancel_callback,
+                )
+            else:
+                raise FloppyImageError("Invalid floppy write target.")
+            _notify_progress(progress_callback, 5, 5, "Floppy write complete.")
+        finally:
             if os.path.exists(modified_img):
                 os.remove(modified_img)

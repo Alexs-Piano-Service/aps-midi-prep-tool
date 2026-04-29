@@ -1,7 +1,8 @@
 APP_NAME = "APS MIDI Prep Tool"
-APP_VERSION = "0.5.2"
+APP_VERSION = "0.5.3"
 APP_TITLE_WITH_VERSION = f"{APP_NAME} v{APP_VERSION}"
 APP_WEBSITE = "https://www.alexanderpeppe.com/"
+UPDATE_CHECK_URL = "https://www.alexanderpeppe.com/aps-midi-prep-tool/update.json"
 
 SETTINGS_ORG = "AlexPianoServiceLLC"
 SETTINGS_APP = "APSMidiPrepTool"

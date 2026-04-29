@@ -68,6 +68,7 @@ class DropTableWidget(QTableWidget):
             progressDialog = None
             if total > 1:
                 progressDialog = QProgressDialog("Adding files...", "Cancel", 0, total, main_window)
+                progressDialog.setWindowTitle("Adding Files")
                 progressDialog.setWindowModality(Qt.WindowModal)
                 progressDialog.setMinimumDuration(0)
                 center_dialog_on_parent(progressDialog, main_window)

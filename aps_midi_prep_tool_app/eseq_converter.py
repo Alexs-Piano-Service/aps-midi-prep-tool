@@ -446,9 +446,9 @@ def _effective_initial_mpqn(tempo_events):
 
 def parse_eseq_bytes(eseq_bytes):
     if len(eseq_bytes) < ESEQ_HEADER_SIZE:
-        raise EseqConversionError("File is too small to be a valid E-SEQ file.")
+        raise EseqConversionError("File is too small to be a valid Yamaha E-SEQ file.")
     if eseq_bytes[7:15] != ESEQ_SIGNATURE:
-        raise EseqConversionError("Missing COM-ESEQ signature.")
+        raise EseqConversionError("This does not look like a Yamaha E-SEQ file; the COM-ESEQ signature is missing.")
 
     data = eseq_bytes
     title = _decode_title_bytes(data[ESEQ_TITLE_START:ESEQ_TITLE_END + 1])
@@ -701,10 +701,10 @@ def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None, cc7_pol
 
 def _parse_midi_header(midi_bytes):
     if len(midi_bytes) < 14 or midi_bytes[:4] != b"MThd":
-        raise EseqConversionError("Missing MThd header chunk.")
+        raise EseqConversionError("This does not look like a standard MIDI file; the MThd header chunk is missing.")
     header_length = int.from_bytes(midi_bytes[4:8], "big")
     if header_length < 6 or 8 + header_length > len(midi_bytes):
-        raise EseqConversionError("Invalid MIDI header length.")
+        raise EseqConversionError("The MIDI header length is invalid; the file may be corrupt or incomplete.")
     format_type = int.from_bytes(midi_bytes[8:10], "big")
     division = int.from_bytes(midi_bytes[12:14], "big")
     if division & 0x8000:
@@ -956,7 +956,7 @@ def _finalize_eseq_header(
 ):
     used_length = ESEQ_HEADER_SIZE + len(stream_bytes)
     if used_length > 0xFFFFFFFF:
-        raise EseqConversionError("E-SEQ output is too large.")
+        raise EseqConversionError("E-SEQ output is too large for the Yamaha E-SEQ file format.")
 
     numerator, denominator_power = (
         time_signature_events[0][1],
@@ -1170,7 +1170,7 @@ def convert_midi_bytes_to_eseq_bytes(
             prefix.extend(b"\x00" * (Q11_EVENT_STREAM_START - len(prefix)))
         used_length = len(prefix) + len(stream)
         if used_length > 0xFFFFFFFF:
-            raise EseqConversionError("E-SEQ output is too large.")
+            raise EseqConversionError("E-SEQ output is too large for the Yamaha E-SEQ file format.")
         prefix[3:7] = used_length.to_bytes(4, "little")
         if len(prefix) >= 0x23:
             prefix[0x1F:0x23] = used_length.to_bytes(4, "little")
