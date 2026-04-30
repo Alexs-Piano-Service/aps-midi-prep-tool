@@ -13,6 +13,7 @@ import zlib
 from dataclasses import dataclass
 
 from .eseq_pianodir import (
+    ESEQ_ORDER_KEY_SIZE,
     PIANODIR_FILENAME,
     PIANODIR_HEADER,
     PIANODIR_TARGET_FILE_SIZE,
@@ -178,6 +179,16 @@ class FloppyDriveInfo:
 
 
 @dataclass(frozen=True)
+class FloppyRecoverySource:
+    drive_info: FloppyDriveInfo
+    disk_format: DiskFormat
+
+    @property
+    def display_name(self):
+        return f"{self.drive_info.path} ({self.disk_format.label})"
+
+
+@dataclass(frozen=True)
 class GreaseweazleDeviceInfo:
     path: str
     label: str = ""
@@ -286,7 +297,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {
 }
 
 PREFERRED_OUTPUT_EXTENSIONS = [
-    ("bin", "BIN (PPFBU) raw sector image"),
+    ("bin", "BIN raw sector image"),
     ("img", "IMG (Gotek) raw sector image"),
     ("hfe", "HFE (Nalbantov) image"),
     ("ima", "IMA raw sector image"),
@@ -555,7 +566,7 @@ def _dependency_command_message(command_name):
     if command == "dd":
         return (
             "Required system command 'dd' was not found. "
-            "Direct USB floppy reads and writes on Linux need dd on PATH."
+            "Direct floppy reads and writes on Linux need dd on PATH."
         )
     return f"Required command '{command}' was not found. Install it and make sure it is on PATH."
 
@@ -1446,7 +1457,7 @@ class _WindowsVolumeHandle:
                 written_total += bytes_written.value
                 if progress_callback is not None and total_size > 0:
                     progress = min(100, int((written_total / total_size) * 100))
-                    progress_callback(progress, 100, f"Writing USB floppy: {display_bytes(written_total)} of {display_bytes(total_size)}...")
+                    progress_callback(progress, 100, f"Writing floppy: {display_bytes(written_total)} of {display_bytes(total_size)}...")
         _raise_if_cancelled(cancel_callback)
         if not self._kernel32.FlushFileBuffers(self.handle):
             raise FloppyImageError(_windows_last_error_message(f"Could not flush floppy device {self.path}"))
@@ -1462,7 +1473,7 @@ def _open_block_device_for_read(device_path):
         lower = str(exc).lower()
         if "permission denied" in lower:
             detail += (
-                "\n\nDirect USB floppy reads require read permission for the block device. "
+                "\n\nDirect floppy reads require read permission for the block device. "
                 "Make sure the disk is not mounted and that your user has access to the device."
             )
         elif "no medium" in lower or "no media" in lower:
@@ -1637,7 +1648,7 @@ def _read_block_device_recovery_image(device_path, output_path, size_bytes, prog
 def _write_block_device(input_path, device_path, progress_callback=None, cancel_callback=None):
     if os.name == "nt":
         permission_hint = (
-            "Direct USB floppy writes on Windows require permission to lock and write the raw drive. "
+            "Direct floppy writes on Windows require permission to lock and write the raw drive. "
             "Close Explorer windows using the drive and run the app as administrator if Windows denies access. "
             "You can also use Save As Image as a safer fallback."
         )
@@ -1662,7 +1673,7 @@ def _write_block_device(input_path, device_path, progress_callback=None, cancel_
             raise FloppyImageError(detail) from exc
 
     permission_hint = (
-        "Direct USB floppy writes require write permission for the block device. "
+        "Direct floppy writes require write permission for the block device. "
         "On Linux, make sure the disk is not mounted and that your user has write "
         "access to the device, or run the app with appropriate elevated permissions. "
         "You can also use Save As Image as a safer fallback."
@@ -1688,7 +1699,7 @@ def _write_block_device(input_path, device_path, progress_callback=None, cancel_
                     progress_callback(
                         progress,
                         100,
-                        f"Writing USB floppy: {display_bytes(written)} of {display_bytes(total_size)}...",
+                        f"Writing floppy: {display_bytes(written)} of {display_bytes(total_size)}...",
                     )
             target.flush()
             os.fsync(target.fileno())
@@ -2138,7 +2149,7 @@ def _iter_root_file_entries(root_dir):
             continue
         if attr & 0x10:
             raise FloppyImageError(
-                "Fast USB floppy read does not support disks with subdirectories. "
+                "Fast floppy read does not support disks with subdirectories. "
                 "Use image loading or Greaseweazle for this disk."
             )
 
@@ -2493,7 +2504,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             cancel_callback=cancel_callback,
         ) or b"\x00" * _YAMAHA_BYTES_PER_SECTOR
         geometry = _geometry_from_boot_sector(sector0)
-        repair_result = YamahaRepairResult("Fast USB floppy read: valid FAT12 boot sector present.", False)
+        repair_result = YamahaRepairResult("Fast floppy read: valid FAT12 boot sector present.", False)
         boot = sector0
         fat_area = None
         root_dir = None
@@ -2543,14 +2554,14 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                 break
             if geometry is None or matched_layout is None:
                 raise FloppyImageError(
-                    "Fast USB floppy read only supports valid FAT12 disks or Yamaha protected FAT12 disks. "
+                    "Fast floppy read only supports valid FAT12 disks or Yamaha protected FAT12 disks. "
                     "If this is a non-FAT disk or a difficult original, try reading it with Greaseweazle."
                 )
             _notify_progress(progress_callback, 10, 100, "Yamaha protected disk recognized; creating working copy...")
             serial = zlib.crc32(fat_area + root_dir) & 0xFFFFFFFF
             boot = _build_standard_fat12_boot_sector(matched_layout, serial, _find_volume_label(root_dir))
             repair_result = YamahaRepairResult(
-                "Fast USB floppy read applied Yamaha copy-protection repair: sector 0 appears blank/corrupt.",
+                "Fast floppy read applied Yamaha copy-protection repair: sector 0 appears blank/corrupt.",
                 True,
             )
 
@@ -2772,11 +2783,39 @@ def _valid_recovery_filename(name, fallback):
     if not basename or basename in {".", ".."}:
         return fallback
     stem, ext = os.path.splitext(basename)
-    stem = re.sub(r"[^A-Z0-9_$~!#%&'{}()@^`-]", "_", stem)[:8].strip("._ ")
-    ext = re.sub(r"[^A-Z0-9_$~!#%&'{}()@^`-]", "", ext.lstrip("."))[:3]
+    stem = stem.lstrip("!")
+    stem = re.sub(r"[^A-Z0-9_]", "_", stem)[:8].strip("._ ")
+    ext = re.sub(r"[^A-Z0-9_]", "_", ext.lstrip("."))[:3].strip("_")
     if not stem:
         return fallback
     return f"{stem}.{ext}" if ext else stem
+
+
+def _eseq_order_key_slice():
+    start = PIANODIR_TRACK_SOURCE_START
+    return slice(start, start + ESEQ_ORDER_KEY_SIZE)
+
+
+def _update_recovered_eseq_order_key(data, image_path):
+    if not _is_probably_eseq_bytes(data):
+        return data
+    payload = bytearray(data)
+    payload[_eseq_order_key_slice()] = build_eseq_order_key_from_path(image_path)
+    return bytes(payload)
+
+
+def _update_recovered_pianodir_order_keys(data, order_key_map):
+    if not order_key_map or not _is_probably_pianodir_bytes(data):
+        return data
+    payload = bytearray(_padded_pianodir_bytes(data))
+    max_records = (PIANODIR_TARGET_FILE_SIZE - len(PIANODIR_HEADER)) // PIANODIR_TRACK_SIZE
+    for slot in range(max_records):
+        record_offset = len(PIANODIR_HEADER) + slot * PIANODIR_TRACK_SIZE
+        order_key = bytes(payload[record_offset:record_offset + ESEQ_ORDER_KEY_SIZE])
+        replacement = order_key_map.get(order_key) or order_key_map.get(order_key[:11])
+        if replacement:
+            payload[record_offset:record_offset + ESEQ_ORDER_KEY_SIZE] = replacement
+    return bytes(payload)
 
 
 def _unique_recovery_path(preferred_path, used_paths, fallback_prefix, extension, index):
@@ -3006,6 +3045,7 @@ def _dedupe_recovered_files(files):
     seen_offsets = {}
     seen_identity_keys = {}
     used_paths = set()
+    order_key_map = {}
     counters = {"MIDI": 1, "E-SEQ": 1, "PIANODIR": 1, "FILE": 1}
 
     def priority(item):
@@ -3019,6 +3059,9 @@ def _dedupe_recovered_files(files):
         payload = bytes(item.data or b"")
         if not payload:
             continue
+        source_order_key = b""
+        if item.kind == "E-SEQ" and len(payload) >= PIANODIR_TRACK_SOURCE_START + ESEQ_ORDER_KEY_SIZE:
+            source_order_key = bytes(payload[_eseq_order_key_slice()])
         offset_key = None
         if item.kind in {"E-SEQ", "MIDI"} and item.source_offset >= 0:
             offset_key = (item.kind, item.source_offset)
@@ -3043,6 +3086,11 @@ def _dedupe_recovered_files(files):
             index = counters["E-SEQ"]
             image_path = _unique_recovery_path(item.image_path, used_paths, "REC", "FIL", index)
             counters["E-SEQ"] += 1
+            target_order_key = build_eseq_order_key_from_path(image_path)
+            if source_order_key:
+                order_key_map[source_order_key] = target_order_key
+                order_key_map[source_order_key[:11]] = target_order_key
+            payload = _update_recovered_eseq_order_key(payload, image_path)
         else:
             index = counters["FILE"]
             image_path = _unique_recovery_path(item.image_path, used_paths, "REC", "BIN", index)
@@ -3053,7 +3101,18 @@ def _dedupe_recovered_files(files):
         if identity_key is not None:
             seen_identity_keys[identity_key] = image_path
         selected.append(RecoveredFile(image_path, payload, item.kind, item.source_offset, item.origin))
-    return selected
+    if not order_key_map:
+        return selected
+    return [
+        RecoveredFile(
+            item.image_path,
+            _update_recovered_pianodir_order_keys(item.data, order_key_map) if item.kind == "PIANODIR" else item.data,
+            item.kind,
+            item.source_offset,
+            item.origin,
+        )
+        for item in selected
+    ]
 
 
 def _preferred_recovery_formats_for_data(data, files, disk_format_hint=None):
@@ -3260,7 +3319,7 @@ class FloppyImageSession:
                     _notify_progress(progress_callback, 75, 100, "Creating working copy...")
                     repair_result = prepare_yamaha_bytes(raw_data, working_img)
                     repair_result = YamahaRepairResult(
-                        repair_result.note + f" Fast USB file-level read was unavailable: {fast_exc}",
+                        repair_result.note + f" Fast floppy file-level read was unavailable: {fast_exc}",
                         repair_result.changed,
                     )
                     disk_format = _disk_format_for_image(working_img)
@@ -3297,7 +3356,7 @@ class FloppyImageSession:
                     _notify_progress(progress_callback, 75, 100, "Creating working copy...")
                     repair_result = prepare_yamaha_image(source_copy, working_img)
                     repair_result = YamahaRepairResult(
-                        repair_result.note + f" Fast USB file-level read was unavailable: {fast_exc}",
+                        repair_result.note + f" Fast floppy file-level read was unavailable: {fast_exc}",
                         repair_result.changed,
                     )
                     disk_format = _disk_format_for_image(working_img)
@@ -3398,7 +3457,7 @@ class FloppyImageSession:
         cancel_callback=None,
     ):
         if not isinstance(drive_info, FloppyDriveInfo):
-            raise FloppyImageError("Invalid USB floppy drive selection.")
+            raise FloppyImageError("Invalid floppy drive selection.")
         if not isinstance(disk_format, DiskFormat):
             raise FloppyImageError("Invalid disk format.")
 
@@ -3416,7 +3475,7 @@ class FloppyImageSession:
                 _raise_if_cancelled(cancel_callback)
                 _notify_progress(progress_callback, 1, 5, "Adding empty PIANODIR.FIL...")
                 _write_empty_pianodir_to_image(working_img, temp_dir)
-            _notify_progress(progress_callback, 2, 5, f"Writing USB floppy {drive_info.path}...")
+            _notify_progress(progress_callback, 2, 5, f"Writing floppy {drive_info.path}...")
             _write_block_device(
                 working_img,
                 drive_info.path,
@@ -3632,12 +3691,21 @@ class FloppyImageSession:
 
     @classmethod
     def _recover_usb_floppy(cls, drive_info, progress_callback=None, cancel_callback=None):
+        disk_format_hint = None
+        if isinstance(drive_info, FloppyRecoverySource):
+            disk_format_hint = drive_info.disk_format
+            drive_info = drive_info.drive_info
         if not isinstance(drive_info, FloppyDriveInfo):
             raise FloppyImageError("Invalid floppy drive selection.")
 
         temp_dir = tempfile.mkdtemp(prefix="aps_recover_floppy_")
         try:
             source_copy = os.path.join(temp_dir, "source_recovery.img")
+            read_size = (
+                disk_format_hint.size_bytes
+                if isinstance(disk_format_hint, DiskFormat)
+                else drive_info.size_bytes
+            )
             _notify_progress(
                 progress_callback,
                 0,
@@ -3647,15 +3715,22 @@ class FloppyImageSession:
             read_note = _read_block_device_recovery_image(
                 drive_info.path,
                 source_copy,
-                drive_info.size_bytes,
+                read_size,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
             )
+            format_note = ""
+            if isinstance(disk_format_hint, DiskFormat):
+                format_note = (
+                    f" Recovery was run with the disk format hint: {disk_format_hint.label} "
+                    f"({display_bytes(disk_format_hint.size_bytes)})."
+                )
             return cls._recover_from_raw_image(
                 source_copy,
                 temp_dir,
                 source_name=f"Recovered from {drive_info.display_name}",
-                extra_note=f"{read_note} The source floppy was not modified.",
+                extra_note=f"{read_note}{format_note} The source floppy was not modified.",
+                disk_format_hint=disk_format_hint,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
             )
@@ -3738,6 +3813,7 @@ class FloppyImageSession:
                         temp_dir,
                         source_name=f"Recovered from {attempt.display_name}",
                         extra_note=note,
+                        disk_format_hint=attempt.disk_format,
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
                     )
@@ -4331,7 +4407,7 @@ class FloppyImageSession:
         )
         try:
             if self.source_kind == "floppy_usb":
-                _notify_progress(progress_callback, 4, 5, f"Writing USB floppy {self.source_path}...")
+                _notify_progress(progress_callback, 4, 5, f"Writing floppy {self.source_path}...")
                 _write_block_device(
                     modified_img,
                     self.source_path,
@@ -4406,8 +4482,8 @@ class FloppyImageSession:
         try:
             if target_kind == "floppy_usb":
                 if not isinstance(target, FloppyDriveInfo):
-                    raise FloppyImageError("Invalid USB floppy drive selection.")
-                _notify_progress(progress_callback, 4, 5, f"Writing USB floppy {target.path}...")
+                    raise FloppyImageError("Invalid floppy drive selection.")
+                _notify_progress(progress_callback, 4, 5, f"Writing floppy {target.path}...")
                 _write_block_device(
                     modified_img,
                     target.path,

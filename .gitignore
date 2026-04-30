@@ -9,8 +9,13 @@ __pycache__/
 # Build and release artifacts
 build/
 dist/
+release/
+*.AppImage
 release/*.AppImage
 release/*.AppImage.zsync
+*.AppImage.zsync
+*.AppDir/
+appimagetool-*.AppImage
 *.spec
 
 # Optional bundled preview assets

@@ -83,8 +83,8 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             (
                 "Overview",
                 f"""
-                <p><strong>APS MIDI Prep Tool</strong> prepares MIDI and Yamaha Disklavier E-SEQ
-                music files for folders, floppy images, and real disks.</p>
+                <p><strong>APS MIDI Prep Tool</strong> is a Disklavier preservation and preparation
+                workstation for MIDI files, Yamaha E-SEQ files, floppy images, and real disks.</p>
                 <p>Pick a workflow above, or use <strong>Next</strong>, to see the path that
                 matches what you are trying to do.</p>
                 <ul>
@@ -99,7 +99,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             (
                 "Edit Titles",
                 """
-                <p>Use <strong>Choose MIDI Folder</strong>, or drag files into the table, to edit
+                <p>Use <strong>Open MIDI Folder</strong>, or drag files into the table, to edit
                 local MIDI or E-SEQ titles.</p>
                 <ul>
                   <li>Click the <strong>Title</strong> column to edit a song title.</li>
@@ -111,16 +111,17 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             (
                 "Copy Or Back Up Yamaha Floppies",
                 """
-                <p>Use <strong>Read Floppy</strong> for a USB floppy drive or Greaseweazle, or
+                <p>Use <strong>Read Floppy</strong> for a floppy drive or Greaseweazle, or
                 <strong>Open Image</strong> for IMG, HFE, BIN, and related image files.</p>
                 <ul>
                   <li>The app repairs Yamaha copy-protected boot sectors in the working copy.</li>
+                  <li>Use <strong>Recover Damaged Floppy</strong> or <strong>Recover Damaged Image</strong> when normal reading fails.</li>
                   <li><strong>Save As</strong> copies the listed files to a folder.</li>
                   <li><strong>Save As Image</strong> creates a new floppy image without touching the original.</li>
                   <li>For fragile or difficult disks, use Greaseweazle and choose archival SCP when you want a raw flux capture.</li>
                   <li>Keep the backup image unchanged, then make edited copies from it when needed.</li>
                 </ul>
-                <p>Related articles: <a href="https://www.alexanderpeppe.com/disklavier-floppy-backups/">Using PPFBU to Back Up Disks</a>
+                <p>Related articles: <a href="https://www.alexanderpeppe.com/disklavier-floppy-backups/">Backing up Disklavier floppy disks</a>
                 and <a href="https://www.alexanderpeppe.com/making-archival-copies-of-disks-using-a-greaseweazle-v4/">Backing Up Yamaha Disklavier Floppy Disks with a Greaseweazle</a>.</p>
                 """,
             ),
@@ -158,6 +159,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 <strong>MIDI -&gt; E-SEQ</strong> to prepare Yamaha E-SEQ files.</p>
                 <ul>
                   <li>E-SEQ titles are limited to 32 characters.</li>
+                  <li>In any E-SEQ mode, dropped MIDI files are staged as E-SEQ and Type 1 MIDI is converted to Type 0 first.</li>
                   <li>The tool can generate or refresh <strong>PIANODIR.FIL</strong>.</li>
                   <li>E-SEQ disks support up to 60 songs, and floppy/image size limits still apply.</li>
                 </ul>
@@ -183,6 +185,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li><strong>Save As</strong> writes files to a selected folder.</li>
                   <li><strong>Save As Image</strong> creates a new image file.</li>
                   <li><strong>Back up before saving</strong> creates backups before overwriting.</li>
+                  <li><strong>Create .tags.txt sidecars</strong> creates optional tag sidecar files only for local folder saves.</li>
                 </ul>
                 """,
             ),

@@ -95,7 +95,9 @@ from .floppy_image import (
     DISK_FORMATS,
     PREFERRED_OUTPUT_EXTENSIONS,
     FloppyImageError,
+    FloppyDriveInfo,
     FloppyImageSession,
+    FloppyRecoverySource,
     GreaseweazleFloppySource,
     ImageRecoverySource,
     allocated_size,
@@ -130,6 +132,11 @@ from .eseq_pianodir import (
     update_eseq_order_key_to_path,
 )
 from .app_info import (
+    APP_AUTHOR,
+    APP_COMPANY,
+    APP_COMPANY_ADDRESS,
+    APP_COPYRIGHT_NOTICE,
+    APP_LICENSE,
     APP_NAME,
     APP_TITLE_WITH_VERSION,
     APP_VERSION,
@@ -968,18 +975,46 @@ class MidiPreviewRenderWorker(QThread):
 
 class PianoRollWidget(QWidget):
     seekRequested = Signal(float)
+    MAX_DISPLAY_NOTES = 50000
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.notes = []
+        self.display_notes = []
         self.duration = 1.0
         self.playhead_sec = 0.0
         self.setMinimumHeight(220)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setCursor(Qt.PointingHandCursor)
 
+    @classmethod
+    def _notes_for_display(cls, notes):
+        notes = list(notes or [])
+        if len(notes) <= cls.MAX_DISPLAY_NOTES:
+            return notes
+
+        ordered = sorted(
+            notes,
+            key=lambda note: (
+                float(note.get("start_sec", 0.0)),
+                float(note.get("end_sec", 0.0)),
+                int(note.get("pitch", 0)),
+            ),
+        )
+        step = (len(ordered) - 1) / max(1, cls.MAX_DISPLAY_NOTES - 1)
+        selected = []
+        last_index = -1
+        for position in range(cls.MAX_DISPLAY_NOTES):
+            index = int(round(position * step))
+            if index == last_index:
+                continue
+            selected.append(ordered[index])
+            last_index = index
+        return selected
+
     def set_notes(self, notes, duration):
         self.notes = list(notes or [])
+        self.display_notes = self._notes_for_display(self.notes)
         self.duration = max(0.1, float(duration or 0.1))
         self.playhead_sec = 0.0
         self.update()
@@ -1044,7 +1079,7 @@ class PianoRollWidget(QWidget):
             QColor("#C05C9A"),
         ]
         painter.setPen(Qt.NoPen)
-        for note in self.notes[:5000]:
+        for note in self.display_notes:
             start = float(note.get("start_sec", 0.0))
             end = float(note.get("end_sec", start + 0.05))
             x = rect.left() + int((start / self.duration) * rect.width())
@@ -1634,6 +1669,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_GREASEWEAZLE_DRIVE = "greaseweazle_drive"
     SETTING_CHECK_UPDATES_AT_STARTUP = "check_updates_at_startup"
     SETTING_SKIP_UPDATE_REMINDERS = "skip_update_reminders"
+    SETTING_WRITE_TAG_SIDECARS = "write_tag_sidecars"
     IMAGE_FILENAME_INVALID_CHARS = set('\\/:*?"<>|+,;=[]')
     EXPORT_FOLDER_INVALID_CHARS = set('\\/:*?"<>|')
     TYPE_COLUMN_MIN_WIDTH = 70
@@ -1740,7 +1776,7 @@ class MidiTitleWindow(QMainWindow):
         self.read_floppy_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.read_floppy_button.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.read_floppy_button.setToolTip(
-            "Read a floppy from a USB floppy drive or from a Greaseweazle-connected drive."
+            "Read a floppy from a floppy drive or from a Greaseweazle-connected drive."
         )
         self.read_floppy_button.clicked.connect(self.load_floppy_drive)
         source_layout.addWidget(self.read_floppy_button, stretch=1)
@@ -2082,6 +2118,16 @@ class MidiTitleWindow(QMainWindow):
         self.fileSaveAsAction.triggered.connect(self.save_as_changes)
         self.fileMenu.addAction(self.fileSaveAsAction)
 
+        self.fileCreateTagSidecarsAction = QAction("Create Tag Sidecars When Saving", self)
+        self.fileCreateTagSidecarsAction.setCheckable(True)
+        self.fileCreateTagSidecarsAction.setChecked(self._tag_sidecars_enabled())
+        self.fileCreateTagSidecarsAction.setToolTip(
+            "When saving local MIDI or E-SEQ files to folders, create one .tags.txt ID3 tag sidecar next to each song. "
+            "This option is not used for Image Mode or Floppy Mode saves."
+        )
+        self.fileCreateTagSidecarsAction.toggled.connect(self.toggle_tag_sidecar_writing)
+        self.fileMenu.addAction(self.fileCreateTagSidecarsAction)
+
         self.fileSaveAsImageAction = QAction("Save As Image...", self)
         self.fileSaveAsImageAction.triggered.connect(self.save_as_image)
         self.fileMenu.addAction(self.fileSaveAsImageAction)
@@ -2099,7 +2145,7 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesMenu.addAction(self.utilitiesSongListAction)
 
         self.utilitiesFileInspectionAction = QAction("File Inspection...", self)
-        self.utilitiesFileInspectionAction.triggered.connect(self.show_file_inspection_tool)
+        self.utilitiesFileInspectionAction.triggered.connect(lambda _checked=False: self.show_file_inspection_tool())
         self.utilitiesMenu.addAction(self.utilitiesFileInspectionAction)
 
         self.utilitiesRecoverImageAction = QAction("Recover Damaged Image...", self)
@@ -2108,6 +2154,13 @@ class MidiTitleWindow(QMainWindow):
         )
         self.utilitiesRecoverImageAction.triggered.connect(self.recover_damaged_image_dialog)
         self.utilitiesMenu.addAction(self.utilitiesRecoverImageAction)
+
+        self.utilitiesRecoverFloppyAction = QAction("Recover Damaged Floppy...", self)
+        self.utilitiesRecoverFloppyAction.setToolTip(
+            "Recover song data from a damaged physical floppy and open the result as a new editable image copy."
+        )
+        self.utilitiesRecoverFloppyAction.triggered.connect(self.recover_damaged_floppy_dialog)
+        self.utilitiesMenu.addAction(self.utilitiesRecoverFloppyAction)
 
         self.utilitiesMenu.addSeparator()
 
@@ -2153,6 +2206,10 @@ class MidiTitleWindow(QMainWindow):
         welcome_action = QAction("Show Welcome Screen", self)
         welcome_action.triggered.connect(self.show_welcome_dialog)
         help_menu.addAction(welcome_action)
+
+        disclaimer_action = QAction("Disclaimer", self)
+        disclaimer_action.triggered.connect(self.show_disclaimer_dialog)
+        help_menu.addAction(disclaimer_action)
 
         about_action = QAction("About APS MIDI Prep Tool", self)
         about_action.triggered.connect(self.show_about_dialog)
@@ -2251,7 +2308,7 @@ class MidiTitleWindow(QMainWindow):
         if "permission denied" in lower or "access is denied" in lower:
             return (
                 "Check that the file or floppy device is writable by your user. "
-                "On Linux, unmount the disk before direct USB floppy writes and make sure your user has device access."
+                "On Linux, unmount the disk before direct floppy writes and make sure your user has device access."
             )
         if "device or resource busy" in lower or "text file busy" in lower or "could not lock" in lower:
             return "Close file managers or other programs using the disk, unmount it if needed, and try again."
@@ -2480,6 +2537,15 @@ class MidiTitleWindow(QMainWindow):
             )
             self.diskLoadContext = {}
             return
+        if request.get("load_kind") == "floppy_usb":
+            source = self._wrap_floppy_recovery_source_with_format(request.get("source"))
+            if source is None or not isinstance(source, FloppyRecoverySource):
+                self.diskLoadContext = {}
+                return
+            request = dict(request)
+            request["source"] = source
+            request["source_label"] = f"floppy disk ({source.disk_format.label})"
+            request["progress_title"] = "Recovering Floppy Data"
         self._start_disk_recovery_worker(request)
 
     def _start_disk_recovery_worker(self, request):
@@ -2983,6 +3049,22 @@ class MidiTitleWindow(QMainWindow):
                 if enabled else
                 "Please wait for the current operation to finish before recovering a damaged image."
             )
+        if hasattr(self, "utilitiesRecoverFloppyAction"):
+            enabled = self.choose_button.isEnabled()
+            self.utilitiesRecoverFloppyAction.setEnabled(enabled)
+            self.utilitiesRecoverFloppyAction.setStatusTip(
+                "Recover song data from a damaged physical floppy."
+                if enabled else
+                "Please wait for the current operation to finish before recovering a damaged floppy."
+            )
+        if hasattr(self, "fileCreateTagSidecarsAction"):
+            enabled = self.choose_button.isEnabled()
+            self.fileCreateTagSidecarsAction.setEnabled(enabled)
+            self.fileCreateTagSidecarsAction.setStatusTip(
+                "Create .tags.txt sidecar files next to saved local MIDI or E-SEQ files."
+                if enabled else
+                "Please wait for the current operation to finish before changing sidecar output."
+            )
 
         has_listed_files = self.choose_button.isEnabled() and any(
             self.table.item(row, 1) is not None and not self._is_special_pianodir_row(row)
@@ -3353,19 +3435,88 @@ class MidiTitleWindow(QMainWindow):
             return "Untitled"
         return title
 
+    @staticmethod
+    def _song_list_display_text(value, fallback=""):
+        text = re.sub(r"\s+", " ", str(value or "").replace("\x00", " ")).strip()
+        return text or fallback
+
     def _build_song_list_text(self):
         rows = self._current_song_rows_for_listing()
         metadata = self._current_visible_pianodir_metadata()
         lines = []
-        if metadata.disk_title.strip():
-            lines.append(f"Album: {metadata.disk_title.strip()}")
-        if metadata.catalog_number.strip():
-            lines.append(f"Catalog: {metadata.catalog_number.strip()}")
+        disk_title = self._song_list_display_text(metadata.disk_title)
+        catalog_number = self._song_list_display_text(metadata.catalog_number)
+        if disk_title:
+            lines.append(f"Album: {disk_title}")
+        if catalog_number:
+            lines.append(f"Catalog: {catalog_number}")
         if lines:
             lines.append("")
         for index, row in enumerate(rows, start=1):
-            lines.append(f"{index}. {self._song_title_for_row(row)}")
+            title = self._song_list_display_text(self._song_title_for_row(row), "Untitled")
+            lines.append(f"{index}. {title}")
         return "\n".join(lines).strip()
+
+    def toggle_tag_sidecar_writing(self, enabled):
+        self.settings.setValue(self.SETTING_WRITE_TAG_SIDECARS, bool(enabled))
+
+    def _tag_sidecars_enabled(self):
+        return self.settings.value(self.SETTING_WRITE_TAG_SIDECARS, False, type=bool)
+
+    def _tag_sidecar_path_for_output(self, output_path):
+        base_path, _ext = os.path.splitext(output_path)
+        return f"{base_path}.tags.txt"
+
+    def _tag_sidecar_lines_for_row(self, row):
+        metadata = self._current_visible_pianodir_metadata()
+        title = self._song_list_display_text(self._song_title_for_row(row), "Untitled")
+        album = self._song_list_display_text(metadata.disk_title)
+        catalog = self._song_list_display_text(metadata.catalog_number)
+
+        lines = [f"TIT2={title}"]
+        if catalog:
+            lines.append(f"TIT3={catalog}")
+        if album:
+            lines.append(f"TALB={album}")
+        lines.append("TCON=Player Piano")
+        return lines
+
+    def _write_tag_sidecar_file(self, output_path, row):
+        if is_pianodir_path(output_path):
+            return None
+        tag_path = self._tag_sidecar_path_for_output(output_path)
+        try:
+            tag_dir = os.path.dirname(tag_path)
+            if tag_dir:
+                os.makedirs(tag_dir, exist_ok=True)
+            payload = "\r\n".join(self._tag_sidecar_lines_for_row(row)) + "\r\n"
+            with open(tag_path, "w", encoding="utf-8-sig", newline="") as handle:
+                handle.write(payload)
+            return None
+        except Exception as exc:
+            return f"Could not write tag file for {os.path.basename(output_path)}: {exc}"
+
+    def _write_tag_sidecars_for_regular_rows(self, path_remap=None, only_paths=None):
+        if not self._tag_sidecars_enabled() or self.is_image_mode():
+            return []
+
+        path_remap = path_remap or {}
+        only_paths = set(only_paths) if only_paths is not None else None
+        errors = []
+        for row in self._regular_file_rows():
+            full_path_item = self.table.item(row, 1)
+            if full_path_item is None:
+                continue
+            full_path = full_path_item.text()
+            if only_paths is not None and full_path not in only_paths:
+                continue
+            output_path = path_remap.get(full_path, full_path)
+            if not output_path or is_pianodir_path(output_path):
+                continue
+            error = self._write_tag_sidecar_file(output_path, row)
+            if error:
+                errors.append(error)
+        return errors
 
     def show_song_list_tool(self):
         song_list_text = self._build_song_list_text()
@@ -3421,6 +3572,8 @@ class MidiTitleWindow(QMainWindow):
         return items
 
     def show_file_inspection_tool(self, selected_row=None):
+        if isinstance(selected_row, bool):
+            selected_row = None
         items = self._inspection_items()
         if not items:
             QMessageBox.information(self, "No Files", "No loaded MIDI or E-SEQ files are available to inspect.")
@@ -4420,7 +4573,7 @@ class MidiTitleWindow(QMainWindow):
         self.open_image_button.setToolTip("Open a floppy image file for editing in Image Mode.")
         self.read_floppy_button.setEnabled(True)
         self.read_floppy_button.setToolTip(
-            "Read a floppy from a USB floppy drive or from a Greaseweazle-connected drive."
+            "Read a floppy from a floppy drive or from a Greaseweazle-connected drive."
         )
         self.table.setToolTip(
             "Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename."
@@ -4455,7 +4608,7 @@ class MidiTitleWindow(QMainWindow):
         self.open_image_button.setToolTip("Open a floppy image file for editing in Image Mode.")
         self.read_floppy_button.setEnabled(True)
         self.read_floppy_button.setToolTip(
-            "Read a floppy from a USB floppy drive or from a Greaseweazle-connected drive."
+            "Read a floppy from a floppy drive or from a Greaseweazle-connected drive."
         )
         self.table.setToolTip(
             "E-SEQ Mode: edit local MIDI and E-SEQ titles, and manage the local PIANODIR.FIL row."
@@ -4518,7 +4671,7 @@ class MidiTitleWindow(QMainWindow):
         self.open_image_button.setToolTip("Open another floppy image file for editing in Image Mode.")
         self.read_floppy_button.setEnabled(True)
         self.read_floppy_button.setToolTip(
-            "Read another floppy from a USB floppy drive or a Greaseweazle-connected drive."
+            "Read another floppy from a floppy drive or a Greaseweazle-connected drive."
         )
         self.table.setToolTip(
             f"{mode_banner}: edit titles, rename files, remove rows to delete files on Save, or drop files to add them."
@@ -4933,7 +5086,7 @@ class MidiTitleWindow(QMainWindow):
             )
 
     def _choose_floppy_source_mode(self):
-        options = ["USB Floppy Drive", "Greaseweazle"]
+        options = ["Floppy Drive", "Greaseweazle"]
         choice, ok = QInputDialog.getItem(
             self,
             "Choose Floppy Source",
@@ -4967,7 +5120,7 @@ class MidiTitleWindow(QMainWindow):
         layout.addWidget(target_label)
 
         target_combo = QComboBox(dialog)
-        target_combo.addItems(["USB Floppy Drive", "Greaseweazle"])
+        target_combo.addItems(["Floppy Drive", "Greaseweazle"])
         layout.addWidget(target_combo)
 
         format_label = QLabel("Disk format:")
@@ -5010,16 +5163,16 @@ class MidiTitleWindow(QMainWindow):
         if not drives:
             QMessageBox.information(
                 self,
-                "No USB Floppy Found",
-                "No supported USB floppy drive was detected. Insert a disk and try again.",
+                "No Floppy Drive Found",
+                "No supported floppy drive was detected. Insert a disk and try again.",
             )
             return None
 
         labels = [drive.display_name for drive in drives]
         chosen_label, ok = QInputDialog.getItem(
             self,
-            "Choose USB Floppy Drive",
-            "USB floppy drive:",
+            "Choose Floppy Drive",
+            "Floppy drive:",
             labels,
             0,
             False,
@@ -5121,7 +5274,7 @@ class MidiTitleWindow(QMainWindow):
         )
         if drive_size_bytes and drive_size_bytes != disk_format.size_bytes:
             message += (
-                "\n\nThe selected USB drive currently reports "
+                "\n\nThe selected floppy drive currently reports "
                 f"{display_bytes(drive_size_bytes)}, which does not match the selected format."
             )
         return QMessageBox.question(
@@ -5147,7 +5300,7 @@ class MidiTitleWindow(QMainWindow):
         source_kind = ""
         drive_size_bytes = 0
 
-        if target_mode == "USB Floppy Drive":
+        if target_mode == "Floppy Drive":
             selected_source = self._choose_usb_floppy_drive()
             if selected_source is None:
                 return
@@ -5311,7 +5464,7 @@ class MidiTitleWindow(QMainWindow):
             message += "\n\nPending image changes will be included in the floppy write."
         if drive_size_bytes and disk_format is not None and drive_size_bytes != disk_format.size_bytes:
             message += (
-                "\n\nThe selected USB drive currently reports "
+                "\n\nThe selected floppy drive currently reports "
                 f"{display_bytes(drive_size_bytes)}, which does not match the current image size "
                 f"({display_bytes(disk_format.size_bytes)})."
             )
@@ -5349,7 +5502,7 @@ class MidiTitleWindow(QMainWindow):
         if not source_mode:
             return
 
-        if source_mode == "USB Floppy Drive":
+        if source_mode == "Floppy Drive":
             target = self._choose_usb_floppy_drive()
             if target is None:
                 return
@@ -5378,7 +5531,7 @@ class MidiTitleWindow(QMainWindow):
         )
 
     def _start_write_image_to_floppy_worker(self, target_kind, target, target_name, operations):
-        progress_text = "Writing USB floppy..." if target_kind == "floppy_usb" else "Writing floppy via Greaseweazle..."
+        progress_text = "Writing floppy..." if target_kind == "floppy_usb" else "Writing floppy via Greaseweazle..."
         progress_dialog = QProgressDialog(progress_text, "Cancel", 0, 5, self)
         progress_dialog.setWindowTitle("Writing Image to Floppy")
         self._prepare_progress_dialog(progress_dialog)
@@ -5753,6 +5906,126 @@ class MidiTitleWindow(QMainWindow):
             }
         )
 
+    def _choose_floppy_recovery_disk_format(self):
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle("Floppy Recovery Disk Size")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(500)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(8)
+
+        hint = QLabel(
+            "Choose the format of the disk in the drive. Most Yamaha Disklavier floppies are IBM 720K DD; "
+            "recovery will copy exactly the selected amount of data."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        format_label = QLabel("Disk format:")
+        layout.addWidget(format_label)
+
+        format_combo = QComboBox(dialog)
+        default_index = 0
+        for index, disk_format in enumerate(DISK_FORMATS):
+            format_combo.addItem(
+                f"{disk_format.label} ({display_bytes(disk_format.size_bytes)})",
+                disk_format,
+            )
+            if disk_format.key == "ibm.720":
+                default_index = index
+        format_combo.setCurrentIndex(default_index)
+        layout.addWidget(format_combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return None
+        return format_combo.currentData()
+
+    def _wrap_floppy_recovery_source_with_format(self, source):
+        if isinstance(source, FloppyRecoverySource):
+            return source
+        if not isinstance(source, FloppyDriveInfo):
+            return source
+        disk_format = self._choose_floppy_recovery_disk_format()
+        if disk_format is None:
+            return None
+        return FloppyRecoverySource(source, disk_format)
+
+    def recover_damaged_floppy_dialog(self):
+        if not self._prepare_for_disk_load("a recovered floppy disk"):
+            return
+
+        source_mode = self._choose_floppy_source_mode()
+        if not source_mode:
+            return
+
+        if source_mode == "Floppy Drive":
+            selected_source = self._choose_usb_floppy_drive()
+            if selected_source is None:
+                return
+            selected_source = self._wrap_floppy_recovery_source_with_format(selected_source)
+            if selected_source is None:
+                return
+            load_kind = "floppy_usb"
+            disk_format = selected_source.disk_format
+            source_label = f"floppy disk ({disk_format.label})"
+            progress_title = "Recovering Floppy Data"
+        else:
+            selected_source = self._choose_greaseweazle_source()
+            if selected_source is None:
+                return
+            load_kind = "floppy_gw"
+            disk_format = selected_source.disk_format
+            source_label = f"Greaseweazle floppy ({disk_format.label})"
+            progress_title = "Recovering Greaseweazle Floppy Data"
+
+        drive_size_note = ""
+        if (
+            load_kind == "floppy_usb"
+            and selected_source.drive_info.size_bytes
+            and selected_source.drive_info.size_bytes != disk_format.size_bytes
+        ):
+            drive_size_note = (
+                "\n\nThe selected drive reports "
+                f"{display_bytes(selected_source.drive_info.size_bytes)}, which may be the drive capacity. "
+                f"Recovery will copy the selected disk size: {disk_format.label} "
+                f"({display_bytes(disk_format.size_bytes)})."
+            )
+
+        reply = QMessageBox.question(
+            self,
+            "Recover Damaged Floppy",
+            (
+                "Try to recover song data from the selected physical floppy?\n\n"
+                f"Disk format: {disk_format.label} ({display_bytes(disk_format.size_bytes)})\n\n"
+                "Recovery may take a long time. The app will copy a full disk image first, then try "
+                "Yamaha/FAT repairs and raw scanning for MIDI, E-SEQ, and PIANODIR data.\n\n"
+                "The source floppy will not be modified."
+                f"{drive_size_note}"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._start_disk_recovery_worker(
+            {
+                "load_kind": load_kind,
+                "source": selected_source,
+                "failure_title": "Floppy Recovery Failed",
+                "source_label": source_label,
+                "progress_title": progress_title,
+            }
+        )
+
     def load_image_file(self, image_path, prevalidated=False):
         if not prevalidated and not self._prepare_for_disk_load("this floppy image"):
             return
@@ -5775,11 +6048,11 @@ class MidiTitleWindow(QMainWindow):
         if not source_mode:
             return
 
-        if source_mode == "USB Floppy Drive":
+        if source_mode == "Floppy Drive":
             selected_source = self._choose_usb_floppy_drive()
             if selected_source is None:
                 return
-            progress_title = "Reading USB Floppy"
+            progress_title = "Reading Floppy"
             progress_total = 100
         else:
             selected_source = self._choose_greaseweazle_source()
@@ -5791,7 +6064,7 @@ class MidiTitleWindow(QMainWindow):
                 progress_title = "Reading Floppy via Greaseweazle (Archival SCP)"
 
         self._start_disk_load_worker(
-            load_kind="floppy_usb" if source_mode == "USB Floppy Drive" else "floppy_gw",
+            load_kind="floppy_usb" if source_mode == "Floppy Drive" else "floppy_gw",
             source=selected_source,
             progress_title=progress_title,
             progress_total=progress_total,
@@ -7562,7 +7835,7 @@ class MidiTitleWindow(QMainWindow):
     def _confirm_floppy_write(self):
         if self.image_session is None or not self.image_session.source_kind.startswith("floppy"):
             return True
-        title = "Write USB Floppy" if self.image_session.source_kind == "floppy_usb" else "Write Greaseweazle Floppy"
+        title = "Write Floppy" if self.image_session.source_kind == "floppy_usb" else "Write Greaseweazle Floppy"
         return self._confirm_with_optional_skip(
             setting_key=self.SETTING_SKIP_FLOPPY_WRITE_WARNING,
             title=title,
@@ -8308,7 +8581,7 @@ class MidiTitleWindow(QMainWindow):
         renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
         order_key_edits = self._image_eseq_order_key_edits()
         if self.image_session.source_kind == "floppy_usb":
-            progress_text = "Writing USB floppy..."
+            progress_text = "Writing floppy..."
         elif self.image_session.source_kind == "floppy_gw":
             progress_text = "Writing floppy via Greaseweazle..."
         else:
@@ -8462,6 +8735,23 @@ class MidiTitleWindow(QMainWindow):
             self.diskCommitWorker.deleteLater()
             self.diskCommitWorker = None
 
+    def show_disclaimer_dialog(self):
+        QMessageBox.information(
+            self,
+            "Disclaimer",
+            (
+                "APS MIDI Prep Tool is provided for lawful preservation, repair, and compatibility work.\n\n"
+                "Use copies whenever possible, keep backups, and test outputs before relying on them. "
+                "You are responsible for any data loss, disk damage, instrument behavior, or other results "
+                "from using the software.\n\n"
+                "Use the tool only with disks and files you own or are authorized to preserve, convert, or modify. "
+                "Do not use it to distribute copyrighted music, commercial player-piano libraries, proprietary "
+                "software, or other material you do not have the right to share.\n\n"
+                "This software is independent and is not affiliated with Yamaha, PianoDisc, Nalbantov, "
+                "Greaseweazle, or other companies mentioned. Trademarks belong to their respective owners."
+            ),
+        )
+
     def show_about_dialog(self):
         dialog = QDialog(self)
         apply_window_icon(dialog)
@@ -8492,6 +8782,21 @@ class MidiTitleWindow(QMainWindow):
         website_label.setOpenExternalLinks(True)
         website_label.setToolTip("Project website.")
         layout.addWidget(website_label)
+
+        info_label = QLabel(
+            (
+                f"{APP_COPYRIGHT_NOTICE}<br>"
+                f"Author: {APP_AUTHOR}<br>"
+                f"{APP_COMPANY}<br>"
+                f"{APP_COMPANY_ADDRESS}<br>"
+                f"License: {APP_LICENSE}"
+            ),
+            dialog,
+        )
+        info_label.setTextFormat(Qt.RichText)
+        info_label.setAlignment(Qt.AlignCenter)
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
         buttons.rejected.connect(dialog.reject)
@@ -9080,7 +9385,16 @@ class MidiTitleWindow(QMainWindow):
             except Exception as exc:
                 return [f"Could not write PIANODIR.FIL: {exc}"]
 
+        tag_errors = self._write_tag_sidecars_for_regular_rows(
+            path_remap=output_path_map,
+            only_paths=output_path_map.keys(),
+        )
+        if tag_errors:
+            return tag_errors
+
         status_text = f"Saved {len(output_path_map)} converted file(s)."
+        if self._tag_sidecars_enabled() and output_path_map:
+            status_text += "\nWrote .tags.txt sidecar file(s)."
         if self.backup_checkbox.isChecked():
             status_text += "\nCreated backup file(s) for the original source files."
         self._cleanup_midi_scratch_dir()
@@ -9098,8 +9412,15 @@ class MidiTitleWindow(QMainWindow):
         should_write_local_pianodir = self.is_local_eseq_mode() and self._should_generate_pianodir()
         regular_order_key_edits = self._regular_eseq_order_key_edits() if self.is_local_eseq_mode() else {}
         has_pending_conversions = bool(self.pendingRegularConversions)
+        should_write_tag_sidecars = self._tag_sidecars_enabled() and self._regular_file_count() > 0
 
-        if not self.pendingEdits and not should_write_local_pianodir and not regular_order_key_edits and not has_pending_conversions:
+        if (
+            not self.pendingEdits
+            and not should_write_local_pianodir
+            and not regular_order_key_edits
+            and not has_pending_conversions
+            and not should_write_tag_sidecars
+        ):
             QMessageBox.information(self, "No Changes", "There are no pending changes to save.")
             return
         if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
@@ -9190,6 +9511,9 @@ class MidiTitleWindow(QMainWindow):
             except Exception as exc:
                 errors.append(f"Could not write PIANODIR.FIL: {exc}")
 
+        if not errors and should_write_tag_sidecars:
+            errors.extend(self._write_tag_sidecars_for_regular_rows())
+
         if errors:
             self._show_error_list(
                 "Save Failed",
@@ -9198,7 +9522,10 @@ class MidiTitleWindow(QMainWindow):
                 guidance="Fix the listed files, then try Save again",
             )
         else:
-            QMessageBox.information(self, "Save Complete", "All pending changes have been saved.")
+            message = "All pending changes have been saved."
+            if should_write_tag_sidecars:
+                message += "\n\n.tags.txt sidecar file(s) were written next to the saved files."
+            QMessageBox.information(self, "Save Complete", message)
 
     def save_as_changes(self):
         if self.is_image_mode():
@@ -9294,6 +9621,13 @@ class MidiTitleWindow(QMainWindow):
                 copied_pianodir = os.path.join(export_dir, PIANODIR_FILENAME)
                 shutil.copy2(existing_pianodir, copied_pianodir)
                 output_paths.append(copied_pianodir)
+        if not errors:
+            errors.extend(
+                self._write_tag_sidecars_for_regular_rows(
+                    path_remap=output_path_map,
+                    only_paths=output_path_map.keys(),
+                )
+            )
         if errors:
             self._show_error_list(
                 "Save As Failed",
@@ -9306,4 +9640,7 @@ class MidiTitleWindow(QMainWindow):
                 output_paths,
                 f"Current context moved to: \"{export_dir}\"",
             )
-            QMessageBox.information(self, "Save As Complete", "Files have been saved to the new folder.")
+            message = "Files have been saved to the new folder."
+            if self._tag_sidecars_enabled():
+                message += "\n\n.tags.txt sidecar file(s) were written next to the exported files."
+            QMessageBox.information(self, "Save As Complete", message)

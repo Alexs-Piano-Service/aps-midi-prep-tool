@@ -1,12 +1,25 @@
 
 # Yamaha E-SEQ and PIANODIR.FIL Reference
 
-**Prepared for:** APS MIDI Prep Tool  
-**Purpose:** implementation reference for converting Yamaha E-SEQ `.FIL` song files to Standard MIDI Files, converting Standard MIDI Files back to E-SEQ `.FIL`, and constructing `PIANODIR.FIL` disk indexes for older Yamaha Disklavier media.  
-**Revision:** 1.0-precorpus  
-**Date:** 2026-04-25
+**Prepared for:** APS MIDI Prep Tool
+
+**Purpose:** implementation reference for converting Yamaha E-SEQ `.FIL` song files to Standard MIDI Files, converting Standard MIDI Files back to E-SEQ `.FIL`, and constructing `PIANODIR.FIL` disk indexes for older Yamaha Disklavier media.
+
+**Revision:** 1.1
+
+**Date:** 2026-04-30
+
+**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.5.3.
 
 > This document is intentionally written as an engineering reference. It distinguishes proven behavior from inferred or compatibility-oriented behavior. It does not contain proprietary Yamaha source code or third-party program code; it specifies file behavior derived from personal recordings, supplied disk images, static binary inspection, and public format references.
+
+Review notes for v0.5.3:
+
+- The app stages MIDI-to-E-SEQ, E-SEQ-to-MIDI, and SMF1-to-SMF0 conversions before writing them to disk.
+- In E-SEQ modes, dropped MIDI files are converted through Type 0 before E-SEQ output.
+- Generated `PIANODIR.FIL` records copy the relevant E-SEQ header slice for normal files and use the Q11 recipe for `Q11V1.00` files.
+- Damaged-image and damaged-floppy recovery are best-effort workflows. They can repair FAT/Yamaha structure when possible and otherwise carve MIDI, E-SEQ, and PIANODIR data from copied bytes.
+- Items still marked unchecked in the implementation checklist are either not exposed as user-selectable options or remain corpus/testing work rather than everyday app behavior.
 
 ---
 
@@ -1420,7 +1433,7 @@ Public references used for context and cross-checking:
 - MIDI Association, MIDI 1.0 Control Change Messages, including controller 7 as Channel Volume and controller 64 as Damper/Sustain: <https://midi.org/midi-1-0-control-change-messages>
 - Yamaha FAQ, “Using E-SEQ Format on a Disklavier II XG”: <https://faq.yamaha.com/usa/s/article/U0001636>
 - Alexander Peppe, “Converting MIDI Files and Creating PIANODIR.FIL for E-SEQ Files”: <https://www.alexanderpeppe.com/eseq-and-pianodir-fil/>
-- Alexander Peppe, “Using PPFBU to Back Up Disks: Disklavier Floppy Disks, E-SEQ, and MIDI Formats”: <https://www.alexanderpeppe.com/disklavier-floppy-backups/>
+- Alexander Peppe, Disklavier floppy backup article: <https://www.alexanderpeppe.com/disklavier-floppy-backups/>
 - MS3FGX `disklav.py`, public Disklavier image reverse-engineering script: <https://github.com/MS3FGX/disklav/blob/master/disklav.py>
 - YamahaMusicians forum post quoting DKVUTILS-era Disklavier disk and `PIANODIR.FIL` notes: <https://yamahamusicians.com/forum/viewtopic.php?t=14561>
 
@@ -1430,21 +1443,21 @@ Public references used for context and cross-checking:
 
 Use this checklist before considering APS MIDI Prep Tool E-SEQ support complete:
 
-- [ ] Parse SMF type 0 and type 1 with running status, meta events, sysex, and PPQN division.
-- [ ] Normalize MIDI to one absolute-tick event list.
-- [ ] Detect E-SEQ normal vs Q11 variant.
-- [ ] Parse E-SEQ event stream with `F3`, `F4`, `F9`, `FB`, channel events, sysex, and `F2`.
-- [ ] Convert normal E-SEQ tempo byte and `FB` factors to MIDI tempo events.
-- [ ] Convert MIDI tempo map to normal E-SEQ tempo byte and `FB` factors.
+- [x] Parse SMF type 0 and type 1 with running status, meta events, sysex, and PPQN division.
+- [x] Normalize MIDI to one absolute-tick event list.
+- [x] Detect E-SEQ normal vs Q11 variant.
+- [x] Parse E-SEQ event stream with `F3`, `F4`, `F9`, `FB`, channel events, sysex, and `F2`.
+- [x] Convert normal E-SEQ tempo byte and `FB` factors to MIDI tempo events.
+- [x] Convert MIDI tempo map to normal E-SEQ tempo byte and `FB` factors.
 - [ ] Support selectable end-tick policies.
-- [ ] Detect and report un-restored piano-channel `CC7=0` events.
-- [ ] Provide CC7 preservation/playback-fix policies.
-- [ ] Generate normal `0x77` `.FIL` files with coherent header, event stream, `F2`, and padding.
+- [x] Detect and report un-restored piano-channel `CC7=0` events.
+- [x] Provide CC7 preservation/playback-fix policies.
+- [x] Generate normal `0x77` `.FIL` files with coherent header, event stream, `F2`, and padding.
 - [ ] Parse `PIANODIR.FIL` size `0x1400` and `0x1800`.
-- [ ] Generate `0x1800` `PIANODIR.FIL` indexes.
-- [ ] Implement normal PIANODIR record recipe.
-- [ ] Implement Q11 PIANODIR record recipe.
-- [ ] Recalculate disk title, total duration, secondary aggregate, and count fields.
+- [x] Generate `0x1800` `PIANODIR.FIL` indexes.
+- [x] Implement normal PIANODIR record recipe.
+- [x] Implement Q11 PIANODIR record recipe.
+- [x] Recalculate disk title, total duration, secondary aggregate, and count fields.
 - [ ] Validate against the 21 personal pairs.
 - [ ] Validate against the 110-image PIANODIR corpus.
 - [ ] Add corpus-based tests for thousands of future pairs.
