@@ -1,31 +1,54 @@
 from PySide6.QtCore import QThread, Signal
 
-from .floppy_image import FloppyImageSession, FloppyOperationCancelled
+from .floppy_image import FloppyImageSession, FloppyOperationCancelled, GreaseweazleConversionError
 
 
 class _CancellableDiskWorker(QThread):
     progressChanged = Signal(int, int, str)
     operationCancelled = Signal(str)
+    CANCELLED_MESSAGE = "Operation cancelled."
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cancel_was_requested = False
 
     def cancel(self):
+        self._cancel_was_requested = True
         self.requestInterruption()
 
     def _cancel_requested(self):
-        return self.isInterruptionRequested()
+        return self._cancel_was_requested or self.isInterruptionRequested()
 
     def _raise_if_cancelled(self):
         if self._cancel_requested():
-            raise FloppyOperationCancelled("Operation cancelled.")
+            raise FloppyOperationCancelled(self.CANCELLED_MESSAGE)
 
     def _emit_progress(self, step, total, message):
         self._raise_if_cancelled()
         self.progressChanged.emit(int(step or 0), int(total or 0), str(message or ""))
         self._raise_if_cancelled()
 
+    def _looks_cancelled(self, exc):
+        text = str(exc or "").strip().lower()
+        return "cancelled" in text or "canceled" in text
+
+    def _should_treat_as_cancelled(self, exc):
+        return (
+            isinstance(exc, FloppyOperationCancelled)
+            or self._cancel_requested()
+            or self._looks_cancelled(exc)
+        )
+
+    def _emit_cancelled(self, exc=None):
+        message = str(exc or "").strip() if exc is not None else ""
+        self.operationCancelled.emit(message or self.CANCELLED_MESSAGE)
+
 
 class DiskSessionLoadWorker(_CancellableDiskWorker):
     sessionLoaded = Signal(object, object)
+    captureReady = Signal(object)
     loadFailed = Signal(str)
+    loadFailedWithDetails = Signal(object)
 
     def __init__(self, load_kind, source, *, final_total=0, final_message="", parent=None):
         super().__init__(parent)
@@ -36,6 +59,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
 
     def run(self):
         session = None
+        capture = None
         try:
             if self.load_kind == "image":
                 session = FloppyImageSession.load(
@@ -55,6 +79,37 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                     progress_callback=self._emit_progress,
                     cancel_callback=self._cancel_requested,
                 )
+            elif self.load_kind == "floppy_gw_capture_only":
+                source = self.source
+                if isinstance(source, dict):
+                    source = source.get("gw_source")
+                capture = FloppyImageSession.capture_greaseweazle_archival(
+                    source,
+                    progress_callback=self._emit_progress,
+                    cancel_callback=self._cancel_requested,
+                )
+                if self.final_message:
+                    self._emit_progress(self.final_total, self.final_total, self.final_message)
+                self._raise_if_cancelled()
+                self.captureReady.emit(
+                    {
+                        "capture": capture,
+                        "recover_after_capture": bool(
+                            isinstance(self.source, dict)
+                            and self.source.get("recover_after_capture")
+                        ),
+                    }
+                )
+                capture = None
+                return
+            elif self.load_kind == "floppy_gw_capture":
+                session = FloppyImageSession.load_greaseweazle_capture(
+                    self.source["gw_source"],
+                    self.source["capture_path"],
+                    self.source["disk_format"],
+                    progress_callback=self._emit_progress,
+                    cancel_callback=self._cancel_requested,
+                )
             else:
                 raise ValueError(f"Unsupported disk session load kind: {self.load_kind}")
 
@@ -69,10 +124,31 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
         except FloppyOperationCancelled as exc:
             if session is not None:
                 session.cleanup()
-            self.operationCancelled.emit(str(exc) or "Operation cancelled.")
+            if capture is not None:
+                capture.cleanup()
+            self._emit_cancelled(exc)
         except Exception as exc:
             if session is not None:
                 session.cleanup()
+            if capture is not None:
+                capture.cleanup()
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+                return
+            if isinstance(exc, GreaseweazleConversionError):
+                self.loadFailedWithDetails.emit(
+                    {
+                        "type": "greaseweazle_conversion",
+                        "message": str(exc),
+                        "sector_map": exc.sector_map,
+                        "disk_format": exc.disk_format,
+                        "capture_path": exc.capture_path,
+                        "reason": exc.reason,
+                        "suggested_format": exc.suggested_format,
+                        "source": self.source,
+                    }
+                )
+                return
             self.loadFailed.emit(str(exc))
 
 
@@ -106,10 +182,13 @@ class DiskSessionRecoveryWorker(_CancellableDiskWorker):
         except FloppyOperationCancelled as exc:
             if session is not None:
                 session.cleanup()
-            self.operationCancelled.emit(str(exc) or "Operation cancelled.")
+            self._emit_cancelled(exc)
         except Exception as exc:
             if session is not None:
                 session.cleanup()
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+                return
             self.recoveryFailed.emit(str(exc))
 
 
@@ -163,10 +242,13 @@ class DiskSessionFormatWorker(_CancellableDiskWorker):
         except FloppyOperationCancelled as exc:
             if session is not None:
                 session.cleanup()
-            self.operationCancelled.emit(str(exc) or "Operation cancelled.")
+            self._emit_cancelled(exc)
         except Exception as exc:
             if session is not None:
                 session.cleanup()
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+                return
             self.formatFailed.emit(str(exc))
 
 
@@ -189,8 +271,11 @@ class DiskSessionCommitWorker(_CancellableDiskWorker):
             listing = self.session.list_entries()
             self.commitFinished.emit(listing)
         except FloppyOperationCancelled as exc:
-            self.operationCancelled.emit(str(exc) or "Operation cancelled.")
+            self._emit_cancelled(exc)
         except Exception as exc:
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+                return
             self.commitFailed.emit(str(exc))
 
 
@@ -198,12 +283,13 @@ class DiskSessionWriteTargetWorker(_CancellableDiskWorker):
     writeFinished = Signal()
     writeFailed = Signal(str)
 
-    def __init__(self, session, target_kind, target, operations, parent=None):
+    def __init__(self, session, target_kind, target, operations, parent=None, file_level=False):
         super().__init__(parent)
         self.session = session
         self.target_kind = target_kind
         self.target = target
         self.operations = dict(operations or {})
+        self.file_level = bool(file_level)
 
     def run(self):
         try:
@@ -211,11 +297,15 @@ class DiskSessionWriteTargetWorker(_CancellableDiskWorker):
                 self.target_kind,
                 self.target,
                 **self.operations,
+                file_level=self.file_level,
                 progress_callback=self._emit_progress,
                 cancel_callback=self._cancel_requested,
             )
             self.writeFinished.emit()
         except FloppyOperationCancelled as exc:
-            self.operationCancelled.emit(str(exc) or "Operation cancelled.")
+            self._emit_cancelled(exc)
         except Exception as exc:
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+                return
             self.writeFailed.emit(str(exc))

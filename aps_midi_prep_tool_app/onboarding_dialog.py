@@ -115,7 +115,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 <strong>Open Image</strong> for IMG, HFE, BIN, and related image files.</p>
                 <ul>
                   <li>The app repairs Yamaha copy-protected boot sectors in the working copy.</li>
-                  <li>Use <strong>Recover Damaged Floppy</strong> or <strong>Recover Damaged Image</strong> when normal reading fails.</li>
+                  <li>Use <strong>Read Floppy</strong> with recovery mode, or <strong>Recover Damaged Image</strong>, when normal reading fails.</li>
                   <li><strong>Save As</strong> copies the listed files to a folder.</li>
                   <li><strong>Save As Image</strong> creates a new floppy image without touching the original.</li>
                   <li>For fragile or difficult disks, use Greaseweazle and choose archival SCP when you want a raw flux capture.</li>
@@ -185,7 +185,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li><strong>Save As</strong> writes files to a selected folder.</li>
                   <li><strong>Save As Image</strong> creates a new image file.</li>
                   <li><strong>Back up before saving</strong> creates backups before overwriting.</li>
-                  <li><strong>Create .tags.txt sidecars</strong> creates optional tag sidecar files only for local folder saves.</li>
+                  <li><strong>Create Tag Sidecars When Saving</strong> creates optional tag sidecar files only for local folder saves.</li>
                 </ul>
                 """,
             ),

@@ -28,6 +28,9 @@ class DropTableWidget(QTableWidget):
                 if is_supported_image_path(file_path):
                     event.acceptProposedAction()
                     return
+                if getattr(main_window, "can_accept_mpc_seq_path", lambda _path: False)(file_path):
+                    event.acceptProposedAction()
+                    return
                 if getattr(main_window, "is_image_mode", lambda: False)() and os.path.isfile(file_path):
                     event.acceptProposedAction()
                     return
@@ -50,6 +53,26 @@ class DropTableWidget(QTableWidget):
                 main_window.load_image_file(image_paths[0])
                 event.acceptProposedAction()
                 return
+
+            mpc_seq_paths = [
+                path
+                for path in local_paths
+                if getattr(main_window, "can_accept_mpc_seq_path", lambda _path: False)(path)
+            ]
+            if mpc_seq_paths and hasattr(main_window, "handle_mpc_seq_file_drop"):
+                handled = main_window.handle_mpc_seq_file_drop(local_paths)
+                if handled:
+                    event.acceptProposedAction()
+                    return
+                mpc_seq_path_set = {os.path.abspath(path) for path in mpc_seq_paths}
+                local_paths = [
+                    path
+                    for path in local_paths
+                    if os.path.abspath(path) not in mpc_seq_path_set
+                ]
+                if not local_paths:
+                    event.acceptProposedAction()
+                    return
 
             if getattr(main_window, "is_image_mode", lambda: False)():
                 if hasattr(main_window, "queue_image_additions"):
@@ -74,10 +97,11 @@ class DropTableWidget(QTableWidget):
                 center_dialog_on_parent(progressDialog, main_window)
             results = []
             for i, file_path in enumerate(regular_paths):
-                if self.file_exists(file_path):
-                    results.append({"status": "skipped", "path": file_path, "message": "Already listed."})
-                elif hasattr(main_window, "add_regular_file_from_drop"):
-                    results.append(main_window.add_regular_file_from_drop(file_path))
+                if hasattr(main_window, "add_regular_file_from_drop"):
+                    result = main_window.add_regular_file_from_drop(file_path)
+                    results.append(result)
+                    if result and result.get("status") == "cancelled":
+                        break
                 if progressDialog:
                     progressDialog.setValue(i + 1)
                     QApplication.processEvents()

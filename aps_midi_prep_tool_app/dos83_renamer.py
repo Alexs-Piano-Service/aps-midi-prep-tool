@@ -81,6 +81,13 @@ def build_midi_dos83_plan(file_paths):
 
 
 def _validate_plan(plan):
+    missing = [source for source, _ in plan if not os.path.isfile(source)]
+    if missing:
+        pretty = ", ".join(os.path.basename(p) for p in missing[:3])
+        if len(missing) > 3:
+            pretty += ", ..."
+        raise ValueError(f"Some selected files no longer exist: {pretty}")
+
     source_keys = {_normalize_path_key(source) for source, _ in plan}
     target_map = {}
 
@@ -103,12 +110,23 @@ def _validate_plan(plan):
             )
 
 
+def validate_midi_dos83_plan(plan):
+    normalized_plan = [
+        (os.path.abspath(source), os.path.abspath(target))
+        for source, target in plan
+    ]
+    _validate_plan(normalized_plan)
+
+
 def _build_temp_path(directory, index):
     return os.path.join(directory, f".aps_midi_rename_{index}_{uuid.uuid4().hex}.tmp")
 
 
-def rename_midi_files_dos83(file_paths, create_backups=False, backup_path_builder=None):
-    plan = build_midi_dos83_plan(file_paths)
+def apply_midi_dos83_plan(plan, create_backups=False, backup_path_builder=None):
+    plan = [
+        (os.path.abspath(source), os.path.abspath(target))
+        for source, target in plan
+    ]
     if not plan:
         return RenameResult(renamed=[], unchanged=[], backups_created=[])
 
@@ -194,4 +212,12 @@ def rename_midi_files_dos83(file_paths, create_backups=False, backup_path_builde
         renamed=[(source, target) for source, target in moving],
         unchanged=unchanged,
         backups_created=backups_created,
+    )
+
+
+def rename_midi_files_dos83(file_paths, create_backups=False, backup_path_builder=None):
+    return apply_midi_dos83_plan(
+        build_midi_dos83_plan(file_paths),
+        create_backups=create_backups,
+        backup_path_builder=backup_path_builder,
     )

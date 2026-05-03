@@ -12,7 +12,7 @@ def _prefer_xcb_for_appimage() -> None:
 
 _prefer_xcb_for_appimage()
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from .app_info import APP_NAME, APP_VERSION, LEGACY_SETTINGS_APP, SETTINGS_APP, SETTINGS_ORG
@@ -66,7 +66,17 @@ def main():
     window = MidiTitleWindow()
     apply_window_icon(window)
     window.show()
-    app.processEvents()
-    show_first_time_dialog(app_icon, parent=window)
-    window.schedule_startup_update_check()
+
+    def run_startup_dialogs(attempt=0):
+        window_handle = window.windowHandle()
+        if attempt < 20 and (
+            not window.isVisible()
+            or (window_handle is not None and not window_handle.isExposed())
+        ):
+            QTimer.singleShot(50, lambda: run_startup_dialogs(attempt + 1))
+            return
+        show_first_time_dialog(app_icon, parent=window)
+        window.schedule_startup_update_check()
+
+    QTimer.singleShot(0, run_startup_dialogs)
     sys.exit(app.exec())

@@ -2,10 +2,11 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from .eseq_converter import refresh_eseq_timing_fields_in_bytes
+from .eseq_converter import is_clavinova_mda_eseq_bytes, refresh_eseq_timing_fields_in_bytes
 
 
 PIANODIR_FILENAME = "PIANODIR.FIL"
+MUSICDIR_FILENAME = "MUSIC.DIR"
 PIANODIR_ROW_PATH = ":PIANODIR:"
 PIANODIR_TARGET_FILE_SIZE = 6 * 1024
 PIANODIR_MAX_TRACKS = 60
@@ -31,6 +32,13 @@ ESEQ_WRITE_PROTECT_OFFSET = PIANODIR_TRACK_SOURCE_START + PIANODIR_TRACK_WRITE_P
 ESEQ_ARRANGEMENT_TYPE_OFFSET = PIANODIR_TRACK_SOURCE_START + PIANODIR_TRACK_TYPE_OFFSET
 ESEQ_SIGNATURE = b"COM-ESEQ"
 Q11_SIGNATURE = b"Q11V1.00"
+CLAVINOVA_MDA_RECORD_SOURCE_START = 0x27
+CLAVINOVA_MDA_RECORD_SOURCE_END = 0x57
+CLAVINOVA_MUSICDIR_HEADER_SIZE = 0xA0
+CLAVINOVA_MUSICDIR_RECORD_SIZE = 0x30
+CLAVINOVA_MUSICDIR_MAX_TRACKS = 64
+ESEQ_VARIANT_DISKLAVIER = "disklavier"
+ESEQ_VARIANT_CLAVINOVA = "clavinova"
 ESEQ_ARRANGEMENT_TYPE_LABELS = {
     0: "Solo",
     1: "L-R Split",
@@ -70,18 +78,41 @@ def is_pianodir_path(path):
     return os.path.basename(path).upper() == PIANODIR_FILENAME
 
 
+def is_musicdir_path(path):
+    return os.path.basename(path).upper() == MUSICDIR_FILENAME
+
+
+def is_eseq_directory_path(path):
+    return is_pianodir_path(path) or is_musicdir_path(path)
+
+
 def is_eseq_filename(path):
     filename = os.path.basename(path)
     stem, ext = os.path.splitext(filename)
-    return bool(stem) and ext.lower() in {"", ".fil"}
+    return bool(stem) and ext.lower() in {"", ".fil", ".mda"}
 
 
 def is_eseq_bytes(data):
-    return len(data) >= PIANODIR_TRACK_SOURCE_END and data[7:15] == ESEQ_SIGNATURE
+    return (
+        (len(data) >= PIANODIR_TRACK_SOURCE_END and data[7:15] == ESEQ_SIGNATURE)
+        or is_clavinova_mda_eseq_bytes(data)
+    )
 
 
 def is_q11_eseq_bytes(data):
-    return is_eseq_bytes(data) and data[0x0F:0x17] == Q11_SIGNATURE
+    return len(data) >= PIANODIR_TRACK_SOURCE_END and data[7:15] == ESEQ_SIGNATURE and data[0x0F:0x17] == Q11_SIGNATURE
+
+
+def is_clavinova_mda_bytes(data, filename=""):
+    return is_clavinova_mda_eseq_bytes(data, filename=filename)
+
+
+def is_clavinova_mda_file(path):
+    try:
+        with open(path, "rb") as handle:
+            return is_clavinova_mda_bytes(handle.read(0x80), filename=os.path.basename(path))
+    except OSError:
+        return False
 
 
 def eseq_arrangement_type_label(code):
@@ -89,6 +120,8 @@ def eseq_arrangement_type_label(code):
 
 
 def extract_eseq_arrangement_type_code_from_bytes(data):
+    if is_clavinova_mda_bytes(data):
+        return 0
     if is_q11_eseq_bytes(data):
         return 2
     if not is_eseq_bytes(data):
@@ -108,6 +141,8 @@ def read_eseq_arrangement_type_label_from_file(path):
 
 
 def extract_eseq_write_protect_from_bytes(data):
+    if is_clavinova_mda_bytes(data):
+        return None
     if is_q11_eseq_bytes(data):
         return None
     if not is_eseq_bytes(data):
@@ -137,6 +172,10 @@ def eseq_type_display_label(file_kind, arrangement_type_label, write_protected=N
 
 def pianodir_is_populated(size_bytes):
     return int(size_bytes or 0) > len(PIANODIR_HEADER)
+
+
+def musicdir_is_populated(size_bytes):
+    return int(size_bytes or 0) > CLAVINOVA_MUSICDIR_HEADER_SIZE
 
 
 def _ascii_text(value):
@@ -282,6 +321,15 @@ def build_dos83_name_bytes(path, *, uppercase=False):
     return stem_bytes + ext_bytes
 
 
+def decode_dos83_name(raw_name):
+    raw_name = bytes(raw_name or b"")[:11].ljust(11, b" ")
+    stem = raw_name[:8].decode("ascii", errors="replace").rstrip(" \x00")
+    ext = raw_name[8:11].decode("ascii", errors="replace").rstrip(" \x00")
+    if stem and ext:
+        return f"{stem}.{ext}"
+    return stem or ext
+
+
 def normalize_eseq_order_key(order_key):
     if order_key is None:
         return b""
@@ -293,6 +341,8 @@ def normalize_eseq_order_key(order_key):
 
 
 def extract_eseq_order_key_from_bytes(data):
+    if is_clavinova_mda_bytes(data):
+        return normalize_eseq_order_key(data[CLAVINOVA_MDA_RECORD_SOURCE_START:CLAVINOVA_MDA_RECORD_SOURCE_START + 11] + b"\x00")
     if len(data) < ESEQ_ORDER_KEY_END:
         raise ValueError("File is too small to contain an E-SEQ order key.")
     return normalize_eseq_order_key(data[ESEQ_ORDER_KEY_OFFSET:ESEQ_ORDER_KEY_END])
@@ -307,6 +357,11 @@ def update_eseq_order_key_to_path(source_path, order_key, dest_path):
     try:
         with open(source_path, "rb") as handle:
             data = bytearray(handle.read())
+        if is_clavinova_mda_bytes(data, filename=os.path.basename(source_path)):
+            data[CLAVINOVA_MDA_RECORD_SOURCE_START:CLAVINOVA_MDA_RECORD_SOURCE_START + 11] = normalize_eseq_order_key(order_key)[:11]
+            with open(dest_path, "wb") as handle:
+                handle.write(bytes(data))
+            return None
         if len(data) < ESEQ_ORDER_KEY_END:
             raise ValueError("File is too small to contain an E-SEQ order key.")
         data[ESEQ_ORDER_KEY_OFFSET:ESEQ_ORDER_KEY_END] = normalize_eseq_order_key(order_key)
@@ -331,6 +386,11 @@ def _build_track_entry(track_entry):
 
     if not is_eseq_bytes(data):
         raise ValueError(f"{os.path.basename(track_entry.image_path)} is not a valid E-SEQ file.")
+    if is_clavinova_mda_bytes(data, filename=track_entry.image_path):
+        raise ValueError(
+            f"{os.path.basename(track_entry.image_path)} is a Clavinova MDA file; "
+            "build MUSIC.DIR instead of PIANODIR.FIL."
+        )
 
     short_name = build_dos83_name_bytes(track_entry.image_path)
     if is_q11_eseq_bytes(data):
@@ -394,4 +454,109 @@ def build_pianodir_bytes(track_entries, metadata=None, *, catalog_number="", dis
         0xFFFF,
     ).to_bytes(2, "little")
     output[PIANODIR_COUNT_OFFSET:PIANODIR_COUNT_OFFSET + 2] = (len(track_entries) + 1).to_bytes(2, "little")
+    return bytes(output)
+
+
+def clavinova_music_order_key(slot):
+    slot = max(1, min(int(slot or 1), 99999999))
+    return normalize_eseq_order_key(f"{slot:08d}MDA".encode("ascii") + b"\x00")
+
+
+def parse_music_dir(data):
+    data = bytes(data or b"")
+    if len(data) < CLAVINOVA_MUSICDIR_HEADER_SIZE:
+        raise ValueError("MUSIC.DIR is too small.")
+    if data[0:3] != b"\xFE\x00\x00" or data[7:15] != b"MUSICDIR":
+        raise ValueError("File is not a Clavinova MUSIC.DIR.")
+
+    used_len = int.from_bytes(data[3:7], "little")
+    if not (CLAVINOVA_MUSICDIR_HEADER_SIZE <= used_len <= len(data)):
+        used_len = len(data)
+
+    logical_slots = data[0x51]
+    record_count = max(0, (used_len - CLAVINOVA_MUSICDIR_HEADER_SIZE) // CLAVINOVA_MUSICDIR_RECORD_SIZE)
+    records = [
+        data[
+            CLAVINOVA_MUSICDIR_HEADER_SIZE + index * CLAVINOVA_MUSICDIR_RECORD_SIZE:
+            CLAVINOVA_MUSICDIR_HEADER_SIZE + (index + 1) * CLAVINOVA_MUSICDIR_RECORD_SIZE
+        ]
+        for index in range(record_count)
+    ]
+
+    songs = []
+    for slot in range(min(logical_slots, CLAVINOVA_MUSICDIR_MAX_TRACKS)):
+        rec_index = data[0x60 + slot]
+        if rec_index == 0xFF:
+            continue
+        if rec_index >= len(records):
+            songs.append(
+                {
+                    "slot": slot + 1,
+                    "record_index": rec_index,
+                    "filename": "",
+                    "warning": "record index out of range",
+                }
+            )
+            continue
+        record = records[rec_index]
+        songs.append(
+            {
+                "slot": slot + 1,
+                "record_index": rec_index,
+                "filename": decode_dos83_name(record[0:11]),
+                "raw_record": record,
+            }
+        )
+    return songs
+
+
+def music_dir_order_keys(data):
+    order_keys = {}
+    try:
+        songs = parse_music_dir(data)
+    except Exception:
+        return order_keys
+    for song in songs:
+        filename = (song.get("filename") or "").upper()
+        if filename:
+            order_keys[filename] = clavinova_music_order_key(song.get("slot", 1))
+    return order_keys
+
+
+def read_music_dir_order_keys_from_file(path):
+    with open(path, "rb") as handle:
+        return music_dir_order_keys(handle.read())
+
+
+def _build_musicdir_record(track_entry):
+    with open(track_entry.local_path, "rb") as handle:
+        data = handle.read()
+    if not is_clavinova_mda_bytes(data, filename=track_entry.image_path):
+        raise ValueError(f"{os.path.basename(track_entry.image_path)} is not a valid Clavinova MDA file.")
+    record = bytearray(data[CLAVINOVA_MDA_RECORD_SOURCE_START:CLAVINOVA_MDA_RECORD_SOURCE_END])
+    if len(record) != CLAVINOVA_MUSICDIR_RECORD_SIZE:
+        raise ValueError(f"{os.path.basename(track_entry.image_path)} is too small to build a MUSIC.DIR entry.")
+    record[0:11] = build_dos83_name_bytes(track_entry.image_path, uppercase=True)
+    return bytes(record)
+
+
+def build_music_dir_bytes(track_entries):
+    track_entries = list(track_entries)
+    if len(track_entries) > CLAVINOVA_MUSICDIR_MAX_TRACKS:
+        raise ValueError(f"Clavinova E-SEQ supports at most {CLAVINOVA_MUSICDIR_MAX_TRACKS} files per set.")
+
+    used_len = CLAVINOVA_MUSICDIR_HEADER_SIZE + len(track_entries) * CLAVINOVA_MUSICDIR_RECORD_SIZE
+    output = bytearray(used_len)
+    output[0:3] = b"\xFE\x00\x00"
+    output[3:7] = used_len.to_bytes(4, "little")
+    output[7:15] = b"MUSICDIR"
+    output[0x50] = 0x0B
+    output[0x51] = len(track_entries)
+    output[0x60:0xA0] = b"\xFF" * CLAVINOVA_MUSICDIR_MAX_TRACKS
+
+    for slot, track_entry in enumerate(track_entries):
+        output[0x60 + slot] = slot
+        offset = CLAVINOVA_MUSICDIR_HEADER_SIZE + slot * CLAVINOVA_MUSICDIR_RECORD_SIZE
+        output[offset:offset + CLAVINOVA_MUSICDIR_RECORD_SIZE] = _build_musicdir_record(track_entry)
+
     return bytes(output)

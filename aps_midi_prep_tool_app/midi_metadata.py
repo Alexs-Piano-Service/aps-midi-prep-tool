@@ -1,6 +1,6 @@
 import os
 
-from .eseq_converter import refresh_eseq_timing_fields_in_bytes
+from .eseq_converter import is_clavinova_mda_eseq_bytes, refresh_eseq_timing_fields_in_bytes
 
 _SYSTEM_MESSAGE_DATA_LENGTHS = {
     0xF1: 1,
@@ -61,6 +61,10 @@ def is_midi_file(midi_path):
 
 def has_eseq_title_metadata(file_path):
     try:
+        with open(file_path, "rb") as handle:
+            header = handle.read(_ESEQ_TITLE_END + 1)
+        if is_clavinova_mda_eseq_bytes(header, filename=os.path.basename(file_path)):
+            return True
         return os.path.getsize(file_path) >= (_ESEQ_TITLE_END + 1)
     except OSError:
         return False
@@ -229,6 +233,8 @@ def _decode_title_bytes(title_bytes):
 
 
 def _extract_eseq_title_from_bytes(data):
+    if is_clavinova_mda_eseq_bytes(data):
+        return ""
     if len(data) < (_ESEQ_TITLE_END + 1):
         raise ValueError("File is too small to contain E-SEQ title metadata.")
 
@@ -237,6 +243,8 @@ def _extract_eseq_title_from_bytes(data):
 
 
 def _set_eseq_title_in_bytes(data, new_title):
+    if is_clavinova_mda_eseq_bytes(data):
+        return bytes(data)
     if len(data) < (_ESEQ_TITLE_END + 1):
         raise ValueError("File is too small to contain E-SEQ title metadata.")
 

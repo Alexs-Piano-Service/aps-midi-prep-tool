@@ -4,7 +4,7 @@ APS MIDI Prep Tool is a modern Disklavier preservation and preparation
 workstation for MIDI files, Yamaha E-SEQ files, floppy images, and physical
 floppy disks.
 
-Current version: `0.5.3`
+Current version: `0.6.0`
 
 Author: Alexander Peppe
 
@@ -49,9 +49,9 @@ before you write anything back.
 4. Review the files, titles, types, and free space.
 5. Use `Save As Image` to create an archival image, or `Save As` to extract files.
 
-For difficult disks, use `Utilities -> Recover Damaged Floppy...`. Recovery asks
-for the disk size, defaults to the common Yamaha 720K DD format, copies a full
-image first, then tries filesystem repair and raw MIDI/E-SEQ carving.
+For difficult disks, choose `Read Floppy` and enable `Start in recovery mode`.
+Recovery asks for the disk size, defaults to the common Yamaha 720K DD format,
+copies a full image first, then tries filesystem repair and raw MIDI/E-SEQ carving.
 
 ### Prepare A Nalbantov USB Stick Image
 
@@ -94,10 +94,10 @@ readable reference lists.
 
 ### Create Tag Sidecar Files
 
-Enable `Create .tags.txt sidecars` in the Options area before saving local
-folder files. When enabled, APS MIDI Prep Tool writes one UTF-8 `.tags.txt` file
-next to each saved MIDI or E-SEQ file. These sidecars use four-letter ID3 tag
-keys such as `TIT2` for title and `TALB` for album.
+Enable `File -> Create Tag Sidecars When Saving` before saving local folder
+files. When enabled, APS MIDI Prep Tool writes one UTF-8 `.tags.txt` file next
+to each saved MIDI or E-SEQ file. These sidecars use four-letter ID3 tag keys
+such as `TIT2` for title and `TALB` for album.
 
 Tag sidecar files are not written when saving in Image Mode or Floppy Mode.
 

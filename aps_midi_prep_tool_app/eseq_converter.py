@@ -9,6 +9,9 @@ ESEQ_SIGNATURE = b"COM-ESEQ"
 Q11_SIGNATURE = b"Q11V1.00"
 ESEQ_HEADER_SIZE = 0x77
 Q11_EVENT_STREAM_START = 0x200
+CLAVINOVA_MDA_HEADER_SIZE = 0x57
+CLAVINOVA_MDA_HEADER_PREFIX = b"\xFE\x00\x00\xFF\xFF\x00\x00"
+CLAVINOVA_MDA_CONST_17 = bytes.fromhex("80 00 21 00 30 00 00 00")
 ESEQ_ORDER_KEY_START = 0x27
 ESEQ_TITLE_START = 0x57
 ESEQ_TITLE_END = 0x76
@@ -29,6 +32,8 @@ CC7_POLICY_PLAYBACK_FIX_100 = "playback_fix_100"
 CC7_POLICY_PLAYBACK_FIX_127 = "playback_fix_127"
 CC7_POLICY_DROP_EARLY_ZERO = "drop_early_cc7_zero"
 DEFAULT_CC7_POLICY = CC7_POLICY_PLAYBACK_FIX_100
+ESEQ_CONTAINER_DISKLAVIER = "disklavier"
+ESEQ_CONTAINER_CLAVINOVA_MDA = "clavinova_mda"
 _ESEQ_PADDING_BYTE = 0xF6
 _ESEQ_TIMING_META_PREFIX = "APS-ESEQ-TIMING"
 _ESEQ_HEADER_META_PREFIX = "APS-ESEQ-HEADER"
@@ -219,8 +224,25 @@ def _is_q11_eseq(data):
     return len(data) >= ESEQ_TITLE_END + 1 and data[7:15] == ESEQ_SIGNATURE and data[0x0F:0x17] == Q11_SIGNATURE
 
 
+def is_clavinova_mda_eseq_bytes(data, filename=""):
+    data = bytes(data or b"")
+    if len(data) < CLAVINOVA_MDA_HEADER_SIZE + 1:
+        return False
+    if data[7:15] != ESEQ_SIGNATURE:
+        return False
+    if (
+        data[0:7] == CLAVINOVA_MDA_HEADER_PREFIX
+        and data[0x17:0x1F] == CLAVINOVA_MDA_CONST_17
+        and data[0x57:0x5A] == b"\xF1\x00\xF9"
+    ):
+        return True
+    return filename.upper().endswith(".MDA") and data[0x57:0x5A] == b"\xF1\x00\xF9"
+
+
 def _eseq_base_bpm(data):
     if _is_q11_eseq(data):
+        return _clamp_base_bpm(data[0x24] + 29)
+    if is_clavinova_mda_eseq_bytes(data):
         return _clamp_base_bpm(data[0x24] + 29)
     return _clamp_base_bpm(data[0x33] + 29)
 
@@ -228,6 +250,8 @@ def _eseq_base_bpm(data):
 def _eseq_event_stream_start(data):
     if _is_q11_eseq(data):
         return min(len(data), Q11_EVENT_STREAM_START)
+    if is_clavinova_mda_eseq_bytes(data):
+        return min(len(data), CLAVINOVA_MDA_HEADER_SIZE)
     return ESEQ_HEADER_SIZE
 
 
@@ -242,6 +266,10 @@ def _encode_15(value):
 
 
 def _declared_stream_end(data, stream_start):
+    if is_clavinova_mda_eseq_bytes(data) and len(data) >= 0x23:
+        used_length = int.from_bytes(data[0x1F:0x23], "little")
+        if stream_start < used_length <= len(data):
+            return used_length
     if len(data) >= 0x23:
         stream_length = int.from_bytes(data[0x1F:0x23], "little")
         stream_end = stream_start + stream_length
@@ -445,13 +473,16 @@ def _effective_initial_mpqn(tempo_events):
 
 
 def parse_eseq_bytes(eseq_bytes):
-    if len(eseq_bytes) < ESEQ_HEADER_SIZE:
+    if len(eseq_bytes) < CLAVINOVA_MDA_HEADER_SIZE:
         raise EseqConversionError("File is too small to be a valid Yamaha E-SEQ file.")
     if eseq_bytes[7:15] != ESEQ_SIGNATURE:
         raise EseqConversionError("This does not look like a Yamaha E-SEQ file; the COM-ESEQ signature is missing.")
 
     data = eseq_bytes
-    title = _decode_title_bytes(data[ESEQ_TITLE_START:ESEQ_TITLE_END + 1])
+    is_clavinova_mda = is_clavinova_mda_eseq_bytes(data)
+    if not is_clavinova_mda and len(data) < ESEQ_HEADER_SIZE:
+        raise EseqConversionError("File is too small to be a valid Yamaha E-SEQ file.")
+    title = "" if is_clavinova_mda else _decode_title_bytes(data[ESEQ_TITLE_START:ESEQ_TITLE_END + 1])
     base_bpm = _eseq_base_bpm(data)
 
     abs_tick = 0
@@ -470,6 +501,9 @@ def parse_eseq_bytes(eseq_bytes):
         pos += 1
 
         if status < 0x80:
+            continue
+
+        if status == _ESEQ_PADDING_BYTE:
             continue
 
         if status == 0xF1:
@@ -509,6 +543,8 @@ def parse_eseq_bytes(eseq_bytes):
             numerator = data[pos]
             denominator_power = data[pos + 1]
             pos += 2
+            if numerator == 0 and denominator_power == 0:
+                continue
             marker = (abs_tick, numerator, denominator_power)
             if last_time_signature != marker[1:]:
                 time_signature_events.append(marker)
@@ -607,7 +643,7 @@ def _clamp_directory_u16(value):
 
 
 def refresh_eseq_timing_fields_in_bytes(eseq_bytes):
-    if _is_q11_eseq(eseq_bytes):
+    if _is_q11_eseq(eseq_bytes) or is_clavinova_mda_eseq_bytes(eseq_bytes):
         return bytes(eseq_bytes)
     timing = derive_eseq_timing_fields(eseq_bytes)
     data = bytearray(eseq_bytes)
@@ -985,6 +1021,24 @@ def _finalize_eseq_header(
     return bytes(header)
 
 
+def _finalize_clavinova_mda_header(stream_bytes, base_bpm, filename_hint):
+    used_length = CLAVINOVA_MDA_HEADER_SIZE + len(stream_bytes)
+    if used_length > 0xFFFFFFFF:
+        raise EseqConversionError("MDA output is too large for the Yamaha Clavinova E-SEQ file format.")
+
+    header = bytearray(CLAVINOVA_MDA_HEADER_SIZE)
+    header[0:7] = CLAVINOVA_MDA_HEADER_PREFIX
+    header[7:15] = ESEQ_SIGNATURE
+    header[0x0F:0x17] = b" " * 8
+    header[0x17:0x1F] = CLAVINOVA_MDA_CONST_17
+    header[0x1F:0x23] = used_length.to_bytes(4, "little")
+    header[0x24] = max(0, min(base_bpm - 29, 255))
+    header[0x27:0x32] = _sanitize_ascii_filename_key(filename_hint or "CLP_01.MDA")
+    header[0x33] = 0x0B
+    header[0x39:0x3B] = b"\x03\x80"
+    return bytes(header)
+
+
 def _pad_eseq_output(data):
     remainder = len(data) % 2048
     if remainder == 0:
@@ -998,7 +1052,12 @@ def convert_midi_bytes_to_eseq_bytes(
     title_override=None,
     filename_hint="",
     cc7_policy=DEFAULT_CC7_POLICY,
+    container_variant=ESEQ_CONTAINER_DISKLAVIER,
 ):
+    container_variant = (container_variant or ESEQ_CONTAINER_DISKLAVIER).strip().lower()
+    if container_variant not in {ESEQ_CONTAINER_DISKLAVIER, ESEQ_CONTAINER_CLAVINOVA_MDA}:
+        raise EseqConversionError(f"Unsupported E-SEQ container variant '{container_variant}'.")
+
     division, merged_events, midi_end_tick = _collect_merged_midi_events(midi_bytes, include_end_tick=True)
     timing_hint = _extract_eseq_timing_hint(merged_events)
     header_hint = _extract_eseq_header_hint(merged_events)
@@ -1161,7 +1220,8 @@ def convert_midi_bytes_to_eseq_bytes(
         delay_after_ticks = 0
 
     if (
-        header_hint is not None
+        container_variant == ESEQ_CONTAINER_DISKLAVIER
+        and header_hint is not None
         and header_hint.prefix_00_stream is not None
         and _is_q11_eseq(header_hint.prefix_00_stream)
     ):
@@ -1183,6 +1243,10 @@ def convert_midi_bytes_to_eseq_bytes(
         ):
             prefix[ESEQ_TITLE_START:ESEQ_TITLE_END + 1] = _encode_title_bytes(title)
         return _pad_eseq_output(bytes(prefix) + bytes(stream))
+
+    if container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA:
+        header = _finalize_clavinova_mda_header(bytes(stream), base_bpm, filename_hint)
+        return bytes(header) + bytes(stream)
 
     header = bytearray(_finalize_eseq_header(
         bytes(stream),
@@ -1245,13 +1309,23 @@ def convert_midi_file_to_eseq_path(
     title_override=None,
     filename_hint="",
     cc7_policy=DEFAULT_CC7_POLICY,
+    container_variant=None,
 ):
     with open(source_path, "rb") as handle:
         midi_bytes = handle.read()
+    resolved_variant = container_variant
+    if resolved_variant is None:
+        hint = filename_hint or dest_path
+        resolved_variant = (
+            ESEQ_CONTAINER_CLAVINOVA_MDA
+            if os.path.splitext(hint)[1].lower() == ".mda"
+            else ESEQ_CONTAINER_DISKLAVIER
+        )
     payload = convert_midi_bytes_to_eseq_bytes(
         midi_bytes,
         title_override=title_override,
         filename_hint=filename_hint or os.path.basename(dest_path),
         cc7_policy=cc7_policy,
+        container_variant=resolved_variant,
     )
     _write_destination_bytes(dest_path, payload)

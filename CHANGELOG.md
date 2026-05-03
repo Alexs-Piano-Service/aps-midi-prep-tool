@@ -12,14 +12,24 @@ with release sections grouped by version and date.
 - Apache License 2.0 project license, NOTICE file, security policy, and contribution guide.
 - Optional `.tags.txt` ID3 sidecar file writing for local folder saves.
 - Help menu disclaimer covering backups, lawful use, copyright, and risk.
-- Utilities flow for recovering damaged physical floppy disks, matching damaged image recovery.
+- Integrated flow for recovering damaged physical floppy disks, matching damaged image recovery.
+- File menu entries for Open MIDI Folder, Open Image, and Read Floppy, matching the main window buttons.
+- Yamaha Clavinova/CVP E-SEQ support for `MUSIC.DIR` directories and `.MDA` song files, including MIDI conversion and Clavinova-aware floppy/image modes.
 
 ### Changed
 
 - Repositioned documentation around Disklavier preservation and preparation workflows.
 - Updated direct floppy drive wording so internal drives are represented accurately.
 - Reviewed onboarding and E-SEQ reference documentation against current app behavior.
-- Moved tag sidecar writing out of Utilities and into the Options area.
+- Expanded the E-SEQ reference with Clavinova/CVP `.MDA` and `MUSIC.DIR` findings.
+- Moved tag sidecar writing into the File menu as a save behavior.
+- Consolidated normal floppy reads and floppy recovery into a single Read Floppy dialog with Floppy Drive and Greaseweazle options.
+
+### Fixed
+
+- Fast floppy reads no longer fall back to full-image reads just because an otherwise readable disk has an unreadable Yamaha/protection sector in file data.
+- Fast floppy reads now reconstruct readable FAT/root data from redundant sectors and stop with the recovery prompt, rather than silently starting a slow full-disk read, after a Yamaha/FAT disk has already been recognized.
+- Cancelled disk reads, image conversions, Greaseweazle operations, and recovery attempts now report as cancellation instead of surfacing command or conversion errors.
 
 ## [0.5.3] - 2026-04-30
 

@@ -1,23 +1,25 @@
 
-# Yamaha E-SEQ and PIANODIR.FIL Reference
+# Yamaha E-SEQ, PIANODIR.FIL, and MUSIC.DIR Reference
 
 **Prepared for:** APS MIDI Prep Tool
 
-**Purpose:** implementation reference for converting Yamaha E-SEQ `.FIL` song files to Standard MIDI Files, converting Standard MIDI Files back to E-SEQ `.FIL`, and constructing `PIANODIR.FIL` disk indexes for older Yamaha Disklavier media.
+**Purpose:** implementation reference for converting Yamaha E-SEQ song files (`.FIL` and Clavinova/CVP `.MDA`) to Standard MIDI Files, converting Standard MIDI Files back to E-SEQ containers, and constructing `PIANODIR.FIL` / `MUSIC.DIR` disk indexes for older Yamaha media.
 
-**Revision:** 1.1
+**Revision:** 1.2
 
-**Date:** 2026-04-30
+**Date:** 2026-05-02
 
-**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.5.3.
+**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, `floppy_image.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.6.0 development.
 
 > This document is intentionally written as an engineering reference. It distinguishes proven behavior from inferred or compatibility-oriented behavior. It does not contain proprietary Yamaha source code or third-party program code; it specifies file behavior derived from personal recordings, supplied disk images, static binary inspection, and public format references.
 
-Review notes for v0.5.3:
+Review notes for v0.6.0 development:
 
 - The app stages MIDI-to-E-SEQ, E-SEQ-to-MIDI, and SMF1-to-SMF0 conversions before writing them to disk.
 - In E-SEQ modes, dropped MIDI files are converted through Type 0 before E-SEQ output.
 - Generated `PIANODIR.FIL` records copy the relevant E-SEQ header slice for normal files and use the Q11 recipe for `Q11V1.00` files.
+- Clavinova/CVP `.MDA` files are E-SEQ at the event-stream level, but use a different song container and `MUSIC.DIR` instead of `PIANODIR.FIL`.
+- Generated `MUSIC.DIR` records copy the relevant `.MDA` header slice and use the logical slot map in `MUSIC.DIR`.
 - Damaged-image and damaged-floppy recovery are best-effort workflows. They can repair FAT/Yamaha structure when possible and otherwise carve MIDI, E-SEQ, and PIANODIR data from copied bytes.
 - Items still marked unchecked in the implementation checklist are either not exposed as user-selectable options or remain corpus/testing work rather than everyday app behavior.
 
@@ -25,15 +27,20 @@ Review notes for v0.5.3:
 
 ## 1. Executive summary
 
-E-SEQ is a Yamaha song-file format used by older Disklavier and related Yamaha player systems. On old E-SEQ floppy disks, the individual songs are usually stored as `.FIL` files and the disk-level song list is stored in `PIANODIR.FIL`.
+E-SEQ is a Yamaha song-file format used by older Disklavier, Clavinova/CVP, and related Yamaha player systems. On old Disklavier E-SEQ floppy disks, the individual songs are usually stored as `.FIL` files and the disk-level song list is stored in `PIANODIR.FIL`. Some Clavinova/CVP disks instead store songs as `.MDA` files and use `MUSIC.DIR` as the disk-level song list.
 
 The supported conversion model is:
 
 ```text
-E-SEQ .FIL song file  <---->  Standard MIDI File, preferably SMF type 0
+Disklavier E-SEQ .FIL  <---->  Standard MIDI File, preferably SMF type 0
        ^
        |
        +---- PIANODIR.FIL indexes .FIL songs for old Disklavier media
+
+Clavinova/CVP E-SEQ .MDA  <---->  Standard MIDI File, preferably SMF type 0
+       ^
+       |
+       +---- MUSIC.DIR indexes .MDA songs for Clavinova/CVP media
 ```
 
 The most important implementation findings are:
@@ -59,7 +66,9 @@ The most important implementation findings are:
 6. `PIANODIR.FIL` is not musical event data. It is the disk index: song order, active-song list, display titles, durations, and copied E-SEQ header metadata.
 7. For normal `.FIL` songs in the analyzed disk-image corpus, each `PIANODIR.FIL` song record is essentially `eseq_file[0x27:0x77]` with the first eleven bytes replaced by the actual DOS 8.3 filename. If timing has been edited, update the E-SEQ header first; `PIANODIR.FIL` generation should then copy the header slice rather than recomputing fields independently.
 8. A second E-SEQ header variant, marked `Q11V1.00`, exists. Its event stream begins at `0x0200`, and its `PIANODIR.FIL` record must be built by a special recipe.
-9. Early MIDI `CC7 Channel Volume = 0` events on piano channels are significant. In generic MIDI playback they mute the channel, but in Yamaha/Disklavier workflows they may be intentional playback-control or compatibility behavior. APS MIDI Prep Tool should detect them and offer explicit handling policies.
+9. Clavinova/CVP `.MDA` files in the analyzed corpus are E-SEQ at the event level, but not Disklavier `.FIL` containers. They still contain `COM-ESEQ` at `0x07`, but their event stream begins at `0x57`, their initial tempo byte is at `0x24`, and bytes `0x57..0x76` are event data, not title text.
+10. `MUSIC.DIR` replaces `PIANODIR.FIL` for these Clavinova/CVP disks. It uses a `MUSICDIR` header, a logical-slot map, and 48-byte song records usually copied from `.MDA file[0x27:0x57]`.
+11. Early MIDI `CC7 Channel Volume = 0` events on piano channels are significant. In generic MIDI playback they mute the channel, but in Yamaha/Disklavier workflows they may be intentional playback-control or compatibility behavior. APS MIDI Prep Tool should detect them and offer explicit handling policies.
 
 ---
 
@@ -72,6 +81,7 @@ The specification below is based on:
 - 21 matched E-SEQ/MIDI pairs of personal recordings.
 - Static inspection of a 1998-era `ESEQ2MID.EXE` that converts E-SEQ to MIDI type 0.
 - 110 Yamaha disk images containing `PIANODIR.FIL` and E-SEQ files.
+- Clavinova/CVP samples containing `.MDA` song files and `MUSIC.DIR` indexes.
 - Static inspection of a third-party `EEXPLORE.EXE` index utility; it was not executed and is treated as secondary evidence.
 - Public references for Standard MIDI Files, MIDI control-change numbering, Disklavier E-SEQ disk conventions, and public Disklavier disk-image tools.
 
@@ -98,10 +108,10 @@ One image, `CSC1045.img`, had a `PIANODIR.FIL` root entry whose first data secto
 
 | Label | Meaning | Example |
 |---|---|---|
-| **Proven** | Confirmed by matched pairs, static converter behavior, and/or full disk-image corpus | `F3`/`F4` delays, normal `PIANODIR` record rule, `base_bpm = byte + 29` for the tested normal variant, duration/before/after delay fields, arrangement/type display code, write-protect flag |
-| **Strongly inferred** | Consistent across available samples and tooling, but may not cover every Yamaha variant | `F9 04 02` as a 4/4 bar marker |
+| **Proven** | Confirmed by matched pairs, static converter behavior, and/or full disk-image corpus | `F3`/`F4` delays, normal `PIANODIR` record rule, Clavinova `.MDA` event start at `0x57`, Clavinova tempo byte at `0x24`, `base_bpm = byte + 29` for tested variants, duration/before/after delay fields, arrangement/type display code, write-protect flag |
+| **Strongly inferred** | Consistent across available samples and tooling, but may not cover every Yamaha variant | `F9 04 02` as a 4/4 bar marker, `F9 00 00` as a Clavinova no-op/bar marker with no usable meter |
 | **Compatibility rule** | Recommended writer behavior because it matches known converters or old media conventions | Uppercase DOS 8.3 filenames, 6144-byte `PIANODIR.FIL` output |
-| **Open** | Field or behavior not fully explained; copy/preserve rather than interpret | Several opaque header bytes and `PIANODIR` record byte `0x2A` |
+| **Open** | Field or behavior not fully explained; copy/preserve rather than interpret | Several opaque header bytes, `PIANODIR` record byte `0x2A`, and some Clavinova `.MDA` category/classification bytes |
 
 ---
 
@@ -109,13 +119,16 @@ One image, `CSC1045.img`, had a `PIANODIR.FIL` root entry whose first data secto
 
 | Term | Meaning |
 |---|---|
-| E-SEQ | Yamaha sequence format used by older Disklavier and related Yamaha systems. |
+| E-SEQ | Yamaha sequence format used by older Disklavier, Clavinova/CVP, and related Yamaha systems. |
 | `.FIL` | Common extension for one E-SEQ song file on old Disklavier media. Some disks also index files with extensions like `.P01`, `.P02`, etc. |
+| `.MDA` | Clavinova/CVP E-SEQ song container observed with `MUSIC.DIR` indexes. Event stream starts at `0x57` in the analyzed corpus. |
 | Standard MIDI File / SMF | Standard `.mid` container with `MThd` and `MTrk` chunks. |
 | SMF type 0 | Single-track Standard MIDI File. Historical E-SEQ converters commonly produce this. |
 | `PIANODIR.FIL` | Disk index for old E-SEQ media. It lists active E-SEQ files, order, titles, duration fields, and metadata copied from song headers. |
+| `MUSIC.DIR` | Disk index for Clavinova/CVP `.MDA` media. It maps logical song slots to 48-byte song records. |
 | Normal E-SEQ variant | The common `COM-ESEQ` variant whose event stream starts at `0x77`. |
 | `Q11V1.00` variant | E-SEQ header variant observed in the disk-image corpus. Event stream starts at `0x0200`, and `PIANODIR` records require a special recipe. |
+| Clavinova/CVP `.MDA` variant | `COM-ESEQ` song container with a shorter `0x57`-byte header, no title field at `0x57..0x76`, and `MUSIC.DIR` directory records copied from `file[0x27:0x57]`. |
 
 Public Yamaha material describes E-SEQ as a Yamaha format compatible with Disklavier, Clavinova, and other Yamaha products. Public DKVUTILS-era descriptions say old Disklavier E-SEQ disks use `.FIL` music files plus a `PIANODIR.FIL` index that lists active files, titles, and file positions, and that the index is normally 6 KB.
 
@@ -225,7 +238,7 @@ Recommended reader policy:
 
 1. Locate and verify `COM-ESEQ`.
 2. Detect known variant.
-3. Choose event start (`0x77` for normal, `0x0200` for Q11).
+3. Choose event start (`0x77` for normal, `0x0200` for Q11, `0x57` for Clavinova/CVP `.MDA`).
 4. Parse until opcode `F2`, with the file size and stream-length field as safety bounds.
 5. Treat `0x03` as metadata, not as the only authoritative EOF.
 
@@ -263,6 +276,113 @@ E-SEQ-to-MIDI conversion should still parse the event stream with the same opcod
 
 ---
 
+## 6A. Clavinova/CVP `.MDA` and `MUSIC.DIR` E-SEQ variant
+
+The Clavinova/CVP files observed so far are E-SEQ at the event-stream level, but they are not Disklavier `.FIL` files and must not be indexed with `PIANODIR.FIL`.
+
+Use a separate container variant, for example `clavinova_mda`.
+
+### 6A.1 Detection
+
+Strong detection from the analyzed samples:
+
+```python
+def is_clavinova_mda_eseq(data, filename=""):
+    if len(data) < 0x58:
+        return False
+    if data[0x07:0x0F] != b"COM-ESEQ":
+        return False
+    if (
+        data[0:7] == b"\xFE\x00\x00\xFF\xFF\x00\x00"
+        and data[0x17:0x1F] == bytes.fromhex("80 00 21 00 30 00 00 00")
+        and data[0x57:0x5A] == b"\xF1\x00\xF9"
+    ):
+        return True
+    return filename.upper().endswith(".MDA") and data[0x57:0x5A] == b"\xF1\x00\xF9"
+```
+
+The extension alone is not sufficient for archival tooling, but it is a useful fallback when loose files are dropped into the app.
+
+### 6A.2 `.MDA` song-file layout
+
+Observed non-empty `.MDA` files:
+
+```text
+0x00..0x06   FE 00 00 FF FF 00 00
+0x07..0x0E   "COM-ESEQ"
+0x0F..0x16   spaces
+0x17..0x1E   80 00 21 00 30 00 00 00
+0x1F..0x22   little-endian used length; equals full used file length in good samples
+0x23         00
+0x24         tempo byte: base_bpm = data[0x24] + 29
+0x25..0x26   00 00
+0x27..0x31   DOS 8.3 filename bytes without dot
+0x32         00
+0x33         model/category byte; observed 0x0B for CLP and 0x07 for CVP
+0x34..0x38   zeros
+0x39..0x3A   flags/classification; observed 03 80, 01 80, or 01 00
+0x3B..0x56   mostly zeros
+0x57..       E-SEQ event stream
+last byte    F2
+```
+
+Important trap:
+
+```text
+0x57..0x76 is event data, not a 32-byte title field.
+```
+
+Typical stream starts are:
+
+```text
+F1 00 F9 04 02 ...
+F1 00 F9 00 00 ...
+```
+
+Reader rules:
+
+| Field | Disklavier normal `.FIL` | Clavinova/CVP `.MDA` |
+|---|---:|---:|
+| Song extension | `.FIL` | `.MDA` |
+| Disk index | `PIANODIR.FIL` | `MUSIC.DIR` |
+| Directory record size | `0x50` | `0x30` |
+| Event stream start | `0x77` | `0x57` |
+| Title field | `0x57..0x76` | none observed; use `MUSIC.DIR`/filename/UI title |
+| Initial tempo byte | `0x33` | `0x24` |
+| Used-length field | `0x1F..0x22` stream-length-ish | absolute used file length |
+| Directory record source | `file[0x27:0x77]` | usually `file[0x27:0x57]` |
+
+### 6A.3 Event-stream differences
+
+After choosing event start `0x57`, use the same basic E-SEQ event grammar with these compatibility rules:
+
+- Treat in-stream `F6` as filler/no-op. Do not stop parsing and do not emit MIDI for it.
+- Treat `F9 00 00` as a bar/no-op marker with no usable meter. Do not emit MIDI time signature `0/1`.
+- `FB lo hi`, `F3`, `F4`, channel messages, sysex, channel-prefix style `FF cc`, and `F2` use the same interpretation as normal E-SEQ.
+
+### 6A.4 MIDI-to-`.MDA` writer rule
+
+For Clavinova output, write a `0x57`-byte `.MDA` header, then the E-SEQ stream. Do not write a Disklavier `0x77` header and do not write a title at `0x57..0x76`.
+
+Minimal generated header:
+
+```python
+header = bytearray(0x57)
+header[0:7] = b"\xFE\x00\x00\xFF\xFF\x00\x00"
+header[0x07:0x0F] = b"COM-ESEQ"
+header[0x0F:0x17] = b" " * 8
+header[0x17:0x1F] = bytes.fromhex("80 00 21 00 30 00 00 00")
+header[0x1F:0x23] = (0x57 + len(event_stream)).to_bytes(4, "little")
+header[0x24] = base_bpm - 29
+header[0x27:0x32] = dos_8_3_short_name_bytes
+header[0x33] = 0x0B
+header[0x39:0x3B] = b"\x03\x80"
+```
+
+The category and classification bytes should be treated as open/corpus-sensitive fields. For generated app output, a conservative CLP-style default is acceptable until hardware testing proves a better profile.
+
+---
+
 ## 7. E-SEQ event-stream grammar
 
 ### 7.1 Parser model
@@ -297,7 +417,8 @@ For conversion to Standard MIDI, one E-SEQ event tick maps to one MIDI tick in a
 | `0xF2` | 1 | End of E-SEQ stream | Stop parsing; emit MIDI end-of-track by selected policy. |
 | `0xF3 xx` | 2 | Short delay | Add `xx` ticks. |
 | `0xF4 lo hi` | 3 | Long delay | Add `(hi << 7) | (lo & 0x7F)` ticks. |
-| `0xF9 a b` | 3 | Bar/time marker | In samples, `F9 04 02` marks 4/4 barlines. Usually convert to MIDI time-signature metadata, not repeated channel data. |
+| `0xF6` | 1 | Padding/filler no-op | Skip. It can appear as stream padding and was observed inside Clavinova/CVP `.MDA` streams. |
+| `0xF9 a b` | 3 | Bar/time marker | In samples, `F9 04 02` marks 4/4 barlines. Usually convert usable meters to MIDI time-signature metadata, not repeated channel data. Treat `F9 00 00` as a no-op marker. |
 | `0xFB lo hi` | 3 | Tempo factor | Emit MIDI tempo change at current tick. |
 | `0xFF cc` | 2 | MIDI channel-prefix equivalent | Emit MIDI meta `FF 20 01 cc`. |
 | Other `0xF*` | variable/open | Reserved/unknown | Preserve in diagnostic representation; do not silently drop in archival mode. |
@@ -379,6 +500,14 @@ bar_ticks = numerator * 384 * 4 / natural_denominator
 natural_denominator = 2 ** denominator_exponent
 ```
 
+Observed Clavinova/CVP `.MDA` streams sometimes use:
+
+```text
+F9 00 00
+```
+
+This should be preserved as a bar/no-op marker for diagnostics or round-trip purposes, but it should not become a MIDI `FF 58` time-signature event. A MIDI time signature of `0/1` is invalid for practical playback and is not the intended meaning.
+
 ### 7.5 End marker `F2`
 
 `F2` ends the E-SEQ event stream. Bytes after `F2` are slack/padding for file/disk layout and must not be interpreted as musical events.
@@ -408,6 +537,13 @@ MIDI tempo event:
 
 ```text
 00 FF 51 03 <mpqn as 3-byte big-endian integer>
+```
+
+For the Clavinova/CVP `.MDA` variant, use the same `+29` formula but read the byte at `0x24`:
+
+```python
+base_bpm = eseq[0x24] + 29
+mpqn = 60000000 // base_bpm
 ```
 
 Examples from the 21 matched files:
@@ -656,8 +792,11 @@ For SMPTE-timed MIDI divisions, require a special conversion mode because E-SEQ 
 3. Write normal header tempo byte:
 
    ```python
-   header[0x33] = base_bpm - 29
-   header[0x24] = header[0x33]
+   if container_variant == "clavinova_mda":
+       header[0x24] = base_bpm - 29
+   else:
+       header[0x33] = base_bpm - 29
+       header[0x24] = header[0x33]
    ```
 
 4. For each tempo event, including tick 0 if needed, write `FB lo hi` when the desired tempo differs from the base tempo beyond tolerance. Later tempo events remain later tempo events even when no explicit tick-0 MIDI tempo was present.
@@ -734,7 +873,7 @@ Recommended writer strategy:
 3. Write filename bytes at `0x27..0x31`.
 4. Write tempo at `0x24` and `0x33`.
 5. Write time signature at `0x34..0x35`.
-6. Write title at `0x57..0x76`.
+6. Write title at `0x57..0x76` for normal Disklavier `.FIL` output only.
 7. Write event stream beginning at `0x77`.
 8. After writing `F2`, update stream length, duration/end tick, event-class flags, and padding.
 
@@ -753,6 +892,8 @@ header[0x54] = (0x01 if has_notes else 0) | (0x04 if has_controllers else 0)
 ```
 
 Because several header fields remain opaque, a generated E-SEQ writer should identify itself as using a known template profile, for example `normal_0x77_generated`.
+
+For Clavinova/CVP `.MDA` output, use the writer rule in section 6A.4 instead of this normal `.FIL` header recipe.
 
 ---
 
@@ -796,6 +937,30 @@ The supplied Yamaha images are normally `737,280` bytes, consistent with 720 KB 
 | Data area | `0x1C00` | remainder | Cluster 2 begins here; cluster size 1024 bytes. |
 
 A robust tool should locate `PIANODIR.FIL` by root-directory name and follow its FAT chain. Do not assume it is root entry 0 or starts at cluster 2, even though that is common.
+
+---
+
+## 12A. `MUSIC.DIR` role for Clavinova/CVP media
+
+`MUSIC.DIR` is the disk/album index for the Clavinova/CVP `.MDA` E-SEQ media observed so far. Treat it as a separate directory format from `PIANODIR.FIL`.
+
+It stores:
+
+- A fixed `MUSICDIR` signature.
+- A logical slot count.
+- A 64-byte logical-slot-to-record map.
+- Up to 64 song records of 48 bytes each.
+- DOS 8.3 `.MDA` filenames.
+
+Important difference from `PIANODIR.FIL`: the map may contain `0xFF` holes for missing/deleted logical slots. Do not stop at the first `0xFF`.
+
+Practical media rule:
+
+| Rule | Implementation consequence |
+|---|---|
+| Clavinova/CVP E-SEQ disks use `.MDA` plus `MUSIC.DIR`. | Do not build `PIANODIR.FIL` for `.MDA` media. |
+| `MUSIC.DIR` controls logical order. | Root directory order alone is insufficient. |
+| Song files are still E-SEQ at the event level. | Reuse the E-SEQ event parser once `.MDA` event start and tempo byte are selected. |
 
 ---
 
@@ -1047,6 +1212,123 @@ def build_pianodir(eseq_files, disk_title=""):
 
 ---
 
+## 13A. `MUSIC.DIR` binary format
+
+### 13A.1 Top-level layout
+
+Observed `MUSIC.DIR` files use this structure:
+
+```text
+0x00..0x02   FE 00 00
+0x03..0x06   little-endian used length
+0x07..0x0E   "MUSICDIR"
+0x0F..0x4F   zeros
+0x50         0B
+0x51         logical slot count / highest slot count
+0x52..0x5F   zeros
+0x60..0x9F   logical-slot-to-record map, up to 64 bytes
+0xA0..       0x30-byte song records
+```
+
+The logical map is:
+
+```text
+logical song slot -> record index
+```
+
+For logical song number `n`:
+
+```python
+record_index = data[0x60 + (n - 1)]
+```
+
+If `record_index == 0xFF`, the slot is absent. Otherwise:
+
+```python
+record_offset = 0xA0 + record_index * 0x30
+record = data[record_offset:record_offset + 0x30]
+filename = decode_dos_8_3(record[0:11])
+```
+
+### 13A.2 Song-record source
+
+For most good records in the analyzed corpus, each 48-byte directory record equals:
+
+```python
+record = bytearray(mda_file[0x27:0x57])
+record[0:11] = dos_8_3_short_name_bytes
+```
+
+Some stale/placeholder-looking records may exist in damaged or edited directories. For conversion, prefer this policy:
+
+1. Use `MUSIC.DIR` as the song list and ordering source.
+2. Open the actual `.MDA` file named by each record.
+3. Trust the `.MDA` header and stream for musical conversion.
+4. When writing a fresh directory, rebuild each record from the current `.MDA file[0x27:0x57]`.
+
+### 13A.3 Reader algorithm
+
+```python
+def parse_music_dir(data):
+    if len(data) < 0xA0:
+        raise ValueError("MUSIC.DIR too small")
+    if data[0:3] != b"\xFE\x00\x00" or data[0x07:0x0F] != b"MUSICDIR":
+        raise ValueError("not a Clavinova/CVP MUSIC.DIR")
+
+    used_len = int.from_bytes(data[0x03:0x07], "little")
+    if not (0xA0 <= used_len <= len(data)):
+        used_len = len(data)
+
+    logical_slots = data[0x51]
+    record_count = max(0, (used_len - 0xA0) // 0x30)
+    records = [data[0xA0 + i * 0x30:0xA0 + (i + 1) * 0x30] for i in range(record_count)]
+
+    songs = []
+    for slot in range(min(logical_slots, 64)):
+        rec_index = data[0x60 + slot]
+        if rec_index == 0xFF:
+            continue
+        if rec_index >= len(records):
+            songs.append({"slot": slot + 1, "record_index": rec_index, "warning": "record index out of range"})
+            continue
+        rec = records[rec_index]
+        songs.append({
+            "slot": slot + 1,
+            "record_index": rec_index,
+            "filename": decode_dos_8_3(rec[0:11]),
+            "raw_record": rec,
+        })
+    return songs
+```
+
+### 13A.4 Writer algorithm
+
+```python
+def build_music_dir(mda_files):
+    if len(mda_files) > 64:
+        raise ValueError("Clavinova/CVP MUSIC.DIR supports at most 64 files")
+
+    used_len = 0xA0 + len(mda_files) * 0x30
+    out = bytearray(used_len)
+    out[0:3] = b"\xFE\x00\x00"
+    out[0x03:0x07] = used_len.to_bytes(4, "little")
+    out[0x07:0x0F] = b"MUSICDIR"
+    out[0x50] = 0x0B
+    out[0x51] = len(mda_files)
+    out[0x60:0xA0] = b"\xFF" * 64
+
+    for slot, item in enumerate(mda_files):
+        out[0x60 + slot] = slot
+        record = bytearray(item.bytes[0x27:0x57])
+        record[0:11] = encode_dos_8_3(item.filename)
+        off = 0xA0 + slot * 0x30
+        out[off:off + 0x30] = record
+
+    return bytes(out)
+```
+
+---
+
 ## 14. Disk-image authoring workflow
 
 A complete MIDI-to-old-Disklavier workflow should be:
@@ -1058,6 +1340,16 @@ A complete MIDI-to-old-Disklavier workflow should be:
 5. Write a Yamaha-compatible 720 KB image or target folder/device.
 6. Keep E-SEQ disks E-SEQ-only; do not mix `.MID` and `.FIL` media conventions.
 7. Validate by parsing the final image and confirming `PIANODIR` records point to visible files by name.
+
+A complete MIDI-to-Clavinova/CVP E-SEQ workflow should be:
+
+1. Normalize and validate input MIDI.
+2. Convert each MIDI file to a `.MDA` E-SEQ file with the `0x57` header profile.
+3. Assign DOS 8.3 filenames, commonly `CLP_01.MDA`, `CLP_02.MDA`, etc., unless preserving original names.
+4. Build `MUSIC.DIR` from the resulting `.MDA` files.
+5. Write a Yamaha-compatible image or target folder/device.
+6. Keep Clavinova/CVP E-SEQ disks E-SEQ-only; do not mix `.MID` and `.MDA` media conventions.
+7. Validate by parsing the final image and confirming `MUSIC.DIR` records point to visible `.MDA` files by name.
 
 For a raw disk image matching the observed corpus, use:
 
@@ -1159,6 +1451,18 @@ For every disk image:
   - Total duration and count match.
   - Disk title matches.
 
+### 16.3A MUSIC.DIR validation
+
+For every Clavinova/CVP disk image or folder:
+
+- Locate `MUSIC.DIR` by name.
+- Verify `FE 00 00` and `MUSICDIR` signatures.
+- Parse the used length, logical slot count, 64-byte map, and 48-byte records.
+- Do not stop at the first `0xFF` map entry.
+- Match each present record filename to an `.MDA` file.
+- Rebuild `MUSIC.DIR` from `.MDA` files and compare record bytes where the source files are intact.
+- Confirm each `.MDA` file has `COM-ESEQ`, event start `0x57`, tempo byte `0x24`, and a terminating `F2`.
+
 ### 16.4 Playback-control validation
 
 For every MIDI pair:
@@ -1181,7 +1485,7 @@ aps_eseq/events.py        E-SEQ event-stream parser/writer
 aps_eseq/tempo.py         Tempo byte/factor/MPQN helpers
 aps_eseq/midi.py          SMF parser/writer integration
 aps_eseq/convert.py       E-SEQ <-> MIDI conversion workflows
-aps_eseq/pianodir.py      PIANODIR parser/writer
+aps_eseq/pianodir.py      PIANODIR and MUSIC.DIR parser/writer
 aps_eseq/diskimage.py     Optional Yamaha FAT12-style image reader/writer
 aps_eseq/report.py        Diagnostics, warnings, corpus reports
 ```
@@ -1231,6 +1535,7 @@ class PianoDirEntry:
 | CC7 zero policy | `preserve`, `warn_only`, `playback_fix_100`, `playback_fix_127`, `drop_early_cc7_zero` |
 | Padding policy | `compat_f6`, `zero`, `compact`, `preserve` |
 | PIANODIR size | `0x1800` default, `preserve_existing` for edits |
+| E-SEQ container | `disklavier_fil`, `clavinova_mda` |
 | Filename policy | `uppercase_8_3`, `preserve_case_8_3`, `auto_piano001` |
 
 ---
@@ -1245,12 +1550,21 @@ def detect_eseq_variant(data):
         raise ValueError("missing COM-ESEQ signature")
     if data[0x0F:0x17] == b"Q11V1.00":
         return "q11"
+    if (
+        len(data) >= 0x58
+        and data[0:7] == b"\xFE\x00\x00\xFF\xFF\x00\x00"
+        and data[0x17:0x1F] == bytes.fromhex("80 00 21 00 30 00 00 00")
+        and data[0x57:0x5A] == b"\xF1\x00\xF9"
+    ):
+        return "clavinova_mda"
     return "normal_0x77"
 
 
 def event_start_for_variant(data, variant):
     if variant == "q11":
         return 0x0200
+    if variant == "clavinova_mda":
+        return 0x0057
     return 0x0077
 
 
@@ -1306,6 +1620,9 @@ def parse_eseq_events(data, start):
             i += 2
             tick += (hi2 << 7) | (lo & 0x7F)
 
+        elif b == 0xF6:
+            events.append(ESeqEvent(tick, "noop"))
+
         elif b == 0xF9:
             a, c = data[i], data[i+1]
             i += 2
@@ -1347,6 +1664,10 @@ def write_vlq(value):
 ```python
 def normal_eseq_base_bpm(data):
     return data[0x33] + 29
+
+
+def clavinova_mda_base_bpm(data):
+    return data[0x24] + 29
 
 
 def bpm_to_mpqn_floor(bpm):
@@ -1406,6 +1727,8 @@ The supplied `EEXPLORE.EXE` is a third-party `PIANODIR.FIL` utility, not a Yamah
 
 Limitation: this static behavior describes ordinary non-Q11 E-SEQ files. It does not explain the Q11 record template, which comes from disk-image corpus evidence.
 
+It also does not describe the Clavinova/CVP `.MDA` / `MUSIC.DIR` format. That format uses a shorter song header and a different 48-byte directory record scheme.
+
 ---
 
 ## 20. Known open questions
@@ -1422,6 +1745,9 @@ These items should be resolved with the next, larger corpus and, ideally, hardwa
 8. Whether Disklavier playback uses `PIANODIR` duration fields for playback, display only, or both.
 9. Behavior of compact unpadded `.FIL` files on old hardware.
 10. Whether old hardware depends on `PIANODIR.FIL` being physically first on disk.
+11. Exact semantics of Clavinova/CVP `.MDA` category byte `0x33` and classification bytes `0x39..0x3A`.
+12. Whether all Clavinova/CVP `.MDA` devices use event start `0x57`, or whether additional container profiles exist.
+13. Whether Clavinova/CVP hardware depends on `MUSIC.DIR` physical placement or filename patterns such as `CLP_01.MDA`.
 
 ---
 
@@ -1446,17 +1772,20 @@ Use this checklist before considering APS MIDI Prep Tool E-SEQ support complete:
 - [x] Parse SMF type 0 and type 1 with running status, meta events, sysex, and PPQN division.
 - [x] Normalize MIDI to one absolute-tick event list.
 - [x] Detect E-SEQ normal vs Q11 variant.
-- [x] Parse E-SEQ event stream with `F3`, `F4`, `F9`, `FB`, channel events, sysex, and `F2`.
+- [x] Detect Clavinova/CVP `.MDA` E-SEQ container variant.
+- [x] Parse E-SEQ event stream with `F3`, `F4`, `F6`, `F9`, `FB`, channel events, sysex, and `F2`.
 - [x] Convert normal E-SEQ tempo byte and `FB` factors to MIDI tempo events.
 - [x] Convert MIDI tempo map to normal E-SEQ tempo byte and `FB` factors.
 - [ ] Support selectable end-tick policies.
 - [x] Detect and report un-restored piano-channel `CC7=0` events.
 - [x] Provide CC7 preservation/playback-fix policies.
 - [x] Generate normal `0x77` `.FIL` files with coherent header, event stream, `F2`, and padding.
+- [x] Generate Clavinova/CVP `.MDA` files with coherent `0x57` header and event stream.
 - [ ] Parse `PIANODIR.FIL` size `0x1400` and `0x1800`.
 - [x] Generate `0x1800` `PIANODIR.FIL` indexes.
 - [x] Implement normal PIANODIR record recipe.
 - [x] Implement Q11 PIANODIR record recipe.
+- [x] Parse and generate Clavinova/CVP `MUSIC.DIR` indexes.
 - [x] Recalculate disk title, total duration, secondary aggregate, and count fields.
 - [ ] Validate against the 21 personal pairs.
 - [ ] Validate against the 110-image PIANODIR corpus.
