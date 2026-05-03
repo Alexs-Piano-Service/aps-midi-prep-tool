@@ -1,6 +1,7 @@
 import datetime
 import json
 import math
+import ntpath
 import os
 import queue
 import re
@@ -2140,7 +2141,17 @@ def _windows_drive_file_path(root, image_path):
     parts = _split_image_path_components(image_path)
     if not parts or any(part in {".", ".."} for part in parts):
         raise FloppyImageError(f"Invalid floppy file path: {image_path}")
-    return os.path.join(root, *parts)
+    return ntpath.join(root, *parts)
+
+
+def _windows_mcopy_host_path(root, image_path):
+    match = re.fullmatch(r"([A-Za-z]):\\", str(root or ""))
+    if not match:
+        raise FloppyImageError(f"Invalid Windows floppy drive root: {root}")
+    parts = _split_image_path_components(image_path)
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise FloppyImageError(f"Invalid floppy file path: {image_path}")
+    return f"//?/{match.group(1).upper()}:/" + "/".join(parts)
 
 
 def _windows_raw_write_denied(exc):
@@ -5297,59 +5308,49 @@ class FloppyImageSession:
         )
         total_steps = max(1, len(target_entries) + len(source_entries) + 1)
         step = 0
-        temp_extract_dir = tempfile.mkdtemp(prefix="aps_floppy_file_save_", dir=self.temp_dir)
-        try:
-            for entry in sorted(target_entries, key=lambda item: item.path.lower()):
-                _raise_if_cancelled(cancel_callback)
-                step += 1
-                _notify_progress(
-                    progress_callback,
-                    step,
-                    total_steps,
-                    f"Removing old {entry.path} from floppy...",
-                )
-                target_path = _windows_drive_file_path(root, entry.path)
-                try:
-                    if os.path.isfile(target_path) or os.path.islink(target_path):
-                        os.remove(target_path)
-                except OSError as exc:
-                    raise FloppyImageError(
-                        f"Could not remove {entry.path} from the floppy: {exc}\n\n{permission_hint}"
-                    ) from exc
-
-            for entry in sorted(source_entries, key=lambda item: item.path.lower()):
-                _raise_if_cancelled(cancel_callback)
-                step += 1
-                _notify_progress(
-                    progress_callback,
-                    step,
-                    total_steps,
-                    f"Copying {entry.path} to floppy...",
-                )
-                extracted_path = os.path.join(
-                    temp_extract_dir,
-                    f"{uuid.uuid4().hex}_{os.path.basename(entry.path)}",
-                )
-                self._extract_from_image(
-                    modified_img,
-                    entry.path,
-                    extracted_path,
-                    cancel_callback=cancel_callback,
-                )
-                target_path = _windows_drive_file_path(root, entry.path)
-                try:
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                    shutil.copy2(extracted_path, target_path)
-                except OSError as exc:
-                    raise FloppyImageError(
-                        f"Could not copy {entry.path} to the floppy: {exc}\n\n{permission_hint}"
-                    ) from exc
-
+        mcopy = _require_command("mcopy")
+        for entry in sorted(target_entries, key=lambda item: item.path.lower()):
             _raise_if_cancelled(cancel_callback)
-            _notify_progress(progress_callback, total_steps, total_steps, "Checking floppy directory...")
-            read_image_listing(drive_path)
-        finally:
-            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+            step += 1
+            _notify_progress(
+                progress_callback,
+                step,
+                total_steps,
+                f"Removing old {entry.path} from floppy...",
+            )
+            target_path = _windows_drive_file_path(root, entry.path)
+            try:
+                if os.path.isfile(target_path) or os.path.islink(target_path):
+                    os.remove(target_path)
+            except OSError as exc:
+                raise FloppyImageError(
+                    f"Could not remove {entry.path} from the floppy: {exc}\n\n{permission_hint}"
+                ) from exc
+
+        for entry in sorted(source_entries, key=lambda item: item.path.lower()):
+            _raise_if_cancelled(cancel_callback)
+            step += 1
+            _notify_progress(
+                progress_callback,
+                step,
+                total_steps,
+                f"Copying {entry.path} to floppy...",
+            )
+            self._run_mtools(
+                [
+                    mcopy,
+                    "-i",
+                    modified_img,
+                    mtools_path(entry.path),
+                    _windows_mcopy_host_path(root, entry.path),
+                ],
+                f"Could not copy {entry.path} to the floppy",
+                cancel_callback=cancel_callback,
+            )
+
+        _raise_if_cancelled(cancel_callback)
+        _notify_progress(progress_callback, total_steps, total_steps, "Checking floppy directory...")
+        read_image_listing(drive_path)
 
     def _sync_modified_image_files_to_floppy_drive(
         self,
