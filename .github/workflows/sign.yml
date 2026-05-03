@@ -1,0 +1,69 @@
+name: Sign Existing Release EXEs
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to pull EXEs from (for example: v1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  sign-existing-release-assets:
+    runs-on: windows-latest
+
+    steps:
+      - name: Download EXE assets from selected release tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          New-Item -ItemType Directory -Path unsigned -Force | Out-Null
+          gh release download "$env:RELEASE_TAG" --pattern "*.exe" --dir unsigned
+          $count = (Get-ChildItem -Path unsigned -Filter *.exe -File).Count
+          if ($count -eq 0) { throw "No .exe assets found in release tag $env:RELEASE_TAG" }
+          Write-Host "Downloaded $count EXE file(s) from release $env:RELEASE_TAG"
+
+      - name: Sign EXEs with Azure Trusted Signing
+        uses: azure/trusted-signing-action@v0.5.9
+        with:
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_PROFILE }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          files-folder: unsigned
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify signatures
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path unsigned -Filter *.exe -File
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Host "[$($f.Name)] Status: $($sig.Status)"
+            if ($sig.Status -ne 'Valid') { throw "Signature invalid for $($f.Name): $($sig.Status)" }
+          }
+
+      - name: Upload signed EXEs as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-exes-${{ inputs.release_tag }}
+          path: unsigned/*.exe
+
+      - name: Replace release EXEs with signed versions
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "$env:RELEASE_TAG" unsigned/*.exe --clobber
