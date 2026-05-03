@@ -29,6 +29,7 @@ with release sections grouped by version and date.
 
 - Direct Windows floppy writes no longer report false failures when a VM or floppy device rejects the final flush after writing completes.
 - Bundled console tools launched from the GUI no longer flash black console windows on Windows.
+- File-level floppy saves now leave already-matching files in place instead of deleting and copying them again, while always refreshing generated E-SEQ directory files.
 - File-level floppy saves on Windows now delete old files through the mounted drive and copy final files from the temp image with mtools extended host paths, avoiding false permission-denied failures on USB and VM floppy drives.
 - Windows hidden volume metadata is hidden from floppy/image listings and no longer disables fast file-level floppy reads.
 - Fast floppy reads no longer fall back to full-image reads just because an otherwise readable disk has an unreadable Yamaha/protection sector in file data.

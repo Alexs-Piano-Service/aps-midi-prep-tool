@@ -2166,6 +2166,30 @@ def _windows_raw_write_denied(exc):
     )
 
 
+def _image_entry_key(entry):
+    return _normalize_image_path(entry.path).upper()
+
+
+def _must_refresh_floppy_sync_entry(entry):
+    return is_eseq_directory_path(entry.path)
+
+
+def _files_have_same_content(path_a, path_b):
+    try:
+        if os.path.getsize(path_a) != os.path.getsize(path_b):
+            return False
+        with open(path_a, "rb") as handle_a, open(path_b, "rb") as handle_b:
+            while True:
+                chunk_a = handle_a.read(64 * 1024)
+                chunk_b = handle_b.read(64 * 1024)
+                if chunk_a != chunk_b:
+                    return False
+                if not chunk_a:
+                    return True
+    except OSError:
+        return False
+
+
 def _is_block_device_path(path):
     if os.name != "posix":
         return False
@@ -5291,6 +5315,8 @@ class FloppyImageSession:
         target_listing = read_image_listing(drive_path)
         source_entries = list(source_listing.entries)
         target_entries = list(target_listing.entries)
+        source_by_key = {_image_entry_key(entry): entry for entry in source_entries}
+        target_by_key = {_image_entry_key(entry): entry for entry in target_entries}
         nested_entries = [
             entry.path
             for entry in source_entries + target_entries
@@ -5306,47 +5332,106 @@ class FloppyImageSession:
             "Close File Explorer windows using the floppy, make sure the disk is not write-protected, "
             "and try again."
         )
-        total_steps = max(1, len(target_entries) + len(source_entries) + 1)
+        compare_keys = [
+            key
+            for key, source_entry in source_by_key.items()
+            if (
+                key in target_by_key
+                and source_entry.size == target_by_key[key].size
+                and not _must_refresh_floppy_sync_entry(source_entry)
+            )
+        ]
+        total_steps = max(1, len(compare_keys) + len(target_entries) + len(source_entries) + 1)
         step = 0
         mcopy = _require_command("mcopy")
-        for entry in sorted(target_entries, key=lambda item: item.path.lower()):
-            _raise_if_cancelled(cancel_callback)
-            step += 1
-            _notify_progress(
-                progress_callback,
-                step,
-                total_steps,
-                f"Removing old {entry.path} from floppy...",
-            )
-            target_path = _windows_drive_file_path(root, entry.path)
-            try:
-                if os.path.isfile(target_path) or os.path.islink(target_path):
-                    os.remove(target_path)
-            except OSError as exc:
-                raise FloppyImageError(
-                    f"Could not remove {entry.path} from the floppy: {exc}\n\n{permission_hint}"
-                ) from exc
-
-        for entry in sorted(source_entries, key=lambda item: item.path.lower()):
-            _raise_if_cancelled(cancel_callback)
-            step += 1
-            _notify_progress(
-                progress_callback,
-                step,
-                total_steps,
-                f"Copying {entry.path} to floppy...",
-            )
-            self._run_mtools(
-                [
-                    mcopy,
-                    "-i",
+        preserved_keys = set()
+        temp_extract_dir = tempfile.mkdtemp(prefix="aps_floppy_file_save_", dir=self.temp_dir)
+        try:
+            for key in sorted(compare_keys):
+                _raise_if_cancelled(cancel_callback)
+                source_entry = source_by_key[key]
+                target_entry = target_by_key[key]
+                step += 1
+                _notify_progress(
+                    progress_callback,
+                    step,
+                    total_steps,
+                    f"Checking existing {source_entry.path} on floppy...",
+                )
+                source_extract_path = os.path.join(
+                    temp_extract_dir,
+                    f"{uuid.uuid4().hex}_{os.path.basename(source_entry.path)}",
+                )
+                self._extract_from_image(
                     modified_img,
-                    mtools_path(entry.path),
-                    _windows_mcopy_host_path(root, entry.path),
-                ],
-                f"Could not copy {entry.path} to the floppy",
-                cancel_callback=cancel_callback,
-            )
+                    source_entry.path,
+                    source_extract_path,
+                    cancel_callback=cancel_callback,
+                )
+                if _files_have_same_content(
+                    source_extract_path,
+                    _windows_drive_file_path(root, target_entry.path),
+                ):
+                    preserved_keys.add(key)
+
+            for entry in sorted(target_entries, key=lambda item: item.path.lower()):
+                _raise_if_cancelled(cancel_callback)
+                step += 1
+                key = _image_entry_key(entry)
+                if key in preserved_keys:
+                    _notify_progress(
+                        progress_callback,
+                        step,
+                        total_steps,
+                        f"Keeping unchanged {entry.path} on floppy...",
+                    )
+                    continue
+                _notify_progress(
+                    progress_callback,
+                    step,
+                    total_steps,
+                    f"Removing old {entry.path} from floppy...",
+                )
+                target_path = _windows_drive_file_path(root, entry.path)
+                try:
+                    if os.path.isfile(target_path) or os.path.islink(target_path):
+                        os.remove(target_path)
+                except OSError as exc:
+                    raise FloppyImageError(
+                        f"Could not remove {entry.path} from the floppy: {exc}\n\n{permission_hint}"
+                    ) from exc
+
+            for entry in sorted(source_entries, key=lambda item: item.path.lower()):
+                _raise_if_cancelled(cancel_callback)
+                step += 1
+                key = _image_entry_key(entry)
+                if key in preserved_keys:
+                    _notify_progress(
+                        progress_callback,
+                        step,
+                        total_steps,
+                        f"Skipping unchanged {entry.path}...",
+                    )
+                    continue
+                _notify_progress(
+                    progress_callback,
+                    step,
+                    total_steps,
+                    f"Copying {entry.path} to floppy...",
+                )
+                self._run_mtools(
+                    [
+                        mcopy,
+                        "-i",
+                        modified_img,
+                        mtools_path(entry.path),
+                        _windows_mcopy_host_path(root, entry.path),
+                    ],
+                    f"Could not copy {entry.path} to the floppy",
+                    cancel_callback=cancel_callback,
+                )
+        finally:
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
         _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, total_steps, total_steps, "Checking floppy directory...")
@@ -5374,6 +5459,8 @@ class FloppyImageSession:
 
         source_entries = list(source_listing.entries)
         target_entries = list(target_listing.entries)
+        source_by_key = {_image_entry_key(entry): entry for entry in source_entries}
+        target_by_key = {_image_entry_key(entry): entry for entry in target_entries}
         nested_entries = [
             entry.path
             for entry in source_entries + target_entries
@@ -5385,13 +5472,68 @@ class FloppyImageSession:
                 "Use Write Current Image to Floppy for disks with folders."
             )
 
-        total_steps = max(1, len(target_entries) + len(source_entries) + 1)
+        compare_keys = [
+            key
+            for key, source_entry in source_by_key.items()
+            if (
+                key in target_by_key
+                and source_entry.size == target_by_key[key].size
+                and not _must_refresh_floppy_sync_entry(source_entry)
+            )
+        ]
+        total_steps = max(1, len(compare_keys) + len(target_entries) + len(source_entries) + 1)
         step = 0
         temp_extract_dir = tempfile.mkdtemp(prefix="aps_floppy_file_save_", dir=self.temp_dir)
         try:
+            preserved_keys = set()
+            source_extract_cache = {}
+            for key in sorted(compare_keys):
+                _raise_if_cancelled(cancel_callback)
+                source_entry = source_by_key[key]
+                target_entry = target_by_key[key]
+                step += 1
+                _notify_progress(
+                    progress_callback,
+                    step,
+                    total_steps,
+                    f"Checking existing {source_entry.path} on floppy...",
+                )
+                source_extract_path = os.path.join(
+                    temp_extract_dir,
+                    f"{uuid.uuid4().hex}_source_{os.path.basename(source_entry.path)}",
+                )
+                target_extract_path = os.path.join(
+                    temp_extract_dir,
+                    f"{uuid.uuid4().hex}_target_{os.path.basename(target_entry.path)}",
+                )
+                self._extract_from_image(
+                    modified_img,
+                    source_entry.path,
+                    source_extract_path,
+                    cancel_callback=cancel_callback,
+                )
+                source_extract_cache[key] = source_extract_path
+                self._extract_from_image(
+                    drive_path,
+                    target_entry.path,
+                    target_extract_path,
+                    cancel_callback=cancel_callback,
+                )
+                if _files_have_same_content(source_extract_path, target_extract_path):
+                    preserved_keys.add(key)
+
             for entry in sorted(target_entries, key=lambda item: item.path.lower()):
                 _raise_if_cancelled(cancel_callback)
                 step += 1
+                key = _image_entry_key(entry)
+                if key in preserved_keys:
+                    _notify_progress(
+                        progress_callback,
+                        step,
+                        total_steps,
+                        f"Keeping unchanged {entry.path} on floppy...",
+                    )
+                    continue
                 _notify_progress(
                     progress_callback,
                     step,
@@ -5407,22 +5549,33 @@ class FloppyImageSession:
             for entry in sorted(source_entries, key=lambda item: item.path.lower()):
                 _raise_if_cancelled(cancel_callback)
                 step += 1
+                key = _image_entry_key(entry)
+                if key in preserved_keys:
+                    _notify_progress(
+                        progress_callback,
+                        step,
+                        total_steps,
+                        f"Skipping unchanged {entry.path}...",
+                    )
+                    continue
                 _notify_progress(
                     progress_callback,
                     step,
                     total_steps,
                     f"Copying {entry.path} to floppy...",
                 )
-                extracted_path = os.path.join(
-                    temp_extract_dir,
-                    f"{uuid.uuid4().hex}_{os.path.basename(entry.path)}",
-                )
-                self._extract_from_image(
-                    modified_img,
-                    entry.path,
-                    extracted_path,
-                    cancel_callback=cancel_callback,
-                )
+                extracted_path = source_extract_cache.get(key)
+                if not extracted_path:
+                    extracted_path = os.path.join(
+                        temp_extract_dir,
+                        f"{uuid.uuid4().hex}_{os.path.basename(entry.path)}",
+                    )
+                    self._extract_from_image(
+                        modified_img,
+                        entry.path,
+                        extracted_path,
+                        cancel_callback=cancel_callback,
+                    )
                 self._run_mtools(
                     [mcopy, "-i", drive_path, extracted_path, mtools_path(entry.path)],
                     f"Could not copy {entry.path} to the floppy",
