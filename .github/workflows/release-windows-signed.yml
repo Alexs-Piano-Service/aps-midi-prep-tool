@@ -1,0 +1,81 @@
+name: Release Windows (Signed)
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-sign-upload:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install pyinstaller
+
+      - name: Build Windows EXE
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --onefile --name APSMIDIPrepTool aps_midi_prep_tool.py
+
+      - name: Install AzureSignTool
+        shell: pwsh
+        run: dotnet tool install --global AzureSignTool
+
+      - name: Sign EXE with Trusted Signing
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+        run: |
+          $exe = "dist/APSMIDIPrepTool.exe"
+          if (!(Test-Path $exe)) { throw "Build output not found: $exe" }
+
+          azuresigntool sign `
+            -kvu "$env:AZURE_TRUSTED_SIGNING_ENDPOINT" `
+            -kvi "$env:AZURE_CLIENT_ID" `
+            -kvt "$env:AZURE_TENANT_ID" `
+            -kvs "$env:AZURE_CLIENT_SECRET" `
+            -tr "http://timestamp.acs.microsoft.com" `
+            -td sha256 `
+            -fd sha256 `
+            -dlib "Azure.CodeSigning.Dlib.dll" `
+            -dmdf "$env:AZURE_TRUSTED_SIGNING_ACCOUNT/$env:AZURE_TRUSTED_SIGNING_PROFILE" `
+            "$exe"
+
+      - name: Verify signature
+        shell: pwsh
+        run: |
+          $exe = "dist/APSMIDIPrepTool.exe"
+          Get-AuthenticodeSignature $exe | Format-List
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: APSMIDIPrepTool-windows-signed
+          path: dist/APSMIDIPrepTool.exe
+
+      - name: Attach signed EXE to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/APSMIDIPrepTool.exe
