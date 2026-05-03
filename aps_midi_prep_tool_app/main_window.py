@@ -168,6 +168,7 @@ from .app_info import (
     SETTINGS_ORG as APP_SETTINGS_ORG,
     UPDATE_CHECK_URL,
 )
+from .subprocess_utils import windows_subprocess_kwargs
 
 
 class TitleOverflowDelegate(QStyledItemDelegate):
@@ -1021,6 +1022,7 @@ class MidiPreviewRenderWorker(QThread):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            **windows_subprocess_kwargs(),
         )
         while self._process.poll() is None:
             if self._cancel_requested():

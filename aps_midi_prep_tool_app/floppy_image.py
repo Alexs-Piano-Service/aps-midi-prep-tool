@@ -43,6 +43,7 @@ from .midi_metadata import (
     update_eseq_title_to_path,
     update_midi_title_to_path,
 )
+from .subprocess_utils import windows_subprocess_kwargs
 
 
 class FloppyImageError(Exception):
@@ -551,7 +552,13 @@ def _terminate_process(process):
 
 def _run_command(args, error_prefix, *, cancel_callback=None):
     if cancel_callback is None:
-        result = subprocess.run(args, text=True, capture_output=True, check=False)
+        result = subprocess.run(
+            args,
+            text=True,
+            capture_output=True,
+            check=False,
+            **windows_subprocess_kwargs(),
+        )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             if detail:
@@ -560,7 +567,13 @@ def _run_command(args, error_prefix, *, cancel_callback=None):
         return (result.stdout or "") + (result.stderr or "")
 
     _raise_if_cancelled(cancel_callback)
-    process = subprocess.Popen(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        args,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **windows_subprocess_kwargs(),
+    )
     try:
         while process.poll() is None:
             _raise_if_cancelled(cancel_callback)
@@ -588,6 +601,7 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None, 
         text=True,
         bufsize=1,
         env=env,
+        **windows_subprocess_kwargs(),
     )
 
     output_lines = []
@@ -710,6 +724,7 @@ def _list_linux_floppy_drives():
         text=True,
         capture_output=True,
         check=False,
+        **windows_subprocess_kwargs(),
     )
     if result.returncode != 0:
         return []
@@ -786,6 +801,17 @@ def _windows_raw_volume_path(drive_path):
     if re.fullmatch(r"[A-Za-z]", drive_path):
         return f"\\\\.\\{drive_path.upper()}:"
     return drive_path
+
+
+def _windows_filesystem_root(drive_path):
+    drive_path = str(drive_path or "").strip()
+    raw_match = re.fullmatch(r"\\\\\.\\([A-Za-z]):", drive_path)
+    if raw_match:
+        return f"{raw_match.group(1).upper()}:\\"
+    match = re.fullmatch(r"([A-Za-z]):[\\/]*", drive_path)
+    if match:
+        return f"{match.group(1).upper()}:\\"
+    return None
 
 
 def _windows_volume_label(root_path):
@@ -972,7 +998,13 @@ def list_greaseweazle_devices():
     if not gw:
         return []
 
-    result = subprocess.run([gw, "info"], text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        [gw, "info"],
+        text=True,
+        capture_output=True,
+        check=False,
+        **windows_subprocess_kwargs(),
+    )
     if result.returncode != 0:
         return []
 
@@ -2055,6 +2087,74 @@ def _read_image_listing_with_7z(img_path):
     return ImageListing(entries=entries, free_space=free_space, cluster_size=cluster_size)
 
 
+def _read_windows_filesystem_drive_listing(drive_path):
+    root = _windows_filesystem_root(drive_path)
+    if not root:
+        raise FloppyImageError(f"Invalid Windows floppy drive path: {drive_path}")
+
+    entries = []
+    try:
+        usage = shutil.disk_usage(root)
+    except OSError as exc:
+        raise FloppyImageError(
+            f"Could not read floppy drive {drive_path}: {exc}. "
+            "If this is a protected or damaged disk, use Read Floppy with recovery instead."
+        ) from exc
+
+    try:
+        for current_root, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                dirname
+                for dirname in dirnames
+                if not _is_windows_volume_metadata_path(
+                    os.path.relpath(os.path.join(current_root, dirname), root)
+                )
+            ]
+            for filename in filenames:
+                full_path = os.path.join(current_root, filename)
+                relative_path = os.path.relpath(full_path, root)
+                image_path = _normalize_image_path(relative_path)
+                if _is_windows_volume_metadata_path(image_path):
+                    continue
+                try:
+                    stat_result = os.stat(full_path)
+                except OSError:
+                    continue
+                entries.append(
+                    ImageEntry(
+                        path=image_path,
+                        size=stat_result.st_size,
+                        packed_size=allocated_size(stat_result.st_size, 1024),
+                        attributes="",
+                        modified_time=stat_result.st_mtime,
+                    )
+                )
+    except OSError as exc:
+        raise FloppyImageError(f"Could not list files on floppy drive {drive_path}: {exc}") from exc
+
+    entries.sort(key=lambda item: item.path.lower())
+    return ImageListing(entries=entries, free_space=usage.free, cluster_size=1024)
+
+
+def _windows_drive_file_path(root, image_path):
+    parts = _split_image_path_components(image_path)
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise FloppyImageError(f"Invalid floppy file path: {image_path}")
+    return os.path.join(root, *parts)
+
+
+def _windows_raw_write_denied(exc):
+    lower = str(exc or "").lower()
+    return (
+        os.name == "nt"
+        and (
+            "access is denied" in lower
+            or "permission denied" in lower
+            or "could not lock" in lower
+        )
+    )
+
+
 def _is_block_device_path(path):
     if os.name != "posix":
         return False
@@ -2101,6 +2201,8 @@ def _read_fat12_block_device_listing(device_path):
 
 
 def read_image_listing(img_path):
+    if os.name == "nt" and _windows_filesystem_root(img_path):
+        return _read_windows_filesystem_drive_listing(img_path)
     if _is_block_device_path(img_path):
         return _read_fat12_block_device_listing(img_path)
     try:
@@ -5163,6 +5265,92 @@ class FloppyImageSession:
             if os.path.exists(temp_output):
                 os.remove(temp_output)
 
+    def _sync_modified_image_files_to_windows_drive(
+        self,
+        modified_img,
+        drive_path,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        root = _windows_filesystem_root(drive_path)
+        if not root:
+            raise FloppyImageError(f"Invalid Windows floppy drive path: {drive_path}")
+
+        source_listing = read_image_listing(modified_img)
+        target_listing = read_image_listing(drive_path)
+        source_entries = list(source_listing.entries)
+        target_entries = list(target_listing.entries)
+        nested_entries = [
+            entry.path
+            for entry in source_entries + target_entries
+            if entry.directory
+        ]
+        if nested_entries:
+            raise FloppyImageError(
+                "File-level Save To Floppy only supports root-directory floppy files. "
+                "Use Write Current Image to Floppy for disks with folders."
+            )
+
+        permission_hint = (
+            "Close File Explorer windows using the floppy, make sure the disk is not write-protected, "
+            "and try again."
+        )
+        total_steps = max(1, len(target_entries) + len(source_entries) + 1)
+        step = 0
+        temp_extract_dir = tempfile.mkdtemp(prefix="aps_floppy_file_save_", dir=self.temp_dir)
+        try:
+            for entry in sorted(target_entries, key=lambda item: item.path.lower()):
+                _raise_if_cancelled(cancel_callback)
+                step += 1
+                _notify_progress(
+                    progress_callback,
+                    step,
+                    total_steps,
+                    f"Removing old {entry.path} from floppy...",
+                )
+                target_path = _windows_drive_file_path(root, entry.path)
+                try:
+                    if os.path.isfile(target_path) or os.path.islink(target_path):
+                        os.remove(target_path)
+                except OSError as exc:
+                    raise FloppyImageError(
+                        f"Could not remove {entry.path} from the floppy: {exc}\n\n{permission_hint}"
+                    ) from exc
+
+            for entry in sorted(source_entries, key=lambda item: item.path.lower()):
+                _raise_if_cancelled(cancel_callback)
+                step += 1
+                _notify_progress(
+                    progress_callback,
+                    step,
+                    total_steps,
+                    f"Copying {entry.path} to floppy...",
+                )
+                extracted_path = os.path.join(
+                    temp_extract_dir,
+                    f"{uuid.uuid4().hex}_{os.path.basename(entry.path)}",
+                )
+                self._extract_from_image(
+                    modified_img,
+                    entry.path,
+                    extracted_path,
+                    cancel_callback=cancel_callback,
+                )
+                target_path = _windows_drive_file_path(root, entry.path)
+                try:
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    shutil.copy2(extracted_path, target_path)
+                except OSError as exc:
+                    raise FloppyImageError(
+                        f"Could not copy {entry.path} to the floppy: {exc}\n\n{permission_hint}"
+                    ) from exc
+
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(progress_callback, total_steps, total_steps, "Checking floppy directory...")
+            read_image_listing(drive_path)
+        finally:
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
     def _sync_modified_image_files_to_floppy_drive(
         self,
         modified_img,
@@ -5170,6 +5358,14 @@ class FloppyImageSession:
         progress_callback=None,
         cancel_callback=None,
     ):
+        if os.name == "nt" and _windows_filesystem_root(drive_path):
+            return self._sync_modified_image_files_to_windows_drive(
+                modified_img,
+                drive_path,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+
         mdel = _require_command("mdel")
         mcopy = _require_command("mcopy")
         source_listing = read_image_listing(modified_img)
@@ -5407,12 +5603,33 @@ class FloppyImageSession:
                     )
                 else:
                     _notify_progress(progress_callback, 4, 5, f"Writing floppy {target.path}...")
-                    _write_block_device(
-                        modified_img,
-                        target.path,
-                        progress_callback=progress_callback,
-                        cancel_callback=cancel_callback,
-                    )
+                    try:
+                        _write_block_device(
+                            modified_img,
+                            target.path,
+                            progress_callback=progress_callback,
+                            cancel_callback=cancel_callback,
+                        )
+                    except FloppyImageError as exc:
+                        if not _windows_raw_write_denied(exc):
+                            raise
+                        _notify_progress(
+                            progress_callback,
+                            4,
+                            5,
+                            "Windows denied direct floppy image writing; saving files through the mounted drive...",
+                        )
+                        try:
+                            self._sync_modified_image_files_to_floppy_drive(
+                                modified_img,
+                                target.path,
+                                progress_callback=progress_callback,
+                                cancel_callback=cancel_callback,
+                            )
+                        except FloppyImageError as fallback_exc:
+                            raise FloppyImageError(
+                                f"Windows denied direct floppy image writing, and file-level saving also failed: {fallback_exc}"
+                            ) from fallback_exc
             elif file_level:
                 raise FloppyImageError(
                     "File-level Save To Floppy requires a floppy drive. "

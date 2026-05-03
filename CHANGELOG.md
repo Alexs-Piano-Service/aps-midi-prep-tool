@@ -28,6 +28,8 @@ with release sections grouped by version and date.
 ### Fixed
 
 - Direct Windows floppy writes no longer report false failures when a VM or floppy device rejects the final flush after writing completes.
+- Bundled console tools launched from the GUI no longer flash black console windows on Windows.
+- File-level floppy saves on Windows now use the mounted drive directly instead of mtools/raw image access, avoiding false permission-denied failures on USB and VM floppy drives.
 - Windows hidden volume metadata is hidden from floppy/image listings and no longer disables fast file-level floppy reads.
 - Fast floppy reads no longer fall back to full-image reads just because an otherwise readable disk has an unreadable Yamaha/protection sector in file data.
 - Fast floppy reads now reconstruct readable FAT/root data from redundant sectors and stop with the recovery prompt, rather than silently starting a slow full-disk read, after a Yamaha/FAT disk has already been recognized.
