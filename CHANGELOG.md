@@ -27,6 +27,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Direct Windows floppy writes no longer report false failures when a VM or floppy device rejects the final flush after writing completes.
+- Windows hidden volume metadata is hidden from floppy/image listings and no longer disables fast file-level floppy reads.
 - Fast floppy reads no longer fall back to full-image reads just because an otherwise readable disk has an unreadable Yamaha/protection sector in file data.
 - Fast floppy reads now reconstruct readable FAT/root data from redundant sectors and stop with the recovery prompt, rather than silently starting a slow full-disk read, after a Yamaha/FAT disk has already been recognized.
 - Cancelled disk reads, image conversions, Greaseweazle operations, and recovery attempts now report as cancellation instead of surfacing command or conversion errors.

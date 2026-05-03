@@ -221,6 +221,8 @@ class FloppyDriveInfo:
         parts = [self.path]
         if self.disk_format is not None:
             parts.append(self.disk_format.label)
+        elif self.size_bytes <= 0:
+            parts.append("size unknown")
         else:
             parts.append(display_bytes(self.size_bytes))
         if self.transport:
@@ -922,7 +924,9 @@ def _list_windows_floppy_drives():
 
         raw_path = _windows_raw_volume_path(f"{letter}:")
         size_bytes = _windows_detect_floppy_size(raw_path)
-        if size_bytes not in DISK_FORMAT_BY_SIZE:
+        # Protected floppy disks may not look filesystem-ready to Windows but
+        # can still be readable through the app's raw/protected-disk path.
+        if size_bytes not in DISK_FORMAT_BY_SIZE and letter not in {"A", "B"}:
             continue
         drives.append(
             FloppyDriveInfo(
@@ -1511,6 +1515,33 @@ def _normalize_image_path(path):
     return cleaned
 
 
+_WINDOWS_VOLUME_METADATA_DIR_NAMES = {
+    "SYSTEM VOLUME INFORMATION",
+    "SYSTEM~1",
+}
+
+_WINDOWS_VOLUME_METADATA_FILE_NAMES = {
+    "INDEXERVOLUMEGUID",
+    "INDEXE~1",
+    "WPSETTINGS.DAT",
+    "WPSETT~1.DAT",
+}
+
+
+def _is_windows_volume_metadata_path(path):
+    normalized = _normalize_image_path(str(path or ""))
+    parts = [
+        part.strip().rstrip(".").upper()
+        for part in normalized.split("/")
+        if part.strip()
+    ]
+    if not parts:
+        return False
+    if any(part in _WINDOWS_VOLUME_METADATA_DIR_NAMES for part in parts):
+        return True
+    return parts[-1] in _WINDOWS_VOLUME_METADATA_FILE_NAMES
+
+
 class _WindowsVolumeHandle:
     GENERIC_READ = 0x80000000
     GENERIC_WRITE = 0x40000000
@@ -1522,6 +1553,8 @@ class _WindowsVolumeHandle:
     FSCTL_LOCK_VOLUME = 0x00090018
     FSCTL_UNLOCK_VOLUME = 0x0009001C
     FSCTL_DISMOUNT_VOLUME = 0x00090020
+    ERROR_INVALID_FUNCTION = 1
+    ERROR_NOT_READY = 21
 
     def __init__(self, path, *, write=False):
         if os.name != "nt":
@@ -1669,6 +1702,15 @@ class _WindowsVolumeHandle:
         if progress_callback is not None and total_size > 0:
             progress_callback(99, 100, "Finalizing floppy write...")
         if not self._kernel32.FlushFileBuffers(self.handle):
+            error_code = self._ctypes.get_last_error()
+            if error_code in {self.ERROR_INVALID_FUNCTION, self.ERROR_NOT_READY}:
+                if progress_callback is not None and total_size > 0:
+                    progress_callback(
+                        100,
+                        100,
+                        "Writing floppy complete; Windows did not confirm the final flush.",
+                    )
+                return
             raise FloppyImageError(_windows_last_error_message(f"Could not flush floppy device {self.path}"))
         if progress_callback is not None and total_size > 0:
             progress_callback(100, 100, "Writing floppy complete.")
@@ -1972,7 +2014,7 @@ def _read_image_listing_with_7z(img_path):
             return
         folder = record.get("Folder")
         path = _normalize_image_path(record.get("Path", ""))
-        if folder == "-" and path:
+        if folder == "-" and path and not _is_windows_volume_metadata_path(path):
             size = _parse_int(record.get("Size"), 0)
             packed_size = _parse_int(record.get("Packed Size"), allocated_size(size, cluster_size))
             entries.append(
@@ -2037,7 +2079,10 @@ def _read_fat12_block_device_listing(device_path):
     finally:
         os.close(fd)
 
-    if any(entry["attr"] & 0x10 for entry in _iter_fat_directory_entries(root_dir)):
+    if any(
+        entry["attr"] & 0x10 and not _is_windows_volume_metadata_path(entry["name"])
+        for entry in _iter_fat_directory_entries(root_dir)
+    ):
         return _read_fat12_image_listing(device_path)
 
     data = boot_sector.ljust(geometry.data_offset, b"\x00")
@@ -2571,6 +2616,9 @@ def _iter_root_file_entries(root_dir):
             continue
         if attr & 0x08:
             continue
+        name = _decode_dos_directory_name(entry[:11])
+        if not name or _is_windows_volume_metadata_path(name):
+            continue
         if attr & 0x10:
             raise FastFloppyReadError(
                 "Fast floppy read does not support disks with subdirectories. "
@@ -2578,9 +2626,6 @@ def _iter_root_file_entries(root_dir):
                 fallback_allowed=True,
             )
 
-        name = _decode_dos_directory_name(entry[:11])
-        if not name:
-            continue
         yield {
             "name": name,
             "attr": attr,
@@ -2705,6 +2750,8 @@ def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_
         attr = entry["attr"]
         image_path = entry["name"] if not parent_path else f"{parent_path}/{entry['name']}"
         image_path = _normalize_image_path(image_path)
+        if _is_windows_volume_metadata_path(image_path):
+            continue
         if attr & 0x08:
             continue
         if attr & 0x10:
@@ -3412,6 +3459,8 @@ def _recover_files_from_fat_context(data, geometry):
     fat = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size]
     root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
     for entry in _iter_fat_directory_entries(root_dir):
+        if _is_windows_volume_metadata_path(entry["name"]):
+            continue
         if entry["attr"] & 0x10:
             continue
         name = _valid_recovery_filename(entry["name"], "")
