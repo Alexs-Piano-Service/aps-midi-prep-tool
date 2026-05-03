@@ -2346,7 +2346,7 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesMenu.addSeparator()
         self.utilitiesMenu.addAction(self.utilitiesRecoverImageAction)
 
-        self.utilitiesFormatFloppyAction = QAction("Format Yamaha Disklavier Floppy...", self)
+        self.utilitiesFormatFloppyAction = QAction("Format Floppy Disk...", self)
         self.utilitiesFormatFloppyAction.setToolTip(
             "Format a physical floppy disk for Yamaha Disklavier use."
         )
@@ -5275,7 +5275,14 @@ class MidiTitleWindow(QMainWindow):
         self.listedFileInfo.pop(full_path, None)
 
     def _stage_regular_row_conversion(self, row, full_path, target_kind):
-        target_filename = self._converted_regular_filename_for_kind(full_path, target_kind)
+        target_filename = self._converted_regular_filename_for_kind(
+            full_path,
+            target_kind,
+            used_filenames=self._regular_used_output_filenames_for_directory(
+                os.path.dirname(full_path),
+                exclude_row=row,
+            ),
+        )
         output_temp_path = os.path.join(
             self._ensure_midi_scratch_dir(),
             f"{uuid.uuid4().hex}_{target_filename}",
@@ -5370,7 +5377,7 @@ class MidiTitleWindow(QMainWindow):
             target_kind = "midi"
 
         display_filename = (
-            self._converted_regular_filename_for_kind(full_path, target_kind)
+            self._converted_regular_filename_for_kind(full_path, target_kind, used_filenames=set())
             if target_kind else
             os.path.basename(full_path)
         )
@@ -6530,7 +6537,7 @@ class MidiTitleWindow(QMainWindow):
 
         dialog = QDialog(self)
         apply_window_icon(dialog)
-        dialog.setWindowTitle("Format Disklavier Floppy")
+        dialog.setWindowTitle("Format Floppy Disk...")
         dialog.setModal(True)
         dialog.setMinimumWidth(560)
 
@@ -7104,7 +7111,7 @@ class MidiTitleWindow(QMainWindow):
             )
         return QMessageBox.question(
             self,
-            "Format Floppy Disk",
+            "Format Floppy Disk...",
             message,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -8826,11 +8833,43 @@ class MidiTitleWindow(QMainWindow):
                 guidance="The original files were not changed; remove or replace the listed files and try again",
             )
 
-    def _converted_image_path_for_kind(self, image_path, target_kind):
+    def _dos_eseq_filename(self, filename, *, variant=None, used_filenames=None):
+        stem = os.path.splitext(os.path.basename(filename))[0] or "FILE"
+        extension = self._eseq_song_extension(variant)
+        return self._build_dos_image_filename(
+            f"{stem}.{extension}",
+            {str(name).upper() for name in (used_filenames or set())},
+        )
+
+    def _image_used_filenames_for_directory(self, directory, *, exclude_row=None):
+        directory_key = directory.replace("\\", "/").strip("/").upper()
+        used = set()
+        for row in range(self.table.rowCount()):
+            if exclude_row is not None and row == exclude_row:
+                continue
+            if self._is_special_pianodir_row(row):
+                continue
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            final_path = self._final_image_path(path_item.text()).replace("\\", "/").strip("/")
+            if os.path.dirname(final_path).replace("\\", "/").strip("/").upper() == directory_key:
+                used.add(os.path.basename(final_path).upper())
+        return used
+
+    def _converted_image_path_for_kind(self, image_path, target_kind, *, exclude_row=None):
         directory = os.path.dirname(image_path).replace("\\", "/")
         stem = os.path.splitext(os.path.basename(image_path))[0] or os.path.basename(image_path) or "FILE"
         extension = ".MID" if target_kind == "midi" else f".{self._eseq_song_extension(self.imageEseqVariant)}"
-        return self._join_image_path(directory, f"{stem.upper()}{extension}")
+        if target_kind == "eseq":
+            filename = self._dos_eseq_filename(
+                f"{stem}{extension}",
+                variant=self.imageEseqVariant,
+                used_filenames=self._image_used_filenames_for_directory(directory, exclude_row=exclude_row),
+            )
+        else:
+            filename = f"{stem.upper()}{extension}"
+        return self._join_image_path(directory, filename)
 
     def _image_row_current_title(self, row):
         return self._row_raw_title(row)
@@ -8915,7 +8954,7 @@ class MidiTitleWindow(QMainWindow):
         source_path = path_item.text()
         current_path = self._row_final_image_path(row)
         current_title = self._image_row_current_title(row)
-        target_path = self._converted_image_path_for_kind(current_path, target_kind)
+        target_path = self._converted_image_path_for_kind(current_path, target_kind, exclude_row=row)
         if target_path.upper() in self._active_image_paths(exclude_row=row):
             raise EseqConversionError(f"'{os.path.basename(target_path)}' already exists in this image folder.")
 
@@ -9107,10 +9146,29 @@ class MidiTitleWindow(QMainWindow):
             status_text += f"\n{omitted_count} non-MIDI file(s) were not exported into MIDI Mode."
         self._load_midi_paths_into_list(midi_specs, status_text)
 
-    def _converted_regular_filename_for_kind(self, full_path, target_kind):
+    def _regular_used_output_filenames_for_directory(self, directory, *, exclude_row=None):
+        directory_key = os.path.normcase(os.path.abspath(directory or ""))
+        used = set()
+        for row in self._regular_file_rows():
+            if exclude_row is not None and row == exclude_row:
+                continue
+            full_path_item = self.table.item(row, 1)
+            if full_path_item is None:
+                continue
+            row_directory = os.path.normcase(os.path.abspath(os.path.dirname(full_path_item.text())))
+            if row_directory == directory_key:
+                used.add(self._regular_row_output_filename(row).upper())
+        return used
+
+    def _converted_regular_filename_for_kind(self, full_path, target_kind, *, used_filenames=None):
         stem = os.path.splitext(os.path.basename(full_path))[0] or os.path.basename(full_path) or "FILE"
-        extension = ".mid" if target_kind == "midi" else f".{self._eseq_song_extension(self.regularEseqVariant).lower()}"
-        return stem + extension
+        if target_kind == "eseq":
+            return self._dos_eseq_filename(
+                f"{stem}.{self._eseq_song_extension(self.regularEseqVariant)}",
+                variant=self.regularEseqVariant,
+                used_filenames=used_filenames,
+            )
+        return stem + ".mid"
 
     def _converted_regular_path_for_kind(self, full_path, target_kind, *, output_dir=None):
         directory = output_dir or os.path.dirname(full_path)
@@ -9238,7 +9296,14 @@ class MidiTitleWindow(QMainWindow):
             if row is None:
                 continue
 
-            target_filename = self._converted_regular_filename_for_kind(full_path, target_kind)
+            target_filename = self._converted_regular_filename_for_kind(
+                full_path,
+                target_kind,
+                used_filenames=self._regular_used_output_filenames_for_directory(
+                    os.path.dirname(full_path),
+                    exclude_row=row,
+                ),
+            )
             output_temp_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
             source_material_path = self._regular_source_material_path(full_path)
             current_title = self._row_raw_title(row)

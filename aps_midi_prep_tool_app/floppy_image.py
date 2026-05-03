@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -2012,7 +2013,51 @@ def _read_image_listing_with_7z(img_path):
     return ImageListing(entries=entries, free_space=free_space, cluster_size=cluster_size)
 
 
+def _is_block_device_path(path):
+    if os.name != "posix":
+        return False
+    try:
+        return stat.S_ISBLK(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _read_fat12_block_device_listing(device_path):
+    fd = os.open(device_path, os.O_RDONLY)
+    try:
+        boot_sector = _read_device_exact(fd, 0, _YAMAHA_BYTES_PER_SECTOR, "floppy boot sector")
+        geometry = _geometry_from_boot_sector(boot_sector)
+        if geometry is None:
+            raise FloppyImageError(
+                "Could not parse a FAT12 boot sector on this floppy. "
+                "The disk may not be an IBM/Yamaha floppy, or it may need recovery."
+            )
+        fat = _read_device_exact(fd, geometry.fat_offset, geometry.fat_size, "floppy FAT")
+        root_dir = _read_device_exact(fd, geometry.root_offset, geometry.root_size, "floppy root directory")
+    finally:
+        os.close(fd)
+
+    if any(entry["attr"] & 0x10 for entry in _iter_fat_directory_entries(root_dir)):
+        return _read_fat12_image_listing(device_path)
+
+    data = boot_sector.ljust(geometry.data_offset, b"\x00")
+    entries = _collect_fat12_listing_entries(data, geometry, fat, root_dir)
+    free_clusters = sum(
+        1
+        for cluster in range(2, _fat12_data_cluster_count(geometry) + 2)
+        if _fat12_next_cluster(fat, cluster) == 0
+    )
+    entries.sort(key=lambda item: item.path.lower())
+    return ImageListing(
+        entries=entries,
+        free_space=free_clusters * geometry.cluster_size,
+        cluster_size=geometry.cluster_size,
+    )
+
+
 def read_image_listing(img_path):
+    if _is_block_device_path(img_path):
+        return _read_fat12_block_device_listing(img_path)
     try:
         return _read_fat12_image_listing(img_path)
     except FloppyImageError as fat_exc:
@@ -5139,7 +5184,7 @@ class FloppyImageSession:
                 )
 
             _raise_if_cancelled(cancel_callback)
-            _notify_progress(progress_callback, total_steps, total_steps, "Verifying floppy files...")
+            _notify_progress(progress_callback, total_steps, total_steps, "Checking floppy directory...")
             read_image_listing(drive_path)
         finally:
             shutil.rmtree(temp_extract_dir, ignore_errors=True)

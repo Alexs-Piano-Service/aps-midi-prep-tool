@@ -97,32 +97,36 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 """,
             ),
             (
-                "Edit Titles",
-                """
-                <p>Use <strong>Open MIDI Folder</strong>, or drag files into the table, to edit
-                local MIDI or E-SEQ titles.</p>
-                <ul>
-                  <li>Click the <strong>Title</strong> column to edit a song title.</li>
-                  <li>Use <strong>Format for Disklavier screen</strong> for two 16-character E-SEQ rows.</li>
-                  <li>Use <strong>Save</strong> for the current files, or <strong>Save As</strong> for copies.</li>
-                </ul>
-                """,
-            ),
-            (
-                "Copy Or Back Up Yamaha Floppies",
+                "Extract Files From Floppy",
                 """
                 <p>Use <strong>Read Floppy</strong> for a floppy drive or Greaseweazle, or
                 <strong>Open Image</strong> for IMG, HFE, BIN, and related image files.</p>
                 <ul>
-                  <li>The app repairs Yamaha copy-protected boot sectors in the working copy.</li>
-                  <li>Use <strong>Read Floppy</strong> with recovery mode, or <strong>Recover Damaged Image</strong>, when normal reading fails.</li>
                   <li><strong>Save As</strong> copies the listed files to a folder.</li>
                   <li><strong>Save As Image</strong> creates a new floppy image without touching the original.</li>
+                  <li>The app repairs Yamaha copy-protected boot sectors in the working copy.</li>
+                  <li>Use recovery mode when normal reading fails or the disk is physically damaged.</li>
                   <li>For fragile or difficult disks, use Greaseweazle and choose archival SCP when you want a raw flux capture.</li>
                   <li>Keep the backup image unchanged, then make edited copies from it when needed.</li>
                 </ul>
                 <p>Related articles: <a href="https://www.alexanderpeppe.com/disklavier-floppy-backups/">Backing up Disklavier floppy disks</a>
                 and <a href="https://www.alexanderpeppe.com/making-archival-copies-of-disks-using-a-greaseweazle-v4/">Backing Up Yamaha Disklavier Floppy Disks with a Greaseweazle</a>.</p>
+                """,
+            ),
+            (
+                "Format Or Fill A Floppy",
+                """
+                <p>Use this path when you want to create a fresh Disklavier floppy or add files to
+                an existing disk.</p>
+                <ul>
+                  <li>For a blank disk, use <strong>Utilities &gt; Format Floppy Disk...</strong>; IBM 720K DD is the usual Disklavier choice.</li>
+                  <li>Check the E-SEQ option when preparing a PianoSoft-style disk with a generated directory file.</li>
+                  <li>For an existing disk, use <strong>Read Floppy</strong>, then drag new files into the list.</li>
+                  <li>In E-SEQ modes, dropped MIDI files are staged as E-SEQ automatically.</li>
+                  <li><strong>Save</strong> writes pending changes back to the current floppy when overwrite is enabled.</li>
+                  <li><strong>File &gt; Save To Floppy...</strong> saves the current listed files to a selected formatted floppy drive.</li>
+                  <li><strong>File &gt; Write Current Image to Floppy...</strong> rewrites a whole disk from the current image.</li>
+                </ul>
                 """,
             ),
             (
@@ -162,6 +166,18 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>In any E-SEQ mode, dropped MIDI files are staged as E-SEQ and Type 1 MIDI is converted to Type 0 first.</li>
                   <li>The tool can generate or refresh <strong>PIANODIR.FIL</strong>.</li>
                   <li>E-SEQ disks support up to 60 songs, and floppy/image size limits still apply.</li>
+                </ul>
+                """,
+            ),
+            (
+                "Edit Titles",
+                """
+                <p>Use <strong>Open MIDI Folder</strong>, or drag files into the table, to edit
+                local MIDI or E-SEQ titles.</p>
+                <ul>
+                  <li>Click the <strong>Title</strong> column to edit a song title.</li>
+                  <li>Use <strong>Format for Disklavier screen</strong> for two 16-character E-SEQ rows.</li>
+                  <li>Use <strong>Save</strong> for the current files, or <strong>Save As</strong> for copies.</li>
                 </ul>
                 """,
             ),
