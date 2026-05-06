@@ -5,7 +5,7 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [Unreleased]
+## [0.6.1] - 2026-05-05
 
 ### Added
 
@@ -36,7 +36,7 @@ with release sections grouped by version and date.
 - Fast floppy reads now reconstruct readable FAT/root data from redundant sectors and stop with the recovery prompt, rather than silently starting a slow full-disk read, after a Yamaha/FAT disk has already been recognized.
 - Cancelled disk reads, image conversions, Greaseweazle operations, and recovery attempts now report as cancellation instead of surfacing command or conversion errors.
 
-## [0.5.3] - 2026-04-30
+## Previous Release Notes - 2026-04-30
 
 ### Added
 

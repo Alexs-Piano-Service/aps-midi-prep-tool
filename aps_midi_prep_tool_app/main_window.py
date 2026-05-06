@@ -1801,6 +1801,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_READ_FLOPPY_GW_FORMAT = "read_floppy_gw_format"
     SETTING_READ_FLOPPY_GW_REVS = "read_floppy_gw_revs"
     SETTING_READ_FLOPPY_GW_RETRIES = "read_floppy_gw_retries"
+    SETTING_READ_FLOPPY_CONVERT_TO_MIDI = "read_floppy_convert_to_midi"
     SETTING_CHECK_UPDATES_AT_STARTUP = "check_updates_at_startup"
     SETTING_SKIP_UPDATE_REMINDERS = "skip_update_reminders"
     SETTING_WRITE_TAG_SIDECARS = "write_tag_sidecars"
@@ -1860,6 +1861,7 @@ class MidiTitleWindow(QMainWindow):
         self.diskLoadFailureTitle = "Disk Load Failed"
         self.diskLoadShouldOfferCapture = False
         self.diskLoadContext = {}
+        self.pendingFloppyReadConvertToMidi = False
         self.v50NseqPromptedSessionPath = ""
         self.mpcSeqPromptedSessionPath = ""
         self.pendingGwConversionDetails = None
@@ -2649,6 +2651,7 @@ class MidiTitleWindow(QMainWindow):
             self.diskLoadProgressDialog = None
 
         if self._offer_mpc_seq_conversion_for_loaded_session(session, listing):
+            self.pendingFloppyReadConvertToMidi = False
             return
 
         try:
@@ -2667,7 +2670,10 @@ class MidiTitleWindow(QMainWindow):
 
         if self.diskLoadShouldOfferCapture:
             self._offer_save_greaseweazle_capture()
-        QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
+        if self.pendingFloppyReadConvertToMidi:
+            QTimer.singleShot(0, self._convert_loaded_floppy_to_midi_after_read)
+        else:
+            QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
 
     def _offer_post_load_sequence_conversions(self):
         if self._offer_v50_nseq_conversion_if_available():
@@ -3251,6 +3257,7 @@ class MidiTitleWindow(QMainWindow):
         gw_source = getattr(capture, "gw_source", None)
         capture_path = getattr(capture, "capture_path", "")
         if not isinstance(gw_source, GreaseweazleFloppySource) or not capture_path:
+            self.pendingFloppyReadConvertToMidi = False
             self._show_operation_error(
                 "Greaseweazle Capture Failed",
                 "The Greaseweazle SCP capture could not be prepared for saving",
@@ -3271,6 +3278,7 @@ class MidiTitleWindow(QMainWindow):
         )
         if not output_path:
             capture.cleanup()
+            self.pendingFloppyReadConvertToMidi = False
             self.status_label.setText("Greaseweazle capture was not saved; opening cancelled.")
             return
         if image_extension(output_path) != "scp":
@@ -3281,6 +3289,7 @@ class MidiTitleWindow(QMainWindow):
             shutil.copy2(capture_path, output_path)
         except Exception as exc:
             capture.cleanup()
+            self.pendingFloppyReadConvertToMidi = False
             self._show_operation_error(
                 "SCP Save Failed",
                 f"Could not save the raw Greaseweazle capture to {os.path.basename(output_path)}",
@@ -3450,6 +3459,7 @@ class MidiTitleWindow(QMainWindow):
 
         capture_path = details.get("capture_path") or ""
         if not capture_path or not os.path.isfile(capture_path):
+            self.pendingFloppyReadConvertToMidi = False
             self._show_operation_error(
                 "Greaseweazle Conversion Failed",
                 "The Greaseweazle capture could not be converted",
@@ -3459,6 +3469,7 @@ class MidiTitleWindow(QMainWindow):
 
         retry_format = self._choose_greaseweazle_retry_format(details)
         if retry_format is None:
+            self.pendingFloppyReadConvertToMidi = False
             self.status_label.setText(
                 f"Greaseweazle conversion stopped. Raw capture saved at {capture_path}."
             )
@@ -3493,6 +3504,7 @@ class MidiTitleWindow(QMainWindow):
             self.diskLoadProgressDialog.close()
             self.diskLoadProgressDialog = None
         self.status_label.setText("Disk operation cancelled.")
+        self.pendingFloppyReadConvertToMidi = False
         self.pendingDiskRecoveryRequest = None
         self.pendingGwConversionDetails = None
         if self.pendingGwCapture:
@@ -3553,6 +3565,7 @@ class MidiTitleWindow(QMainWindow):
                 "The disk or image could not be opened",
                 request.get("message", ""),
             )
+            self.pendingFloppyReadConvertToMidi = False
             self.diskLoadContext = {}
             return
         if request.get("load_kind") == "floppy_usb":
@@ -3634,6 +3647,8 @@ class MidiTitleWindow(QMainWindow):
                 "The original source was not modified. Review the recovered list, then use Save As Image or Write Current Image to Floppy to keep a clean copy."
             ),
         )
+        if self.pendingFloppyReadConvertToMidi:
+            QTimer.singleShot(0, self._convert_loaded_floppy_to_midi_after_read)
 
     def _on_disk_recovery_failure(self, message):
         if self.diskRecoveryProgressDialog is not None:
@@ -3653,12 +3668,14 @@ class MidiTitleWindow(QMainWindow):
             detail,
             guidance="If this is a physical floppy, try a different drive, a Greaseweazle capture with more retries, or a known-good disk image",
         )
+        self.pendingFloppyReadConvertToMidi = False
 
     def _on_disk_recovery_cancelled(self, _message):
         if self.diskRecoveryProgressDialog is not None:
             self.diskRecoveryProgressDialog.close()
             self.diskRecoveryProgressDialog = None
         self.status_label.setText("Disk recovery cancelled.")
+        self.pendingFloppyReadConvertToMidi = False
 
     def _on_disk_recovery_finished(self):
         self._set_disk_load_busy(False)
@@ -6942,6 +6959,23 @@ class MidiTitleWindow(QMainWindow):
         recovery_layout.addWidget(recovery_hint, 1, 1)
         layout.addLayout(recovery_layout)
 
+        convert_to_midi_checkbox = QCheckBox("Convert E-SEQ files to MIDI after reading")
+        convert_to_midi_checkbox.setChecked(
+            self.settings.value(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, False, type=bool)
+        )
+        convert_to_midi_checkbox.setToolTip(
+            "After the floppy opens, queue detected Yamaha E-SEQ songs for Standard MIDI conversion."
+        )
+
+        convert_layout = QGridLayout()
+        convert_layout.setContentsMargins(0, 0, 0, 0)
+        convert_layout.setHorizontalSpacing(12)
+        convert_layout.setColumnStretch(1, 1)
+        convert_label_spacer = QLabel("")
+        convert_layout.addWidget(convert_label_spacer, 0, 0)
+        convert_layout.addWidget(convert_to_midi_checkbox, 0, 1)
+        layout.addLayout(convert_layout)
+
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -6957,6 +6991,7 @@ class MidiTitleWindow(QMainWindow):
             revs_label,
             retries_label,
             recovery_label_spacer,
+            convert_label_spacer,
         ]
         form_label_width = max(label.sizeHint().width() for label in form_labels)
         for label in form_labels:
@@ -7003,6 +7038,8 @@ class MidiTitleWindow(QMainWindow):
 
         source_kind = source_combo.currentData()
         recover = recovery_checkbox.isChecked()
+        convert_to_midi = convert_to_midi_checkbox.isChecked()
+        self.settings.setValue(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, convert_to_midi)
         if source_kind == "floppy_usb":
             drive_info = drive_combo.currentData()
             if not isinstance(drive_info, FloppyDriveInfo):
@@ -7023,6 +7060,7 @@ class MidiTitleWindow(QMainWindow):
                     "progress_title": "Recovering Floppy Data",
                     "progress_total": 100,
                     "offer_greaseweazle_capture": False,
+                    "convert_to_midi": convert_to_midi,
                 }
             return {
                 "load_kind": "floppy_usb",
@@ -7032,6 +7070,7 @@ class MidiTitleWindow(QMainWindow):
                 "progress_title": "Reading Floppy",
                 "progress_total": 100,
                 "offer_greaseweazle_capture": False,
+                "convert_to_midi": convert_to_midi,
             }
 
         selected_device = gw_device_combo.currentData()
@@ -7076,6 +7115,7 @@ class MidiTitleWindow(QMainWindow):
                 "progress_total": 2,
                 "final_message": "Greaseweazle SCP capture ready.",
                 "offer_greaseweazle_capture": False,
+                "convert_to_midi": convert_to_midi,
             }
         if recover:
             return {
@@ -7086,6 +7126,7 @@ class MidiTitleWindow(QMainWindow):
                 "progress_title": "Recovering Greaseweazle Floppy Data",
                 "progress_total": 100,
                 "offer_greaseweazle_capture": False,
+                "convert_to_midi": convert_to_midi,
             }
         progress_title = "Reading Floppy via Greaseweazle"
         progress_total = 5 if source.archival_quality else 4
@@ -7097,6 +7138,7 @@ class MidiTitleWindow(QMainWindow):
             "progress_title": progress_title,
             "progress_total": progress_total,
             "offer_greaseweazle_capture": False,
+            "convert_to_midi": convert_to_midi,
         }
 
     def _confirm_format_floppy(self, target_name, disk_format, *, eseq_disk=False, drive_size_bytes=0):
@@ -7979,6 +8021,7 @@ class MidiTitleWindow(QMainWindow):
         if not prevalidated and not self._prepare_for_disk_load("this floppy image"):
             return
 
+        self.pendingFloppyReadConvertToMidi = False
         self._start_disk_load_worker(
             load_kind="image",
             source=image_path,
@@ -7997,6 +8040,7 @@ class MidiTitleWindow(QMainWindow):
         if not options:
             return
 
+        self.pendingFloppyReadConvertToMidi = bool(options.get("convert_to_midi"))
         if options.get("recover"):
             self._start_disk_recovery_worker(
                 {
@@ -9106,6 +9150,99 @@ class MidiTitleWindow(QMainWindow):
 
         omitted_count = max(0, visible_file_count - len(midi_specs))
         return midi_specs, omitted_count
+
+    def _image_eseq_conversion_rows(self):
+        rows = []
+        if self.image_session is None:
+            return rows
+        for row in range(self.table.rowCount()):
+            if self._is_special_pianodir_row(row):
+                continue
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            source_path = path_item.text()
+            final_path = self._final_image_path(source_path)
+            if self._is_eseq_candidate(final_path, is_midi=self._image_path_is_midi(source_path)):
+                rows.append(row)
+        return rows
+
+    def _convert_loaded_floppy_to_midi_after_read(self):
+        if not self.pendingFloppyReadConvertToMidi:
+            return
+        self.pendingFloppyReadConvertToMidi = False
+        if self.image_session is None:
+            return
+
+        conversion_rows = self._image_eseq_conversion_rows()
+        if not conversion_rows:
+            QMessageBox.information(
+                self,
+                "No E-SEQ Files Found",
+                "The floppy was read, but no Yamaha E-SEQ files were found to convert to MIDI.",
+            )
+            QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
+            return
+
+        self.pendingExportPianodirMetadata = self._current_visible_pianodir_metadata()
+
+        progressDialog = QProgressDialog(
+            "Converting E-SEQ files...",
+            "Cancel",
+            0,
+            len(conversion_rows),
+            self,
+        )
+        self._prepare_progress_dialog(progressDialog)
+
+        converted = []
+        errors = []
+        for index, row in enumerate(conversion_rows):
+            if progressDialog.wasCanceled():
+                break
+            try:
+                converted.append(self._queue_image_format_conversion(row, "midi"))
+            except Exception as exc:
+                filename_item = self.table.item(row, 3)
+                label = filename_item.text() if filename_item is not None else "Unknown file"
+                errors.append(f"{label}: {exc}")
+            progressDialog.setValue(index + 1)
+            QApplication.processEvents()
+
+        progressDialog.close()
+        has_eseq_remaining = False
+        for row in range(self.table.rowCount()):
+            if self._is_special_pianodir_row(row):
+                continue
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            source_path = path_item.text()
+            final_path = self._final_image_path(source_path)
+            if self._is_eseq_candidate(final_path, is_midi=self._image_path_is_midi(source_path)):
+                has_eseq_remaining = True
+                break
+        if not has_eseq_remaining:
+            self.pendingDeletePianodir = self.imageHasPianodir
+        self._refresh_pianodir_row()
+
+        status_parts = [f"Read the floppy and queued {len(converted)} file(s) for E-SEQ -> MIDI conversion."]
+        remaining = self._pending_image_space_remaining()
+        status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
+        if converted:
+            status_parts.append("Use Save, Save As, or Save As Image to write the converted files.")
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) could not be converted.")
+        self.status_label.setText("\n".join(status_parts))
+
+        if errors:
+            self._show_error_list(
+                "Floppy MIDI Conversion Issues",
+                "Some E-SEQ files could not be staged for MIDI conversion",
+                errors,
+                warning=True,
+                guidance="Nothing has been written yet; remove or replace the listed files and try again",
+            )
 
     def _switch_to_midi_mode_after_eseq_conversion(self, conversion_rows):
         converted_count = len(conversion_rows)
