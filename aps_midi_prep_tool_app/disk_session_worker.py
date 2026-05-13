@@ -1,6 +1,13 @@
 from PySide6.QtCore import QThread, Signal
 
-from .floppy_image import FloppyImageSession, FloppyOperationCancelled, GreaseweazleConversionError
+from .floppy_image import (
+    FloppyImageSession,
+    FloppyOperationCancelled,
+    GreaseweazleConversionError,
+    capture_floppy_drive_image,
+    capture_greaseweazle_floppy_image,
+    convert_greaseweazle_image_file,
+)
 
 
 class _CancellableDiskWorker(QThread):
@@ -136,20 +143,84 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                 self._emit_cancelled(exc)
                 return
             if isinstance(exc, GreaseweazleConversionError):
-                self.loadFailedWithDetails.emit(
-                    {
-                        "type": "greaseweazle_conversion",
-                        "message": str(exc),
-                        "sector_map": exc.sector_map,
-                        "disk_format": exc.disk_format,
-                        "capture_path": exc.capture_path,
-                        "reason": exc.reason,
-                        "suggested_format": exc.suggested_format,
-                        "source": self.source,
-                    }
-                )
+                details = {
+                    "type": "greaseweazle_conversion",
+                    "message": str(exc),
+                    "sector_map": exc.sector_map,
+                    "disk_format": exc.disk_format,
+                    "capture_path": exc.capture_path,
+                    "reason": exc.reason,
+                    "suggested_format": exc.suggested_format,
+                    "source": self.source,
+                }
+                details.update(getattr(exc, "details", {}) or {})
+                self.loadFailedWithDetails.emit(details)
                 return
             self.loadFailed.emit(str(exc))
+
+
+class DiskImageCaptureWorker(_CancellableDiskWorker):
+    captureFinished = Signal(object)
+    captureFailed = Signal(str)
+
+    def __init__(self, source_kind, source, output_path, *, disk_format=None, parent=None):
+        super().__init__(parent)
+        self.source_kind = source_kind
+        self.source = source
+        self.output_path = output_path
+        self.disk_format = disk_format
+
+    def run(self):
+        try:
+            if self.source_kind == "floppy_usb":
+                output_path = capture_floppy_drive_image(
+                    self.source,
+                    self.output_path,
+                    disk_format=self.disk_format,
+                    progress_callback=self._emit_progress,
+                    cancel_callback=self._cancel_requested,
+                )
+            elif self.source_kind == "floppy_gw":
+                capture_result = capture_greaseweazle_floppy_image(
+                    self.source,
+                    self.output_path,
+                    progress_callback=self._emit_progress,
+                    cancel_callback=self._cancel_requested,
+                )
+                if isinstance(capture_result, tuple):
+                    output_path, sector_map = capture_result
+                else:
+                    output_path = capture_result
+                    sector_map = {}
+            elif self.source_kind == "image_convert":
+                output_path, sector_map = convert_greaseweazle_image_file(
+                    self.source,
+                    self.output_path,
+                    self.disk_format,
+                    progress_callback=self._emit_progress,
+                    cancel_callback=self._cancel_requested,
+                )
+            else:
+                raise ValueError(f"Unsupported disk image capture source kind: {self.source_kind}")
+
+            self._raise_if_cancelled()
+            sector_map = locals().get("sector_map", {})
+            self.captureFinished.emit(
+                {
+                    "output_path": output_path,
+                    "source_kind": self.source_kind,
+                    "source": self.source,
+                    "disk_format": self.disk_format,
+                    "sector_map": sector_map,
+                }
+            )
+        except FloppyOperationCancelled as exc:
+            self._emit_cancelled(exc)
+        except Exception as exc:
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+                return
+            self.captureFailed.emit(str(exc))
 
 
 class DiskSessionRecoveryWorker(_CancellableDiskWorker):

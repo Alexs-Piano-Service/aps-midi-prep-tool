@@ -28,6 +28,12 @@ class DropTableWidget(QTableWidget):
                 if is_supported_image_path(file_path):
                     event.acceptProposedAction()
                     return
+                if getattr(main_window, "can_accept_electone_evt_path", lambda _path: False)(file_path):
+                    event.acceptProposedAction()
+                    return
+                if getattr(main_window, "can_accept_v50_nseq_path", lambda _path: False)(file_path):
+                    event.acceptProposedAction()
+                    return
                 if getattr(main_window, "can_accept_mpc_seq_path", lambda _path: False)(file_path):
                     event.acceptProposedAction()
                     return
@@ -53,6 +59,46 @@ class DropTableWidget(QTableWidget):
                 main_window.load_image_file(image_paths[0])
                 event.acceptProposedAction()
                 return
+
+            electone_evt_paths = [
+                path
+                for path in local_paths
+                if getattr(main_window, "can_accept_electone_evt_path", lambda _path: False)(path)
+            ]
+            if electone_evt_paths and hasattr(main_window, "handle_electone_evt_file_drop"):
+                handled = main_window.handle_electone_evt_file_drop(local_paths)
+                if handled:
+                    event.acceptProposedAction()
+                    return
+                electone_evt_path_set = {os.path.abspath(path) for path in electone_evt_paths}
+                local_paths = [
+                    path
+                    for path in local_paths
+                    if os.path.abspath(path) not in electone_evt_path_set
+                ]
+                if not local_paths:
+                    event.acceptProposedAction()
+                    return
+
+            v50_nseq_paths = [
+                path
+                for path in local_paths
+                if getattr(main_window, "can_accept_v50_nseq_path", lambda _path: False)(path)
+            ]
+            if v50_nseq_paths and hasattr(main_window, "handle_v50_nseq_file_drop"):
+                handled = main_window.handle_v50_nseq_file_drop(local_paths)
+                if handled:
+                    event.acceptProposedAction()
+                    return
+                v50_nseq_path_set = {os.path.abspath(path) for path in v50_nseq_paths}
+                local_paths = [
+                    path
+                    for path in local_paths
+                    if os.path.abspath(path) not in v50_nseq_path_set
+                ]
+                if not local_paths:
+                    event.acceptProposedAction()
+                    return
 
             mpc_seq_paths = [
                 path

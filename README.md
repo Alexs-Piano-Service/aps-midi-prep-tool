@@ -25,16 +25,33 @@ before you write anything back.
 - Reads common floppy-image formats supported through Greaseweazle conversion,
   including IMG/BIN-style raw images and HFE workflows.
 - Reads and writes physical floppies using a normal floppy drive or Greaseweazle.
+- Shows Greaseweazle sector-map previews after reads, writes, and image conversions
+  so good and bad sector positions can be reviewed visually.
+- Images physical floppies directly to IMG or SCP files without opening or
+  scanning the disk contents afterward.
+- Recognizes Macintosh 800K GCR/HFS Greaseweazle SCP captures as non-Yamaha
+  disks and can save decoded IMG copies without opening them for editing.
 - Creates fresh floppy images, including default PianoSoft-style 720K E-SEQ images.
 - Formats Yamaha Disklavier floppies as MIDI or E-SEQ disks.
+- Formats removable USB sticks as FAT32 superfloppies for E3/ENSPIRE Disklaviers
+  or as MBR single-partition FAT32 disks for PianoForce.
 - Recovers damaged floppy images and physical floppies with repair and raw-carving paths.
 - Edits MIDI titles, E-SEQ titles, image filenames, and Disklavier album metadata.
 - Converts MIDI Type 1 / SMF1 files to MIDI Type 0 / SMF0.
 - Converts Yamaha E-SEQ `.FIL` files to standard MIDI.
+- Extracts Akai MPC `.SEQ` files and embedded sequences in MPC `.ALL` files,
+  converting them to standard MIDI.
+- Extracts Yamaha V50/SY77 NSEQ sequences when the V50/SY77 signature is
+  present, converting them to standard MIDI.
+- Reads Yamaha Electone MDR floppy images, including some images with blank or
+  nonstandard boot sectors, and converts `.EVT` performance files to standard
+  MIDI while preserving millisecond timing and SysEx events.
 - Converts MIDI to Yamaha E-SEQ, converting Type 1 MIDI to Type 0 first when needed.
 - Generates and refreshes `PIANODIR.FIL` for Yamaha E-SEQ disks and folders.
 - Stages destructive or format-changing work until you choose `Save`, `Save As`,
   `Save As Image`, or `Write Current Image to Floppy`.
+- Can write a `metadata_summary.txt` file on save with each saved MIDI file and
+  its detected MIDI metadata.
 - Shows song lists, file inspection metadata, piano-roll previews, channels, and
   playback previews.
 - Optionally writes `.tags.txt` ID3 sidecar files for local folder exports.
@@ -52,6 +69,10 @@ before you write anything back.
 For difficult disks, choose `Read Floppy` and enable `Start in recovery mode`.
 Recovery asks for the disk size, defaults to the common Yamaha 720K DD format,
 copies a full image first, then tries filesystem repair and raw MIDI/E-SEQ carving.
+
+To make a preservation copy without opening the disk contents in the app, choose
+`File -> Image Floppy...` and save an IMG sector image or Greaseweazle SCP flux
+capture.
 
 ### Prepare A Nalbantov USB Stick Image
 

@@ -19,7 +19,7 @@ from math import exp, pi, sin
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QPalette, QPen, QPolygon
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QPainter, QPalette, QPen, QPixmap, QPolygon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -91,6 +91,7 @@ from .ui_utils import (
 )
 from .drop_table_widget import DropTableWidget
 from .disk_session_worker import (
+    DiskImageCaptureWorker,
     DiskSessionCommitWorker,
     DiskSessionFormatWorker,
     DiskSessionLoadWorker,
@@ -99,9 +100,11 @@ from .disk_session_worker import (
 )
 from .icon_utils import apply_window_icon
 from .onboarding_dialog import show_first_time_dialog
-from .additional_formats import mpc_seq_to_midi, v50_nseq_to_midi
+from .usb_format_dialog import UsbFormatDialog
+from .additional_formats import electone_mdr_to_midi, mpc_seq_to_midi, v50_nseq_to_midi
 from .floppy_image import (
     DISK_FORMATS,
+    GW_IMAGE_FORMATS,
     PREFERRED_OUTPUT_EXTENSIONS,
     FloppyImageError,
     FloppyDriveInfo,
@@ -310,6 +313,53 @@ class GreaseweazleSectorGrid(QWidget):
                 x = self.padding + col * self.cell_size + offset
                 painter.setBrush(color)
                 painter.drawEllipse(x, y, self.dot_size, self.dot_size)
+
+
+def render_greaseweazle_sector_map_image(sector_map, palette=None):
+    rows = list((sector_map or {}).get("rows") or [])
+    column_count = max((len(row.get("statuses", "")) for row in rows), default=0)
+    cell_size = 6
+    dot_size = 4
+    padding = 8
+    if not rows or column_count <= 0:
+        image = QImage(420, 42, QImage.Format_ARGB32)
+        image.fill(QColor("#FFFFFF"))
+        painter = QPainter(image)
+        painter.setPen(QColor("#1F2933"))
+        painter.drawText(image.rect(), Qt.AlignCenter, "No sector map reported.")
+        painter.end()
+        return image
+
+    width = padding * 2 + column_count * cell_size
+    height = padding * 2 + len(rows) * cell_size
+    image = QImage(width, height, QImage.Format_ARGB32)
+    base_color = palette.color(QPalette.Base) if palette is not None else QColor("#FFFFFF")
+    border_color = palette.color(QPalette.Mid) if palette is not None else QColor("#9AA5B1")
+    image.fill(base_color)
+
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setPen(QPen(border_color, 1))
+    painter.drawRect(image.rect().adjusted(0, 0, -1, -1))
+    painter.setPen(Qt.NoPen)
+
+    offset = (cell_size - dot_size) // 2
+    for row_index, row in enumerate(rows):
+        statuses = row.get("statuses", "")
+        y = padding + row_index * cell_size + offset
+        for col in range(column_count):
+            status = statuses[col] if col < len(statuses) else " "
+            if status == ".":
+                color = QColor("#2FA866")
+            elif str(status).strip():
+                color = QColor("#D14D4D")
+            else:
+                color = QColor("#69737C")
+            x = padding + col * cell_size + offset
+            painter.setBrush(color)
+            painter.drawEllipse(x, y, dot_size, dot_size)
+    painter.end()
+    return image
 
 
 class VerticalUsageBar(QWidget):
@@ -1788,6 +1838,8 @@ class MidiTitleWindow(QMainWindow):
     SETTING_SKIP_IMAGE_REMOVE_WARNING = "skip_image_remove_warning"
     SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING = "skip_image_delete_on_save_warning"
     SETTING_SKIP_FLOPPY_WRITE_WARNING = "skip_floppy_write_warning"
+    SETTING_HIDE_RECOVERY_COMPLETE_DIALOG = "hide_recovery_complete_dialog"
+    SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT = "skip_eseq_to_midi_conversion_prompt"
     SETTING_ALLOW_FLOPPY_SAVE = "allow_floppy_save"
     SETTING_CONFIRM_IMAGE_SAVE = "confirm_image_save"
     SETTING_AUTO_WRITE_PROTECT_ON_LOAD = "auto_write_protect_on_load"
@@ -1798,13 +1850,30 @@ class MidiTitleWindow(QMainWindow):
     SETTING_GREASEWEAZLE_DRIVE = "greaseweazle_drive"
     SETTING_READ_FLOPPY_SOURCE_KIND = "read_floppy_source_kind"
     SETTING_READ_FLOPPY_GW_ARCHIVAL = "read_floppy_gw_archival"
+    SETTING_READ_FLOPPY_GW_IMAGE_TYPE = "read_floppy_gw_image_type"
     SETTING_READ_FLOPPY_GW_FORMAT = "read_floppy_gw_format"
     SETTING_READ_FLOPPY_GW_REVS = "read_floppy_gw_revs"
     SETTING_READ_FLOPPY_GW_RETRIES = "read_floppy_gw_retries"
     SETTING_READ_FLOPPY_CONVERT_TO_MIDI = "read_floppy_convert_to_midi"
+    SETTING_READ_FLOPPY_START_RECOVERY = "read_floppy_start_recovery"
+    SETTING_RECOVERY_IMAGE_PATH = "disk_recovery_image_path"
+    SETTING_RECOVERY_IMAGE_FORMAT = "disk_recovery_image_format"
+    SETTING_RECOVERY_FLOPPY_FORMAT = "disk_recovery_floppy_format"
+    SETTING_SAVE_AS_LOCATION = "save_as_location"
     SETTING_CHECK_UPDATES_AT_STARTUP = "check_updates_at_startup"
     SETTING_SKIP_UPDATE_REMINDERS = "skip_update_reminders"
     SETTING_WRITE_TAG_SIDECARS = "write_tag_sidecars"
+    SETTING_WRITE_METADATA_SUMMARY = "write_metadata_summary"
+    SETTING_HIDE_CHOICES_RESET_VERSION = "hide_choices_reset_version"
+    HIDE_CHOICES_RESET_VERSION = 1
+    SETTING_GW_SECTOR_REPORT_HIDE_VERSION = "gw_sector_report_hide_version"
+    GW_SECTOR_REPORT_HIDE_VERSION = 2
+    GW_SECTOR_REPORT_HIDE_SETTINGS = {
+        "read": "hide_gw_sector_report_read_v1",
+        "write": "hide_gw_sector_report_write_v1",
+        "convert": "hide_gw_sector_report_convert_v1",
+        "recover": "hide_gw_sector_report_recover_v1",
+    }
     IMAGE_FILENAME_INVALID_CHARS = set('\\/:*?"<>|+,;=[]')
     EXPORT_FOLDER_INVALID_CHARS = set('\\/:*?"<>|')
     TYPE_COLUMN_MIN_WIDTH = 70
@@ -1863,6 +1932,7 @@ class MidiTitleWindow(QMainWindow):
         self.diskLoadContext = {}
         self.pendingFloppyReadConvertToMidi = False
         self.v50NseqPromptedSessionPath = ""
+        self.electoneMdrPromptedSessionPath = ""
         self.mpcSeqPromptedSessionPath = ""
         self.pendingGwConversionDetails = None
         self.pendingGwCapture = None
@@ -1877,10 +1947,16 @@ class MidiTitleWindow(QMainWindow):
         self.diskCommitProgressDialog = None
         self.diskWriteTargetWorker = None
         self.diskWriteTargetProgressDialog = None
+        self.diskImageCaptureWorker = None
+        self.diskImageCaptureProgressDialog = None
+        self.diskImageCaptureContext = {}
         self.updateCheckWorker = None
         self.updateCheckManual = False
         self.updateCheckStartupScheduled = False
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        self._reset_user_hide_choices_if_needed()
+        self._reset_gw_sector_report_hide_choices_if_needed()
+        self._shownGwSectorReportFingerprints = set()
         self._did_apply_initial_column_sizing = False
         self._is_adjusting_columns = False
         self._manual_column_widths = {}
@@ -2266,6 +2342,13 @@ class MidiTitleWindow(QMainWindow):
         self.fileReadFloppyAction.triggered.connect(self.load_floppy_drive)
         self.fileMenu.addAction(self.fileReadFloppyAction)
 
+        self.fileImageFloppyAction = QAction("Image Floppy...", self)
+        self.fileImageFloppyAction.setToolTip(
+            "Copy a physical floppy to an image file without opening or scanning its contents."
+        )
+        self.fileImageFloppyAction.triggered.connect(self.image_floppy_disk)
+        self.fileMenu.addAction(self.fileImageFloppyAction)
+
         self.fileMenu.addSeparator()
 
         self.fileSaveAction = QAction("Save", self)
@@ -2284,6 +2367,14 @@ class MidiTitleWindow(QMainWindow):
             "This option is not used for Image Mode or Floppy Mode saves."
         )
         self.fileCreateTagSidecarsAction.toggled.connect(self.toggle_tag_sidecar_writing)
+
+        self.fileCreateMetadataSummaryAction = QAction("Create Metadata Summary When Saving", self)
+        self.fileCreateMetadataSummaryAction.setCheckable(True)
+        self.fileCreateMetadataSummaryAction.setChecked(self._metadata_summary_enabled())
+        self.fileCreateMetadataSummaryAction.setToolTip(
+            "When saving MIDI files to a folder, create metadata_summary.txt with each saved MIDI file and its metadata."
+        )
+        self.fileCreateMetadataSummaryAction.toggled.connect(self.toggle_metadata_summary_writing)
 
         self.fileSaveAsImageAction = QAction("Save As Image...", self)
         self.fileSaveAsImageAction.triggered.connect(self.save_as_image)
@@ -2313,6 +2404,7 @@ class MidiTitleWindow(QMainWindow):
         self.fileAutoWriteProtectAction.toggled.connect(self.toggle_auto_write_protect_on_load)
         self.fileMenu.addAction(self.fileAutoWriteProtectAction)
         self.fileMenu.addAction(self.fileCreateTagSidecarsAction)
+        self.fileMenu.addAction(self.fileCreateMetadataSummaryAction)
 
         self.utilitiesMenu = self.menuBar().addMenu("&Utilities")
         self.utilitiesSongListAction = QAction("Song List...", self)
@@ -2356,6 +2448,13 @@ class MidiTitleWindow(QMainWindow):
         )
         self.utilitiesFormatFloppyAction.triggered.connect(self.format_disklavier_floppy)
         self.utilitiesMenu.addAction(self.utilitiesFormatFloppyAction)
+
+        self.utilitiesFormatUsbAction = QAction("Format USB Stick...", self)
+        self.utilitiesFormatUsbAction.setToolTip(
+            "Format a removable USB stick as FAT32 for Disklavier or PianoForce use."
+        )
+        self.utilitiesFormatUsbAction.triggered.connect(self.format_disklavier_usb_stick)
+        self.utilitiesMenu.addAction(self.utilitiesFormatUsbAction)
 
         help_menu = self.menuBar().addMenu("&Help")
         self.helpCheckUpdatesAction = QAction("Check for Updates...", self)
@@ -2570,6 +2669,7 @@ class MidiTitleWindow(QMainWindow):
             or self.diskFormatWorker is not None
             or self.diskCommitWorker is not None
             or self.diskWriteTargetWorker is not None
+            or self.diskImageCaptureWorker is not None
         )
 
     def _message_indicates_cancelled(self, message):
@@ -2592,6 +2692,7 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
             return False
 
+        self._reset_gw_sector_report_dedupe()
         progress_dialog = QProgressDialog(progress_title, "Cancel", 0, progress_total, self)
         progress_dialog.setWindowTitle(progress_title)
         self._prepare_progress_dialog(progress_dialog)
@@ -2650,9 +2751,14 @@ class MidiTitleWindow(QMainWindow):
             self.diskLoadProgressDialog.close()
             self.diskLoadProgressDialog = None
 
-        if self._offer_mpc_seq_conversion_for_loaded_session(session, listing):
-            self.pendingFloppyReadConvertToMidi = False
-            return
+        self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
+        should_offer_capture = bool(self.diskLoadShouldOfferCapture)
+        if not should_offer_capture and getattr(session, "source_kind", "") == "floppy_gw":
+            gw_source = getattr(session, "gw_source", None)
+            should_offer_capture = bool(
+                isinstance(gw_source, GreaseweazleFloppySource)
+                and str(getattr(gw_source, "capture_output_ext", "") or "").strip()
+            )
 
         try:
             self._activate_disk_session(session, listing)
@@ -2668,7 +2774,7 @@ class MidiTitleWindow(QMainWindow):
             )
             return
 
-        if self.diskLoadShouldOfferCapture:
+        if should_offer_capture:
             self._offer_save_greaseweazle_capture()
         if self.pendingFloppyReadConvertToMidi:
             QTimer.singleShot(0, self._convert_loaded_floppy_to_midi_after_read)
@@ -2676,6 +2782,8 @@ class MidiTitleWindow(QMainWindow):
             QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
 
     def _offer_post_load_sequence_conversions(self):
+        if self._offer_electone_evt_conversion_if_available():
+            return
         if self._offer_v50_nseq_conversion_if_available():
             return
         self._offer_mpc_seq_conversion_if_available()
@@ -2727,6 +2835,63 @@ class MidiTitleWindow(QMainWindow):
             "slot_count": slot_count,
             "sequence_files": sequence_files,
             "song_names": song_names,
+            "prompt_text": "This disk appears to contain Yamaha V50/SY77 NSEQ sequences.",
+        }
+
+    def _v50_nseq_slots_for_filedata(self, filedata):
+        if v50_nseq_to_midi.V50SEQ_SIGNATURE not in filedata:
+            return []
+        try:
+            return [
+                slot
+                for slot in v50_nseq_to_midi.scan_v50_sequence_slots(filedata)
+                if slot.tracks
+            ]
+        except Exception:
+            return []
+
+    def _v50_nseq_sequence_summary_for_file(self, file_path, *, require_all_extension=True):
+        if not file_path or not os.path.isfile(file_path):
+            return None
+        if require_all_extension and os.path.splitext(file_path)[1].lower() != ".all":
+            return None
+        try:
+            data = Path(file_path).read_bytes()
+        except OSError:
+            return None
+        slots = self._v50_nseq_slots_for_filedata(data)
+        if not slots:
+            return None
+        return {
+            "file_count": 1,
+            "slot_count": len(slots),
+            "sequence_files": [os.path.basename(file_path)],
+            "song_names": [slot.song_name.strip() for slot in slots if slot.song_name.strip()],
+            "prompt_text": "This file appears to contain Yamaha V50/SY77 NSEQ sequences.",
+        }
+
+    def _v50_nseq_sequence_summary_for_paths(self, file_paths, *, require_all_extension=True):
+        sequence_files = []
+        song_names = []
+        slot_count = 0
+        for file_path in file_paths or []:
+            summary = self._v50_nseq_sequence_summary_for_file(
+                file_path,
+                require_all_extension=require_all_extension,
+            )
+            if not summary:
+                continue
+            sequence_files.extend(summary.get("sequence_files", []))
+            song_names.extend(summary.get("song_names", []))
+            slot_count += int(summary.get("slot_count") or 0)
+        if slot_count <= 0:
+            return None
+        return {
+            "file_count": len(sequence_files),
+            "slot_count": slot_count,
+            "sequence_files": sequence_files,
+            "song_names": song_names,
+            "prompt_text": "These files appear to contain Yamaha V50/SY77 NSEQ sequences.",
         }
 
     def _offer_v50_nseq_conversion_if_available(self):
@@ -2764,7 +2929,10 @@ class MidiTitleWindow(QMainWindow):
         apply_window_icon(prompt)
         prompt.setIcon(QMessageBox.Question)
         prompt.setWindowTitle("V50/SY77 Sequences Detected")
-        prompt.setText("This disk appears to contain Yamaha V50/SY77 NSEQ sequences.")
+        prompt.setText(
+            (summary or {}).get("prompt_text")
+            or "This source appears to contain Yamaha V50/SY77 NSEQ sequences."
+        )
         prompt.setInformativeText(detail)
         prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         prompt.setDefaultButton(QMessageBox.Yes)
@@ -2772,59 +2940,150 @@ class MidiTitleWindow(QMainWindow):
         prompt.button(QMessageBox.No).setText("Not Now")
         return self._exec_child_dialog(prompt) == QMessageBox.Yes
 
-    def _convert_v50_nseq_image_to_midi_mode(self, source_image, source_name, summary, *, reset_current_image=False):
-        if not source_image or not os.path.isfile(source_image):
-            QMessageBox.warning(
-                self,
-                "Conversion Unavailable",
-                "The source image is no longer available for V50/SY77 conversion.",
-            )
-            return
+    def _v50_nseq_converter_args(self, mode):
+        return argparse.Namespace(
+            mode=mode,
+            ppq=96,
+            zero_duration_ticks=1,
+            include_events_json=False,
+            no_midi=False,
+            no_raw=True,
+            no_embed_meta=False,
+            program_mode="gm-fallback",
+            initial_programs="",
+            initial_program_overrides=v50_nseq_to_midi.parse_initial_program_overrides(""),
+            fallback_tempo=120,
+        )
 
-        output_root = os.path.join(self._ensure_midi_scratch_dir(), f"v50_nseq_{uuid.uuid4().hex}")
-        progress_dialog = QProgressDialog("Converting V50/SY77 sequences to MIDI...", None, 0, 0, self)
+    def _v50_nseq_input_specs(self, source_paths):
+        inputs = []
+        for item in source_paths or []:
+            if isinstance(item, dict):
+                path = item.get("path", "")
+                label = item.get("label") or path
+            else:
+                path = item
+                label = path
+            if not path or not os.path.isfile(path):
+                continue
+            inputs.append(
+                {
+                    "path": os.path.abspath(path),
+                    "label": label,
+                }
+            )
+        return inputs
+
+    def _convert_v50_nseq_paths_to_midi_paths(self, source_paths, *, mode="auto"):
+        source_inputs = self._v50_nseq_input_specs(source_paths)
+        if not source_inputs:
+            return [], [], False
+
+        output_root = Path(self._ensure_midi_scratch_dir()) / f"v50_nseq_{uuid.uuid4().hex}"
+        staged_output_dir = output_root / "midi"
+        staged_output_dir.mkdir(parents=True, exist_ok=True)
+        midi_paths = []
+        failures = []
+        cancelled = False
+
+        progress_dialog = QProgressDialog(
+            "Converting V50/SY77 sequences to MIDI...",
+            "Cancel" if len(source_inputs) > 1 else None,
+            0,
+            len(source_inputs),
+            self,
+        )
         progress_dialog.setWindowTitle("Converting V50/SY77")
         self._prepare_progress_dialog(progress_dialog)
-        progress_dialog.setCancelButton(None)
         progress_dialog.show()
         QApplication.processEvents()
 
         try:
-            args = argparse.Namespace(
-                mode="image",
-                ppq=96,
-                zero_duration_ticks=1,
-                include_events_json=False,
-                no_midi=False,
-                no_raw=True,
-                no_embed_meta=False,
-                program_mode="gm-fallback",
-                initial_programs="",
-                initial_program_overrides=v50_nseq_to_midi.parse_initial_program_overrides(""),
-                fallback_tempo=120,
-            )
-            with contextlib.redirect_stdout(io.StringIO()):
-                v50_nseq_to_midi.process_input(Path(source_image), Path(output_root), args)
-            midi_dir = Path(output_root) / "midi"
-            midi_paths = sorted(str(path) for path in midi_dir.glob("*.mid"))
-        except Exception as exc:
-            progress_dialog.close()
-            self._show_operation_error(
-                "V50/SY77 Conversion Failed",
-                "The app could not convert the detected V50/SY77 sequences to MIDI",
-                exc,
-                guidance="The source disk image is still open; try saving an image copy and converting again",
-            )
-            return
+            for index, source_input in enumerate(source_inputs, start=1):
+                source_path = source_input["path"]
+                label = source_input.get("label") or source_path
+                progress_dialog.setValue(index - 1)
+                progress_dialog.setLabelText(f"Converting {os.path.basename(label)}...")
+                QApplication.processEvents()
+                if progress_dialog.wasCanceled():
+                    cancelled = True
+                    break
 
-        progress_dialog.close()
-        if not midi_paths:
-            QMessageBox.information(
+                try:
+                    per_source_dir = output_root / f"{index:03d}_{uuid.uuid4().hex}"
+                    args = self._v50_nseq_converter_args(mode)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        v50_nseq_to_midi.process_input(Path(source_path), per_source_dir, args)
+                    source_midi_paths = sorted((per_source_dir / "midi").glob("*.mid"))
+                    if not source_midi_paths:
+                        failures.append(f"{os.path.basename(label)}: no MIDI files were created")
+                        continue
+                    for source_output in source_midi_paths:
+                        target_output = self._unique_path_in_directory(staged_output_dir, source_output.name)
+                        shutil.move(str(source_output), str(target_output))
+                        midi_paths.append(str(target_output))
+                except SystemExit as exc:
+                    failures.append(f"{os.path.basename(label)}: {str(exc) or exc.__class__.__name__}")
+                except Exception as exc:
+                    failures.append(f"{os.path.basename(label)}: {exc}")
+        finally:
+            progress_dialog.setValue(len(source_inputs))
+            progress_dialog.close()
+
+        return midi_paths, failures, cancelled
+
+    def _convert_v50_nseq_sources_to_midi_mode(
+        self,
+        source_paths,
+        source_name,
+        summary,
+        *,
+        mode="auto",
+        reset_current_image=False,
+        confirm_image_exit=True,
+        append=False,
+        extra_regular_paths=None,
+    ):
+        source_inputs = self._v50_nseq_input_specs(source_paths)
+        extra_regular_paths = [
+            os.path.abspath(path)
+            for path in (extra_regular_paths or [])
+            if os.path.isfile(path) and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+        ]
+        if not source_inputs:
+            QMessageBox.warning(
                 self,
-                "No MIDI Files Created",
-                "The V50/SY77 converter did not create any MIDI files.",
+                "Conversion Unavailable",
+                "The source file is no longer available for V50/SY77 conversion.",
             )
-            return
+            return False
+        if (
+            reset_current_image
+            and confirm_image_exit
+            and self.image_session is not None
+            and not self._confirm_discard_image_changes()
+        ):
+            return False
+
+        midi_paths, failures, cancelled = self._convert_v50_nseq_paths_to_midi_paths(source_inputs, mode=mode)
+        if not midi_paths:
+            if failures:
+                self._show_error_list(
+                    "V50/SY77 Conversion Failed",
+                    "The app could not convert the detected V50/SY77 sequences to MIDI",
+                    failures,
+                    warning=True,
+                    guidance="The source files were not modified",
+                )
+            elif cancelled:
+                self.status_label.setText("V50/SY77 conversion cancelled. No files were changed.")
+            else:
+                QMessageBox.information(
+                    self,
+                    "No MIDI Files Created",
+                    "The V50/SY77 converter did not create any MIDI files.",
+                )
+            return False
 
         converted_count = len(midi_paths)
         slot_count = int((summary or {}).get("slot_count") or converted_count)
@@ -2833,9 +3092,39 @@ class MidiTitleWindow(QMainWindow):
         status_text = (
             f"Converted {converted_count} MIDI file(s) from {slot_count} V50/SY77 sequence(s) in {source_name} "
             "with routed channels and program changes.\n"
-            "The source disk/image was not modified. Use Save As to choose a permanent folder."
+            "The source files were not modified. Use Save As to choose a permanent folder."
         )
-        self._load_regular_files(midi_paths, status_text)
+        if cancelled:
+            status_text += "\nConversion was cancelled after the files listed above were created."
+
+        files_to_load = extra_regular_paths + midi_paths
+        if append:
+            self._append_regular_files_from_paths(files_to_load)
+            existing_status = self.status_label.text().strip()
+            self.status_label.setText(
+                status_text if not existing_status else status_text + "\n" + existing_status
+            )
+        else:
+            self._load_regular_files(files_to_load, status_text)
+
+        if failures:
+            self._show_error_list(
+                "Some V50/SY77 Files Need Review",
+                "Some V50/SY77 sequence files could not be converted",
+                failures,
+                warning=True,
+                guidance="The source files were not modified; review the MIDI files that were created",
+            )
+        return True
+
+    def _convert_v50_nseq_image_to_midi_mode(self, source_image, source_name, summary, *, reset_current_image=False):
+        return self._convert_v50_nseq_sources_to_midi_mode(
+            [source_image],
+            source_name,
+            summary,
+            mode="image",
+            reset_current_image=reset_current_image,
+        )
 
     def _convert_current_v50_nseq_to_midi_mode(self, summary):
         if self.image_session is None:
@@ -2849,6 +3138,409 @@ class MidiTitleWindow(QMainWindow):
             reset_current_image=True,
         )
 
+    def can_accept_v50_nseq_path(self, file_path):
+        return self._v50_nseq_sequence_summary_for_file(file_path) is not None
+
+    def _v50_nseq_all_file_paths_in_folder(self, directory):
+        try:
+            filenames = os.listdir(directory)
+        except OSError:
+            return []
+        return sorted(
+            (
+                os.path.join(directory, filename)
+                for filename in filenames
+                if self.can_accept_v50_nseq_path(os.path.join(directory, filename))
+            ),
+            key=lambda path: (os.path.basename(path).upper(), path.upper()),
+        )
+
+    def _convert_v50_nseq_files_to_midi_mode(
+        self,
+        file_paths,
+        source_name,
+        summary,
+        *,
+        reset_current_image=False,
+        confirm_image_exit=True,
+        append=False,
+        extra_regular_paths=None,
+    ):
+        return self._convert_v50_nseq_sources_to_midi_mode(
+            file_paths,
+            source_name,
+            summary,
+            mode="auto",
+            reset_current_image=reset_current_image,
+            confirm_image_exit=confirm_image_exit,
+            append=append,
+            extra_regular_paths=extra_regular_paths,
+        )
+
+    def _is_electone_evt_path(self, file_path):
+        return (
+            bool(file_path)
+            and os.path.isfile(file_path)
+            and electone_mdr_to_midi.is_evt_path(file_path)
+        )
+
+    def can_accept_electone_evt_path(self, file_path):
+        return self._is_electone_evt_path(file_path)
+
+    def _electone_evt_file_paths_in_folder(self, directory):
+        try:
+            filenames = os.listdir(directory)
+        except OSError:
+            return []
+        return sorted(
+            (
+                os.path.join(directory, filename)
+                for filename in filenames
+                if self._is_electone_evt_path(os.path.join(directory, filename))
+            ),
+            key=lambda path: (os.path.basename(path).upper(), path.upper()),
+        )
+
+    def _electone_evt_entries_from_listing(self, listing):
+        entries = []
+        for entry in getattr(listing, "entries", []):
+            if electone_mdr_to_midi.EVT_FILE_RE.match(entry.name or ""):
+                entries.append(entry)
+        return entries
+
+    def _current_image_electone_evt_entries(self):
+        if self.image_session is None:
+            return []
+        try:
+            listing = self.image_session.list_entries()
+        except Exception:
+            return []
+        return self._electone_evt_entries_from_listing(listing)
+
+    def _electone_evt_input_specs(self, evt_paths):
+        inputs = []
+        for item in evt_paths or []:
+            if isinstance(item, dict):
+                path = item.get("path", "")
+                output_stem = item.get("output_stem")
+                label = item.get("label") or path
+            else:
+                path = item
+                output_stem = None
+                label = path
+            if not self._is_electone_evt_path(path):
+                continue
+            inputs.append(
+                {
+                    "path": os.path.abspath(path),
+                    "output_stem": output_stem,
+                    "label": label,
+                }
+            )
+        return inputs
+
+    def _extract_image_electone_evt_entries(self, entries, session=None):
+        session = session or self.image_session
+        if session is None:
+            return [], ["No disk or image is currently open."]
+        evt_inputs = []
+        failures = []
+        for entry in entries:
+            try:
+                extracted_path = session.extract_file(entry.path)
+                if not self._is_electone_evt_path(extracted_path):
+                    failures.append(f"{entry.path}: the extracted file did not look like an Electone EVT file")
+                    continue
+                evt_inputs.append(
+                    {
+                        "path": extracted_path,
+                        "output_stem": os.path.splitext(entry.name or "electone")[0],
+                        "label": entry.path,
+                    }
+                )
+            except Exception as exc:
+                failures.append(f"{entry.path}: {exc}")
+        return evt_inputs, failures
+
+    def _prompt_for_electone_evt_conversion(self, evt_labels, source_label=""):
+        labels = [str(label).strip() for label in (evt_labels or []) if str(label).strip()]
+        count = len(labels)
+        if count <= 0:
+            return False
+        detail = (
+            f"Found {count} Electone MDR EVT performance file(s)"
+            + (f" in {source_label}" if source_label else "")
+            + ".\n\nConvert the EVT performances to Standard MIDI files and open the MIDI files in the list?\n\n"
+            "The matching B00/R00 registration files are not decoded yet, so the MIDI files preserve "
+            "timing, notes, controllers, and SysEx events, but may not sound identical on a generic synth."
+        )
+        preview = labels[:8]
+        if preview:
+            detail += "\n\nDetected files:\n" + "\n".join(f"- {os.path.basename(label)}" for label in preview)
+            if len(labels) > len(preview):
+                detail += "\n..."
+
+        prompt = QMessageBox(self)
+        apply_window_icon(prompt)
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setWindowTitle("Electone MDR Files Detected")
+        prompt.setText("This source appears to contain Yamaha Electone MDR performance data.")
+        prompt.setInformativeText(detail)
+        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        prompt.setDefaultButton(QMessageBox.Yes)
+        prompt.button(QMessageBox.Yes).setText("Convert to MIDI")
+        prompt.button(QMessageBox.No).setText("Not Now")
+        return self._exec_child_dialog(prompt) == QMessageBox.Yes
+
+    def _convert_electone_evt_paths_to_midi_paths(self, evt_paths):
+        evt_inputs = self._electone_evt_input_specs(evt_paths)
+        if not evt_inputs:
+            return [], [], [], False
+
+        output_root = Path(self._ensure_midi_scratch_dir()) / f"electone_mdr_{uuid.uuid4().hex}"
+        staged_output_dir = output_root / "midi"
+        staged_output_dir.mkdir(parents=True, exist_ok=True)
+        reports = []
+        failures = []
+        midi_paths = []
+        cancelled = False
+
+        progress_dialog = QProgressDialog(
+            "Converting Electone MDR files to MIDI...",
+            "Cancel",
+            0,
+            len(evt_inputs),
+            self,
+        )
+        progress_dialog.setWindowTitle("Converting Electone MDR")
+        self._prepare_progress_dialog(progress_dialog)
+        progress_dialog.show()
+        QApplication.processEvents()
+
+        try:
+            for index, evt_input in enumerate(evt_inputs, start=1):
+                evt_path = evt_input["path"]
+                label = evt_input.get("label") or evt_path
+                progress_dialog.setValue(index - 1)
+                progress_dialog.setLabelText(f"Converting {os.path.basename(label)}...")
+                QApplication.processEvents()
+                if progress_dialog.wasCanceled():
+                    cancelled = True
+                    break
+                try:
+                    per_file_dir = output_root / f"{index:03d}_{uuid.uuid4().hex}"
+                    report = electone_mdr_to_midi.convert_one(
+                        Path(evt_path),
+                        per_file_dir,
+                        output_stem=evt_input.get("output_stem"),
+                    )
+                    source_output = Path(report.output)
+                    if not source_output.is_file():
+                        raise RuntimeError("The converter did not create a MIDI file.")
+                    target_output = self._unique_path_in_directory(staged_output_dir, source_output.name)
+                    shutil.move(str(source_output), str(target_output))
+                    report.input = label
+                    report.output = str(target_output)
+                    reports.append(report)
+                    midi_paths.append(str(target_output))
+                except Exception as exc:
+                    failures.append(f"{os.path.basename(label)}: {exc}")
+        finally:
+            progress_dialog.setValue(len(evt_inputs))
+            progress_dialog.close()
+
+        return midi_paths, reports, failures, cancelled
+
+    def _convert_electone_evt_files_to_midi_mode(
+        self,
+        evt_paths,
+        source_name,
+        *,
+        reset_current_image=False,
+        confirm_image_exit=True,
+        append=False,
+        extra_regular_paths=None,
+        pre_conversion_warnings=None,
+    ):
+        evt_inputs = self._electone_evt_input_specs(evt_paths)
+        extra_regular_paths = [
+            os.path.abspath(path)
+            for path in (extra_regular_paths or [])
+            if os.path.isfile(path) and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+        ]
+        warnings = list(pre_conversion_warnings or [])
+        if not evt_inputs:
+            return False
+        if (
+            reset_current_image
+            and confirm_image_exit
+            and self.image_session is not None
+            and not self._confirm_discard_image_changes()
+        ):
+            return False
+
+        midi_paths, reports, failures, cancelled = self._convert_electone_evt_paths_to_midi_paths(evt_inputs)
+        warnings.extend(failures)
+
+        if not midi_paths:
+            if warnings:
+                self._show_error_list(
+                    "Electone MDR Conversion Failed",
+                    "The app could not convert the selected Electone EVT files to MIDI",
+                    warnings,
+                    warning=True,
+                    guidance="The source files were not modified",
+                )
+            elif cancelled:
+                self.status_label.setText("Electone MDR conversion cancelled. No files were changed.")
+            return False
+
+        if reset_current_image and self.image_session is not None:
+            self._reset_image_state()
+
+        converted_count = len(midi_paths)
+        source_count = len(evt_inputs)
+        status_text = (
+            f"Converted {converted_count} MIDI file(s) from {source_count} Electone MDR EVT file(s)"
+            + (f" in {source_name}" if source_name else "")
+            + ".\nThe source files were not modified. B00/R00 registrations were not decoded. "
+            "Use Save As to choose a permanent folder."
+        )
+        if cancelled:
+            status_text += "\nConversion was cancelled after the files listed above were created."
+
+        files_to_load = extra_regular_paths + midi_paths
+        if append:
+            self._append_regular_files_from_paths(files_to_load)
+            existing_status = self.status_label.text().strip()
+            self.status_label.setText(
+                status_text if not existing_status else status_text + "\n" + existing_status
+            )
+        else:
+            self._load_regular_files(files_to_load, status_text)
+
+        report_warnings = []
+        for report in reports:
+            if report.events_written <= 0:
+                report_warnings.append(f"{os.path.basename(report.input)}: no MIDI events were written")
+            for warning in report.warnings:
+                report_warnings.append(f"{os.path.basename(report.input)}: {warning}")
+        warnings.extend(report_warnings)
+        if warnings:
+            self._show_error_list(
+                "Some Electone MDR Files Need Review",
+                "Some Electone EVT files were converted with warnings",
+                warnings,
+                warning=True,
+                guidance="Review the converted MIDI files before using them for preservation or playback",
+            )
+        return True
+
+    def _offer_electone_evt_conversion_for_loaded_session(self, session, listing):
+        entries = self._electone_evt_entries_from_listing(listing)
+        if not entries:
+            return False
+
+        image_path = getattr(session, "working_img_path", "")
+        if image_path:
+            self.electoneMdrPromptedSessionPath = image_path
+        source_name = getattr(session, "source_name", "disk or image")
+        if not self._prompt_for_electone_evt_conversion([entry.path for entry in entries], source_name):
+            return False
+
+        self._cleanup_midi_scratch_dir()
+        evt_paths, extraction_failures = self._extract_image_electone_evt_entries(entries, session=session)
+        if not evt_paths:
+            self._show_error_list(
+                "Electone MDR Conversion Failed",
+                "The app could not extract the detected Electone EVT files from the disk or image",
+                extraction_failures or ["No Electone EVT files could be extracted."],
+                warning=True,
+                guidance="The source disk or image was not modified",
+            )
+            return False
+
+        if self.image_session is not None:
+            self._reset_image_state()
+
+        converted = self._convert_electone_evt_files_to_midi_mode(
+            evt_paths,
+            source_name,
+            pre_conversion_warnings=extraction_failures,
+        )
+        if not converted:
+            return False
+
+        try:
+            session.cleanup()
+        except Exception:
+            pass
+        return True
+
+    def _offer_electone_evt_conversion_if_available(self):
+        if self.image_session is None:
+            return False
+        image_path = getattr(self.image_session, "working_img_path", "")
+        if not image_path or image_path == self.electoneMdrPromptedSessionPath:
+            return False
+        self.electoneMdrPromptedSessionPath = image_path
+
+        entries = self._current_image_electone_evt_entries()
+        if not entries:
+            return False
+
+        source_name = getattr(self.image_session, "source_name", "disk or image")
+        if not self._prompt_for_electone_evt_conversion([entry.path for entry in entries], source_name):
+            return True
+
+        evt_paths, extraction_failures = self._extract_image_electone_evt_entries(entries)
+        if not evt_paths:
+            self._show_error_list(
+                "Electone MDR Conversion Failed",
+                "The app could not extract the detected Electone EVT files from the disk or image",
+                extraction_failures or ["No Electone EVT files could be extracted."],
+                warning=True,
+                guidance="The source disk or image was not modified",
+            )
+            return True
+        self._convert_electone_evt_files_to_midi_mode(
+            evt_paths,
+            source_name,
+            reset_current_image=True,
+            confirm_image_exit=False,
+            pre_conversion_warnings=extraction_failures,
+        )
+        return True
+
+    def handle_electone_evt_file_drop(self, file_paths):
+        evt_paths = [path for path in (file_paths or []) if self._is_electone_evt_path(path)]
+        if not evt_paths:
+            return False
+
+        extra_regular_paths = []
+        if not self.is_image_mode():
+            evt_path_set = {os.path.abspath(path) for path in evt_paths}
+            extra_regular_paths = [
+                path
+                for path in (file_paths or [])
+                if os.path.abspath(path) not in evt_path_set
+                and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+            ]
+
+        if not self._prompt_for_electone_evt_conversion(
+            [os.path.basename(path) for path in evt_paths],
+            "the dropped files",
+        ):
+            return False
+
+        return self._convert_electone_evt_files_to_midi_mode(
+            evt_paths,
+            "the dropped files",
+            reset_current_image=self.is_image_mode(),
+            append=not self.is_image_mode(),
+            extra_regular_paths=extra_regular_paths,
+        )
+
     def _is_mpc_seq_path(self, file_path):
         return (
             bool(file_path)
@@ -2856,8 +3548,25 @@ class MidiTitleWindow(QMainWindow):
             and os.path.splitext(file_path)[1].lower() == ".seq"
         )
 
+    def _is_mpc_all_path(self, file_path):
+        if (
+            not file_path
+            or not os.path.isfile(file_path)
+            or os.path.splitext(file_path)[1].lower() != ".all"
+        ):
+            return False
+        if self.can_accept_v50_nseq_path(file_path):
+            return False
+        try:
+            return mpc_seq_to_midi.looks_like_mpc_all_bytes(Path(file_path).read_bytes())
+        except Exception:
+            return False
+
+    def _is_mpc_sequence_source_path(self, file_path):
+        return self._is_mpc_seq_path(file_path) or self._is_mpc_all_path(file_path)
+
     def can_accept_mpc_seq_path(self, file_path):
-        return self._is_mpc_seq_path(file_path)
+        return self._is_mpc_sequence_source_path(file_path)
 
     def _mpc_seq_file_paths_in_folder(self, directory):
         try:
@@ -2868,17 +3577,30 @@ class MidiTitleWindow(QMainWindow):
             (
                 os.path.join(directory, filename)
                 for filename in filenames
-                if self._is_mpc_seq_path(os.path.join(directory, filename))
+                if self._is_mpc_sequence_source_path(os.path.join(directory, filename))
             ),
             key=lambda path: (os.path.basename(path).upper(), path.upper()),
         )
 
-    def _mpc_seq_entries_from_listing(self, listing):
-        return [
-            entry
-            for entry in getattr(listing, "entries", [])
-            if os.path.splitext(entry.name)[1].lower() == ".seq"
-        ]
+    def _image_entry_contains_mpc_all_sequences(self, entry, session=None):
+        session = session or self.image_session
+        if session is None:
+            return False
+        try:
+            extracted_path = session.extract_file(entry.path)
+            return self._is_mpc_all_path(extracted_path)
+        except Exception:
+            return False
+
+    def _mpc_seq_entries_from_listing(self, listing, session=None):
+        entries = []
+        for entry in getattr(listing, "entries", []):
+            ext = os.path.splitext(entry.name)[1].lower()
+            if ext == ".seq":
+                entries.append(entry)
+            elif ext == ".all" and self._image_entry_contains_mpc_all_sequences(entry, session=session):
+                entries.append(entry)
+        return entries
 
     def _current_image_mpc_seq_entries(self):
         if self.image_session is None:
@@ -2887,7 +3609,7 @@ class MidiTitleWindow(QMainWindow):
             listing = self.image_session.list_entries()
         except Exception:
             return []
-        return self._mpc_seq_entries_from_listing(listing)
+        return self._mpc_seq_entries_from_listing(listing, session=self.image_session)
 
     def _unique_path_in_directory(self, directory, filename):
         directory = Path(directory)
@@ -2915,7 +3637,7 @@ class MidiTitleWindow(QMainWindow):
                 path = item
                 output_stem = None
                 label = path
-            if not self._is_mpc_seq_path(path):
+            if not self._is_mpc_sequence_source_path(path):
                 continue
             inputs.append(
                 {
@@ -2935,6 +3657,10 @@ class MidiTitleWindow(QMainWindow):
         for entry in entries:
             try:
                 extracted_path = session.extract_file(entry.path)
+                ext = os.path.splitext(entry.name)[1].lower()
+                if ext == ".all" and not self._is_mpc_all_path(extracted_path):
+                    failures.append(f"{entry.path}: no embedded MPC sequences were found")
+                    continue
                 seq_inputs.append(
                     {
                         "path": extracted_path,
@@ -2952,7 +3678,7 @@ class MidiTitleWindow(QMainWindow):
         if count <= 0:
             return False
         detail = (
-            f"Found {count} MPC .SEQ file(s)"
+            f"Found {count} MPC sequence source file(s)"
             + (f" in {source_label}" if source_label else "")
             + ".\n\nConvert them to Standard MIDI files and open the MIDI files in the list?"
         )
@@ -2965,8 +3691,8 @@ class MidiTitleWindow(QMainWindow):
         prompt = QMessageBox(self)
         apply_window_icon(prompt)
         prompt.setIcon(QMessageBox.Question)
-        prompt.setWindowTitle("MPC .SEQ Files Detected")
-        prompt.setText("These files appear to be Akai MPC sequence files.")
+        prompt.setWindowTitle("MPC Sequence Files Detected")
+        prompt.setText("These files appear to contain Akai MPC sequence data.")
         prompt.setInformativeText(detail)
         prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         prompt.setDefaultButton(QMessageBox.Yes)
@@ -2988,13 +3714,13 @@ class MidiTitleWindow(QMainWindow):
         cancelled = False
 
         progress_dialog = QProgressDialog(
-            "Converting MPC .SEQ files to MIDI...",
+            "Converting MPC sequence files to MIDI...",
             "Cancel",
             0,
             len(seq_inputs),
             self,
         )
-        progress_dialog.setWindowTitle("Converting MPC .SEQ")
+        progress_dialog.setWindowTitle("Converting MPC Sequences")
         self._prepare_progress_dialog(progress_dialog)
         progress_dialog.show()
         QApplication.processEvents()
@@ -3011,20 +3737,37 @@ class MidiTitleWindow(QMainWindow):
                     break
                 try:
                     per_file_dir = output_root / f"{index:03d}_{uuid.uuid4().hex}"
-                    report = mpc_seq_to_midi.convert_one(
-                        Path(seq_path),
-                        per_file_dir,
-                        output_stem=seq_input.get("output_stem"),
-                    )
-                    source_output = Path(report.output)
-                    if not source_output.is_file():
-                        raise RuntimeError("The converter did not create a MIDI file.")
-                    target_output = self._unique_path_in_directory(staged_output_dir, source_output.name)
-                    shutil.move(str(source_output), str(target_output))
-                    report.input = label
-                    report.output = str(target_output)
-                    reports.append(report)
-                    midi_paths.append(str(target_output))
+                    if os.path.splitext(seq_path)[1].lower() == ".all":
+                        all_reports, all_warnings = mpc_seq_to_midi.convert_all(
+                            Path(seq_path),
+                            per_file_dir,
+                            output_stem=seq_input.get("output_stem"),
+                        )
+                        for warning in all_warnings:
+                            if warning.startswith("Skipped ") and " no note data" in warning:
+                                continue
+                            failures.append(f"{os.path.basename(label)}: {warning}")
+                        if not all_reports:
+                            raise RuntimeError("No embedded MPC sequences with note data were converted.")
+                        source_reports = all_reports
+                    else:
+                        source_reports = [
+                            mpc_seq_to_midi.convert_one(
+                                Path(seq_path),
+                                per_file_dir,
+                                output_stem=seq_input.get("output_stem"),
+                            )
+                        ]
+                    for report in source_reports:
+                        source_output = Path(report.output)
+                        if not source_output.is_file():
+                            raise RuntimeError("The converter did not create a MIDI file.")
+                        target_output = self._unique_path_in_directory(staged_output_dir, source_output.name)
+                        shutil.move(str(source_output), str(target_output))
+                        report.input = label
+                        report.output = str(target_output)
+                        reports.append(report)
+                        midi_paths.append(str(target_output))
                 except Exception as exc:
                     failures.append(f"{os.path.basename(label)}: {exc}")
         finally:
@@ -3080,14 +3823,14 @@ class MidiTitleWindow(QMainWindow):
         if not midi_paths:
             if warnings:
                 self._show_error_list(
-                    "MPC .SEQ Conversion Failed",
-                    "The app could not convert the selected MPC .SEQ files to MIDI",
+                    "MPC Sequence Conversion Failed",
+                    "The app could not convert the selected MPC sequence files to MIDI",
                     warnings,
                     warning=True,
                     guidance="The source files were not modified",
                 )
             elif cancelled:
-                self.status_label.setText("MPC .SEQ conversion cancelled. No files were changed.")
+                self.status_label.setText("MPC sequence conversion cancelled. No files were changed.")
             return False
 
         if reset_current_image and self.image_session is not None:
@@ -3096,7 +3839,7 @@ class MidiTitleWindow(QMainWindow):
         converted_count = len(midi_paths)
         source_count = len(seq_inputs)
         status_text = (
-            f"Converted {converted_count} MIDI file(s) from {source_count} MPC .SEQ file(s)"
+            f"Converted {converted_count} MIDI file(s) from {source_count} MPC sequence source file(s)"
             + (f" in {source_name}" if source_name else "")
             + ".\nThe source files were not modified. Use Save As to choose a permanent folder."
         )
@@ -3120,8 +3863,8 @@ class MidiTitleWindow(QMainWindow):
         warnings.extend(report_warnings)
         if warnings:
             self._show_error_list(
-                "Some MPC .SEQ Files Need Review",
-                "Some MPC .SEQ files were converted with warnings",
+                "Some MPC Sequence Files Need Review",
+                "Some MPC sequence files were converted with warnings",
                 warnings,
                 warning=True,
                 guidance="Review the converted MIDI files before using them for preservation or playback",
@@ -3129,7 +3872,7 @@ class MidiTitleWindow(QMainWindow):
         return True
 
     def _offer_mpc_seq_conversion_for_loaded_session(self, session, listing):
-        entries = self._mpc_seq_entries_from_listing(listing)
+        entries = self._mpc_seq_entries_from_listing(listing, session=session)
         if not entries:
             return False
 
@@ -3144,9 +3887,9 @@ class MidiTitleWindow(QMainWindow):
         seq_paths, extraction_failures = self._extract_image_mpc_seq_entries(entries, session=session)
         if not seq_paths:
             self._show_error_list(
-                "MPC .SEQ Conversion Failed",
-                "The app could not extract the detected MPC .SEQ files from the disk or image",
-                extraction_failures or ["No .SEQ files could be extracted."],
+                "MPC Sequence Conversion Failed",
+                "The app could not extract the detected MPC sequence files from the disk or image",
+                extraction_failures or ["No MPC sequence files could be extracted."],
                 warning=True,
                 guidance="The source disk or image was not modified",
             )
@@ -3188,9 +3931,9 @@ class MidiTitleWindow(QMainWindow):
         seq_paths, extraction_failures = self._extract_image_mpc_seq_entries(entries)
         if not seq_paths:
             self._show_error_list(
-                "MPC .SEQ Conversion Failed",
-                "The app could not extract the detected MPC .SEQ files from the disk or image",
-                extraction_failures or ["No .SEQ files could be extracted."],
+                "MPC Sequence Conversion Failed",
+                "The app could not extract the detected MPC sequence files from the disk or image",
+                extraction_failures or ["No MPC sequence files could be extracted."],
                 warning=True,
                 guidance="The source disk or image was not modified",
             )
@@ -3204,8 +3947,39 @@ class MidiTitleWindow(QMainWindow):
         )
         return True
 
+    def handle_v50_nseq_file_drop(self, file_paths):
+        v50_paths = [path for path in (file_paths or []) if self.can_accept_v50_nseq_path(path)]
+        if not v50_paths:
+            return False
+
+        summary = self._v50_nseq_sequence_summary_for_paths(v50_paths)
+        if not summary:
+            return False
+
+        extra_regular_paths = []
+        if not self.is_image_mode():
+            v50_path_set = {os.path.abspath(path) for path in v50_paths}
+            extra_regular_paths = [
+                path
+                for path in (file_paths or [])
+                if os.path.abspath(path) not in v50_path_set
+                and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+            ]
+
+        if not self._prompt_for_v50_nseq_conversion(summary):
+            return False
+
+        return self._convert_v50_nseq_files_to_midi_mode(
+            v50_paths,
+            "the dropped files",
+            summary,
+            reset_current_image=self.is_image_mode(),
+            append=not self.is_image_mode(),
+            extra_regular_paths=extra_regular_paths,
+        )
+
     def handle_mpc_seq_file_drop(self, file_paths):
-        seq_paths = [path for path in (file_paths or []) if self._is_mpc_seq_path(path)]
+        seq_paths = [path for path in (file_paths or []) if self._is_mpc_sequence_source_path(path)]
         if not seq_paths:
             return False
 
@@ -3268,7 +4042,7 @@ class MidiTitleWindow(QMainWindow):
         drive_name = gw_source.drive.lower()
         default_path = os.path.join(
             os.path.expanduser("~"),
-            f"gw_drive_{drive_name}_archival.scp",
+            f"gw_drive_{drive_name}_raw.scp",
         )
         output_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -3299,6 +4073,18 @@ class MidiTitleWindow(QMainWindow):
         finally:
             if os.path.abspath(output_path) != os.path.abspath(capture_path):
                 capture.cleanup()
+
+        self._show_greaseweazle_sector_reports(
+            [
+                {
+                    "type": "read",
+                    "title": "Greaseweazle Read Sector Map",
+                    "summary": f"Read {gw_source.display_name}.",
+                    "sector_map": getattr(capture, "sector_map", {}) or {},
+                    "disk_format": gw_source.disk_format,
+                }
+            ]
+        )
 
         if payload.get("recover_after_capture"):
             self._start_disk_recovery_worker(
@@ -3344,6 +4130,17 @@ class MidiTitleWindow(QMainWindow):
                 self._convert_v50_nseq_image_to_midi_mode(
                     source_path,
                     os.path.basename(source_path) or "V50/SY77 image",
+                    summary,
+                    reset_current_image=False,
+                )
+                return
+            summary = self._v50_nseq_sequence_summary_for_file(source_path, require_all_extension=False)
+            if summary and self._prompt_for_v50_nseq_conversion(summary):
+                self.pendingDiskRecoveryRequest = None
+                self.diskLoadContext = {}
+                self._convert_v50_nseq_files_to_midi_mode(
+                    [source_path],
+                    os.path.basename(source_path) or "V50/SY77 file",
                     summary,
                     reset_current_image=False,
                 )
@@ -3453,9 +4250,69 @@ class MidiTitleWindow(QMainWindow):
             return
         self.pendingGwConversionDetails = details
 
+    def _offer_save_non_fat_greaseweazle_image(self, details):
+        details = dict(details or {})
+        capture_path = details.get("capture_path") or ""
+        disk_format = details.get("disk_format")
+        if not capture_path or not os.path.isfile(capture_path) or disk_format is None:
+            self._show_operation_error(
+                "Greaseweazle Conversion Failed",
+                "The Greaseweazle image could not be opened",
+                details.get("message") or "No converted image format was available.",
+            )
+            return
+
+        volume_name = str(details.get("volume_name") or "").strip()
+        volume_note = f" Volume: {volume_name}." if volume_name else ""
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("Non-Yamaha Disk Image")
+        dialog.setText(f"This image decodes as {disk_format.label}, not an IBM/Yamaha FAT floppy.")
+        dialog.setInformativeText(
+            "APS MIDI Prep Tool cannot open this disk for Yamaha editing."
+            f"{volume_note}\n\n"
+            "You can still save the decoded sector image without opening or scanning it."
+        )
+        save_button = dialog.addButton("Save Converted IMG", QMessageBox.AcceptRole)
+        dialog.addButton(QMessageBox.Close)
+        dialog.setDefaultButton(save_button)
+        self._exec_child_dialog(dialog)
+        if dialog.clickedButton() is not save_button:
+            self.pendingFloppyReadConvertToMidi = False
+            self.status_label.setText("Greaseweazle conversion stopped; the source image was not changed.")
+            return
+
+        default_name = f"{os.path.splitext(os.path.basename(capture_path))[0]}_{disk_format.key.replace('.', '_')}.img"
+        default_path = os.path.join(os.path.dirname(os.path.abspath(capture_path)), default_name)
+        output_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Converted Image",
+            default_path,
+            "Raw sector image (*.img);;All files (*)",
+        )
+        if not output_path:
+            self.pendingFloppyReadConvertToMidi = False
+            self.status_label.setText("Greaseweazle conversion stopped; no converted image was saved.")
+            return
+        if not os.path.splitext(output_path)[1]:
+            output_path = f"{output_path}.img"
+
+        self.pendingFloppyReadConvertToMidi = False
+        self._start_floppy_image_capture_worker(
+            "image_convert",
+            capture_path,
+            output_path,
+            disk_format=disk_format,
+            source_name=os.path.basename(capture_path) or "the selected image",
+        )
+
     def _handle_greaseweazle_conversion_failure(self, details):
         details = dict(details or {})
         message = details.get("message", "")
+
+        if details.get("reason") == "non_fat_format":
+            self._offer_save_non_fat_greaseweazle_image(details)
+            return
 
         capture_path = details.get("capture_path") or ""
         if not capture_path or not os.path.isfile(capture_path):
@@ -3584,6 +4441,7 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
             return False
 
+        self._reset_gw_sector_report_dedupe()
         progress_text = request.get("progress_title", "Recovering Disk Data")
         progress_dialog = QProgressDialog(progress_text, "Cancel", 0, 100, self)
         progress_dialog.setWindowTitle(progress_text)
@@ -3638,14 +4496,17 @@ class MidiTitleWindow(QMainWindow):
             )
             return
 
+        self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
+
         song_count = sum(1 for entry in listing.entries if not is_pianodir_path(entry.path))
-        QMessageBox.information(
-            self,
-            "Recovery Complete",
-            (
+        self._information_with_optional_hide(
+            setting_key=self.SETTING_HIDE_RECOVERY_COMPLETE_DIALOG,
+            title="Recovery Complete",
+            message=(
                 f"Recovered {len(listing.entries)} file(s), including {song_count} song file(s), into a new editable image copy.\n\n"
                 "The original source was not modified. Review the recovered list, then use Save As Image or Write Current Image to Floppy to keep a clean copy."
             ),
+            checkbox_text="Do not show this recovery complete message again",
         )
         if self.pendingFloppyReadConvertToMidi:
             QTimer.singleShot(0, self._convert_loaded_floppy_to_midi_after_read)
@@ -3684,6 +4545,205 @@ class MidiTitleWindow(QMainWindow):
         if self.diskRecoveryWorker is not None:
             self.diskRecoveryWorker.deleteLater()
             self.diskRecoveryWorker = None
+
+    def _reset_user_hide_choices_if_needed(self):
+        version = self.settings.value(self.SETTING_HIDE_CHOICES_RESET_VERSION, 0, type=int)
+        if version == self.HIDE_CHOICES_RESET_VERSION:
+            return
+        for setting_key in (
+            self.SETTING_SKIP_TYPE0_WARNING,
+            self.SETTING_SKIP_IMAGE_REMOVE_WARNING,
+            self.SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING,
+            self.SETTING_SKIP_FLOPPY_WRITE_WARNING,
+            self.SETTING_HIDE_RECOVERY_COMPLETE_DIALOG,
+            self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
+            self.SETTING_SKIP_UPDATE_REMINDERS,
+        ):
+            self.settings.setValue(setting_key, False)
+        self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_SWITCH_MODE, "ask")
+        self.settings.setValue(self.SETTING_HIDE_CHOICES_RESET_VERSION, self.HIDE_CHOICES_RESET_VERSION)
+
+    def _reset_gw_sector_report_hide_choices_if_needed(self):
+        version = self.settings.value(self.SETTING_GW_SECTOR_REPORT_HIDE_VERSION, 0, type=int)
+        if version == self.GW_SECTOR_REPORT_HIDE_VERSION:
+            return
+        for setting_key in self.GW_SECTOR_REPORT_HIDE_SETTINGS.values():
+            self.settings.setValue(setting_key, False)
+        self.settings.setValue(self.SETTING_GW_SECTOR_REPORT_HIDE_VERSION, self.GW_SECTOR_REPORT_HIDE_VERSION)
+
+    def _gw_sector_report_setting_key(self, report_type):
+        return self.GW_SECTOR_REPORT_HIDE_SETTINGS.get(
+            str(report_type or "").lower(),
+            self.GW_SECTOR_REPORT_HIDE_SETTINGS["convert"],
+        )
+
+    def _gw_sector_report_hidden(self, report_type):
+        return self.settings.value(self._gw_sector_report_setting_key(report_type), False, type=bool)
+
+    def _set_gw_sector_report_hidden(self, report_type, hidden):
+        self.settings.setValue(self._gw_sector_report_setting_key(report_type), bool(hidden))
+
+    def _reset_gw_sector_report_dedupe(self):
+        self._shownGwSectorReportFingerprints = set()
+
+    def _gw_sector_report_fingerprint(self, report):
+        sector_map = (report or {}).get("sector_map") or {}
+        rows = tuple(
+            (
+                int(row.get("head") or 0),
+                int(row.get("sector") or 0),
+                str(row.get("statuses") or ""),
+            )
+            for row in sector_map.get("rows") or []
+        )
+        return (
+            rows,
+            sector_map.get("found"),
+            sector_map.get("total"),
+            sector_map.get("good"),
+            sector_map.get("bad"),
+        )
+
+    def _save_gw_sector_map_png(self, sector_map):
+        image = render_greaseweazle_sector_map_image(sector_map, self.palette())
+        fd, png_path = tempfile.mkstemp(prefix="aps_gw_sector_map_", suffix=".png")
+        os.close(fd)
+        if not image.save(png_path, "PNG"):
+            raise OSError("Could not render Greaseweazle sector map PNG.")
+        return png_path
+
+    def _show_greaseweazle_sector_report(self, report):
+        report = dict(report or {})
+        report_type = str(report.get("type") or "convert").lower()
+        sector_map = report.get("sector_map") or {}
+        rows = sector_map.get("rows") or []
+        if self._gw_sector_report_hidden(report_type):
+            return False
+        if not rows and not report.get("allow_empty_rows"):
+            return False
+        fingerprint = self._gw_sector_report_fingerprint(report)
+        if fingerprint in self._shownGwSectorReportFingerprints:
+            return False
+        self._shownGwSectorReportFingerprints.add(fingerprint)
+
+        found = sector_map.get("found")
+        total = sector_map.get("total")
+        good = int(sector_map.get("good") or 0)
+        bad = int(sector_map.get("bad") or 0)
+        summary_parts = []
+        if report.get("summary"):
+            summary_parts.append(str(report.get("summary")))
+        if not rows:
+            if not summary_parts:
+                summary_parts.append("No Greaseweazle sector map was available for this operation.")
+        elif found is not None and total is not None:
+            summary_parts.append(f"Greaseweazle reported {found} of {total} expected sector position(s).")
+        else:
+            summary_parts.append(f"Green dots: {good}. Red dots: {bad}.")
+        if bad:
+            summary_parts.append(f"{bad} sector position(s) need attention.")
+
+        png_path = ""
+        try:
+            png_path = self._save_gw_sector_map_png(sector_map)
+            dialog = QDialog(self)
+            apply_window_icon(dialog)
+            dialog.setWindowTitle(report.get("title") or "Greaseweazle Sector Map")
+            dialog.setModal(True)
+            dialog.setMinimumWidth(620)
+
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(18, 18, 18, 18)
+            layout.setSpacing(10)
+
+            summary = QLabel("\n".join(summary_parts))
+            summary.setWordWrap(True)
+            layout.addWidget(summary)
+
+            legend = QLabel("Green dots are good sector positions. Red dots are bad or missing sector positions.")
+            legend.setWordWrap(True)
+            layout.addWidget(legend)
+
+            pixmap = QPixmap(png_path)
+            image_label = QLabel(dialog)
+            image_label.setAlignment(Qt.AlignCenter)
+            if pixmap.width() > 900 or pixmap.height() > 520:
+                pixmap = pixmap.scaled(900, 520, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            image_label.setPixmap(pixmap)
+            layout.addWidget(image_label)
+
+            action_name = {
+                "read": "Greaseweazle reads",
+                "write": "Greaseweazle writes",
+                "convert": "Greaseweazle image conversions",
+                "recover": "disk recovery operations",
+            }.get(report_type, "this Greaseweazle transaction type")
+            hide_checkbox = QCheckBox(f"Do not show this sector map after {action_name}")
+            layout.addWidget(hide_checkbox)
+
+            buttons = self._make_dialog_button_box(QDialogButtonBox.Ok, dialog)
+            buttons.accepted.connect(dialog.accept)
+            layout.addWidget(buttons)
+            self._exec_child_dialog(dialog)
+            if hide_checkbox.isChecked():
+                self._set_gw_sector_report_hidden(report_type, True)
+            return True
+        finally:
+            if png_path:
+                try:
+                    os.remove(png_path)
+                except OSError:
+                    pass
+
+    def _show_greaseweazle_sector_reports(self, reports):
+        shown = False
+        for report in reports or ():
+            shown = self._show_greaseweazle_sector_report(report) or shown
+        return shown
+
+    def _information_with_optional_hide(self, *, setting_key, title, message, checkbox_text):
+        if self.settings.value(setting_key, False, type=bool):
+            return
+
+        dialog = QMessageBox(self)
+        apply_window_icon(dialog)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.Ok)
+        hide_checkbox = QCheckBox(checkbox_text)
+        dialog.setCheckBox(hide_checkbox)
+        self._exec_child_dialog(dialog)
+        if hide_checkbox.isChecked():
+            self.settings.setValue(setting_key, True)
+            self.settings.sync()
+
+    def _question_with_optional_confirm_skip(
+        self,
+        *,
+        setting_key,
+        title,
+        message,
+        checkbox_text,
+        default_button=QMessageBox.Yes,
+    ):
+        if setting_key and self.settings.value(setting_key, False, type=bool):
+            return True
+
+        dialog = QMessageBox(self)
+        apply_window_icon(dialog)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        dialog.setDefaultButton(default_button)
+        hide_checkbox = QCheckBox(checkbox_text)
+        dialog.setCheckBox(hide_checkbox)
+        confirmed = self._exec_child_dialog(dialog) == QMessageBox.Yes
+        if confirmed and hide_checkbox.isChecked() and setting_key:
+            self.settings.setValue(setting_key, True)
+            self.settings.sync()
+        return confirmed
 
     def _confirm_with_optional_skip(self, *, setting_key, title, message, icon=QMessageBox.Warning):
         if self.settings.value(setting_key, False, type=bool):
@@ -4124,6 +5184,15 @@ class MidiTitleWindow(QMainWindow):
             self.fileReadFloppyAction.setEnabled(open_enabled)
             self.fileReadFloppyAction.setToolTip(self.read_floppy_button.toolTip())
             self.fileReadFloppyAction.setStatusTip(self.read_floppy_button.toolTip())
+        if hasattr(self, "fileImageFloppyAction"):
+            capture_tooltip = (
+                "Copy a physical floppy to an image file without opening or scanning its contents."
+                if open_enabled else
+                "Please wait for the current operation to finish before imaging a floppy disk."
+            )
+            self.fileImageFloppyAction.setEnabled(open_enabled)
+            self.fileImageFloppyAction.setToolTip(capture_tooltip)
+            self.fileImageFloppyAction.setStatusTip(capture_tooltip)
 
         self.fileSaveAction.setText("Save")
         self.fileSaveAction.setEnabled(self.saveButton.isEnabled())
@@ -4187,6 +5256,14 @@ class MidiTitleWindow(QMainWindow):
                 if enabled else
                 "Please wait for the current operation to finish before formatting a floppy disk."
             )
+        if hasattr(self, "utilitiesFormatUsbAction"):
+            enabled = self.choose_button.isEnabled()
+            self.utilitiesFormatUsbAction.setEnabled(enabled)
+            self.utilitiesFormatUsbAction.setStatusTip(
+                "Format a removable USB stick as FAT32 for Disklavier or PianoForce use."
+                if enabled else
+                "Please wait for the current operation to finish before formatting a USB stick."
+            )
         if hasattr(self, "utilitiesRecoverImageAction"):
             enabled = self.choose_button.isEnabled()
             self.utilitiesRecoverImageAction.setEnabled(enabled)
@@ -4202,6 +5279,14 @@ class MidiTitleWindow(QMainWindow):
                 "Create .tags.txt sidecar files next to saved local MIDI or E-SEQ files."
                 if enabled else
                 "Please wait for the current operation to finish before changing sidecar output."
+            )
+        if hasattr(self, "fileCreateMetadataSummaryAction"):
+            enabled = self.choose_button.isEnabled()
+            self.fileCreateMetadataSummaryAction.setEnabled(enabled)
+            self.fileCreateMetadataSummaryAction.setStatusTip(
+                "Create metadata_summary.txt for MIDI files when saving to a folder."
+                if enabled else
+                "Please wait for the current operation to finish before changing metadata summary output."
             )
         if hasattr(self, "fileAutoWriteProtectAction"):
             enabled = self.choose_button.isEnabled()
@@ -4415,6 +5500,39 @@ class MidiTitleWindow(QMainWindow):
         if not self._album_subfolder_option_applies():
             return dest_dir
         return os.path.join(dest_dir, self._album_subfolder_name())
+
+    def _existing_directory_for_dialog_path(self, path):
+        path = str(path or "").strip()
+        if not path:
+            return ""
+        path = os.path.abspath(os.path.expanduser(path))
+        if os.path.isdir(path):
+            return path
+        parent = os.path.dirname(path)
+        if parent and os.path.isdir(parent):
+            return parent
+        return ""
+
+    def _last_save_as_location(self, fallback=""):
+        saved_dir = self._existing_directory_for_dialog_path(
+            self.settings.value(self.SETTING_SAVE_AS_LOCATION, "") or ""
+        )
+        if saved_dir:
+            return saved_dir
+        fallback_dir = self._existing_directory_for_dialog_path(fallback)
+        if fallback_dir:
+            return fallback_dir
+        return os.path.expanduser("~")
+
+    def _default_save_as_path(self, filename, fallback_dir=""):
+        return os.path.join(self._last_save_as_location(fallback_dir), filename)
+
+    def _remember_save_as_location(self, path):
+        directory = self._existing_directory_for_dialog_path(path)
+        if not directory:
+            return
+        self.settings.setValue(self.SETTING_SAVE_AS_LOCATION, directory)
+        self.settings.sync()
 
     def _active_eseq_variant(self):
         if self.is_image_mode():
@@ -4637,6 +5755,117 @@ class MidiTitleWindow(QMainWindow):
 
     def _tag_sidecars_enabled(self):
         return self.settings.value(self.SETTING_WRITE_TAG_SIDECARS, False, type=bool)
+
+    def toggle_metadata_summary_writing(self, enabled):
+        self.settings.setValue(self.SETTING_WRITE_METADATA_SUMMARY, bool(enabled))
+
+    def _metadata_summary_enabled(self):
+        return self.settings.value(self.SETTING_WRITE_METADATA_SUMMARY, False, type=bool)
+
+    def _metadata_summary_path_for_directory(self, directory):
+        return os.path.join(directory, "metadata_summary.txt")
+
+    def _metadata_summary_directory_for_paths(self, paths, base_dir=None):
+        if base_dir:
+            return base_dir
+        directories = [
+            os.path.dirname(os.path.abspath(path))
+            for path in paths
+            if path
+        ]
+        if not directories:
+            return ""
+        try:
+            common = os.path.commonpath(directories)
+        except ValueError:
+            common = directories[0]
+        return common if os.path.isdir(common) else os.path.dirname(common)
+
+    def _metadata_summary_entries_for_regular_rows(self, path_remap=None, only_paths=None):
+        path_remap = path_remap or {}
+        only_paths = set(only_paths) if only_paths is not None else None
+        entries = []
+        seen = set()
+        for row in self._regular_file_rows():
+            full_path_item = self.table.item(row, 1)
+            if full_path_item is None:
+                continue
+            full_path = full_path_item.text()
+            if only_paths is not None and full_path not in only_paths:
+                continue
+            output_path = path_remap.get(full_path, full_path)
+            if not output_path or not os.path.isfile(output_path) or not is_midi_file(output_path):
+                continue
+            output_key = os.path.normcase(os.path.abspath(output_path))
+            if output_key in seen:
+                continue
+            seen.add(output_key)
+            entries.append(
+                {
+                    "path": output_path,
+                    "title": self._song_list_display_text(self._song_title_for_row(row), ""),
+                    "listed_type": self._listed_file_info(full_path).get("midi_type", ""),
+                }
+            )
+        entries.sort(key=lambda entry: (os.path.basename(entry["path"]).upper(), entry["path"].upper()))
+        return entries
+
+    def _metadata_summary_text(self, entries):
+        lines = [
+            "MIDI Metadata Summary",
+            f"Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Files: {len(entries)}",
+            "",
+        ]
+        for index, entry in enumerate(entries, start=1):
+            path = entry["path"]
+            lines.append(f"{index}. {os.path.basename(path)}")
+            lines.append(f"Path: {path}")
+            title = entry.get("title", "")
+            if title:
+                lines.append(f"Title: {title}")
+            try:
+                size = os.path.getsize(path)
+                lines.append(f"Size: {display_bytes(size)}")
+            except OSError:
+                pass
+            try:
+                with open(path, "rb") as handle:
+                    midi_bytes = handle.read()
+                inspection = _inspect_midi_bytes(midi_bytes, source_label=path)
+                detail_lines = [
+                    line
+                    for line in str(inspection.get("metadata_text", "")).splitlines()
+                    if line != "Channel toggles affect this inspection preview only; they do not edit the file."
+                ]
+                if detail_lines:
+                    lines.append("")
+                    lines.extend(detail_lines)
+            except Exception as exc:
+                lines.append(f"Could not inspect MIDI metadata: {exc}")
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _write_metadata_summary_for_regular_rows(self, path_remap=None, only_paths=None, base_dir=None):
+        if not self._metadata_summary_enabled() or self.is_image_mode():
+            return [], ""
+        entries = self._metadata_summary_entries_for_regular_rows(path_remap=path_remap, only_paths=only_paths)
+        if not entries:
+            return [], ""
+        output_dir = self._metadata_summary_directory_for_paths(
+            [entry["path"] for entry in entries],
+            base_dir=base_dir,
+        )
+        if not output_dir:
+            return ["Could not choose a folder for metadata_summary.txt."], ""
+        summary_path = self._metadata_summary_path_for_directory(output_dir)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            with open(summary_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(self._metadata_summary_text(entries))
+            return [], summary_path
+        except Exception as exc:
+            return [f"Could not write metadata_summary.txt: {exc}"], ""
 
     def _tag_sidecar_path_for_output(self, output_path):
         base_path, _ext = os.path.splitext(output_path)
@@ -6708,6 +7937,52 @@ class MidiTitleWindow(QMainWindow):
     def _greaseweazle_drive_options(self):
         return ["A", "B", "0", "1", "2"]
 
+    def _greaseweazle_image_type_options(self, *, include_none=False):
+        options = []
+        if include_none:
+            options.append(("none", "Do not offer to save an image"))
+        options.extend(
+            [
+                ("hfe", "HFE (Nalbantov) image"),
+                ("scp", "SCP (raw SCP flux capture)"),
+                ("img", "IMG raw sector image"),
+                ("bin", "BIN raw sector image"),
+                ("ima", "IMA raw sector image"),
+            ]
+        )
+        return options
+
+    def _greaseweazle_image_type_label(self, image_type):
+        image_type = str(image_type or "").lower().lstrip(".")
+        for option_ext, option_label in self._greaseweazle_image_type_options(include_none=True):
+            if option_ext == image_type:
+                return option_label
+        return f"{image_type.upper()} image" if image_type else "image"
+
+    def _saved_greaseweazle_image_type(self, *, default_ext="hfe", include_none=False):
+        allowed = {ext for ext, _label in self._greaseweazle_image_type_options(include_none=include_none)}
+        value = str(
+            self.settings.value(self.SETTING_READ_FLOPPY_GW_IMAGE_TYPE, "") or ""
+        ).strip().lower().lstrip(".")
+        if value in allowed:
+            return value
+        if self.settings.value(self.SETTING_READ_FLOPPY_GW_ARCHIVAL, False, type=bool):
+            return "scp"
+        default_ext = str(default_ext or "hfe").lower().lstrip(".")
+        if default_ext in allowed:
+            return default_ext
+        return "hfe"
+
+    def _populate_greaseweazle_image_type_combo(self, combo, *, default_ext="hfe", include_none=False):
+        default_ext = str(default_ext or "hfe").lower().lstrip(".")
+        combo.clear()
+        selected_index = 0
+        for index, (ext, label) in enumerate(self._greaseweazle_image_type_options(include_none=include_none)):
+            combo.addItem(label, ext)
+            if ext == default_ext:
+                selected_index = index
+        combo.setCurrentIndex(selected_index)
+
     def _restore_greaseweazle_dialog_selection(self, devices, device_combo, drive_options, drive_combo):
         saved_device_path = str(
             self.settings.value(self.SETTING_GREASEWEAZLE_DEVICE_PATH, "") or ""
@@ -6736,6 +8011,7 @@ class MidiTitleWindow(QMainWindow):
         source_kind,
         *,
         archival_quality=None,
+        image_type=None,
         disk_format=None,
         revs=None,
         retries=None,
@@ -6744,6 +8020,10 @@ class MidiTitleWindow(QMainWindow):
             self.settings.setValue(self.SETTING_READ_FLOPPY_SOURCE_KIND, source_kind)
         if archival_quality is not None:
             self.settings.setValue(self.SETTING_READ_FLOPPY_GW_ARCHIVAL, bool(archival_quality))
+        if image_type is not None:
+            image_type = str(image_type or "none").strip().lower().lstrip(".")
+            self.settings.setValue(self.SETTING_READ_FLOPPY_GW_IMAGE_TYPE, image_type or "none")
+            self.settings.setValue(self.SETTING_READ_FLOPPY_GW_ARCHIVAL, image_type == "scp")
         format_key = str(getattr(disk_format, "key", "") or "").strip()
         if format_key:
             self.settings.setValue(self.SETTING_READ_FLOPPY_GW_FORMAT, format_key)
@@ -6772,10 +8052,11 @@ class MidiTitleWindow(QMainWindow):
             if index >= 0:
                 source_combo.setCurrentIndex(index)
 
-    def _populate_disk_format_combo(self, combo, *, default_key="ibm.720"):
+    def _populate_disk_format_combo(self, combo, *, default_key="ibm.720", formats=None):
         selected_index = 0
+        format_options = list(formats or DISK_FORMATS)
         combo.clear()
-        for index, disk_format in enumerate(DISK_FORMATS):
+        for index, disk_format in enumerate(format_options):
             combo.addItem(
                 f"{disk_format.label} ({display_bytes(disk_format.size_bytes)})",
                 disk_format,
@@ -6783,6 +8064,297 @@ class MidiTitleWindow(QMainWindow):
             if disk_format.key == default_key:
                 selected_index = index
         combo.setCurrentIndex(selected_index)
+
+    def _select_disk_format_combo_key(self, combo, format_key):
+        format_key = str(format_key or "").strip()
+        if not format_key:
+            return
+        for index in range(combo.count()):
+            disk_format = combo.itemData(index)
+            if getattr(disk_format, "key", "") == format_key:
+                combo.setCurrentIndex(index)
+                return
+
+    def _choose_floppy_image_capture_options(self):
+        floppy_drives = list_floppy_drives()
+        greaseweazle_devices = list_greaseweazle_devices()
+
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle("Image Floppy")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(560)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(8)
+
+        hint = QLabel(
+            "Create an image file from a physical floppy without opening, scanning, repairing, or converting its contents."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        source_combo = QComboBox(dialog)
+        source_combo.addItem("Floppy Drive", "floppy_usb")
+        source_combo.addItem("Greaseweazle", "floppy_gw")
+        self._restore_read_floppy_source_selection(
+            source_combo,
+            has_floppy_drives=bool(floppy_drives),
+            has_greaseweazle_devices=bool(greaseweazle_devices),
+        )
+
+        common_grid = self._make_dialog_form_grid()
+        source_label = self._add_dialog_form_row(common_grid, 0, "Image using:", source_combo)
+        layout.addLayout(common_grid)
+
+        drive_page = QWidget(dialog)
+        drive_grid = self._make_dialog_form_grid()
+        drive_page.setLayout(drive_grid)
+        drive_combo = QComboBox(drive_page)
+        if floppy_drives:
+            for drive in floppy_drives:
+                drive_combo.addItem(drive.display_name, drive)
+        else:
+            drive_combo.addItem("No supported floppy drive detected", None)
+            drive_combo.setEnabled(False)
+        detected_drive_format = None
+        if floppy_drives:
+            detected_drive_format = floppy_drives[0].disk_format
+        drive_format_combo = QComboBox(drive_page)
+        self._populate_disk_format_combo(
+            drive_format_combo,
+            default_key=getattr(detected_drive_format, "key", "") or "ibm.720",
+        )
+        drive_label = self._add_dialog_form_row(drive_grid, 0, "Floppy drive:", drive_combo)
+        drive_format_label = self._add_dialog_form_row(drive_grid, 1, "Disk size:", drive_format_combo)
+        layout.addWidget(drive_page)
+
+        gw_page = QWidget(dialog)
+        gw_grid = self._make_dialog_form_grid()
+        gw_page.setLayout(gw_grid)
+        gw_device_combo = QComboBox(gw_page)
+        if greaseweazle_devices:
+            for device in greaseweazle_devices:
+                gw_device_combo.addItem(device.display_name, device)
+        else:
+            gw_device_combo.addItem("No Greaseweazle device detected", None)
+            gw_device_combo.setEnabled(False)
+
+        gw_drive_combo = QComboBox(gw_page)
+        drive_options = self._greaseweazle_drive_options()
+        gw_drive_combo.addItems(drive_options)
+        if greaseweazle_devices:
+            self._restore_greaseweazle_dialog_selection(
+                greaseweazle_devices,
+                gw_device_combo,
+                drive_options,
+                gw_drive_combo,
+            )
+
+        gw_format_combo = QComboBox(gw_page)
+        saved_gw_format_key = str(
+            self.settings.value(self.SETTING_READ_FLOPPY_GW_FORMAT, "ibm.720") or "ibm.720"
+        ).strip()
+        self._populate_disk_format_combo(
+            gw_format_combo,
+            default_key=saved_gw_format_key,
+            formats=GW_IMAGE_FORMATS,
+        )
+
+        revs_spin = QSpinBox(gw_page)
+        revs_spin.setRange(0, 20)
+        revs_spin.setSpecialValueText("CLI default")
+        revs_spin.setValue(
+            max(0, min(20, self.settings.value(self.SETTING_READ_FLOPPY_GW_REVS, 0, type=int)))
+        )
+
+        retries_spin = QSpinBox(gw_page)
+        retries_spin.setRange(0, 20)
+        retries_spin.setSpecialValueText("CLI default")
+        retries_spin.setValue(
+            max(0, min(20, self.settings.value(self.SETTING_READ_FLOPPY_GW_RETRIES, 3, type=int)))
+        )
+
+        gw_image_type_combo = QComboBox(gw_page)
+        self._populate_greaseweazle_image_type_combo(
+            gw_image_type_combo,
+            default_ext=self._saved_greaseweazle_image_type(default_ext="hfe"),
+        )
+        gw_image_type_combo.setToolTip(
+            "Choose SCP for a raw flux capture. Other image types are decoded using the selected disk format."
+        )
+
+        gw_device_label = self._add_dialog_form_row(gw_grid, 0, "Greaseweazle device:", gw_device_combo)
+        gw_drive_label = self._add_dialog_form_row(gw_grid, 1, "Drive:", gw_drive_combo)
+        gw_format_label = self._add_dialog_form_row(gw_grid, 2, "Disk format:", gw_format_combo)
+        revs_label = self._add_dialog_form_row(gw_grid, 3, "Read revs:", revs_spin)
+        retries_label = self._add_dialog_form_row(gw_grid, 4, "Read retries:", retries_spin)
+        gw_image_type_label = self._add_dialog_form_row(gw_grid, 5, "Image type:", gw_image_type_combo)
+        layout.addWidget(gw_page)
+
+        self._align_dialog_form_labels(
+            [
+                source_label,
+                drive_label,
+                drive_format_label,
+                gw_device_label,
+                gw_drive_label,
+                gw_format_label,
+                revs_label,
+                retries_label,
+                gw_image_type_label,
+            ]
+        )
+
+        buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setText("Image")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def resize_dialog_to_content():
+            dialog.layout().activate()
+            hint_size = dialog.sizeHint()
+            dialog.resize(max(dialog.minimumWidth(), hint_size.width()), hint_size.height())
+
+        def refresh_drive_disk_size():
+            drive_info = drive_combo.currentData()
+            disk_format = getattr(drive_info, "disk_format", None)
+            if disk_format is not None:
+                self._select_disk_format_combo_key(drive_format_combo, disk_format.key)
+
+        def refresh_source_state():
+            source_kind = source_combo.currentData()
+            is_gw = source_kind == "floppy_gw"
+            drive_page.setVisible(not is_gw)
+            gw_page.setVisible(is_gw)
+            ok = buttons.button(QDialogButtonBox.Ok)
+            if ok is not None:
+                ok.setEnabled(bool(greaseweazle_devices) if is_gw else bool(floppy_drives))
+            QTimer.singleShot(0, resize_dialog_to_content)
+
+        drive_combo.currentIndexChanged.connect(refresh_drive_disk_size)
+        source_combo.currentIndexChanged.connect(refresh_source_state)
+        refresh_drive_disk_size()
+        refresh_source_state()
+        resize_dialog_to_content()
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return None
+
+        source_kind = source_combo.currentData()
+        if source_kind == "floppy_usb":
+            drive_info = drive_combo.currentData()
+            disk_format = drive_format_combo.currentData()
+            if not isinstance(drive_info, FloppyDriveInfo):
+                QMessageBox.information(
+                    self,
+                    "No Floppy Drive Found",
+                    "No supported floppy drive was detected. Insert a disk and try again.",
+                )
+                return None
+            self._remember_read_floppy_dialog_selection(source_kind)
+            return {
+                "source_kind": source_kind,
+                "source": drive_info,
+                "disk_format": disk_format,
+                "source_name": drive_info.display_name,
+                "output_ext": "img",
+            }
+
+        selected_device = gw_device_combo.currentData()
+        if selected_device is None:
+            QMessageBox.information(
+                self,
+                "No Greaseweazle Found",
+                "No Greaseweazle device was detected. Connect one and try again.",
+            )
+            return None
+        selected_drive = drive_options[gw_drive_combo.currentIndex()]
+        disk_format = gw_format_combo.currentData()
+        output_ext = str(gw_image_type_combo.currentData() or "hfe").lower().lstrip(".")
+        archival_quality = output_ext == "scp"
+        read_revs = revs_spin.value()
+        read_retries = retries_spin.value()
+        self._remember_greaseweazle_dialog_selection(selected_device, selected_drive)
+        self._remember_read_floppy_dialog_selection(
+            source_kind,
+            archival_quality=archival_quality,
+            image_type=output_ext,
+            disk_format=disk_format,
+            revs=read_revs,
+            retries=read_retries,
+        )
+        source = GreaseweazleFloppySource(
+            device_path=selected_device.path,
+            drive=selected_drive,
+            disk_format=disk_format,
+            archival_quality=archival_quality,
+            revs=read_revs,
+            retries=read_retries,
+            capture_output_ext=output_ext,
+        )
+        return {
+            "source_kind": source_kind,
+            "source": source,
+            "disk_format": disk_format,
+            "source_name": source.display_name,
+            "output_ext": output_ext,
+        }
+
+    def _choose_floppy_image_capture_output_path(self, default_ext):
+        default_ext = (default_ext or "img").lower().lstrip(".")
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"floppy_image_{timestamp}.{default_ext}"
+        default_path = os.path.join(os.path.expanduser("~"), default_name)
+        if default_ext == "scp":
+            filters = "SCP flux capture (*.scp);;All files (*)"
+            title = "Save SCP Flux Capture"
+        elif default_ext == "hfe":
+            filters = "HFE image (*.hfe);;All files (*)"
+            title = "Save HFE Image"
+        elif default_ext in {"img", "bin", "ima", "vfd"}:
+            filters = f"{default_ext.upper()} raw sector image (*.{default_ext});;All files (*)"
+            title = f"Save {default_ext.upper()} Image"
+        else:
+            label = self._greaseweazle_image_type_label(default_ext)
+            filters = f"{label} (*.{default_ext});;All files (*)"
+            title = f"Save {default_ext.upper()} Image"
+        output_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            title,
+            default_path,
+            filters,
+        )
+        if not output_path:
+            return ""
+        if not os.path.splitext(output_path)[1]:
+            output_path = f"{output_path}.{default_ext}"
+        return output_path
+
+    def image_floppy_disk(self):
+        if self._disk_worker_busy():
+            QMessageBox.information(self, "Busy", "Please wait for disk processing to finish.")
+            return
+
+        options = self._choose_floppy_image_capture_options()
+        if not options:
+            return
+
+        output_path = self._choose_floppy_image_capture_output_path(options.get("output_ext", "img"))
+        if not output_path:
+            return
+
+        self._start_floppy_image_capture_worker(
+            options["source_kind"],
+            options["source"],
+            output_path,
+            disk_format=options.get("disk_format"),
+            source_name=options.get("source_name", "the selected floppy"),
+        )
 
     def _choose_floppy_read_options(self, *, default_recovery=False):
         floppy_drives = list_floppy_drives()
@@ -6841,7 +8413,13 @@ class MidiTitleWindow(QMainWindow):
         drive_recovery_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         drive_recovery_format_combo = QComboBox(drive_page)
-        self._populate_disk_format_combo(drive_recovery_format_combo)
+        saved_recovery_format_key = str(
+            self.settings.value(self.SETTING_RECOVERY_FLOPPY_FORMAT, "ibm.720") or "ibm.720"
+        ).strip()
+        self._populate_disk_format_combo(
+            drive_recovery_format_combo,
+            default_key=saved_recovery_format_key,
+        )
         drive_layout.addWidget(drive_recovery_label, 1, 0)
         drive_layout.addWidget(drive_recovery_format_combo, 1, 1)
         layout.addWidget(drive_page)
@@ -6922,24 +8500,33 @@ class MidiTitleWindow(QMainWindow):
         gw_layout.addWidget(retries_label, 4, 0)
         gw_layout.addWidget(retries_spin, 4, 1)
 
-        archival_checkbox = QCheckBox("Archival quality (raw SCP flux capture)")
-        archival_checkbox.setChecked(
-            self.settings.value(self.SETTING_READ_FLOPPY_GW_ARCHIVAL, False, type=bool)
+        gw_image_type_label = QLabel("Save image:")
+        gw_image_type_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        gw_image_type_combo = QComboBox(gw_page)
+        self._populate_greaseweazle_image_type_combo(
+            gw_image_type_combo,
+            default_ext=self._saved_greaseweazle_image_type(default_ext="hfe", include_none=True),
+            include_none=True,
         )
-        archival_checkbox.setToolTip(
-            "Reads a raw magnetic flux capture to SCP first, then converts it using the selected disk format."
+        gw_image_type_combo.setToolTip(
+            "Choose the image type to offer after the disk opens. SCP reads as raw flux first; other types use the selected disk format."
         )
-        gw_layout.addWidget(archival_checkbox, 5, 1)
+        gw_layout.addWidget(gw_image_type_label, 5, 0)
+        gw_layout.addWidget(gw_image_type_combo, 5, 1)
 
         gw_hint = QLabel(
-            "Use archival quality for difficult disks or when you want the option to save a raw SCP capture after opening."
+            "Choose SCP for a raw flux capture. HFE is the usual Nalbantov-friendly image type."
         )
         gw_hint.setWordWrap(True)
         gw_layout.addWidget(gw_hint, 6, 1)
         layout.addWidget(gw_page)
 
         recovery_checkbox = QCheckBox("Start in recovery mode")
-        recovery_checkbox.setChecked(bool(default_recovery))
+        recovery_checkbox.setChecked(
+            bool(default_recovery)
+            or self.settings.value(self.SETTING_READ_FLOPPY_START_RECOVERY, False, type=bool)
+        )
         recovery_checkbox.setToolTip(
             "Copies a full disk image and tries Yamaha/FAT repair plus raw MIDI/E-SEQ/PIANODIR scanning. "
             "The source floppy is not modified."
@@ -6990,6 +8577,7 @@ class MidiTitleWindow(QMainWindow):
             gw_format_label,
             revs_label,
             retries_label,
+            gw_image_type_label,
             recovery_label_spacer,
             convert_label_spacer,
         ]
@@ -7040,6 +8628,7 @@ class MidiTitleWindow(QMainWindow):
         recover = recovery_checkbox.isChecked()
         convert_to_midi = convert_to_midi_checkbox.isChecked()
         self.settings.setValue(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, convert_to_midi)
+        self.settings.setValue(self.SETTING_READ_FLOPPY_START_RECOVERY, recover)
         if source_kind == "floppy_usb":
             drive_info = drive_combo.currentData()
             if not isinstance(drive_info, FloppyDriveInfo):
@@ -7052,6 +8641,11 @@ class MidiTitleWindow(QMainWindow):
             self._remember_read_floppy_dialog_selection(source_kind)
             if recover:
                 disk_format = drive_recovery_format_combo.currentData()
+                self.settings.setValue(
+                    self.SETTING_RECOVERY_FLOPPY_FORMAT,
+                    str(getattr(disk_format, "key", "") or "ibm.720"),
+                )
+                self.settings.sync()
                 return {
                     "load_kind": "floppy_usb",
                     "source": FloppyRecoverySource(drive_info, disk_format),
@@ -7084,12 +8678,15 @@ class MidiTitleWindow(QMainWindow):
         selected_drive = drive_options[gw_drive_combo.currentIndex()]
         self._remember_greaseweazle_dialog_selection(selected_device, selected_drive)
         disk_format = gw_format_combo.currentData()
-        archival_quality = archival_checkbox.isChecked()
+        selected_image_type = str(gw_image_type_combo.currentData() or "none").lower().lstrip(".")
+        save_image_ext = "" if selected_image_type == "none" else selected_image_type
+        archival_quality = save_image_ext == "scp"
         read_revs = revs_spin.value()
         read_retries = retries_spin.value()
         self._remember_read_floppy_dialog_selection(
             source_kind,
             archival_quality=archival_quality,
+            image_type=selected_image_type,
             disk_format=disk_format,
             revs=read_revs,
             retries=read_retries,
@@ -7101,22 +8698,8 @@ class MidiTitleWindow(QMainWindow):
             archival_quality=archival_quality,
             revs=read_revs,
             retries=read_retries,
+            capture_output_ext=save_image_ext,
         )
-        if source.archival_quality:
-            return {
-                "load_kind": "floppy_gw_capture_only",
-                "source": {
-                    "gw_source": source,
-                    "recover_after_capture": recover,
-                },
-                "recover": False,
-                "source_label": f"Greaseweazle floppy ({disk_format.label})",
-                "progress_title": "Reading Floppy via Greaseweazle (Archival SCP)",
-                "progress_total": 2,
-                "final_message": "Greaseweazle SCP capture ready.",
-                "offer_greaseweazle_capture": False,
-                "convert_to_midi": convert_to_midi,
-            }
         if recover:
             return {
                 "load_kind": "floppy_gw",
@@ -7128,7 +8711,11 @@ class MidiTitleWindow(QMainWindow):
                 "offer_greaseweazle_capture": False,
                 "convert_to_midi": convert_to_midi,
             }
-        progress_title = "Reading Floppy via Greaseweazle"
+        progress_title = (
+            "Reading Floppy via Greaseweazle (Raw SCP)"
+            if source.archival_quality
+            else "Reading Floppy via Greaseweazle"
+        )
         progress_total = 5 if source.archival_quality else 4
         return {
             "load_kind": "floppy_gw",
@@ -7137,7 +8724,7 @@ class MidiTitleWindow(QMainWindow):
             "source_label": f"Greaseweazle floppy ({disk_format.label})",
             "progress_title": progress_title,
             "progress_total": progress_total,
-            "offer_greaseweazle_capture": False,
+            "offer_greaseweazle_capture": bool(save_image_ext),
             "convert_to_midi": convert_to_midi,
         }
 
@@ -7192,11 +8779,25 @@ class MidiTitleWindow(QMainWindow):
             target_name=target_name,
         )
 
+    def format_disklavier_usb_stick(self):
+        if self._disk_worker_busy():
+            QMessageBox.information(self, "Busy", "Please wait for disk processing to finish.")
+            return
+
+        dialog = UsbFormatDialog(self)
+        self._exec_child_dialog(dialog)
+        if dialog.was_formatted:
+            result = dialog.format_result or {}
+            layout = result.get("layout", "FAT32")
+            device = result.get("device", "the selected USB stick")
+            self.status_label.setText(f"Formatted {device} as {layout}.")
+
     def _start_floppy_format_worker(self, source_kind, selected_source, disk_format, *, eseq_disk, target_name):
         if self._disk_worker_busy():
             QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
             return
 
+        self._reset_gw_sector_report_dedupe()
         mode_label = "E-SEQ" if eseq_disk else "MIDI"
         progress_text = f"Formatting Yamaha Disklavier {mode_label} floppy..."
         progress_dialog = QProgressDialog(progress_text, "Cancel", 0, 5, self)
@@ -7265,6 +8866,7 @@ class MidiTitleWindow(QMainWindow):
         self.status_label.setText(
             f"Formatted {target_name} as {format_label} Yamaha Disklavier {mode_label} floppy."
         )
+        self._show_greaseweazle_sector_reports(getattr(session, "latest_gw_sector_reports", ()))
         QMessageBox.information(
             self,
             "Floppy Formatted",
@@ -7632,6 +9234,7 @@ class MidiTitleWindow(QMainWindow):
         )
 
     def _start_write_image_to_floppy_worker(self, target_kind, target, target_name, operations, *, file_level=False):
+        self._reset_gw_sector_report_dedupe()
         if file_level:
             progress_text = "Saving files to floppy..."
             progress_title = "Saving To Floppy"
@@ -7690,6 +9293,10 @@ class MidiTitleWindow(QMainWindow):
         if self.diskWriteTargetProgressDialog is not None:
             self.diskWriteTargetProgressDialog.close()
             self.diskWriteTargetProgressDialog = None
+        if self.image_session is not None:
+            self._show_greaseweazle_sector_reports(
+                getattr(self.image_session, "latest_gw_sector_reports", ())
+            )
         if file_level:
             QMessageBox.information(self, "Floppy Saved", f"The current files were saved to {target_name}.")
             self.status_label.setText(f"Saved current files to {target_name}.")
@@ -7800,9 +9407,17 @@ class MidiTitleWindow(QMainWindow):
             and capture_path
             and os.path.isfile(capture_path)
         )
-        prompt_text = "Save the imported Greaseweazle floppy as an image file now?"
+        preferred_ext = str(
+            getattr(self.image_session.gw_source, "capture_output_ext", "") or ""
+        ).lower().lstrip(".")
+        if not preferred_ext:
+            preferred_ext = "scp" if is_archival_scp else "hfe"
+        prompt_text = (
+            f"Save the imported Greaseweazle floppy as "
+            f"{self._greaseweazle_image_type_label(preferred_ext)} now?"
+        )
         if is_archival_scp:
-            prompt_text = "Save the raw archival Greaseweazle SCP flux capture now?"
+            prompt_text = "Save the raw Greaseweazle SCP flux capture now?"
         reply = QMessageBox.question(
             self,
             "Save Greaseweazle Capture",
@@ -7819,7 +9434,7 @@ class MidiTitleWindow(QMainWindow):
             )
             default_stem = self._sanitize_export_folder_name(catalog_number) if catalog_number else ""
             if not default_stem:
-                default_stem = f"gw_drive_{drive_name}_archival"
+                default_stem = f"gw_drive_{drive_name}_raw"
             default_path = os.path.join(
                 os.path.expanduser("~"),
                 f"{default_stem}.scp",
@@ -7851,7 +9466,7 @@ class MidiTitleWindow(QMainWindow):
         self.save_image_as()
 
     def _image_open_filters(self):
-        common_exts = ("img", "hfe", "bin")
+        common_exts = ("img", "vfd", "hfe", "bin")
         common_patterns = " ".join(
             pattern
             for ext in common_exts
@@ -7869,6 +9484,7 @@ class MidiTitleWindow(QMainWindow):
         all_patterns = " ".join(f"*.{ext}" for ext in all_exts)
         return (
             f"Common floppy images ({common_patterns});;"
+            "Electone/MPC/V50 sequence files (*.evt *.EVT *.seq *.SEQ *.all *.ALL);;"
             f"All supported images ({all_patterns});;"
             "All files (*)"
         )
@@ -7900,18 +9516,28 @@ class MidiTitleWindow(QMainWindow):
         image_row = QHBoxLayout()
         image_edit = QLineEdit(dialog)
         image_edit.setPlaceholderText("Choose a floppy image")
+        saved_image_path = str(self.settings.value(self.SETTING_RECOVERY_IMAGE_PATH, "") or "").strip()
+        if saved_image_path and os.path.isfile(saved_image_path):
+            image_edit.setText(saved_image_path)
         image_row.addWidget(image_edit, stretch=1)
 
         browse_button = QPushButton("Browse...")
         image_row.addWidget(browse_button)
 
         format_combo = QComboBox(dialog)
+        saved_format_key = str(
+            self.settings.value(self.SETTING_RECOVERY_IMAGE_FORMAT, "autodetect") or "autodetect"
+        ).strip()
         format_combo.addItem("Autodetect", None)
+        selected_format_index = 0
         for disk_format in DISK_FORMATS:
             format_combo.addItem(
                 f"{disk_format.label} ({display_bytes(disk_format.size_bytes)})",
                 disk_format,
             )
+            if disk_format.key == saved_format_key:
+                selected_format_index = format_combo.count() - 1
+        format_combo.setCurrentIndex(selected_format_index)
 
         form_grid = self._make_dialog_form_grid()
         image_label = self._add_dialog_form_row(form_grid, 0, "Image:", image_row)
@@ -7919,11 +9545,23 @@ class MidiTitleWindow(QMainWindow):
         self._align_dialog_form_labels([image_label, format_label])
         layout.addLayout(form_grid)
 
+        def browse_start_path():
+            current_path = image_edit.text().strip()
+            if current_path:
+                return current_path
+            if saved_image_path:
+                if os.path.exists(saved_image_path):
+                    return saved_image_path
+                saved_dir = os.path.dirname(saved_image_path)
+                if saved_dir and os.path.isdir(saved_dir):
+                    return saved_dir
+            return os.path.expanduser("~")
+
         def browse_image():
             selected_path, _ = QFileDialog.getOpenFileName(
                 dialog,
                 "Choose Damaged Floppy Image",
-                image_edit.text().strip() or os.path.expanduser("~"),
+                browse_start_path(),
                 self._image_open_filters(),
             )
             if selected_path:
@@ -7950,6 +9588,12 @@ class MidiTitleWindow(QMainWindow):
             return
 
         disk_format = format_combo.currentData()
+        self.settings.setValue(self.SETTING_RECOVERY_IMAGE_PATH, image_path)
+        self.settings.setValue(
+            self.SETTING_RECOVERY_IMAGE_FORMAT,
+            str(getattr(disk_format, "key", "") or "autodetect"),
+        )
+        self.settings.sync()
         source = ImageRecoverySource(path=image_path, disk_format=disk_format)
         self._start_disk_recovery_worker(
             {
@@ -7980,13 +9624,16 @@ class MidiTitleWindow(QMainWindow):
         layout.addWidget(hint)
 
         format_combo = QComboBox(dialog)
+        saved_format_key = str(
+            self.settings.value(self.SETTING_RECOVERY_FLOPPY_FORMAT, "ibm.720") or "ibm.720"
+        ).strip()
         default_index = 0
         for index, disk_format in enumerate(DISK_FORMATS):
             format_combo.addItem(
                 f"{disk_format.label} ({display_bytes(disk_format.size_bytes)})",
                 disk_format,
             )
-            if disk_format.key == "ibm.720":
+            if disk_format.key == saved_format_key:
                 default_index = index
         format_combo.setCurrentIndex(default_index)
 
@@ -8002,7 +9649,13 @@ class MidiTitleWindow(QMainWindow):
 
         if self._exec_child_dialog(dialog) != QDialog.Accepted:
             return None
-        return format_combo.currentData()
+        disk_format = format_combo.currentData()
+        self.settings.setValue(
+            self.SETTING_RECOVERY_FLOPPY_FORMAT,
+            str(getattr(disk_format, "key", "") or "ibm.720"),
+        )
+        self.settings.sync()
+        return disk_format
 
     def _wrap_floppy_recovery_source_with_format(self, source):
         if isinstance(source, FloppyRecoverySource):
@@ -8018,6 +9671,59 @@ class MidiTitleWindow(QMainWindow):
         self.load_floppy_drive(default_recovery=True)
 
     def load_image_file(self, image_path, prevalidated=False):
+        if self._is_electone_evt_path(image_path):
+            if not prevalidated and not self._prepare_for_disk_load("this Electone EVT file"):
+                return
+            if self._prompt_for_electone_evt_conversion(
+                [os.path.basename(image_path)],
+                os.path.dirname(image_path),
+            ):
+                self._cleanup_midi_scratch_dir()
+                self._convert_electone_evt_files_to_midi_mode(
+                    [image_path],
+                    os.path.basename(image_path) or "Electone EVT file",
+                    reset_current_image=self.is_image_mode(),
+                    confirm_image_exit=False,
+                )
+            else:
+                self.status_label.setText("Electone MDR conversion skipped.")
+            return
+
+        v50_summary = self._v50_nseq_sequence_summary_for_file(image_path)
+        if v50_summary:
+            if not prevalidated and not self._prepare_for_disk_load("this V50/SY77 ALL file"):
+                return
+            if self._prompt_for_v50_nseq_conversion(v50_summary):
+                self._cleanup_midi_scratch_dir()
+                self._convert_v50_nseq_files_to_midi_mode(
+                    [image_path],
+                    os.path.basename(image_path) or "V50/SY77 ALL file",
+                    v50_summary,
+                    reset_current_image=self.is_image_mode(),
+                    confirm_image_exit=False,
+                )
+            else:
+                self.status_label.setText("V50/SY77 ALL file conversion skipped.")
+            return
+
+        if self._is_mpc_sequence_source_path(image_path):
+            if not prevalidated and not self._prepare_for_disk_load("this MPC sequence file"):
+                return
+            if self._prompt_for_mpc_seq_conversion(
+                [os.path.basename(image_path)],
+                os.path.dirname(image_path),
+            ):
+                self._cleanup_midi_scratch_dir()
+                self._convert_mpc_seq_files_to_midi_mode(
+                    [image_path],
+                    os.path.basename(image_path) or "MPC sequence file",
+                    reset_current_image=self.is_image_mode(),
+                    confirm_image_exit=False,
+                )
+            else:
+                self.status_label.setText("MPC sequence conversion skipped.")
+            return
+
         if not prevalidated and not self._prepare_for_disk_load("this floppy image"):
             return
 
@@ -8063,6 +9769,151 @@ class MidiTitleWindow(QMainWindow):
             failure_title="Floppy Load Failed",
             offer_greaseweazle_capture=bool(options.get("offer_greaseweazle_capture")),
         )
+
+    def _start_floppy_image_capture_worker(
+        self,
+        source_kind,
+        source,
+        output_path,
+        *,
+        disk_format=None,
+        source_name="the selected floppy",
+    ):
+        if self._disk_worker_busy():
+            QMessageBox.information(self, "Busy", "Please wait for disk processing to finish.")
+            return
+
+        self._reset_gw_sector_report_dedupe()
+        is_image_conversion = source_kind == "image_convert"
+        progress_title = "Convert Image" if is_image_conversion else "Image Floppy"
+        progress_label = "Converting image..." if is_image_conversion else "Imaging floppy..."
+        operation_label = "image conversion" if is_image_conversion else "floppy imaging"
+        progress_dialog = QProgressDialog(progress_label, "Cancel", 0, 100, self)
+        progress_dialog.setWindowTitle(progress_title)
+        self._prepare_progress_dialog(progress_dialog)
+        progress_dialog.setAutoClose(False)
+        self._apply_stage_progress(progress_dialog, 0, 100, f"Preparing {operation_label}...")
+
+        worker = DiskImageCaptureWorker(
+            source_kind,
+            source,
+            output_path,
+            disk_format=disk_format,
+            parent=self,
+        )
+        worker.progressChanged.connect(
+            lambda step, total, message, dialog=progress_dialog: self._apply_stage_progress(
+                dialog, step, total, message
+            )
+        )
+        progress_dialog.canceled.connect(worker.cancel)
+        progress_dialog.canceled.connect(
+            lambda dialog=progress_dialog, label=operation_label: dialog.setLabelText(
+                f"Cancelling {label}..."
+            )
+        )
+        worker.captureFinished.connect(self._on_floppy_image_capture_success)
+        worker.captureFailed.connect(self._on_floppy_image_capture_failure)
+        worker.operationCancelled.connect(self._on_floppy_image_capture_cancelled)
+        worker.finished.connect(self._on_floppy_image_capture_finished)
+
+        self.diskImageCaptureWorker = worker
+        self.diskImageCaptureProgressDialog = progress_dialog
+        self.diskImageCaptureContext = {
+            "source_name": source_name,
+            "output_path": output_path,
+            "source_kind": source_kind,
+        }
+        self._set_disk_load_busy(True)
+        worker.start()
+
+    def _on_floppy_image_capture_success(self, payload):
+        if self.diskImageCaptureProgressDialog is not None:
+            self.diskImageCaptureProgressDialog.close()
+            self.diskImageCaptureProgressDialog = None
+        payload = dict(payload or {})
+        output_path = payload.get("output_path") or self.diskImageCaptureContext.get("output_path", "")
+        source_name = self.diskImageCaptureContext.get("source_name", "the selected floppy")
+        source_kind = payload.get("source_kind") or self.diskImageCaptureContext.get("source_kind", "")
+        is_image_conversion = source_kind == "image_convert"
+        filename = os.path.basename(output_path) if output_path else "the selected image file"
+        action = "Converted" if is_image_conversion else "Imaged"
+        self.status_label.setText(
+            f"{action} {source_name} to {filename}. The image was saved but not opened or scanned."
+        )
+        QMessageBox.information(
+            self,
+            "Image Conversion Complete" if is_image_conversion else "Image Floppy Complete",
+            (
+                f"Saved {filename}.\n\n"
+                "The converted image was not opened, scanned, or repaired."
+            )
+            if is_image_conversion
+            else f"Saved {filename}.\n\nThe disk contents were not opened, scanned, repaired, or converted.",
+        )
+        source = payload.get("source")
+        if isinstance(source, GreaseweazleFloppySource):
+            self._show_greaseweazle_sector_reports(
+                [
+                    {
+                        "type": "read",
+                        "title": "Greaseweazle Read Sector Map",
+                        "summary": f"Read {source.display_name}.",
+                        "sector_map": payload.get("sector_map") or {},
+                        "disk_format": source.disk_format,
+                    }
+                ]
+            )
+        elif is_image_conversion:
+            disk_format = payload.get("disk_format")
+            self._show_greaseweazle_sector_reports(
+                [
+                    {
+                        "type": "convert",
+                        "title": "Greaseweazle Conversion Sector Map",
+                        "summary": (
+                            f"Converted {os.path.basename(str(source or source_name))} as "
+                            f"{disk_format.label if disk_format else 'the selected format'}."
+                        ),
+                        "sector_map": payload.get("sector_map") or {},
+                        "disk_format": disk_format,
+                    }
+                ]
+            )
+
+    def _on_floppy_image_capture_failure(self, message):
+        if self.diskImageCaptureProgressDialog is not None:
+            self.diskImageCaptureProgressDialog.close()
+            self.diskImageCaptureProgressDialog = None
+        source_name = self.diskImageCaptureContext.get("source_name", "the selected floppy")
+        is_image_conversion = self.diskImageCaptureContext.get("source_kind") == "image_convert"
+        guidance = (
+            "Check the source image, selected format, and output location before trying again"
+            if is_image_conversion
+            else "Check the selected drive, disk size, disk condition, and permissions before trying again"
+        )
+        self._show_operation_error(
+            "Image Conversion Failed" if is_image_conversion else "Image Floppy Failed",
+            f"The app could not convert {source_name}" if is_image_conversion else f"The app could not image {source_name}",
+            message,
+            guidance=guidance,
+        )
+
+    def _on_floppy_image_capture_cancelled(self, _message):
+        if self.diskImageCaptureProgressDialog is not None:
+            self.diskImageCaptureProgressDialog.close()
+            self.diskImageCaptureProgressDialog = None
+        if self.diskImageCaptureContext.get("source_kind") == "image_convert":
+            self.status_label.setText("Image conversion cancelled. No image was saved.")
+        else:
+            self.status_label.setText("Floppy imaging cancelled. No image was saved.")
+
+    def _on_floppy_image_capture_finished(self):
+        self._set_disk_load_busy(False)
+        self.diskImageCaptureContext = {}
+        if self.diskImageCaptureWorker is not None:
+            self.diskImageCaptureWorker.deleteLater()
+            self.diskImageCaptureWorker = None
 
     def _load_image_rows(self, entries, *, auto_enable_format=False):
         self.imageFileInfo.clear()
@@ -8524,8 +10375,27 @@ class MidiTitleWindow(QMainWindow):
                 self._apply_midi_mode_ui()
             self._cleanup_midi_scratch_dir()
             file_paths = self._regular_folder_file_paths(directory)
+            electone_evt_paths = self._electone_evt_file_paths_in_folder(directory)
+            v50_nseq_paths = self._v50_nseq_all_file_paths_in_folder(directory)
+            v50_nseq_summary = self._v50_nseq_sequence_summary_for_paths(v50_nseq_paths)
             mpc_seq_paths = self._mpc_seq_file_paths_in_folder(directory)
-            if mpc_seq_paths and self._prompt_for_mpc_seq_conversion(
+            if electone_evt_paths and self._prompt_for_electone_evt_conversion(
+                [os.path.basename(path) for path in electone_evt_paths],
+                os.path.basename(directory) or directory,
+            ):
+                self._convert_electone_evt_files_to_midi_mode(
+                    electone_evt_paths,
+                    os.path.basename(directory) or directory,
+                    extra_regular_paths=file_paths,
+                )
+            elif v50_nseq_summary and self._prompt_for_v50_nseq_conversion(v50_nseq_summary):
+                self._convert_v50_nseq_files_to_midi_mode(
+                    v50_nseq_paths,
+                    os.path.basename(directory) or directory,
+                    v50_nseq_summary,
+                    extra_regular_paths=file_paths,
+                )
+            elif mpc_seq_paths and self._prompt_for_mpc_seq_conversion(
                 [os.path.basename(path) for path in mpc_seq_paths],
                 os.path.basename(directory) or directory,
             ):
@@ -9391,18 +11261,31 @@ class MidiTitleWindow(QMainWindow):
             ):
                 return True
 
-        reply = QMessageBox.question(
-            self,
-            f"Convert All {source_kind.upper()} to {target_kind.upper()}",
-            (
-                f"Convert {len(applicable_paths)} listed {source_kind.upper()} file(s) to {target_kind.upper()}?\n\n"
-                "The converted files will be staged in the list only. Nothing will be written to disk until you use "
-                "Save, Save As, or Save As Image."
-            ),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+        prompt_title = f"Convert All {source_kind.upper()} to {target_kind.upper()}"
+        prompt_message = (
+            f"Convert {len(applicable_paths)} listed {source_kind.upper()} file(s) to {target_kind.upper()}?\n\n"
+            "The converted files will be staged in the list only. Nothing will be written to disk until you use "
+            "Save, Save As, or Save As Image."
         )
-        if reply != QMessageBox.Yes:
+        if source_kind == "eseq" and target_kind == "midi":
+            confirmed = self._question_with_optional_confirm_skip(
+                setting_key=self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
+                title=prompt_title,
+                message=prompt_message,
+                checkbox_text="Do not show this E-SEQ to MIDI conversion dialog again",
+            )
+        else:
+            confirmed = (
+                QMessageBox.question(
+                    self,
+                    prompt_title,
+                    prompt_message,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                == QMessageBox.Yes
+            )
+        if not confirmed:
             return True
 
         if source_kind == "eseq" and target_kind == "midi":
@@ -9565,14 +11448,26 @@ class MidiTitleWindow(QMainWindow):
             summary += f"\n\nIf no E-SEQ files remain, {self._eseq_directory_filename(self.imageEseqVariant)} will be removed on save."
         else:
             summary += f"\n\n{self._eseq_directory_filename(self.imageEseqVariant)} will be generated or refreshed when needed on save."
-        reply = QMessageBox.question(
-            self,
-            f"Convert All {source_kind.upper()} to {target_kind.upper()}",
-            summary,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if reply != QMessageBox.Yes:
+        prompt_title = f"Convert All {source_kind.upper()} to {target_kind.upper()}"
+        if source_kind == "eseq" and target_kind == "midi":
+            confirmed = self._question_with_optional_confirm_skip(
+                setting_key=self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
+                title=prompt_title,
+                message=summary,
+                checkbox_text="Do not show this E-SEQ to MIDI conversion dialog again",
+            )
+        else:
+            confirmed = (
+                QMessageBox.question(
+                    self,
+                    prompt_title,
+                    summary,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                == QMessageBox.Yes
+            )
+        if not confirmed:
             return
 
         if source_kind == "eseq" and target_kind == "midi":
@@ -11194,6 +13089,9 @@ class MidiTitleWindow(QMainWindow):
             progress_callback(5, 5, "Reloading floppy view...")
             self._reload_image_table_after_commit()
             progressDialog.close()
+            self._show_greaseweazle_sector_reports(
+                getattr(self.image_session, "latest_gw_sector_reports", ())
+            )
             if self.image_session.source_kind.startswith("floppy"):
                 QMessageBox.information(self, "Floppy Saved", "Floppy changes have been saved back to the disk.")
             else:
@@ -11223,6 +13121,7 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
             return
 
+        self._reset_gw_sector_report_dedupe()
         progress_dialog = QProgressDialog(progress_text, "Cancel", 0, 5, self)
         progress_dialog.setWindowTitle("Saving Floppy")
         self._prepare_progress_dialog(progress_dialog)
@@ -11267,6 +13166,9 @@ class MidiTitleWindow(QMainWindow):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self._load_image_rows(listing.entries)
+        self._show_greaseweazle_sector_reports(
+            getattr(self.image_session, "latest_gw_sector_reports", ())
+        )
         QMessageBox.information(self, "Floppy Saved", "Floppy changes have been saved back to the disk.")
         self.status_label.setText(self._image_mode_summary())
 
@@ -11510,6 +13412,15 @@ class MidiTitleWindow(QMainWindow):
             return
 
         default_ext = self.image_session.source_ext or "img"
+        if (
+            self.image_session.source_kind == "floppy_gw"
+            and self.image_session.gw_source is not None
+            and not self.image_session.gw_source.archival_quality
+        ):
+            preferred_ext = str(
+                getattr(self.image_session.gw_source, "capture_output_ext", "") or ""
+            ).lower().lstrip(".")
+            default_ext = preferred_ext or "hfe"
         filters, fallback_ext = output_filters(default_ext)
         if self.image_session.source_kind.startswith("floppy"):
             source_dir = os.path.expanduser("~")
@@ -11519,6 +13430,7 @@ class MidiTitleWindow(QMainWindow):
         else:
             source_dir = os.path.dirname(self.image_session.source_path)
             source_stem = os.path.splitext(os.path.basename(self.image_session.source_path))[0]
+        source_dir = self._last_save_as_location(source_dir)
         default_path = os.path.join(source_dir, f"{source_stem}_edited.{default_ext or fallback_ext}")
         output_path, selected_filter = QFileDialog.getSaveFileName(
             self,
@@ -11529,6 +13441,7 @@ class MidiTitleWindow(QMainWindow):
         if not output_path:
             return
 
+        self._reset_gw_sector_report_dedupe()
         selected_ext = image_extension(output_path) or self._extension_from_filter(selected_filter) or fallback_ext
         if not image_extension(output_path):
             output_path = f"{output_path}.{selected_ext}"
@@ -11559,11 +13472,14 @@ class MidiTitleWindow(QMainWindow):
                 delete_pianodir=delete_pianodir,
                 progress_callback=progress_callback,
             )
+            export_sector_reports = getattr(self.image_session, "latest_gw_sector_reports", ())
             progress_callback(5, 5, "Finalizing floppy export...")
             progressDialog.close()
             session = FloppyImageSession.load(output_path)
             listing = session.list_entries()
             self._activate_disk_session(session, listing)
+            self._remember_save_as_location(output_path)
+            self._show_greaseweazle_sector_reports(export_sector_reports)
             QMessageBox.information(self, "Save As Image Complete", f"Image saved as {os.path.basename(output_path)}.")
             self.status_label.setText(self._image_mode_summary())
         except Exception as exc:
@@ -11666,7 +13582,7 @@ class MidiTitleWindow(QMainWindow):
             return None
 
         output_label = type_combo.currentText() or f"{output_ext.upper()} image"
-        default_path = os.path.join(os.path.expanduser("~"), f"midi_floppy.{output_ext}")
+        default_path = self._default_save_as_path(f"midi_floppy.{output_ext}")
         output_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save As Image",
@@ -11808,6 +13724,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         output_path, output_ext, disk_format = options
+        self._reset_gw_sector_report_dedupe()
         staging_dir = tempfile.mkdtemp(prefix="aps_save_image_")
         progressDialog = QProgressDialog("Preparing files for image export...", None, 0, max(1, self._regular_file_count()), self)
         self._prepare_progress_dialog(progressDialog)
@@ -11822,12 +13739,14 @@ class MidiTitleWindow(QMainWindow):
                 QMessageBox.information(self, "No Files", "No valid files were available to export.")
                 return
 
+            sector_reports = []
             output_paths = create_floppy_images_from_files(
                 file_specs,
                 output_path,
                 output_ext,
                 disk_format,
                 progress_callback=progress_callback,
+                sector_report_callback=sector_reports.append,
             )
             progressDialog.close()
 
@@ -11835,6 +13754,8 @@ class MidiTitleWindow(QMainWindow):
                 session = FloppyImageSession.load(output_paths[0])
                 listing = session.list_entries()
                 self._activate_disk_session(session, listing)
+                self._remember_save_as_location(output_paths[0])
+                self._show_greaseweazle_sector_reports(sector_reports)
                 QMessageBox.information(
                     self,
                     "Save As Image Complete",
@@ -11844,6 +13765,7 @@ class MidiTitleWindow(QMainWindow):
                 return
 
             _, context_paths = self._materialize_export_context_files(file_specs, output_path)
+            self._remember_save_as_location(output_paths[0] if output_paths else output_path)
             self._load_regular_files(
                 context_paths,
                 (
@@ -11859,6 +13781,7 @@ class MidiTitleWindow(QMainWindow):
                 "Save As Image Complete",
                 f"Created {len(output_paths)} image files:\n\n{preview}",
             )
+            self._show_greaseweazle_sector_reports(sector_reports)
         except Exception as exc:
             progressDialog.close()
             self._show_operation_error(
@@ -12055,11 +13978,20 @@ class MidiTitleWindow(QMainWindow):
         if tag_errors:
             return tag_errors
 
+        summary_errors, summary_path = self._write_metadata_summary_for_regular_rows(
+            path_remap=combined_path_map,
+            only_paths=all_source_paths,
+        )
+        if summary_errors:
+            return summary_errors
+
         status_text = f"Saved {len(output_path_map)} converted file(s)."
         if renamed_output_map:
             status_text += f"\nRenamed {len(renamed_output_map)} file(s) to DOS 8.3."
         if self._tag_sidecars_enabled() and combined_path_map:
             status_text += "\nWrote .tags.txt sidecar file(s)."
+        if summary_path:
+            status_text += f"\nWrote metadata summary: {os.path.basename(summary_path)}."
         if self.backup_checkbox.isChecked():
             status_text += "\nCreated backup file(s) for the original source files."
         self._cleanup_midi_scratch_dir()
@@ -12079,6 +14011,7 @@ class MidiTitleWindow(QMainWindow):
         has_pending_conversions = bool(self.pendingRegularConversions)
         has_pending_renames = bool(self.pendingRegularRenames)
         should_write_tag_sidecars = self._tag_sidecars_enabled() and self._regular_file_count() > 0
+        should_write_metadata_summary = self._metadata_summary_enabled() and self._regular_midi_file_count() > 0
 
         if (
             not self.pendingEdits
@@ -12087,6 +14020,7 @@ class MidiTitleWindow(QMainWindow):
             and not has_pending_conversions
             and not has_pending_renames
             and not should_write_tag_sidecars
+            and not should_write_metadata_summary
         ):
             QMessageBox.information(self, "No Changes", "There are no pending changes to save.")
             return
@@ -12192,6 +14126,11 @@ class MidiTitleWindow(QMainWindow):
         if not errors and should_write_tag_sidecars:
             errors.extend(self._write_tag_sidecars_for_regular_rows())
 
+        summary_path = ""
+        if not errors and should_write_metadata_summary:
+            summary_errors, summary_path = self._write_metadata_summary_for_regular_rows()
+            errors.extend(summary_errors)
+
         if errors:
             self._show_error_list(
                 "Save Failed",
@@ -12207,6 +14146,8 @@ class MidiTitleWindow(QMainWindow):
                     message += " Copies with the old filenames were kept in the backup folder."
             if should_write_tag_sidecars:
                 message += "\n\n.tags.txt sidecar file(s) were written next to the saved files."
+            if summary_path:
+                message += f"\n\nMetadata summary written to {os.path.basename(summary_path)}."
             QMessageBox.information(self, "Save Complete", message)
 
     def save_as_changes(self):
@@ -12219,7 +14160,11 @@ class MidiTitleWindow(QMainWindow):
             if not self._ensure_pianodir_generation_for_save():
                 return
 
-            dest_dir = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+            dest_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Select Destination Folder",
+                self._last_save_as_location(),
+            )
             if not dest_dir:
                 return
             export_dir = self._destination_with_album_subfolder(dest_dir)
@@ -12241,7 +14186,18 @@ class MidiTitleWindow(QMainWindow):
                     output_paths,
                     f"Current context moved to: \"{export_dir}\"",
                 )
-                QMessageBox.information(self, "Save As Complete", "Files have been saved to the new folder.")
+                summary_errors, summary_path = self._write_metadata_summary_for_regular_rows(base_dir=export_dir)
+                message = "Files have been saved to the new folder."
+                if summary_path:
+                    message += f"\n\nMetadata summary written to {os.path.basename(summary_path)}."
+                if summary_errors:
+                    self._show_error_list(
+                        "Metadata Summary Failed",
+                        "Files were saved, but the metadata summary could not be written",
+                        summary_errors,
+                    )
+                self._remember_save_as_location(dest_dir)
+                QMessageBox.information(self, "Save As Complete", message)
             except Exception as exc:
                 progressDialog.close()
                 self._show_operation_error(
@@ -12252,7 +14208,11 @@ class MidiTitleWindow(QMainWindow):
                 )
             return
 
-        dest_dir = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+        dest_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select Destination Folder",
+            self._last_save_as_location(),
+        )
         if not dest_dir:
             return
         if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
@@ -12310,6 +14270,14 @@ class MidiTitleWindow(QMainWindow):
                     only_paths=output_path_map.keys(),
                 )
             )
+        summary_path = ""
+        if not errors:
+            summary_errors, summary_path = self._write_metadata_summary_for_regular_rows(
+                path_remap=output_path_map,
+                only_paths=output_path_map.keys(),
+                base_dir=export_dir,
+            )
+            errors.extend(summary_errors)
         if errors:
             self._show_error_list(
                 "Save As Failed",
@@ -12325,4 +14293,7 @@ class MidiTitleWindow(QMainWindow):
             message = "Files have been saved to the new folder."
             if self._tag_sidecars_enabled():
                 message += "\n\n.tags.txt sidecar file(s) were written next to the exported files."
+            if summary_path:
+                message += f"\n\nMetadata summary written to {os.path.basename(summary_path)}."
+            self._remember_save_as_location(dest_dir)
             QMessageBox.information(self, "Save As Complete", message)

@@ -3,13 +3,15 @@
 mpc_seq_to_midi.py
 
 Best-effort converter for older Akai MPC .SEQ files, especially MPC3000 /
-MPC60-family sequence files, to Standard MIDI File Type 1.
+MPC60-family sequence files, to Standard MIDI File Type 1. It can also split
+MPC .ALL files that contain multiple embedded .SEQ-style records.
 
 This is intentionally dependency-free and reverse-engineered from a small batch
 of .SEQ files. It is not a complete Akai file-format implementation.
 
 What it currently does:
   - reads the sequence name and tempo from the header
+  - splits MPC .ALL files into embedded sequence records
   - reads the MPC track table and track names
   - finds the main bar/time-signature run in the event stream
   - converts note events to separate MIDI tracks
@@ -24,6 +26,7 @@ What it does not yet fully do:
 
 Usage:
   python mpc_seq_to_midi.py *.SEQ -o converted_midi
+  python mpc_seq_to_midi.py COVER_ME.ALL -o converted_midi
   python mpc_seq_to_midi.py /path/to/seq_folder -o converted_midi --zip
   python mpc_seq_to_midi.py CELINE.SEQ --include-empty-tracks
 
@@ -93,6 +96,14 @@ class ConversionReport:
     warnings: List[str]
 
 
+@dataclass(frozen=True)
+class SequenceChunk:
+    index: int
+    name: str
+    offset: int
+    data: bytes
+
+
 def clean_ascii(raw: bytes, fallback: str = "") -> str:
     """Decode Akai fixed-width strings. Keep printable characters only."""
     text = raw.split(b"\x00", 1)[0].decode("latin1", "replace")
@@ -116,6 +127,75 @@ def read_seq_header(data: bytes) -> Tuple[str, int, float]:
         if 200 <= tempo_tenths <= 3000:
             tempo_bpm = tempo_tenths / 10.0
     return seq_name, header_bars, tempo_bpm
+
+
+def _looks_like_fixed_ascii_field(raw: bytes) -> bool:
+    return (
+        len(raw) == 16
+        and raw[0] in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+        and all(32 <= byte < 127 for byte in raw)
+        and sum(chr(byte).isalnum() for byte in raw.rstrip()) >= 2
+    )
+
+
+def _mpc_sequence_header_name_at(data: bytes, start: int) -> Optional[str]:
+    """Return the sequence name if a plausible MPC .SEQ header begins at start."""
+    if start < 0 or start + 0x24 > len(data):
+        return None
+    raw_name = data[start + 9:start + 25]
+    if not _looks_like_fixed_ascii_field(raw_name):
+        return None
+
+    header_bars = data[start + 0x1C]
+    tempo_tenths = int.from_bytes(data[start + 0x22:start + 0x24], "little")
+    if not (1 <= header_bars <= 255 and 200 <= tempo_tenths <= 3000):
+        return None
+
+    # These bytes are stable across the MPC .SEQ records found inside .ALL
+    # files tested so far. They keep ordinary track names and event text from
+    # being mistaken for a sequence header.
+    if data[start + 0x1B] != 0:
+        return None
+    if data[start + 0x19] > 8 or data[start + 0x1A] > 16:
+        return None
+    if data[start + 0x20:start + 0x22] != b"\x00\x00":
+        return None
+
+    return clean_ascii(raw_name, "Sequence")
+
+
+def find_embedded_sequence_offsets(data: bytes) -> List[Tuple[int, str]]:
+    """Find likely .SEQ record starts inside an MPC .ALL file."""
+    offsets: List[Tuple[int, str]] = []
+    limit = max(0, len(data) - 0x24 + 1)
+    for start in range(limit):
+        name = _mpc_sequence_header_name_at(data, start)
+        if name:
+            offsets.append((start, name))
+    return offsets
+
+
+def extract_all_sequence_chunks(data: bytes) -> List[SequenceChunk]:
+    """Split an MPC .ALL payload into embedded .SEQ-like chunks."""
+    starts = find_embedded_sequence_offsets(data)
+    chunks: List[SequenceChunk] = []
+    for index, (start, name) in enumerate(starts, start=1):
+        end = starts[index][0] if index < len(starts) else len(data)
+        if end <= start:
+            continue
+        chunks.append(
+            SequenceChunk(
+                index=index,
+                name=name,
+                offset=start,
+                data=data[start:end],
+            )
+        )
+    return chunks
+
+
+def looks_like_mpc_all_bytes(data: bytes) -> bool:
+    return bool(extract_all_sequence_chunks(data))
 
 
 def infer_drum_track(meta: bytes, name: str) -> bool:
@@ -537,8 +617,24 @@ def convert_one(
     output_stem: Optional[str] = None,
 ) -> ConversionReport:
     data = input_path.read_bytes()
+    return convert_bytes(
+        data,
+        source_label=str(input_path),
+        output_dir=output_dir,
+        include_empty_tracks=include_empty_tracks,
+        output_stem=output_stem if output_stem is not None else input_path.stem,
+    )
+
+
+def convert_bytes(
+    data: bytes,
+    source_label: str,
+    output_dir: Path,
+    include_empty_tracks: bool = False,
+    output_stem: Optional[str] = None,
+) -> ConversionReport:
     seq_name, header_bars, tempo_bpm, tracks, notes, sig_changes, warnings, run_summary = extract_notes(data)
-    stem = safe_filename(output_stem if output_stem is not None else input_path.stem)
+    stem = safe_filename(output_stem if output_stem is not None else seq_name)
     output_path = output_dir / f"{stem}.mid"
     output_dir.mkdir(parents=True, exist_ok=True)
     midi_tracks_written = write_midi(
@@ -552,7 +648,7 @@ def convert_one(
     )
     start_bar, end_bar, start_offset = run_summary
     return ConversionReport(
-        input=str(input_path),
+        input=source_label,
         output=str(output_path),
         sequence_name=seq_name,
         header_bars=header_bars,
@@ -567,6 +663,50 @@ def convert_one(
     )
 
 
+def convert_all(
+    input_path: Path,
+    output_dir: Path,
+    include_empty_tracks: bool = False,
+    output_stem: Optional[str] = None,
+    include_empty_sequences: bool = False,
+) -> Tuple[List[ConversionReport], List[str]]:
+    data = input_path.read_bytes()
+    chunks = extract_all_sequence_chunks(data)
+    if not chunks:
+        raise ValueError("No embedded MPC sequences were found in this .ALL file")
+
+    reports: List[ConversionReport] = []
+    warnings: List[str] = []
+    skipped_empty = 0
+    container_stem = safe_filename(output_stem if output_stem is not None else input_path.stem, "all")
+    for chunk in chunks:
+        chunk_name = safe_filename(chunk.name, f"sequence_{chunk.index:02d}")
+        chunk_stem = f"{container_stem}_{chunk.index:02d}_{chunk_name}"
+        source_label = f"{input_path}:{hex(chunk.offset)} {chunk.name}"
+        try:
+            report = convert_bytes(
+                chunk.data,
+                source_label=source_label,
+                output_dir=output_dir,
+                include_empty_tracks=include_empty_tracks,
+                output_stem=chunk_stem,
+            )
+            if report.notes_written <= 0 and not include_empty_sequences:
+                skipped_empty += 1
+                try:
+                    Path(report.output).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            reports.append(report)
+        except Exception as exc:  # noqa: BLE001 - keep converting other embedded records
+            warnings.append(f"{chunk.name} at {hex(chunk.offset)}: {exc}")
+
+    if skipped_empty:
+        warnings.append(f"Skipped {skipped_empty} embedded sequence slot(s) with no note data.")
+    return reports, warnings
+
+
 def expand_inputs(paths: Sequence[str]) -> List[Path]:
     out: List[Path] = []
     for raw in paths:
@@ -574,6 +714,8 @@ def expand_inputs(paths: Sequence[str]) -> List[Path]:
         if p.is_dir():
             out.extend(sorted(p.glob("*.SEQ")))
             out.extend(sorted(p.glob("*.seq")))
+            out.extend(sorted(p.glob("*.ALL")))
+            out.extend(sorted(p.glob("*.all")))
         else:
             matches = sorted(Path().glob(raw)) if any(ch in raw for ch in "*?[") else [p]
             out.extend(matches)
@@ -589,17 +731,18 @@ def expand_inputs(paths: Sequence[str]) -> List[Path]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Best-effort Akai MPC .SEQ to Standard MIDI Type 1 converter")
-    parser.add_argument("inputs", nargs="+", help=".SEQ files, directories containing .SEQ files, or shell globs")
+    parser = argparse.ArgumentParser(description="Best-effort Akai MPC .SEQ/.ALL to Standard MIDI Type 1 converter")
+    parser.add_argument("inputs", nargs="+", help=".SEQ or .ALL files, directories containing them, or shell globs")
     parser.add_argument("-o", "--output-dir", default="converted_midi", help="Output directory for .mid files")
     parser.add_argument("--include-empty-tracks", action="store_true", help="Write MIDI tracks even if no notes were found on them")
+    parser.add_argument("--include-empty-sequences", action="store_true", help="For .ALL files, also write embedded sequence slots with no notes")
     parser.add_argument("--report", default=None, help="Write JSON conversion report to this path")
     parser.add_argument("--zip", dest="zip_path", default=None, help="Optionally zip the output directory to this path")
     args = parser.parse_args(argv)
 
     inputs = expand_inputs(args.inputs)
     if not inputs:
-        print("No input .SEQ files found", file=sys.stderr)
+        print("No input .SEQ or .ALL files found", file=sys.stderr)
         return 2
 
     output_dir = Path(args.output_dir)
@@ -607,15 +750,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     failures: List[Dict[str, str]] = []
     for inp in inputs:
         try:
-            report = convert_one(inp, output_dir, include_empty_tracks=args.include_empty_tracks)
-            reports.append(report)
-            print(
-                f"{inp.name}: {report.notes_written} notes, {report.midi_tracks_written} MIDI tracks, "
-                f"tempo {report.tempo_bpm:.1f} BPM -> {Path(report.output).name}"
-            )
-            if report.warnings:
-                for warning in report.warnings:
+            if inp.suffix.lower() == ".all":
+                all_reports, all_warnings = convert_all(
+                    inp,
+                    output_dir,
+                    include_empty_tracks=args.include_empty_tracks,
+                    include_empty_sequences=args.include_empty_sequences,
+                )
+                reports.extend(all_reports)
+                print(f"{inp.name}: {len(all_reports)} embedded sequence(s) -> {output_dir}")
+                for report in all_reports:
+                    print(
+                        f"  {report.sequence_name}: {report.notes_written} notes, "
+                        f"{report.midi_tracks_written} MIDI tracks, tempo {report.tempo_bpm:.1f} BPM "
+                        f"-> {Path(report.output).name}"
+                    )
+                    for warning in report.warnings:
+                        print(f"    warning: {warning}")
+                for warning in all_warnings:
                     print(f"  warning: {warning}")
+            else:
+                report = convert_one(inp, output_dir, include_empty_tracks=args.include_empty_tracks)
+                reports.append(report)
+                print(
+                    f"{inp.name}: {report.notes_written} notes, {report.midi_tracks_written} MIDI tracks, "
+                    f"tempo {report.tempo_bpm:.1f} BPM -> {Path(report.output).name}"
+                )
+                if report.warnings:
+                    for warning in report.warnings:
+                        print(f"  warning: {warning}")
         except Exception as exc:  # noqa: BLE001 - CLI should continue on other files
             failures.append({"input": str(inp), "error": str(exc)})
             print(f"ERROR converting {inp}: {exc}", file=sys.stderr)

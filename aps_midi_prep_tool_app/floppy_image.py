@@ -44,6 +44,7 @@ from .midi_metadata import (
     update_eseq_title_to_path,
     update_midi_title_to_path,
 )
+from .additional_formats import electone_mdr_to_midi
 from .subprocess_utils import windows_subprocess_kwargs
 
 
@@ -67,6 +68,7 @@ class GreaseweazleConversionError(FloppyImageError):
         capture_path="",
         reason="",
         suggested_format=None,
+        details=None,
     ):
         super().__init__(message)
         self.sector_map = sector_map or {}
@@ -74,6 +76,7 @@ class GreaseweazleConversionError(FloppyImageError):
         self.capture_path = capture_path or ""
         self.reason = reason or ("sector_failure" if self.sector_map.get("has_failures") else "")
         self.suggested_format = suggested_format
+        self.details = details or {}
 
 
 class ConvertedImageFormatMismatchError(FloppyImageError):
@@ -270,12 +273,15 @@ class GreaseweazleFloppySource:
     revs: int = 0
     retries: int = 0
     capture_save_path: str = ""
+    capture_output_ext: str = ""
 
     @property
     def display_name(self):
         detail = self.disk_format.label
         if self.archival_quality:
-            detail += ", archival SCP"
+            detail += ", raw SCP"
+        elif self.capture_output_ext:
+            detail += f", save {self.capture_output_ext.upper()}"
         extras = []
         if self.revs > 0:
             extras.append(f"{self.revs} revs")
@@ -291,6 +297,7 @@ class GreaseweazleCapture:
     gw_source: GreaseweazleFloppySource
     capture_path: str
     temp_dir: str
+    sector_map: dict | None = None
 
     def cleanup(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -335,8 +342,33 @@ DISK_FORMATS = [
 ]
 
 DISK_FORMAT_BY_SIZE = {fmt.size_bytes: fmt for fmt in DISK_FORMATS}
+DISK_FORMAT_BY_KEY = {fmt.key: fmt for fmt in DISK_FORMATS}
 
-RAW_IMAGE_EXTENSIONS = {"bin", "img", "ima"}
+NON_FAT_GW_FORMATS = [
+    DiskFormat("mac.800", "Macintosh 800K GCR/HFS", 819200),
+]
+
+GW_IMAGE_FORMATS = DISK_FORMATS + NON_FAT_GW_FORMATS
+GW_FORMAT_BY_KEY = {fmt.key: fmt for fmt in GW_IMAGE_FORMATS}
+NON_FAT_GW_FORMAT_BY_KEY = {fmt.key: fmt for fmt in NON_FAT_GW_FORMATS}
+SCP_DISK_TYPE_MACINTOSH = 0x80
+NON_FAT_GW_FORMAT_BY_SCP_TYPE = {
+    SCP_DISK_TYPE_MACINTOSH: NON_FAT_GW_FORMAT_BY_KEY["mac.800"],
+}
+
+DISK_FORMAT_TRACK_LAYOUTS = {
+    "ibm.160": {"cylinders": 40, "heads": 1, "sectors_per_track": 8},
+    "ibm.180": {"cylinders": 40, "heads": 1, "sectors_per_track": 9},
+    "ibm.320": {"cylinders": 40, "heads": 2, "sectors_per_track": 8},
+    "ibm.360": {"cylinders": 40, "heads": 2, "sectors_per_track": 9},
+    "ibm.720": {"cylinders": 80, "heads": 2, "sectors_per_track": 9},
+    "ibm.800": {"cylinders": 80, "heads": 2, "sectors_per_track": 10},
+    "ibm.1200": {"cylinders": 80, "heads": 2, "sectors_per_track": 15},
+    "ibm.1440": {"cylinders": 80, "heads": 2, "sectors_per_track": 18},
+    "ibm.2880": {"cylinders": 80, "heads": 2, "sectors_per_track": 36},
+}
+
+RAW_IMAGE_EXTENSIONS = {"bin", "img", "ima", "vfd"}
 
 SUPPORTED_IMAGE_EXTENSIONS = {
     "a2r",
@@ -379,6 +411,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {
     "ssd",
     "st",
     "td0",
+    "vfd",
     "xdf",
 }
 
@@ -606,6 +639,7 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None, 
     )
 
     output_lines = []
+    all_output_lines = []
     line_queue = queue.Queue()
     stream_done = object()
 
@@ -634,6 +668,7 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None, 
             line = raw_line.rstrip("\r\n")
             stripped = line.strip()
             if stripped:
+                all_output_lines.append(stripped)
                 output_lines.append(stripped)
                 if len(output_lines) > 40:
                     output_lines = output_lines[-40:]
@@ -658,6 +693,7 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None, 
         if detail:
             raise FloppyImageError(f"{error_prefix}: {detail}")
         raise FloppyImageError(f"{error_prefix}.")
+    return "\n".join(all_output_lines)
 
 
 def _find_gw():
@@ -1068,10 +1104,17 @@ def _write_image_direct(source_img, output_path, output_ext, disk_format):
     output_ext = output_ext.lower().lstrip(".")
     if output_ext in RAW_IMAGE_EXTENSIONS:
         shutil.copy2(source_img, output_path)
-        return
+        return None
     if output_ext not in SUPPORTED_IMAGE_EXTENSIONS:
         raise FloppyImageError(_unsupported_image_type_message(output_ext, for_output=True))
-    _gw_convert(source_img, output_path, disk_format.key)
+    output = _gw_convert(source_img, output_path, disk_format.key)
+    return _gw_sector_report(
+        "convert",
+        _parse_gw_sector_map(output, disk_format),
+        title="Greaseweazle Conversion Sector Map",
+        summary=f"Converted the image to {output_ext.upper()} using {disk_format.label}.",
+        disk_format=disk_format,
+    )
 
 
 def create_blank_floppy_image(output_path, disk_format, volume_label="NO NAME", cancel_callback=None):
@@ -1139,6 +1182,7 @@ def create_floppy_images_from_files(
     *,
     volume_label="NO NAME",
     progress_callback=None,
+    sector_report_callback=None,
 ):
     if not file_specs:
         raise FloppyImageError("There are no files to save into an image. Add MIDI or E-SEQ files first.")
@@ -1237,8 +1281,10 @@ def create_floppy_images_from_files(
                 f".{os.path.basename(final_path)}.aps_{uuid.uuid4().hex}.{output_ext.lower().lstrip('.')}",
             )
             try:
-                _write_image_direct(raw_img, temp_output, output_ext, disk_format)
+                report = _write_image_direct(raw_img, temp_output, output_ext, disk_format)
                 os.replace(temp_output, final_path)
+                if report is not None and sector_report_callback is not None:
+                    sector_report_callback(report)
             finally:
                 if os.path.exists(temp_output):
                     os.remove(temp_output)
@@ -1250,11 +1296,90 @@ def create_floppy_images_from_files(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _parse_gw_sector_map(output):
-    lines = str(output or "").splitlines()
-    rows = []
+def _disk_format_key(disk_format):
+    if isinstance(disk_format, DiskFormat):
+        return disk_format.key
+    return str(disk_format or "")
+
+
+def _gw_expected_sectors_per_track(disk_format):
+    layout = DISK_FORMAT_TRACK_LAYOUTS.get(_disk_format_key(disk_format))
+    if not layout:
+        return 0
+    return int(layout.get("sectors_per_track") or 0)
+
+
+def _track_status_line_to_counts(clean_line, expected_sectors):
+    track_match = re.match(r"^T(?P<cyl>\d+)\.(?P<head>\d+)(?:\s+<-.*)?\s*:\s*(?P<status>.*)$", clean_line)
+    if not track_match:
+        return None
+
+    status_text = track_match.group("status") or ""
     found = None
     total = None
+    pair_match = re.search(r"\b(\d+)\s*/\s*(\d+)\s+sectors?\b", status_text, flags=re.IGNORECASE)
+    if pair_match:
+        found = int(pair_match.group(1))
+        total = int(pair_match.group(2))
+    else:
+        found_match = re.search(r"\b(\d+)\s+sectors?\b", status_text, flags=re.IGNORECASE)
+        if found_match:
+            found = int(found_match.group(1))
+            total = expected_sectors or found
+
+    if total is None:
+        total = expected_sectors
+    if found is None:
+        failed = re.search(r"\b(?:fail|failed|error|bad|missing|lost|no\s+flux)\b", status_text, flags=re.IGNORECASE)
+        found = 0 if failed else total
+    if total <= 0:
+        return None
+
+    found = max(0, min(int(found), int(total)))
+    return {
+        "cylinder": int(track_match.group("cyl")),
+        "head": int(track_match.group("head")),
+        "found": found,
+        "total": int(total),
+    }
+
+
+def _sector_rows_from_track_counts(track_counts):
+    if not track_counts:
+        return []
+    max_cylinder = max(item["cylinder"] for item in track_counts)
+    max_sector = max(item["total"] for item in track_counts)
+    heads = sorted({item["head"] for item in track_counts})
+    grid = {
+        (head, sector): [" "] * (max_cylinder + 1)
+        for head in heads
+        for sector in range(max_sector)
+    }
+    for item in track_counts:
+        cylinder = item["cylinder"]
+        head = item["head"]
+        found = item["found"]
+        total = item["total"]
+        for sector in range(total):
+            grid.setdefault((head, sector), [" "] * (max_cylinder + 1))
+            grid[(head, sector)][cylinder] = "." if sector < found else "x"
+
+    rows = []
+    for head in heads:
+        for sector in range(max_sector):
+            statuses = "".join(grid.get((head, sector), [" "] * (max_cylinder + 1)))
+            if statuses.strip():
+                rows.append({"head": head, "sector": sector, "statuses": statuses})
+    return rows
+
+
+def _parse_gw_sector_map(output, disk_format=None):
+    lines = str(output or "").splitlines()
+    rows = []
+    track_counts = []
+    found = None
+    total = None
+    expected_sectors = _gw_expected_sectors_per_track(disk_format)
     for line in lines:
         clean_line = line.strip()
         found_match = re.search(r"\bFound\s+(\d+)\s+sectors\s+of\s+(\d+)", clean_line)
@@ -1272,6 +1397,15 @@ def _parse_gw_sector_map(output):
                     "statuses": statuses,
                 }
             )
+            continue
+        track_count = _track_status_line_to_counts(clean_line, expected_sectors)
+        if track_count is not None:
+            track_counts.append(track_count)
+
+    if not rows and track_counts:
+        rows = _sector_rows_from_track_counts(track_counts)
+        found = sum(item["found"] for item in track_counts)
+        total = sum(item["total"] for item in track_counts)
 
     if not rows and found is None and total is None:
         return {}
@@ -1282,7 +1416,7 @@ def _parse_gw_sector_map(output):
         for char in row["statuses"]:
             if char == ".":
                 good += 1
-            else:
+            elif str(char).strip():
                 bad += 1
     if found is not None and total is not None and found < total:
         bad = max(bad, total - found)
@@ -1297,7 +1431,76 @@ def _parse_gw_sector_map(output):
     }
 
 
-def _gw_convert(input_path, output_path, disk_format, cancel_callback=None):
+def _gw_sector_report(
+    report_type,
+    sector_map,
+    *,
+    title="",
+    summary="",
+    disk_format=None,
+    allow_empty_rows=False,
+):
+    if not sector_map or (not allow_empty_rows and not sector_map.get("rows")):
+        return None
+    return {
+        "type": str(report_type or "greaseweazle"),
+        "title": title or "Greaseweazle Sector Map",
+        "summary": summary or "",
+        "sector_map": sector_map,
+        "disk_format": disk_format,
+        "allow_empty_rows": bool(allow_empty_rows),
+    }
+
+
+def _gw_sector_reports(*reports):
+    return tuple(report for report in reports if report)
+
+
+def _gw_recovery_sector_report(sector_map, *, summary="", disk_format=None):
+    if not sector_map:
+        return None
+    return _gw_sector_report(
+        "recover",
+        sector_map,
+        title="Greaseweazle Recovery Sector Map",
+        summary=summary,
+        disk_format=disk_format,
+        allow_empty_rows=True,
+    )
+
+
+def _gw_recovery_no_sector_report(*, summary="", disk_format=None):
+    return _gw_recovery_sector_report(
+        {"rows": [], "found": None, "total": None, "good": 0, "bad": 0, "has_failures": False},
+        summary=summary or "No Greaseweazle sector map was available for this recovery.",
+        disk_format=disk_format,
+    )
+
+
+def _gw_recovery_sector_note(sector_map, disk_format):
+    if not sector_map or not sector_map.get("has_failures"):
+        return ""
+    found = sector_map.get("found")
+    total = sector_map.get("total")
+    bad = int(sector_map.get("bad") or 0)
+    format_label = disk_format.label if isinstance(disk_format, DiskFormat) else "the selected format"
+    if found is not None and total is not None:
+        return (
+            f" Greaseweazle reported {found} of {total} expected sector position(s) "
+            f"while converting as {format_label}; recovery continued using the partial image."
+        )
+    if bad:
+        return (
+            f" Greaseweazle reported {bad} bad or missing sector position(s) "
+            f"while converting as {format_label}; recovery continued using the partial image."
+        )
+    return (
+        f" Greaseweazle reported bad or missing sectors while converting as {format_label}; "
+        "recovery continued using the partial image."
+    )
+
+
+def _gw_convert(input_path, output_path, disk_format, cancel_callback=None, *, allow_sector_failures=False):
     gw = _find_gw()
     if not gw:
         raise FloppyImageError(_missing_greaseweazle_message("convert this image format"))
@@ -1312,15 +1515,16 @@ def _gw_convert(input_path, output_path, disk_format, cancel_callback=None):
     except FloppyOperationCancelled:
         raise
     except FloppyImageError as exc:
-        sector_map = _parse_gw_sector_map(str(exc))
+        sector_map = _parse_gw_sector_map(str(exc), disk_format)
         raise GreaseweazleConversionError(
             str(exc),
             sector_map=sector_map,
+            disk_format=GW_FORMAT_BY_KEY.get(_disk_format_key(disk_format)),
             capture_path=input_path,
         ) from exc
 
-    sector_map = _parse_gw_sector_map(output)
-    if sector_map.get("has_failures"):
+    sector_map = _parse_gw_sector_map(output, disk_format)
+    if sector_map.get("has_failures") and not allow_sector_failures:
         found = sector_map.get("found")
         total = sector_map.get("total")
         summary = ""
@@ -1329,6 +1533,7 @@ def _gw_convert(input_path, output_path, disk_format, cancel_callback=None):
         raise GreaseweazleConversionError(
             f"Greaseweazle conversion reported unreadable or missing sectors.{summary}",
             sector_map=sector_map,
+            disk_format=GW_FORMAT_BY_KEY.get(_disk_format_key(disk_format)),
             capture_path=input_path,
             reason="sector_failure",
         )
@@ -1463,12 +1668,17 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
     if os.path.exists(output_path):
         os.remove(output_path)
 
+    raw_capture = (
+        bool(source.archival_quality)
+        or image_extension(output_path) == "scp"
+        or str(getattr(source, "capture_output_ext", "") or "").lower().lstrip(".") == "scp"
+    )
     args = [
         gw,
         "read",
         f"--drive={source.drive}",
     ]
-    if source.archival_quality:
+    if raw_capture:
         args.append("--raw")
     else:
         args.append(f"--format={source.disk_format.key}")
@@ -1491,7 +1701,7 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
             progress_state["command_failed"] = clean_line
         _handle_gw_read_progress_line(progress_callback, progress_state, line)
 
-    _run_streaming_command(
+    output = _run_streaming_command(
         args,
         "Greaseweazle read failed",
         line_callback=_progress_line_callback,
@@ -1505,6 +1715,7 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
             f"Greaseweazle read failed: {detail}. "
             "Check the selected drive, disk format, cable orientation, and that a readable disk is inserted."
         )
+    return _parse_gw_sector_map(output, source.disk_format)
 
 
 def _gw_write_floppy(source, input_path, progress_callback=None, cancel_callback=None):
@@ -1529,13 +1740,14 @@ def _gw_write_floppy(source, input_path, progress_callback=None, cancel_callback
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    _run_streaming_command(
+    output = _run_streaming_command(
         args,
         "Greaseweazle write failed",
         line_callback=_progress_line_callback,
         env=env,
         cancel_callback=cancel_callback,
     )
+    return _parse_gw_sector_map(output, source.disk_format)
 
 
 def _normalize_image_path(path):
@@ -1859,6 +2071,179 @@ def _read_block_device(device_path, output_path, size_bytes, progress_callback=N
             )
     except OSError as exc:
         raise FloppyImageError(f"Could not read floppy device {device_path}: {exc}") from exc
+
+
+def _capture_temp_output_path(output_path, *, suffix=None):
+    output_path = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_path) or os.getcwd()
+    os.makedirs(output_dir, exist_ok=True)
+    output_name = os.path.basename(output_path) or "floppy_image"
+    temp_suffix = suffix if suffix is not None else os.path.splitext(output_name)[1]
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{output_name}.",
+        suffix=temp_suffix or ".tmp",
+        dir=output_dir,
+    )
+    os.close(fd)
+    os.remove(temp_path)
+    return temp_path
+
+
+def _finish_capture_output(temp_path, output_path):
+    output_path = os.path.abspath(output_path)
+    os.replace(temp_path, output_path)
+    return output_path
+
+
+def capture_floppy_drive_image(
+    drive_info,
+    output_path,
+    disk_format=None,
+    progress_callback=None,
+    cancel_callback=None,
+):
+    """Copy a physical floppy to a raw sector image without opening/scanning it."""
+    if not isinstance(drive_info, FloppyDriveInfo):
+        raise FloppyImageError("Invalid floppy drive selection.")
+
+    read_size = 0
+    if isinstance(disk_format, DiskFormat):
+        read_size = disk_format.size_bytes
+    else:
+        read_size = int(drive_info.size_bytes or 0)
+    if read_size <= 0:
+        raise FloppyImageError(
+            "Could not choose a floppy image size. Select the disk size before imaging the disk."
+        )
+
+    output_path = os.path.abspath(output_path)
+    temp_path = _capture_temp_output_path(output_path)
+    try:
+        _notify_progress(
+            progress_callback,
+            0,
+            100,
+            f"Imaging floppy: 0 B of {display_bytes(read_size)}...",
+        )
+        _read_block_device(
+            drive_info.path,
+            temp_path,
+            read_size,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        _raise_if_cancelled(cancel_callback)
+        _notify_progress(progress_callback, 95, 100, "Saving floppy image...")
+        final_path = _finish_capture_output(temp_path, output_path)
+        temp_path = ""
+        _notify_progress(progress_callback, 100, 100, "Floppy image saved.")
+        return final_path
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def capture_greaseweazle_floppy_image(
+    gw_source,
+    output_path,
+    progress_callback=None,
+    cancel_callback=None,
+):
+    """Read a Greaseweazle floppy image without converting/opening it afterward."""
+    if not isinstance(gw_source, GreaseweazleFloppySource):
+        raise FloppyImageError("Invalid Greaseweazle source selection.")
+
+    output_path = os.path.abspath(output_path)
+    output_ext = image_extension(output_path)
+    raw_capture = (
+        gw_source.archival_quality
+        or output_ext == "scp"
+        or str(getattr(gw_source, "capture_output_ext", "") or "").lower().lstrip(".") == "scp"
+    )
+    temp_suffix = ".scp" if raw_capture else f".{output_ext or 'hfe'}"
+    temp_path = _capture_temp_output_path(output_path, suffix=temp_suffix)
+    try:
+        if raw_capture:
+            capture_kind = "SCP flux capture"
+        elif output_ext == "hfe":
+            capture_kind = "HFE image"
+        elif output_ext in RAW_IMAGE_EXTENSIONS:
+            capture_kind = "raw sector image"
+        else:
+            capture_kind = f"{(output_ext or 'HFE').upper()} image"
+        _notify_progress(
+            progress_callback,
+            0,
+            100,
+            f"Reading {capture_kind} via Greaseweazle drive {gw_source.drive}...",
+        )
+        sector_map = _gw_read_floppy(
+            gw_source,
+            temp_path,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        _raise_if_cancelled(cancel_callback)
+        _notify_progress(progress_callback, 95, 100, f"Saving {capture_kind}...")
+        final_path = _finish_capture_output(temp_path, output_path)
+        temp_path = ""
+        _notify_progress(progress_callback, 100, 100, "Floppy image saved.")
+        return final_path, sector_map
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def convert_greaseweazle_image_file(
+    source_path,
+    output_path,
+    disk_format,
+    progress_callback=None,
+    cancel_callback=None,
+    *,
+    allow_sector_failures=True,
+):
+    if not isinstance(disk_format, DiskFormat):
+        raise FloppyImageError("Invalid Greaseweazle conversion format.")
+    if not os.path.isfile(source_path):
+        raise FloppyImageError(f"The source image was not found: {source_path}")
+
+    output_path = os.path.abspath(output_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    temp_path = _capture_temp_output_path(output_path, suffix=os.path.splitext(output_path)[1] or ".img")
+    try:
+        _notify_progress(
+            progress_callback,
+            0,
+            100,
+            f"Converting {os.path.basename(source_path)} as {disk_format.label}...",
+        )
+        conversion_output = _gw_convert(
+            source_path,
+            temp_path,
+            disk_format.key,
+            cancel_callback=cancel_callback,
+            allow_sector_failures=allow_sector_failures,
+        )
+        sector_map = _parse_gw_sector_map(conversion_output, disk_format)
+        _raise_if_cancelled(cancel_callback)
+        _notify_progress(progress_callback, 95, 100, "Saving converted image...")
+        final_path = _finish_capture_output(temp_path, output_path)
+        temp_path = ""
+        _notify_progress(progress_callback, 100, 100, "Converted image saved.")
+        return final_path, sector_map
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def _read_device_chunk_for_recovery(device, offset, size):
@@ -2596,6 +2981,18 @@ def _yamaha_720_geometry():
     )
 
 
+def _fat12_geometry_from_electone_mdr_geometry(geometry):
+    return Fat12Geometry(
+        bytes_per_sector=geometry.bytes_per_sector,
+        sectors_per_cluster=geometry.sectors_per_cluster,
+        reserved_sectors=geometry.reserved_sectors,
+        num_fats=geometry.num_fats,
+        root_entries=geometry.root_entries,
+        total_sectors=geometry.total_sectors,
+        sectors_per_fat=geometry.sectors_per_fat,
+    )
+
+
 def _fat12_geometry_from_layout(layout):
     return Fat12Geometry(
         bytes_per_sector=int(layout["bytes_per_sector"]),
@@ -2881,7 +3278,17 @@ def _read_directory_chain_from_image(data, geometry, fat, first_cluster):
     return _read_cluster_chain_from_image(data, geometry, clusters, len(clusters) * geometry.cluster_size)
 
 
-def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_path=""):
+def _fat12_contiguous_file_bytes(data, geometry, first_cluster, size):
+    if size <= 0:
+        return b""
+    offset = _cluster_offset(geometry, first_cluster)
+    end = offset + size
+    if offset < geometry.data_offset or end > len(data):
+        raise FloppyImageError("A file points outside the floppy data area; the FAT directory appears corrupt.")
+    return data[offset:end]
+
+
+def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_path="", *, allow_contiguous_fallback=False):
     entries = []
     for entry in _iter_fat_directory_entries(directory_bytes):
         attr = entry["attr"]
@@ -2893,15 +3300,31 @@ def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_
             continue
         if attr & 0x10:
             child_dir = _read_directory_chain_from_image(data, geometry, fat, entry["cluster"])
-            entries.extend(_collect_fat12_listing_entries(data, geometry, fat, child_dir, image_path))
+            entries.extend(
+                _collect_fat12_listing_entries(
+                    data,
+                    geometry,
+                    fat,
+                    child_dir,
+                    image_path,
+                    allow_contiguous_fallback=allow_contiguous_fallback,
+                )
+            )
             continue
 
-        cluster_chain = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
+        try:
+            cluster_chain = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
+            packed_size = len(cluster_chain) * geometry.cluster_size
+        except FloppyImageError:
+            if not allow_contiguous_fallback:
+                raise
+            _fat12_contiguous_file_bytes(data, geometry, entry["cluster"], entry["size"])
+            packed_size = allocated_size(entry["size"], geometry.cluster_size)
         entries.append(
             ImageEntry(
                 path=image_path,
                 size=entry["size"],
-                packed_size=len(cluster_chain) * geometry.cluster_size,
+                packed_size=packed_size,
                 attributes=f"{attr:02X}",
                 modified_time=entry.get("modified_time"),
             )
@@ -2915,10 +3338,14 @@ def _read_fat12_image_context(img_path):
 
     geometry = _geometry_from_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR])
     if geometry is None:
-        raise FloppyImageError(
-            "Could not parse a FAT12 boot sector in this image. "
-            "The file may not be an IBM/Yamaha floppy image, or it may need to be read with Greaseweazle first."
-        )
+        mdr_geometry = electone_mdr_to_midi.infer_mdr_geometry(data)
+        if mdr_geometry is not None:
+            geometry = _fat12_geometry_from_electone_mdr_geometry(mdr_geometry)
+        else:
+            raise FloppyImageError(
+                "Could not parse a FAT12 boot sector in this image. "
+                "The file may not be an IBM/Yamaha floppy image, or it may need to be read with Greaseweazle first."
+            )
     if len(data) < geometry.total_size:
         raise FloppyImageError(
             "The floppy image ended before the FAT12 data area was complete. "
@@ -2938,7 +3365,14 @@ def _read_fat12_image_context(img_path):
 
 def _read_fat12_image_listing(img_path):
     data, geometry, fat, root_dir = _read_fat12_image_context(img_path)
-    entries = _collect_fat12_listing_entries(data, geometry, fat, root_dir)
+    allow_contiguous_fallback = electone_mdr_to_midi.root_directory_has_mdr_entries(root_dir)
+    entries = _collect_fat12_listing_entries(
+        data,
+        geometry,
+        fat,
+        root_dir,
+        allow_contiguous_fallback=allow_contiguous_fallback,
+    )
     free_clusters = sum(
         1
         for cluster in range(2, _fat12_data_cluster_count(geometry) + 2)
@@ -2997,8 +3431,13 @@ def _read_fat12_file_bytes(img_path, image_path):
     )
     if entry["attr"] & 0x10:
         raise FloppyImageError(f"Could not extract {normalized_path} from image: path is a directory.")
-    clusters = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
-    return _read_cluster_chain_from_image(data, geometry, clusters, entry["size"])
+    try:
+        clusters = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
+        return _read_cluster_chain_from_image(data, geometry, clusters, entry["size"])
+    except FloppyImageError:
+        if not electone_mdr_to_midi.root_directory_has_mdr_entries(root_dir):
+            raise
+        return _fat12_contiguous_file_bytes(data, geometry, entry["cluster"], entry["size"])
 
 
 def _fat12_chain_starts(fat, geometry):
@@ -3428,6 +3867,131 @@ def _disk_format_for_image(img_path):
             "This tool currently supports common IBM-compatible floppy sizes."
         )
     return disk_format
+
+
+def _scp_disk_type(source_path):
+    try:
+        with open(source_path, "rb") as handle:
+            header = handle.read(5)
+    except OSError:
+        return None
+    if len(header) < 5 or header[:3] != b"SCP":
+        return None
+    return header[4]
+
+
+def _non_fat_gw_format_hint(source_path, source_ext):
+    if str(source_ext or "").lower().lstrip(".") != "scp":
+        return None
+    return NON_FAT_GW_FORMAT_BY_SCP_TYPE.get(_scp_disk_type(source_path))
+
+
+def _hfs_volume_name(img_path):
+    try:
+        with open(img_path, "rb") as handle:
+            handle.seek(1024)
+            mdb = handle.read(128)
+    except OSError:
+        return ""
+    if len(mdb) < 64 or mdb[:2] != b"BD":
+        return ""
+    allocation_blocks = int.from_bytes(mdb[18:20], "big")
+    allocation_block_size = int.from_bytes(mdb[20:24], "big")
+    first_allocation_block = int.from_bytes(mdb[28:30], "big")
+    if allocation_blocks <= 0:
+        return ""
+    if allocation_block_size < 512 or allocation_block_size % 512:
+        return ""
+    if first_allocation_block <= 0:
+        return ""
+    name_length = mdb[36]
+    if name_length <= 0 or name_length > 27:
+        return ""
+    raw_name = mdb[37:37 + min(name_length, 27)]
+    volume_name = raw_name.decode("mac_roman", errors="replace").strip()
+    if not volume_name or any(ord(char) < 32 for char in volume_name):
+        return ""
+    return volume_name
+
+
+def _should_probe_non_fat_gw_image(source_path, source_ext, disk_format_hint, sector_maps):
+    if isinstance(disk_format_hint, DiskFormat):
+        return False
+    if _non_fat_gw_format_hint(source_path, source_ext) is None:
+        return False
+
+    meaningful_maps = [
+        sector_map
+        for sector_map in (sector_maps or [])
+        if sector_map and sector_map.get("total") is not None
+    ]
+    if not meaningful_maps:
+        return False
+    for sector_map in meaningful_maps:
+        found = sector_map.get("found")
+        if found is None:
+            found = sector_map.get("good")
+        if int(found or 0) > 0:
+            return False
+    return True
+
+
+def _detect_non_fat_gw_image(source_path, source_ext, temp_dir, progress_callback=None, cancel_callback=None):
+    disk_format = _non_fat_gw_format_hint(source_path, source_ext)
+    if disk_format is None:
+        return None
+
+    _raise_if_cancelled(cancel_callback)
+    candidate = os.path.join(temp_dir, f"nonfat_{disk_format.key.replace('.', '_')}.img")
+    try:
+        _notify_progress(
+            progress_callback,
+            1,
+            4,
+            f"Checking whether this is a {disk_format.label} image...",
+        )
+        conversion_output = _gw_convert(
+            source_path,
+            candidate,
+            disk_format.key,
+            cancel_callback=cancel_callback,
+            allow_sector_failures=True,
+        )
+    except FloppyOperationCancelled:
+        raise
+    except Exception:
+        return None
+
+    volume_name = _hfs_volume_name(candidate)
+    if not volume_name:
+        return None
+
+    sector_map = _parse_gw_sector_map(conversion_output, disk_format)
+    return {
+        "disk_format": disk_format,
+        "sector_map": sector_map,
+        "volume_name": volume_name,
+    }
+
+
+def _conversion_candidate_formats(source_path, source_ext, disk_format_hint=None):
+    if isinstance(disk_format_hint, DiskFormat):
+        return [disk_format_hint]
+
+    preferred = []
+    if str(source_ext or "").lower().lstrip(".") == "hfe":
+        try:
+            size = os.path.getsize(source_path)
+        except OSError:
+            size = 0
+        if 0 < size < 3 * 1024 * 1024:
+            preferred.append(DISK_FORMAT_BY_KEY["ibm.720"])
+        elif 0 < size < 6 * 1024 * 1024:
+            preferred.append(DISK_FORMAT_BY_KEY["ibm.1440"])
+        elif 0 < size < 10 * 1024 * 1024:
+            preferred.append(DISK_FORMAT_BY_KEY["ibm.2880"])
+
+    return preferred + [disk_format for disk_format in DISK_FORMATS if disk_format not in preferred]
 
 
 def _looks_like_editable_fat_image(img_path):
@@ -3904,6 +4468,7 @@ class FloppyImageSession:
         gw_source=None,
         capture_path=None,
         capture_ext=None,
+        gw_sector_reports=None,
     ):
         self.source_path = source_path
         self.source_ext = source_ext
@@ -3916,6 +4481,8 @@ class FloppyImageSession:
         self.gw_source = gw_source
         self.capture_path = capture_path
         self.capture_ext = capture_ext
+        self.gw_sector_reports = tuple(gw_sector_reports or ())
+        self.latest_gw_sector_reports = self.gw_sector_reports
         self.repair_note = repair_result.note
         self.repair_changed = repair_result.changed
         self.extracted_dir = os.path.join(temp_dir, "extracted")
@@ -4050,7 +4617,7 @@ class FloppyImageSession:
         if not isinstance(gw_source, GreaseweazleFloppySource):
             raise FloppyImageError("Invalid Greaseweazle source selection.")
         if not gw_source.archival_quality:
-            raise FloppyImageError("Greaseweazle SCP capture requires archival quality mode.")
+            raise FloppyImageError("Greaseweazle SCP capture requires raw SCP mode.")
 
         temp_dir = tempfile.mkdtemp(prefix="aps_gw_capture_read_")
         try:
@@ -4061,7 +4628,7 @@ class FloppyImageSession:
                 2,
                 f"Reading floppy via Greaseweazle drive {gw_source.drive}...",
             )
-            _gw_read_floppy(
+            sector_map = _gw_read_floppy(
                 gw_source,
                 source_capture,
                 progress_callback=progress_callback,
@@ -4069,7 +4636,7 @@ class FloppyImageSession:
             )
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 2, 2, "Greaseweazle SCP capture ready to save...")
-            return GreaseweazleCapture(gw_source, source_capture, temp_dir)
+            return GreaseweazleCapture(gw_source, source_capture, temp_dir, sector_map=sector_map)
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
@@ -4095,8 +4662,9 @@ class FloppyImageSession:
                 total_steps,
                 f"Reading floppy via Greaseweazle drive {gw_source.drive}...",
             )
+            read_sector_map = {}
             try:
-                _gw_read_floppy(
+                read_sector_map = _gw_read_floppy(
                     gw_source,
                     source_capture,
                     progress_callback=progress_callback,
@@ -4116,15 +4684,16 @@ class FloppyImageSession:
                     shutil.copy2(source_capture, saved_capture)
                 raise
             progress_step += 1
+            conversion_sector_map = {}
             if gw_source.archival_quality:
                 saved_capture = os.path.abspath(gw_source.capture_save_path) if gw_source.capture_save_path else ""
                 if saved_capture:
                     _raise_if_cancelled(cancel_callback)
-                    _notify_progress(progress_callback, progress_step, total_steps, "Saving archival SCP capture...")
+                    _notify_progress(progress_callback, progress_step, total_steps, "Saving raw SCP capture...")
                     os.makedirs(os.path.dirname(saved_capture), exist_ok=True)
                     shutil.copy2(source_capture, saved_capture)
                     source_capture = saved_capture
-                _notify_progress(progress_callback, progress_step, total_steps, "Converting archival SCP capture...")
+                _notify_progress(progress_callback, progress_step, total_steps, "Converting raw SCP capture...")
                 try:
                     conversion_output = _gw_convert(
                         source_capture,
@@ -4132,6 +4701,7 @@ class FloppyImageSession:
                         gw_source.disk_format.key,
                         cancel_callback=cancel_callback,
                     )
+                    conversion_sector_map = _parse_gw_sector_map(conversion_output, gw_source.disk_format)
                 except GreaseweazleConversionError as exc:
                     raise GreaseweazleConversionError(
                         str(exc),
@@ -4150,7 +4720,7 @@ class FloppyImageSession:
                 if gw_source.archival_quality:
                     raise GreaseweazleConversionError(
                         str(exc),
-                        sector_map=_parse_gw_sector_map(conversion_output),
+                        sector_map=_parse_gw_sector_map(conversion_output, gw_source.disk_format),
                         disk_format=gw_source.disk_format,
                         capture_path=source_capture,
                         reason="format_mismatch",
@@ -4161,7 +4731,7 @@ class FloppyImageSession:
                 if gw_source.archival_quality:
                     raise GreaseweazleConversionError(
                         str(exc),
-                        sector_map=_parse_gw_sector_map(conversion_output),
+                        sector_map=_parse_gw_sector_map(conversion_output, gw_source.disk_format),
                         disk_format=gw_source.disk_format,
                         capture_path=source_capture,
                     ) from exc
@@ -4178,7 +4748,7 @@ class FloppyImageSession:
                     "Greaseweazle read did not match the selected disk size. "
                     f"Selected {gw_source.disk_format.label}, but the captured image looks like {disk_format.label}. "
                     "Choose the matching disk format and try converting the saved capture again.",
-                    sector_map=_parse_gw_sector_map(conversion_output),
+                    sector_map=_parse_gw_sector_map(conversion_output, gw_source.disk_format),
                     disk_format=gw_source.disk_format,
                     capture_path=source_capture,
                     reason="format_mismatch",
@@ -4200,6 +4770,15 @@ class FloppyImageSession:
                 gw_source=gw_source,
                 capture_path=source_capture,
                 capture_ext="scp" if gw_source.archival_quality else "img",
+                gw_sector_reports=_gw_sector_reports(
+                    _gw_sector_report(
+                        "read",
+                        read_sector_map,
+                        title="Greaseweazle Read Sector Map",
+                        summary=f"Read {gw_source.display_name}.",
+                        disk_format=gw_source.disk_format,
+                    ),
+                ),
             )
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -4232,6 +4811,7 @@ class FloppyImageSession:
             revs=gw_source.revs,
             retries=gw_source.retries,
             capture_save_path=capture_path,
+            capture_output_ext="scp",
         )
         try:
             source_copy = os.path.join(temp_dir, "source.img")
@@ -4249,6 +4829,7 @@ class FloppyImageSession:
                     disk_format.key,
                     cancel_callback=cancel_callback,
                 )
+                conversion_sector_map = _parse_gw_sector_map(conversion_output, disk_format)
                 _validate_converted_image_matches_boot_hint(source_copy, disk_format)
             except GreaseweazleConversionError as exc:
                 raise GreaseweazleConversionError(
@@ -4262,7 +4843,10 @@ class FloppyImageSession:
             except ConvertedImageFormatMismatchError as exc:
                 raise GreaseweazleConversionError(
                     str(exc),
-                    sector_map=_parse_gw_sector_map(conversion_output if "conversion_output" in locals() else ""),
+                    sector_map=_parse_gw_sector_map(
+                        conversion_output if "conversion_output" in locals() else "",
+                        disk_format,
+                    ),
                     disk_format=disk_format,
                     capture_path=capture_path,
                     reason="format_mismatch",
@@ -4271,7 +4855,10 @@ class FloppyImageSession:
             except FloppyImageError as exc:
                 raise GreaseweazleConversionError(
                     str(exc),
-                    sector_map=_parse_gw_sector_map(conversion_output if "conversion_output" in locals() else ""),
+                    sector_map=_parse_gw_sector_map(
+                        conversion_output if "conversion_output" in locals() else "",
+                        disk_format,
+                    ),
                     disk_format=disk_format,
                     capture_path=capture_path,
                 ) from exc
@@ -4287,7 +4874,10 @@ class FloppyImageSession:
                     "Greaseweazle conversion did not match the selected disk size. "
                     f"Selected {disk_format.label}, but the captured image looks like {detected_format.label}. "
                     "Choose the matching disk format and try again.",
-                    sector_map=_parse_gw_sector_map(conversion_output if "conversion_output" in locals() else ""),
+                    sector_map=_parse_gw_sector_map(
+                        conversion_output if "conversion_output" in locals() else "",
+                        disk_format,
+                    ),
                     disk_format=disk_format,
                     capture_path=capture_path,
                     reason="format_mismatch",
@@ -4308,6 +4898,15 @@ class FloppyImageSession:
                 gw_source=retry_source,
                 capture_path=capture_path,
                 capture_ext="scp",
+                gw_sector_reports=_gw_sector_reports(
+                    _gw_sector_report(
+                        "convert",
+                        locals().get("conversion_sector_map", {}),
+                        title="Greaseweazle Conversion Sector Map",
+                        summary=f"Converted the saved Greaseweazle capture as {disk_format.label}.",
+                        disk_format=disk_format,
+                    ),
+                ),
             )
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -4407,7 +5006,7 @@ class FloppyImageSession:
                 _notify_progress(progress_callback, 1, 5, "Adding empty PIANODIR.FIL...")
                 _write_empty_pianodir_to_image(working_img, temp_dir)
             _notify_progress(progress_callback, 2, 5, f"Writing Greaseweazle drive {gw_source.drive}...")
-            _gw_write_floppy(
+            write_sector_map = _gw_write_floppy(
                 gw_source,
                 working_img,
                 progress_callback=progress_callback,
@@ -4428,6 +5027,15 @@ class FloppyImageSession:
                 source_kind="floppy_gw",
                 source_name=gw_source.display_name,
                 gw_source=gw_source,
+                gw_sector_reports=_gw_sector_reports(
+                    _gw_sector_report(
+                        "write",
+                        write_sector_map,
+                        title="Greaseweazle Write Sector Map",
+                        summary=f"Wrote {gw_source.disk_format.label} to {gw_source.display_name}.",
+                        disk_format=gw_source.disk_format,
+                    ),
+                ),
             )
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -4525,12 +5133,25 @@ class FloppyImageSession:
                     source_name=f"Recovered from {os.path.basename(source_path)}",
                     extra_note="The original image file was not modified." + hint_note,
                     disk_format_hint=disk_format_hint,
+                    gw_sector_reports=_gw_sector_reports(
+                        _gw_recovery_no_sector_report(
+                            summary=(
+                                f"Recovered {os.path.basename(source_path)} from a raw sector image. "
+                                "No Greaseweazle read or conversion sector map was available to chart."
+                            ),
+                            disk_format=disk_format_hint,
+                        )
+                    ),
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
                 )
 
             last_error = None
-            candidate_formats = [disk_format_hint] if isinstance(disk_format_hint, DiskFormat) else DISK_FORMATS
+            candidate_formats = _conversion_candidate_formats(
+                source_path,
+                source_ext,
+                disk_format_hint=disk_format_hint,
+            )
             for disk_format in candidate_formats:
                 _raise_if_cancelled(cancel_callback)
                 converted = os.path.join(temp_dir, f"source_recovery_{disk_format.key.replace('.', '_')}.img")
@@ -4541,14 +5162,66 @@ class FloppyImageSession:
                         100,
                         f"Converting {source_ext.upper()} image for {disk_format.label} recovery...",
                     )
-                    _gw_convert(source_path, converted, disk_format.key, cancel_callback=cancel_callback)
-                    _validate_converted_image_matches_boot_hint(converted, disk_format)
+                    conversion_output = _gw_convert(
+                        source_path,
+                        converted,
+                        disk_format.key,
+                        cancel_callback=cancel_callback,
+                        allow_sector_failures=True,
+                    )
+                    conversion_sector_map = _parse_gw_sector_map(conversion_output, disk_format)
+                    if (
+                        not isinstance(disk_format_hint, DiskFormat)
+                        and conversion_sector_map.get("found") == 0
+                        and conversion_sector_map.get("total")
+                    ):
+                        raise FloppyImageError(
+                            f"Greaseweazle found 0 sectors while trying {disk_format.label}; trying another format."
+                        )
+                    validation_note = ""
+                    try:
+                        _validate_converted_image_matches_boot_hint(converted, disk_format)
+                    except ConvertedImageFormatMismatchError as exc:
+                        if not isinstance(disk_format_hint, DiskFormat):
+                            raise
+                        detected_label = (
+                            exc.suggested_format.label
+                            if isinstance(exc.suggested_format, DiskFormat)
+                            else exc.hinted_label
+                            or "another format"
+                        )
+                        validation_note = (
+                            f" The converted boot sector looked like {detected_label}, "
+                            f"but recovery continued with the selected {disk_format.label} format."
+                        )
+                    except FloppyImageError as exc:
+                        if not isinstance(disk_format_hint, DiskFormat):
+                            raise
+                        validation_note = (
+                            f" Converted image geometry validation reported '{exc}', "
+                            f"but recovery continued with the selected {disk_format.label} format."
+                        )
                     return cls._recover_from_raw_image(
                         converted,
                         temp_dir,
                         source_name=f"Recovered from {os.path.basename(source_path)}",
-                        extra_note="The original image file was not modified." + hint_note,
+                        extra_note=(
+                            "The original image file was not modified."
+                            + hint_note
+                            + _gw_recovery_sector_note(conversion_sector_map, disk_format)
+                            + validation_note
+                        ),
                         disk_format_hint=disk_format_hint,
+                        gw_sector_reports=_gw_sector_reports(
+                            _gw_recovery_sector_report(
+                                conversion_sector_map,
+                                summary=(
+                                    f"Recovered {os.path.basename(source_path)} by converting "
+                                    f"the source image as {disk_format.label}."
+                                ),
+                                disk_format=disk_format,
+                            )
+                        ),
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
                     )
@@ -4632,6 +5305,7 @@ class FloppyImageSession:
                     revs=gw_source.revs,
                     retries=max(gw_source.retries, 5),
                     capture_save_path=gw_source.capture_save_path,
+                    capture_output_ext=gw_source.capture_output_ext,
                 )
             ]
             if not gw_source.archival_quality:
@@ -4643,6 +5317,7 @@ class FloppyImageSession:
                         archival_quality=True,
                         revs=max(gw_source.revs, 3),
                         retries=max(gw_source.retries, 5),
+                        capture_output_ext="scp",
                     )
                 )
 
@@ -4653,6 +5328,8 @@ class FloppyImageSession:
                 capture = os.path.join(temp_dir, f"source_recovery_{attempt_index}.{capture_ext}")
                 source_img = capture
                 read_note = ""
+                read_sector_map = {}
+                conversion_sector_map = {}
                 try:
                     _notify_progress(
                         progress_callback,
@@ -4660,7 +5337,7 @@ class FloppyImageSession:
                         100,
                         f"Reading floppy via Greaseweazle for recovery ({attempt.display_name})...",
                     )
-                    _gw_read_floppy(
+                    read_sector_map = _gw_read_floppy(
                         attempt,
                         capture,
                         progress_callback=progress_callback,
@@ -4668,7 +5345,7 @@ class FloppyImageSession:
                     )
                     if attempt.archival_quality and attempt.capture_save_path:
                         _raise_if_cancelled(cancel_callback)
-                        _notify_progress(progress_callback, 68, 100, "Saving archival SCP capture...")
+                        _notify_progress(progress_callback, 68, 100, "Saving raw SCP capture...")
                         saved_capture = os.path.abspath(attempt.capture_save_path)
                         os.makedirs(os.path.dirname(saved_capture), exist_ok=True)
                         shutil.copy2(capture, saved_capture)
@@ -4676,12 +5353,13 @@ class FloppyImageSession:
                 except FloppyOperationCancelled:
                     raise
                 except Exception as exc:
+                    read_sector_map = _parse_gw_sector_map(str(exc), attempt.disk_format)
                     last_error = exc
                     if not os.path.isfile(capture) or os.path.getsize(capture) <= 0:
                         continue
                     if attempt.archival_quality and attempt.capture_save_path:
                         _raise_if_cancelled(cancel_callback)
-                        _notify_progress(progress_callback, 68, 100, "Saving partial archival SCP capture...")
+                        _notify_progress(progress_callback, 68, 100, "Saving partial raw SCP capture...")
                         saved_capture = os.path.abspath(attempt.capture_save_path)
                         os.makedirs(os.path.dirname(saved_capture), exist_ok=True)
                         shutil.copy2(capture, saved_capture)
@@ -4691,8 +5369,21 @@ class FloppyImageSession:
                 if attempt.archival_quality:
                     source_img = os.path.join(temp_dir, f"source_recovery_{attempt_index}.img")
                     try:
-                        _notify_progress(progress_callback, 70, 100, "Converting archival SCP capture for recovery...")
-                        _gw_convert(capture, source_img, attempt.disk_format.key, cancel_callback=cancel_callback)
+                        _notify_progress(progress_callback, 70, 100, "Converting raw SCP capture for recovery...")
+                        conversion_output = _gw_convert(
+                            capture,
+                            source_img,
+                            attempt.disk_format.key,
+                            cancel_callback=cancel_callback,
+                            allow_sector_failures=True,
+                        )
+                        conversion_sector_map = _parse_gw_sector_map(conversion_output, attempt.disk_format)
+                        conversion_note = _gw_recovery_sector_note(conversion_sector_map, attempt.disk_format)
+                        if conversion_note:
+                            if read_note:
+                                read_note += conversion_note
+                            else:
+                                read_note = "Greaseweazle recovery read completed." + conversion_note
                     except FloppyOperationCancelled:
                         raise
                     except Exception as exc:
@@ -4700,13 +5391,29 @@ class FloppyImageSession:
                         continue
 
                 try:
-                    note = read_note or "Greaseweazle recovery read completed. The source floppy was not modified."
+                    note = read_note or "Greaseweazle recovery read completed."
+                    note += " The source floppy was not modified."
                     return cls._recover_from_raw_image(
                         source_img,
                         temp_dir,
                         source_name=f"Recovered from {attempt.display_name}",
                         extra_note=note,
                         disk_format_hint=attempt.disk_format,
+                        gw_sector_reports=_gw_sector_reports(
+                            _gw_recovery_sector_report(
+                                read_sector_map,
+                                summary=f"Read {attempt.display_name} for recovery.",
+                                disk_format=attempt.disk_format,
+                            ),
+                            _gw_recovery_sector_report(
+                                conversion_sector_map,
+                                summary=(
+                                    f"Recovered {attempt.display_name} by converting "
+                                    f"the Greaseweazle capture as {attempt.disk_format.label}."
+                                ),
+                                disk_format=attempt.disk_format,
+                            ),
+                        ),
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
                     )
@@ -4733,6 +5440,7 @@ class FloppyImageSession:
         source_name,
         extra_note="",
         disk_format_hint=None,
+        gw_sector_reports=None,
         progress_callback=None,
         cancel_callback=None,
     ):
@@ -4747,18 +5455,19 @@ class FloppyImageSession:
             listing = read_image_listing(prepared)
             if listing.entries:
                 shutil.copy2(prepared, working_img)
+                note = "Recovery opened a repaired editable image copy. Review before saving."
+                if extra_note:
+                    note += f" {str(extra_note).strip()}"
                 return cls(
                     working_img,
                     "img",
                     temp_dir,
                     working_img,
                     disk_format,
-                    YamahaRepairResult(
-                        "Recovery opened a repaired editable image copy. Review before saving.",
-                        True,
-                    ),
+                    YamahaRepairResult(note, True),
                     source_kind="recovered_image",
                     source_name=source_name,
+                    gw_sector_reports=gw_sector_reports,
                 )
         except FloppyOperationCancelled:
             raise
@@ -4794,19 +5503,22 @@ class FloppyImageSession:
             cancel_callback=cancel_callback,
         )
         shutil.copy2(recovered_img, working_img)
+        note = (
+            f"Recovery created an editable image copy from {len(recovered_files)} recovered file(s). "
+            "Some names, order, or damaged song data may be missing."
+        )
+        if extra_note:
+            note += f" {str(extra_note).strip()}"
         return cls(
             working_img,
             "img",
             temp_dir,
             working_img,
             disk_format,
-            YamahaRepairResult(
-                f"Recovery created an editable image copy from {len(recovered_files)} recovered file(s). "
-                "Some names, order, or damaged song data may be missing.",
-                True,
-            ),
+            YamahaRepairResult(note, True),
             source_kind="recovered_image",
             source_name=source_name,
+            gw_sector_reports=gw_sector_reports,
         )
 
     @property
@@ -4820,6 +5532,13 @@ class FloppyImageSession:
         _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 1, 4, "Copying raw floppy image...")
         shutil.copy2(source_path, source_copy)
+        volume_name = _hfs_volume_name(source_copy)
+        if volume_name:
+            raise FloppyImageError(
+                f"This appears to be a Macintosh HFS floppy image (volume '{volume_name}'), "
+                "not an IBM/Yamaha FAT floppy image. APS MIDI Prep Tool cannot open Macintosh HFS volumes "
+                "for Yamaha editing."
+            )
         _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 2, 4, "Preparing editable floppy image...")
         repair_result = prepare_yamaha_image(source_copy, working_img)
@@ -4841,7 +5560,12 @@ class FloppyImageSession:
         cancel_callback=None,
     ):
         last_error = None
-        candidate_formats = [disk_format_hint] if isinstance(disk_format_hint, DiskFormat) else DISK_FORMATS
+        conversion_failure_sector_maps = []
+        candidate_formats = _conversion_candidate_formats(
+            source_path,
+            source_ext,
+            disk_format_hint=disk_format_hint,
+        )
         for disk_format in candidate_formats:
             _raise_if_cancelled(cancel_callback)
             candidate = os.path.join(temp_dir, f"candidate_{disk_format.key.replace('.', '_')}.img")
@@ -4854,13 +5578,14 @@ class FloppyImageSession:
                     f"Converting image to editable {disk_format.label}...",
                 )
                 conversion_output = _gw_convert(source_path, candidate, disk_format.key, cancel_callback=cancel_callback)
+                conversion_sector_map = _parse_gw_sector_map(conversion_output, disk_format)
                 try:
                     _validate_converted_image_matches_boot_hint(candidate, disk_format)
                 except ConvertedImageFormatMismatchError as exc:
                     if isinstance(disk_format_hint, DiskFormat):
                         raise GreaseweazleConversionError(
                             str(exc),
-                            sector_map=_parse_gw_sector_map(conversion_output),
+                            sector_map=_parse_gw_sector_map(conversion_output, disk_format),
                             disk_format=disk_format,
                             capture_path=source_path,
                             reason="format_mismatch",
@@ -4871,7 +5596,7 @@ class FloppyImageSession:
                     if isinstance(disk_format_hint, DiskFormat):
                         raise GreaseweazleConversionError(
                             str(exc),
-                            sector_map=_parse_gw_sector_map(conversion_output),
+                            sector_map=_parse_gw_sector_map(conversion_output, disk_format),
                             disk_format=disk_format,
                             capture_path=source_path,
                         ) from exc
@@ -4891,11 +5616,31 @@ class FloppyImageSession:
                 working_img = os.path.join(temp_dir, "working.img")
                 shutil.move(prepared, working_img)
                 _raise_if_cancelled(cancel_callback)
-                return cls(source_path, source_ext, temp_dir, working_img, disk_format, repair_result)
+                return cls(
+                    source_path,
+                    source_ext,
+                    temp_dir,
+                    working_img,
+                    disk_format,
+                    repair_result,
+                    gw_sector_reports=_gw_sector_reports(
+                        None
+                        if source_ext.lower().lstrip(".") == "hfe"
+                        else _gw_sector_report(
+                            "convert",
+                            conversion_sector_map,
+                            title="Greaseweazle Conversion Sector Map",
+                            summary=f"Converted {os.path.basename(source_path)} as {disk_format.label}.",
+                            disk_format=disk_format,
+                        )
+                    ),
+                )
             except FloppyOperationCancelled:
                 raise
             except GreaseweazleConversionError as exc:
                 last_error = exc
+                if exc.sector_map:
+                    conversion_failure_sector_maps.append(exc.sector_map)
                 if isinstance(disk_format_hint, DiskFormat):
                     raise GreaseweazleConversionError(
                         str(exc),
@@ -4909,6 +5654,34 @@ class FloppyImageSession:
                 last_error = exc
                 if isinstance(disk_format_hint, DiskFormat):
                     raise
+
+        if _should_probe_non_fat_gw_image(
+            source_path,
+            source_ext,
+            disk_format_hint,
+            conversion_failure_sector_maps,
+        ):
+            non_fat = _detect_non_fat_gw_image(
+                source_path,
+                source_ext,
+                temp_dir,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+            if non_fat is not None:
+                disk_format = non_fat["disk_format"]
+                volume_name = non_fat.get("volume_name") or "Untitled"
+                raise GreaseweazleConversionError(
+                    "Greaseweazle decoded this SCP as "
+                    f"{disk_format.label} (volume '{volume_name}'), not an IBM/Yamaha FAT floppy. "
+                    "APS MIDI Prep Tool cannot open Macintosh HFS volumes for Yamaha editing, "
+                    "but it can save the decoded sector image without opening it.",
+                    sector_map=non_fat.get("sector_map") or {},
+                    disk_format=disk_format,
+                    capture_path=source_path,
+                    reason="non_fat_format",
+                    details={"volume_name": volume_name},
+                )
 
         detail = f" Last error: {last_error}" if last_error else ""
         raise FloppyImageError(
@@ -5275,10 +6048,17 @@ class FloppyImageSession:
             _raise_if_cancelled(cancel_callback)
             shutil.copy2(source_img, output_path)
             _raise_if_cancelled(cancel_callback)
-            return
+            return None
         if output_ext not in SUPPORTED_IMAGE_EXTENSIONS:
             raise FloppyImageError(_unsupported_image_type_message(output_ext, for_output=True))
-        _gw_convert(source_img, output_path, self.disk_format.key, cancel_callback=cancel_callback)
+        output = _gw_convert(source_img, output_path, self.disk_format.key, cancel_callback=cancel_callback)
+        return _gw_sector_report(
+            "convert",
+            _parse_gw_sector_map(output, self.disk_format),
+            title="Greaseweazle Conversion Sector Map",
+            summary=f"Converted the image to {output_ext.upper()} using {self.disk_format.label}.",
+            disk_format=self.disk_format,
+        )
 
     def write_image(self, source_img, output_path, output_ext, progress_callback=None, cancel_callback=None):
         output_path = os.path.abspath(output_path)
@@ -5293,9 +6073,10 @@ class FloppyImageSession:
                 _notify_progress(progress_callback, 4, 5, "Writing raw floppy image...")
             else:
                 _notify_progress(progress_callback, 4, 5, f"Converting floppy image to {output_ext.upper()}...")
-            self._write_image_direct(source_img, temp_output, output_ext, cancel_callback=cancel_callback)
+            report = self._write_image_direct(source_img, temp_output, output_ext, cancel_callback=cancel_callback)
             _raise_if_cancelled(cancel_callback)
             os.replace(temp_output, output_path)
+            self.latest_gw_sector_reports = _gw_sector_reports(report)
         finally:
             if os.path.exists(temp_output):
                 os.remove(temp_output)
@@ -5665,6 +6446,7 @@ class FloppyImageSession:
             cancel_callback=cancel_callback,
         )
         try:
+            reports = ()
             if self.source_kind == "floppy_usb":
                 _notify_progress(progress_callback, 4, 5, f"Saving files to floppy {self.source_path}...")
                 self._sync_modified_image_files_to_floppy_drive(
@@ -5676,11 +6458,20 @@ class FloppyImageSession:
             elif self.source_kind == "floppy_gw":
                 drive_name = self.gw_source.drive if self.gw_source is not None else "A"
                 _notify_progress(progress_callback, 4, 5, f"Writing Greaseweazle drive {drive_name}...")
-                _gw_write_floppy(
+                write_sector_map = _gw_write_floppy(
                     self.gw_source,
                     modified_img,
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
+                )
+                reports = _gw_sector_reports(
+                    _gw_sector_report(
+                        "write",
+                        write_sector_map,
+                        title="Greaseweazle Write Sector Map",
+                        summary=f"Wrote changes to {self.source_name}.",
+                        disk_format=self.disk_format,
+                    ),
                 )
             else:
                 output_ext = self.source_ext if self.source_ext else "img"
@@ -5693,7 +6484,8 @@ class FloppyImageSession:
                     _notify_progress(progress_callback, 4, 5, "Saving raw floppy image...")
                 else:
                     _notify_progress(progress_callback, 4, 5, f"Converting image back to {output_ext.upper()}...")
-                self._write_image_direct(modified_img, temp_output, output_ext, cancel_callback=cancel_callback)
+                report = self._write_image_direct(modified_img, temp_output, output_ext, cancel_callback=cancel_callback)
+                reports = _gw_sector_reports(report)
                 _raise_if_cancelled(cancel_callback)
                 os.replace(temp_output, self.source_path)
             if not self.source_kind.startswith("floppy"):
@@ -5702,6 +6494,7 @@ class FloppyImageSession:
             self._extracted_files.clear()
             self.repair_changed = False
             self.repair_note = "Floppy saved." if self.source_kind.startswith("floppy") else "Image saved."
+            self.latest_gw_sector_reports = reports
         finally:
             temp_output = locals().get("temp_output")
             if temp_output and os.path.exists(temp_output):
@@ -5744,6 +6537,7 @@ class FloppyImageSession:
             cancel_callback=cancel_callback,
         )
         try:
+            reports = ()
             if target_kind == "floppy_usb":
                 if not isinstance(target, FloppyDriveInfo):
                     raise FloppyImageError("Invalid floppy drive selection.")
@@ -5793,15 +6587,25 @@ class FloppyImageSession:
                 if not isinstance(target, GreaseweazleFloppySource):
                     raise FloppyImageError("Invalid Greaseweazle source selection.")
                 _notify_progress(progress_callback, 4, 5, f"Writing Greaseweazle drive {target.drive}...")
-                _gw_write_floppy(
+                write_sector_map = _gw_write_floppy(
                     target,
                     modified_img,
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
                 )
+                reports = _gw_sector_reports(
+                    _gw_sector_report(
+                        "write",
+                        write_sector_map,
+                        title="Greaseweazle Write Sector Map",
+                        summary=f"Wrote the current image to {target.display_name}.",
+                        disk_format=target.disk_format,
+                    ),
+                )
             else:
                 raise FloppyImageError("Invalid floppy write target.")
             _notify_progress(progress_callback, 5, 5, "Floppy write complete.")
+            self.latest_gw_sector_reports = reports
         finally:
             if os.path.exists(modified_img):
                 os.remove(modified_img)
