@@ -19,7 +19,7 @@ from math import exp, pi, sin
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QPainter, QPalette, QPen, QPixmap, QPolygon
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -226,6 +226,351 @@ class TitleOverflowDelegate(QStyledItemDelegate):
         painter.setPen(self.warning_color)
         painter.drawText(x, baseline, overflow_text)
         painter.restore()
+
+
+class DisklavierScreenLineEdit(QWidget):
+    textChanged = Signal(str)
+
+    def __init__(self, *args, **kwargs):
+        self._fixed_length = int(kwargs.pop("fixed_length", 16))
+        super().__init__(*args, **kwargs)
+        self._text = " " * self._fixed_length
+        self._cursor_position = 0
+        self._selection_anchor = None
+        self._selection_cursor = None
+        self._alignment = Qt.AlignLeft | Qt.AlignVCenter
+        self._up_field = None
+        self._down_field = None
+        self._cursor_visible = True
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(530)
+        self._blink_timer.timeout.connect(self._blink_cursor)
+        self._blink_timer.start()
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.IBeamCursor)
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+
+    def set_vertical_targets(self, *, up_field=None, down_field=None):
+        self._up_field = up_field
+        self._down_field = down_field
+
+    def _limit(self):
+        return max(1, int(self.maxLength() or self._fixed_length or 16))
+
+    def _fixed_text(self, text):
+        limit = self._limit()
+        return str(text or "")[:limit].ljust(limit)
+
+    def setText(self, text):
+        cursor = self.cursorPosition()
+        next_text = self._fixed_text(text)
+        changed = next_text != self._text
+        self._text = next_text
+        self.setCursorPosition(min(cursor, self._limit()))
+        self._clear_selection()
+        self.update()
+        if changed:
+            self.textChanged.emit(self._text)
+
+    def text(self):
+        return self._text
+
+    def setMaxLength(self, length):
+        length = max(1, int(length or self._fixed_length or 16))
+        if length == self._fixed_length:
+            return
+        self._fixed_length = length
+        self._text = self._fixed_text(self._text)
+        self.setCursorPosition(min(self._cursor_position, self._fixed_length))
+        self.updateGeometry()
+        self.update()
+
+    def maxLength(self):
+        return self._fixed_length
+
+    def setAlignment(self, alignment):
+        self._alignment = alignment
+        self.update()
+
+    def sizeHint(self):
+        metrics = QFontMetrics(self.font())
+        return QSize(metrics.horizontalAdvance("M") * self._limit() + self._cursor_gutter() * 2, metrics.height() + 4)
+
+    def cursorPosition(self):
+        return self._cursor_position
+
+    def setCursorPosition(self, position):
+        self._cursor_position = max(0, min(int(position or 0), self._limit()))
+        self._cursor_visible = True
+        self.update()
+
+    def selectAll(self):
+        self._selection_anchor = 0
+        self._selection_cursor = self._limit()
+        self.setCursorPosition(self._limit())
+
+    def hasSelectedText(self):
+        return self._selection_range() is not None
+
+    def selectedText(self):
+        selection = self._selection_range()
+        if selection is None:
+            return ""
+        start, end = selection
+        return self._text[start:end]
+
+    def selectionStart(self):
+        selection = self._selection_range()
+        return -1 if selection is None else selection[0]
+
+    def _selection_range(self):
+        if self._selection_anchor is None or self._selection_cursor is None:
+            return None
+        start = max(0, min(self._selection_anchor, self._selection_cursor))
+        end = min(self._limit(), max(self._selection_anchor, self._selection_cursor))
+        if start == end:
+            return None
+        return start, end
+
+    def _clear_selection(self):
+        self._selection_anchor = None
+        self._selection_cursor = None
+
+    def _set_text_preserving_cursor(self, next_text, cursor_position):
+        next_text = self._fixed_text(next_text)
+        changed = next_text != self._text
+        self._text = next_text
+        self.setCursorPosition(cursor_position)
+        self._clear_selection()
+        self.update()
+        if changed:
+            self.textChanged.emit(self._text)
+
+    def _move_to_vertical_target(self, target):
+        if target is None:
+            return False
+        cursor = self.cursorPosition()
+        target.setFocus()
+        target.setCursorPosition(min(cursor, target._limit()))
+        return True
+
+    def _replace_selection_or_cursor(self, replacement, *, blank_selection_remainder=False):
+        limit = self._limit()
+        current = self._fixed_text(self._text)
+        selection = self._selection_range()
+        if selection is not None:
+            start, end = selection
+            selected_length = end - start
+        else:
+            start = max(0, min(self.cursorPosition(), limit))
+            selected_length = 0
+
+        if start >= limit:
+            return
+
+        payload = str(replacement or "")[:limit - start]
+        if blank_selection_remainder and selected_length > len(payload):
+            payload = payload + (" " * (selected_length - len(payload)))
+        replace_length = max(selected_length, len(payload))
+        if replace_length <= 0:
+            return
+
+        end = min(limit, start + replace_length)
+        next_text = (current[:start] + payload + current[end:])[:limit].ljust(limit)
+        self._set_text_preserving_cursor(next_text, min(limit, start + len(str(replacement or "")[:limit - start])))
+
+    def _blank_range(self, start, length, cursor_position):
+        limit = self._limit()
+        if length <= 0 or start < 0 or start >= limit:
+            return
+        current = self._fixed_text(self._text)
+        end = min(limit, start + length)
+        next_text = current[:start] + (" " * (end - start)) + current[end:]
+        self._set_text_preserving_cursor(next_text, max(0, min(cursor_position, limit)))
+
+    def _insert_text_at_cursor(self, insert_text):
+        limit = self._limit()
+        current = self._fixed_text(self._text)
+        selection = self._selection_range()
+        if selection is not None:
+            start, end = selection
+            current = (current[:start] + current[end:])[:limit].ljust(limit)
+        else:
+            start = max(0, min(self.cursorPosition(), limit))
+        if start >= limit:
+            return
+
+        cursor = start
+        for char in str(insert_text or ""):
+            if cursor >= limit:
+                break
+            current = (current[:cursor] + char + current[cursor:limit - 1])[:limit].ljust(limit)
+            cursor += 1
+        self._set_text_preserving_cursor(current, cursor)
+
+    def _cursor_gutter(self):
+        return 2
+
+    def _text_origin_x(self):
+        return self._cursor_gutter()
+
+    def _text_area_width(self):
+        return max(1, self.width() - self._cursor_gutter() * 2)
+
+    def _cell_metrics(self):
+        limit = self._limit()
+        return self._text_area_width() / float(limit)
+
+    def _position_from_x(self, x):
+        limit = self._limit()
+        cell_width = self._cell_metrics()
+        relative_x = float(x) - self._text_origin_x()
+        if relative_x <= 0:
+            return 0
+        if relative_x >= self._text_area_width():
+            return limit
+        return max(0, min(limit - 1, int(relative_x / cell_width)))
+
+    def _blink_cursor(self):
+        if not self.hasFocus():
+            self._cursor_visible = False
+        else:
+            self._cursor_visible = not self._cursor_visible
+        self.update()
+
+    def focusInEvent(self, event):
+        self._cursor_visible = True
+        self.update()
+        return super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._cursor_visible = False
+        self._clear_selection()
+        self.update()
+        return super().focusOutEvent(event)
+
+    def mousePressEvent(self, event):
+        self.setFocus()
+        position = self._position_from_x(event.position().x() if hasattr(event, "position") else event.x())
+        self._clear_selection()
+        self.setCursorPosition(position)
+        return super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton):
+            return super().mouseMoveEvent(event)
+        position = self._position_from_x(event.position().x() if hasattr(event, "position") else event.x())
+        if self._selection_anchor is None:
+            self._selection_anchor = self._cursor_position
+        self._selection_cursor = position + 1
+        self._cursor_position = max(0, min(position + 1, self._limit()))
+        self.update()
+        return super().mouseMoveEvent(event)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key_Up and self._move_to_vertical_target(self._up_field):
+            return
+        if key == Qt.Key_Down and self._move_to_vertical_target(self._down_field):
+            return
+        if key == Qt.Key_Left:
+            self._clear_selection()
+            self.setCursorPosition(self.cursorPosition() - 1)
+            return
+        if key == Qt.Key_Right:
+            self._clear_selection()
+            self.setCursorPosition(self.cursorPosition() + 1)
+            return
+        if key == Qt.Key_Home:
+            self._clear_selection()
+            self.setCursorPosition(0)
+            return
+        if key == Qt.Key_End:
+            self._clear_selection()
+            self.setCursorPosition(self._limit())
+            return
+        if event.matches(QKeySequence.SelectAll):
+            self.selectAll()
+            return
+        if event.matches(QKeySequence.Copy):
+            QApplication.clipboard().setText(self.selectedText())
+            return
+        if event.matches(QKeySequence.Paste):
+            self._replace_selection_or_cursor(QApplication.clipboard().text(), blank_selection_remainder=True)
+            return
+        if key == Qt.Key_Delete:
+            selection = self._selection_range()
+            if selection is not None:
+                start, end = selection
+                self._blank_range(start, end - start, start)
+            else:
+                self._blank_range(self.cursorPosition(), 1, self.cursorPosition())
+            return
+        if key == Qt.Key_Backspace:
+            selection = self._selection_range()
+            if selection is not None:
+                start, end = selection
+                self._blank_range(start, end - start, start)
+            else:
+                cursor = self.cursorPosition()
+                self._blank_range(cursor - 1, 1, cursor - 1)
+            return
+
+        text = event.text()
+        command_modifier = Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier
+        if text == " " and not (event.modifiers() & command_modifier):
+            self._insert_text_at_cursor(text)
+            return
+        if (
+            text
+            and not self.hasSelectedText()
+            and not (event.modifiers() & command_modifier)
+            and all(0x20 <= ord(char) <= 0x7E for char in text)
+        ):
+            self._replace_selection_or_cursor(text)
+            return
+        if text and not (event.modifiers() & command_modifier) and all(0x20 <= ord(char) <= 0x7E for char in text):
+            self._replace_selection_or_cursor(text, blank_selection_remainder=True)
+            return
+        if text and any(ord(char) < 0x20 or ord(char) == 0x7F for char in text):
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.TextAntialiasing, False)
+        painter.fillRect(self.rect(), QColor("#63D900"))
+
+        limit = self._limit()
+        cell_width = self._cell_metrics()
+        selection = self._selection_range()
+        if selection is not None:
+            start, end = selection
+            painter.fillRect(
+                int(self._text_origin_x() + start * cell_width),
+                0,
+                int((end - start) * cell_width),
+                self.height(),
+                QColor("#4DB000"),
+            )
+
+        metrics = QFontMetrics(self.font())
+        baseline = (self.height() + metrics.ascent() - metrics.descent()) // 2
+        painter.setPen(QColor("#102208"))
+        text = self._fixed_text(self._text)
+        for index, char in enumerate(text[:limit]):
+            if char == " ":
+                continue
+            char_width = metrics.horizontalAdvance(char)
+            x = int(self._text_origin_x() + index * cell_width + (cell_width - char_width) / 2)
+            painter.drawText(x, baseline, char)
+
+        if self.hasFocus() and self._cursor_visible:
+            cursor_x = int(self._text_origin_x() + min(limit, self._cursor_position) * cell_width)
+            if self._cursor_position >= limit:
+                cursor_x = min(max(0, cursor_x), max(0, self.width() - self._cursor_gutter()))
+            painter.setPen(QPen(QColor("#102208"), 1))
+            painter.drawLine(cursor_x, 2, cursor_x, max(2, self.height() - 3))
 
 
 class GreaseweazleSectorGrid(QWidget):
@@ -12774,10 +13119,24 @@ class MidiTitleWindow(QMainWindow):
 
         title_field_font = QFont("Courier New")
         title_field_font.setStyleHint(QFont.Monospace)
+        screen_title_font = QFont(title_field_font)
+        if use_screen_format:
+            point_size = screen_title_font.pointSize()
+            if point_size <= 0:
+                point_size = QApplication.font().pointSize()
+            screen_title_font.setPointSize(max(point_size + 5, 15))
         title_font_metrics = QFontMetrics(title_field_font)
         title_field_width = title_font_metrics.horizontalAdvance("M" * 32) + 28
-        centered_field_width = title_font_metrics.horizontalAdvance("M" * 16) + 28
-        active_field_width = centered_field_width if use_screen_format else title_field_width
+        centered_field_font = screen_title_font if use_screen_format else title_field_font
+        centered_font_metrics = QFontMetrics(centered_field_font)
+        centered_field_padding = 4 if use_screen_format else 28
+        centered_field_width = centered_font_metrics.horizontalAdvance("M" * 16) + centered_field_padding
+        disklavier_screen_extra_width = 38 if use_screen_format else 0
+        active_field_width = (
+            centered_field_width + disklavier_screen_extra_width
+            if use_screen_format
+            else title_field_width
+        )
 
         editor = QLineEdit(current_title)
         editor.setFont(title_field_font)
@@ -12799,23 +13158,80 @@ class MidiTitleWindow(QMainWindow):
         centered_fields_layout.setContentsMargins(0, 0, 0, 0)
         centered_fields_layout.setSpacing(6)
 
-        first_field = QLineEdit()
-        first_field.setPlaceholderText("Field 1")
-        first_field.setFont(title_field_font)
+        centered_fields_parent = centered_fields_widget
+        centered_fields_parent_layout = centered_fields_layout
+        if use_screen_format:
+            centered_fields_widget.setObjectName("disklavierScreenBezel")
+            centered_fields_widget.setStyleSheet(
+                """
+                QWidget#disklavierScreenBezel {
+                    background-color: #050705;
+                    border: 2px solid #050705;
+                }
+                QWidget#disklavierScreenPanel {
+                    background-color: #63D900;
+                    border: 1px solid #163A08;
+                }
+                """
+            )
+            centered_fields_layout.setContentsMargins(6, 6, 6, 6)
+            centered_fields_layout.setSpacing(0)
+            disklavier_screen_panel = QWidget(centered_fields_widget)
+            disklavier_screen_panel.setObjectName("disklavierScreenPanel")
+            disklavier_screen_layout = QVBoxLayout(disklavier_screen_panel)
+            disklavier_screen_layout.setContentsMargins(10, 6, 10, 6)
+            disklavier_screen_layout.setSpacing(0)
+            centered_fields_layout.addWidget(disklavier_screen_panel)
+            centered_fields_parent = disklavier_screen_panel
+            centered_fields_parent_layout = disklavier_screen_layout
+
+        disklavier_field_style = (
+            """
+            QLineEdit {
+                background-color: #63D900;
+                color: #102208;
+                border: 0;
+                padding: 0;
+                selection-background-color: #4DB000;
+                selection-color: #102208;
+            }
+            QLineEdit:focus {
+                border: 0;
+            }
+            """
+            if use_screen_format
+            else ""
+        )
+        centered_field_alignment = Qt.AlignCenter if use_screen_format else Qt.AlignLeft
+
+        field_class = DisklavierScreenLineEdit if use_screen_format else QLineEdit
+
+        first_field = field_class(centered_fields_parent)
+        if not use_screen_format:
+            first_field.setPlaceholderText("Field 1")
+        first_field.setFont(centered_field_font)
         first_field.setLayoutDirection(Qt.LeftToRight)
         first_field.setMaxLength(16)
         first_field.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         first_field.setFixedWidth(centered_field_width)
-        centered_fields_layout.addWidget(first_field, alignment=Qt.AlignLeft)
+        if disklavier_field_style:
+            first_field.setStyleSheet(disklavier_field_style)
+        centered_fields_parent_layout.addWidget(first_field, alignment=centered_field_alignment)
 
-        second_field = QLineEdit()
-        second_field.setPlaceholderText("Field 2")
-        second_field.setFont(title_field_font)
+        second_field = field_class(centered_fields_parent)
+        if not use_screen_format:
+            second_field.setPlaceholderText("Field 2")
+        second_field.setFont(centered_field_font)
         second_field.setLayoutDirection(Qt.LeftToRight)
         second_field.setMaxLength(16)
         second_field.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         second_field.setFixedWidth(centered_field_width)
-        centered_fields_layout.addWidget(second_field, alignment=Qt.AlignLeft)
+        if disklavier_field_style:
+            second_field.setStyleSheet(disklavier_field_style)
+        centered_fields_parent_layout.addWidget(second_field, alignment=centered_field_alignment)
+        if use_screen_format:
+            first_field.set_vertical_targets(down_field=second_field)
+            second_field.set_vertical_targets(up_field=first_field)
 
         field_stack = QStackedWidget(dialog)
         field_stack.addWidget(editor_page)
@@ -12826,6 +13242,11 @@ class MidiTitleWindow(QMainWindow):
             field_stack_height = (
                 first_field.sizeHint().height()
                 + second_field.sizeHint().height()
+                + centered_fields_parent_layout.contentsMargins().top()
+                + centered_fields_parent_layout.contentsMargins().bottom()
+                + centered_fields_layout.contentsMargins().top()
+                + centered_fields_layout.contentsMargins().bottom()
+                + centered_fields_parent_layout.spacing()
                 + centered_fields_layout.spacing()
             )
         field_stack.setFixedHeight(field_stack_height)
