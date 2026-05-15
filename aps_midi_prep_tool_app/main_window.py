@@ -2363,13 +2363,17 @@ class MidiTitleWindow(QMainWindow):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setMinimumSectionSize(40)
+        self._is_adjusting_columns = True
+        try:
+            self.table.setColumnWidth(0, 50)
+            self.table.setColumnWidth(2, 50)
+            self.table.setColumnWidth(3, self._default_filename_column_width())
+            self.table.setColumnWidth(4, 260)
+            self.table.setColumnWidth(5, 65)
+            self.table.setColumnWidth(6, self.TYPE_COLUMN_MIN_WIDTH)
+        finally:
+            self._is_adjusting_columns = False
         header.sectionResized.connect(self._handle_section_resized)
-        self.table.setColumnWidth(0, 50)
-        self.table.setColumnWidth(2, 50)
-        self.table.setColumnWidth(3, self._default_filename_column_width())
-        self.table.setColumnWidth(4, 260)
-        self.table.setColumnWidth(5, 65)
-        self.table.setColumnWidth(6, self.TYPE_COLUMN_MIN_WIDTH)
         self.table.setColumnHidden(1, True)  # Hide the full path column
         self.table.setSortingEnabled(False)
         self.table.cellClicked.connect(self.handle_cell_clicked)
@@ -5265,12 +5269,26 @@ class MidiTitleWindow(QMainWindow):
         if type_width is not None:
             fixed_total += type_width
 
-        title_min_width = self._minimum_title_column_width()
-        remaining = max((min_section + title_min_width), available_width - fixed_total)
+        auto_title_min_width = self._minimum_title_column_width()
+        remaining = max((min_section + auto_title_min_width), available_width - fixed_total)
 
-        filename_width = self._manual_column_widths.get(3, self._default_filename_column_width())
-        filename_width = max(min_section, min(filename_width, remaining - title_min_width))
-        title_width = remaining - filename_width
+        manual_filename = self._manual_column_widths.get(3)
+        manual_title = self._manual_column_widths.get(4)
+        if manual_filename is not None and manual_title is not None:
+            filename_width = max(min_section, manual_filename)
+            title_width = max(min_section, manual_title)
+            if filename_width + title_width < remaining:
+                title_width = remaining - filename_width
+        elif manual_filename is not None:
+            filename_width = max(min_section, manual_filename)
+            title_width = max(auto_title_min_width, remaining - filename_width)
+        elif manual_title is not None:
+            title_width = max(min_section, manual_title)
+            filename_width = max(min_section, remaining - title_width)
+        else:
+            filename_width = self._default_filename_column_width()
+            filename_width = max(min_section, min(filename_width, remaining - auto_title_min_width))
+            title_width = remaining - filename_width
 
         self._is_adjusting_columns = True
         try:

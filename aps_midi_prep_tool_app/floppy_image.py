@@ -608,14 +608,31 @@ def _run_command(args, error_prefix, *, cancel_callback=None):
         stderr=subprocess.PIPE,
         **windows_subprocess_kwargs(),
     )
+    stdout = ""
+    stderr = ""
+    communicate_error = None
+
+    def _communicate():
+        nonlocal stdout, stderr, communicate_error
+        try:
+            stdout, stderr = process.communicate()
+        except Exception as exc:
+            communicate_error = exc
+
+    communicator = threading.Thread(target=_communicate, daemon=True)
+    communicator.start()
     try:
-        while process.poll() is None:
+        while communicator.is_alive():
             _raise_if_cancelled(cancel_callback)
-            time.sleep(0.1)
-        stdout, stderr = process.communicate()
+            communicator.join(timeout=0.1)
     except FloppyOperationCancelled:
         _terminate_process(process)
+        communicator.join(timeout=2)
         raise
+
+    if communicate_error is not None:
+        _terminate_process(process)
+        raise communicate_error
 
     _raise_if_cancelled(cancel_callback)
     if process.returncode != 0:
@@ -1309,6 +1326,14 @@ def _gw_expected_sectors_per_track(disk_format):
     return int(layout.get("sectors_per_track") or 0)
 
 
+_GW_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _clean_gw_output_line(line):
+    cleaned = _GW_ANSI_ESCAPE_RE.sub("", str(line or ""))
+    return cleaned.replace("\b", "").strip()
+
+
 def _track_status_line_to_counts(clean_line, expected_sectors):
     track_match = re.match(r"^T(?P<cyl>\d+)\.(?P<head>\d+)(?:\s+<-.*)?\s*:\s*(?P<status>.*)$", clean_line)
     if not track_match:
@@ -1381,7 +1406,7 @@ def _parse_gw_sector_map(output, disk_format=None):
     total = None
     expected_sectors = _gw_expected_sectors_per_track(disk_format)
     for line in lines:
-        clean_line = line.strip()
+        clean_line = _clean_gw_output_line(line)
         found_match = re.search(r"\bFound\s+(\d+)\s+sectors\s+of\s+(\d+)", clean_line)
         if found_match:
             found = int(found_match.group(1))
@@ -1597,7 +1622,7 @@ def _gw_short_status(status_text):
 
 
 def _handle_gw_track_progress_line(progress_callback, state, line, *, action="Reading"):
-    clean_line = (line or "").strip()
+    clean_line = _clean_gw_output_line(line)
     if not clean_line:
         return
     if clean_line.startswith("*** "):
@@ -1680,7 +1705,7 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
     ]
     if raw_capture:
         args.append("--raw")
-    else:
+    elif source.disk_format is not None:
         args.append(f"--format={source.disk_format.key}")
     if source.revs > 0:
         args.append(f"--revs={source.revs}")
@@ -1696,7 +1721,7 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
     progress_state = {"total_tracks": 0, "seen_tracks": set(), "command_failed": ""}
 
     def _progress_line_callback(line):
-        clean_line = (line or "").strip()
+        clean_line = _clean_gw_output_line(line)
         if clean_line.startswith("Command Failed:"):
             progress_state["command_failed"] = clean_line
         _handle_gw_read_progress_line(progress_callback, progress_state, line)
@@ -4778,6 +4803,15 @@ class FloppyImageSession:
                         summary=f"Read {gw_source.display_name}.",
                         disk_format=gw_source.disk_format,
                     ),
+                    _gw_sector_report(
+                        "convert",
+                        conversion_sector_map,
+                        title="Greaseweazle Conversion Sector Map",
+                        summary=f"Converted the Greaseweazle capture as {gw_source.disk_format.label}.",
+                        disk_format=gw_source.disk_format,
+                    )
+                    if gw_source.archival_quality
+                    else None,
                 ),
             )
         except Exception:
@@ -5624,9 +5658,7 @@ class FloppyImageSession:
                     disk_format,
                     repair_result,
                     gw_sector_reports=_gw_sector_reports(
-                        None
-                        if source_ext.lower().lstrip(".") == "hfe"
-                        else _gw_sector_report(
+                        _gw_sector_report(
                             "convert",
                             conversion_sector_map,
                             title="Greaseweazle Conversion Sector Map",
