@@ -213,3 +213,9 @@ the right to share.
 
 This project is not affiliated with Yamaha, PianoDisc, Nalbantov, Greaseweazle,
 or other companies mentioned. Trademarks belong to their respective owners.
+
+Related Alex's Piano Service LLC policies:
+
+- [Disclaimer](https://www.alexanderpeppe.com/disclaimer/)
+- [Privacy Policy](https://www.alexanderpeppe.com/privacy-policy/)
+- [DMCA Policy](https://www.alexanderpeppe.com/dmca-policy/)

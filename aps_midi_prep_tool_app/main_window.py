@@ -230,6 +230,8 @@ class TitleOverflowDelegate(QStyledItemDelegate):
 
 class DisklavierScreenLineEdit(QWidget):
     textChanged = Signal(str)
+    CURSOR_GUTTER = 8
+    CURSOR_WIDTH = 2
 
     def __init__(self, *args, **kwargs):
         self._fixed_length = int(kwargs.pop("fixed_length", 16))
@@ -409,7 +411,7 @@ class DisklavierScreenLineEdit(QWidget):
         self._set_text_preserving_cursor(current, cursor)
 
     def _cursor_gutter(self):
-        return 2
+        return self.CURSOR_GUTTER
 
     def _text_origin_x(self):
         return self._cursor_gutter()
@@ -569,7 +571,7 @@ class DisklavierScreenLineEdit(QWidget):
             cursor_x = int(self._text_origin_x() + min(limit, self._cursor_position) * cell_width)
             if self._cursor_position >= limit:
                 cursor_x = min(max(0, cursor_x), max(0, self.width() - self._cursor_gutter()))
-            painter.setPen(QPen(QColor("#102208"), 1))
+            painter.setPen(QPen(QColor("#102208"), self.CURSOR_WIDTH))
             painter.drawLine(cursor_x, 2, cursor_x, max(2, self.height() - 3))
 
 
@@ -2353,7 +2355,7 @@ class MidiTitleWindow(QMainWindow):
         # Column order:
         # 0: Delete ("X"), 1: FullPath (hidden), 2: 📋, 3: Filename, 4: Title, 5: Compat warning (>32), 6: MIDI type
         self.table = DropTableWidget(0, 7)
-        self.table.setStyleSheet("QTableWidget::item:selected { background-color: #FFB347; }")
+        self._apply_table_selection_style()
         self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
         self.table.setToolTip(
             "Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename."
@@ -2848,6 +2850,11 @@ class MidiTitleWindow(QMainWindow):
                 else:
                     self.table.viewport().setCursor(Qt.ArrowCursor)
         return super().eventFilter(obj, event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in {QEvent.ApplicationPaletteChange, QEvent.PaletteChange}:
+            self._apply_table_selection_style()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -5359,6 +5366,32 @@ class MidiTitleWindow(QMainWindow):
             self.table.setColumnHidden(5, not self.compat_warning_checkbox.isChecked())
             self.title_delegate.set_highlight_enabled(self.compat_warning_checkbox.isChecked())
         self.table.viewport().update()
+
+    def _apply_table_selection_style(self):
+        if not hasattr(self, "table"):
+            return
+        if is_dark_theme():
+            background = "#155E75"
+            foreground = "#ECFEFF"
+            inactive_background = "#164E63"
+            inactive_foreground = "#DFF7FA"
+        else:
+            background = "#B9EAF5"
+            foreground = "#0B2533"
+            inactive_background = "#D1F2F7"
+            inactive_foreground = "#12313D"
+        self.table.setStyleSheet(
+            f"""
+            QTableWidget::item:selected {{
+                background-color: {background};
+                color: {foreground};
+            }}
+            QTableWidget::item:selected:!active {{
+                background-color: {inactive_background};
+                color: {inactive_foreground};
+            }}
+            """
+        )
 
     def _update_floppy_save_option_ui(self):
         is_floppy = self.is_floppy_mode()
@@ -13129,7 +13162,7 @@ class MidiTitleWindow(QMainWindow):
         title_field_width = title_font_metrics.horizontalAdvance("M" * 32) + 28
         centered_field_font = screen_title_font if use_screen_format else title_field_font
         centered_font_metrics = QFontMetrics(centered_field_font)
-        centered_field_padding = 4 if use_screen_format else 28
+        centered_field_padding = DisklavierScreenLineEdit.CURSOR_GUTTER * 2 if use_screen_format else 28
         centered_field_width = centered_font_metrics.horizontalAdvance("M" * 16) + centered_field_padding
         disklavier_screen_extra_width = 38 if use_screen_format else 0
         active_field_width = (
@@ -13622,21 +13655,44 @@ class MidiTitleWindow(QMainWindow):
             self.diskCommitWorker = None
 
     def show_disclaimer_dialog(self):
-        QMessageBox.information(
-            self,
-            "Disclaimer",
-            (
-                "APS MIDI Prep Tool is provided for lawful preservation, repair, and compatibility work.\n\n"
-                "Use copies whenever possible, keep backups, and test outputs before relying on them. "
-                "You are responsible for any data loss, disk damage, instrument behavior, or other results "
-                "from using the software.\n\n"
-                "Use the tool only with disks and files you own or are authorized to preserve, convert, or modify. "
-                "Do not use it to distribute copyrighted music, commercial player-piano libraries, proprietary "
-                "software, or other material you do not have the right to share.\n\n"
-                "This software is independent and is not affiliated with Yamaha, PianoDisc, Nalbantov, "
-                "Greaseweazle, or other companies mentioned. Trademarks belong to their respective owners."
-            ),
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle("Disclaimer")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(520)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        message_label = QLabel(dialog)
+        message_label.setWordWrap(True)
+        message_label.setOpenExternalLinks(True)
+        message_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        message_label.setTextFormat(Qt.RichText)
+        message_label.setText(
+            """
+            <p>APS MIDI Prep Tool is provided for lawful preservation, repair, and compatibility work.</p>
+            <p>Use copies whenever possible, keep backups, and test outputs before relying on them.
+            You are responsible for any data loss, disk damage, instrument behavior, or other results
+            from using the software.</p>
+            <p>Use the tool only with disks and files you own or are authorized to preserve, convert, or modify.
+            Do not use it to distribute copyrighted music, commercial player-piano libraries, proprietary
+            software, or other material you do not have the right to share.</p>
+            <p>This software is independent and is not affiliated with Yamaha, PianoDisc, Nalbantov,
+            Greaseweazle, or other companies mentioned. Trademarks belong to their respective owners.</p>
+            <p><strong>Alex's Piano Service LLC policies:</strong><br>
+            <a href="https://www.alexanderpeppe.com/disclaimer/">Disclaimer</a> &nbsp;|&nbsp;
+            <a href="https://www.alexanderpeppe.com/privacy-policy/">Privacy Policy</a> &nbsp;|&nbsp;
+            <a href="https://www.alexanderpeppe.com/dmca-policy/">DMCA Policy</a></p>
+            """
         )
+        layout.addWidget(message_label)
+
+        buttons = self._make_dialog_button_box(QDialogButtonBox.Ok, dialog)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        self._exec_child_dialog(dialog)
 
     def show_about_dialog(self):
         dialog = QDialog(self)

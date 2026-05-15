@@ -186,9 +186,18 @@ def _normalize_catalog_number(catalog_text):
     clean_text = _ascii_text(catalog_text).replace("\x00", "").strip()
     if not clean_text:
         return ""
-    clean_text = re.sub(r"-\s+", "-", clean_text)
+
+    yamaha_match = re.fullmatch(
+        r"(?P<prefix>[A-Z]{3})[\s-]*(?P<number>\d{4})",
+        clean_text,
+        flags=re.IGNORECASE,
+    )
+    if yamaha_match:
+        return f"{yamaha_match.group('prefix').upper()}-{yamaha_match.group('number')}"
+
+    clean_text = re.sub(r"\s*-\s*", "-", clean_text)
     clean_text = re.sub(r"\s+", "-", clean_text)
-    match = re.match(r"^(?P<prefix>[A-Z]{2,5})\s*(?P<number>\d{3,5})(?P<suffix>[A-Z]?)$", clean_text)
+    match = re.fullmatch(r"(?P<prefix>[A-Z]{2,5})\s*(?P<number>\d{3,5})(?P<suffix>[A-Z]?)", clean_text)
     if match and "-" not in clean_text:
         return f"{match.group('prefix')}-{match.group('number')}{match.group('suffix')}"
     return clean_text
@@ -254,12 +263,24 @@ def build_pianodir_metadata_bytes(metadata=None, *, catalog_number="", disk_titl
             and not disk_title
             and getattr(metadata, "raw_label_bytes", b"")
         ):
-            return bytes(metadata.raw_label_bytes)[:PIANODIR_DISK_METADATA_SIZE].ljust(
-                PIANODIR_DISK_METADATA_SIZE,
-                b"\x00",
+            raw_text = (
+                bytes(metadata.raw_label_bytes)[:PIANODIR_DISK_METADATA_SIZE]
+                .split(b"\x00", 1)[0]
+                .decode("ascii", errors="replace")
+                .rstrip()
             )
-        catalog_number = metadata.catalog_number
-        disk_title = metadata.disk_title
+            parsed_raw = _split_disk_label(raw_text)
+            if re.fullmatch(r"[A-Z]{3}-\d{4}", parsed_raw.catalog_number or ""):
+                catalog_number = parsed_raw.catalog_number
+                disk_title = parsed_raw.disk_title
+            else:
+                return bytes(metadata.raw_label_bytes)[:PIANODIR_DISK_METADATA_SIZE].ljust(
+                    PIANODIR_DISK_METADATA_SIZE,
+                    b"\x00",
+                )
+        else:
+            catalog_number = metadata.catalog_number
+            disk_title = metadata.disk_title
 
     catalog_text = _normalize_catalog_number(catalog_number)
     title_text = _ascii_text(disk_title).strip()
