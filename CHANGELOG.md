@@ -24,6 +24,8 @@ with release sections grouped by version and date.
 - Yamaha V50/SY77 sequence extraction when the V50/SY77 signature is present.
 - Yamaha Electone MDR disk reading, including `.VFD` raw images and MDR images with blank or nonstandard boot sectors, plus `.EVT` performance conversion to Standard MIDI.
 - Yamaha Clavinova/CVP E-SEQ support for `MUSIC.DIR` directories and `.MDA` song files, including MIDI conversion and Clavinova-aware floppy/image modes.
+- Centralized localized message catalog with language selection, translated common dialogs, and reusable guidance for Greaseweazle, permission, write-protection, disk-full, unsupported-image, FAT/boot-sector, and cancellation errors.
+- Settings menu with language selection, System/Light/Dark appearance options, and a reset action for hidden warning, confirmation, update-reminder, and Greaseweazle sector-map dialogs.
 
 ### Changed
 

@@ -19,9 +19,10 @@ from math import exp, pi, sin
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QApplication,
     QMainWindow,
     QWidget,
@@ -34,7 +35,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QLineEdit,
     QFileDialog,
-    QMessageBox,
+    QMessageBox as QtQMessageBox,
     QHeaderView,
     QSizePolicy,
     QProgressDialog,
@@ -172,6 +173,203 @@ from .app_info import (
     UPDATE_CHECK_URL,
 )
 from .subprocess_utils import windows_subprocess_kwargs
+from .message_catalog import (
+    DEFAULT_LANGUAGE,
+    guidance_for_error_detail,
+    language_options,
+    normalize_language_code,
+    tr as catalog_tr,
+    translate_text,
+)
+
+
+def _message_parent_language(parent):
+    widget = parent
+    for _ in range(8):
+        if widget is None:
+            break
+        language_method = getattr(widget, "_language_code", None)
+        if callable(language_method):
+            return language_method()
+        parent_method = getattr(widget, "parent", None)
+        widget = parent_method() if callable(parent_method) else None
+    return DEFAULT_LANGUAGE
+
+
+def _translate_for_parent(parent, text):
+    return translate_text(text, _message_parent_language(parent))
+
+
+def _translate_message_box_buttons(message_box, language=None):
+    language = normalize_language_code(language)
+    button_labels = {
+        QtQMessageBox.Ok: "OK",
+        QtQMessageBox.Cancel: "Cancel",
+        QtQMessageBox.Close: "Close",
+        QtQMessageBox.Yes: "Yes",
+        QtQMessageBox.No: "No",
+        QtQMessageBox.Save: "Save",
+    }
+    for standard_button, label in button_labels.items():
+        button = message_box.button(standard_button)
+        if button is not None:
+            button.setText(translate_text(label, language))
+
+
+class QMessageBox(QtQMessageBox):
+    def setWindowTitle(self, title):
+        super().setWindowTitle(_translate_for_parent(self.parent(), title))
+
+    def setText(self, text):
+        super().setText(_translate_for_parent(self.parent(), text))
+
+    def setInformativeText(self, text):
+        super().setInformativeText(_translate_for_parent(self.parent(), text))
+
+    def setStandardButtons(self, buttons):
+        super().setStandardButtons(buttons)
+        _translate_message_box_buttons(self, _message_parent_language(self.parent()))
+
+    @staticmethod
+    def _exec_static(parent, icon, title, text, buttons, defaultButton):
+        box = QMessageBox(parent)
+        apply_window_icon(box)
+        box.setIcon(icon)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(buttons)
+        if defaultButton != QtQMessageBox.StandardButton.NoButton:
+            box.setDefaultButton(defaultButton)
+        _translate_message_box_buttons(box, _message_parent_language(parent))
+        return box.exec()
+
+    @staticmethod
+    def information(
+        parent,
+        title,
+        text,
+        buttons=QtQMessageBox.StandardButton.Ok,
+        defaultButton=QtQMessageBox.StandardButton.NoButton,
+    ):
+        return QMessageBox._exec_static(
+            parent,
+            QtQMessageBox.Information,
+            title,
+            text,
+            buttons,
+            defaultButton,
+        )
+
+    @staticmethod
+    def warning(
+        parent,
+        title,
+        text,
+        buttons=QtQMessageBox.StandardButton.Ok,
+        defaultButton=QtQMessageBox.StandardButton.NoButton,
+    ):
+        return QMessageBox._exec_static(
+            parent,
+            QtQMessageBox.Warning,
+            title,
+            text,
+            buttons,
+            defaultButton,
+        )
+
+    @staticmethod
+    def critical(
+        parent,
+        title,
+        text,
+        buttons=QtQMessageBox.StandardButton.Ok,
+        defaultButton=QtQMessageBox.StandardButton.NoButton,
+    ):
+        return QMessageBox._exec_static(
+            parent,
+            QtQMessageBox.Critical,
+            title,
+            text,
+            buttons,
+            defaultButton,
+        )
+
+    @staticmethod
+    def question(
+        parent,
+        title,
+        text,
+        buttons=QtQMessageBox.StandardButton.Yes | QtQMessageBox.StandardButton.No,
+        defaultButton=QtQMessageBox.StandardButton.NoButton,
+    ):
+        return QMessageBox._exec_static(
+            parent,
+            QtQMessageBox.Question,
+            title,
+            text,
+            buttons,
+            defaultButton,
+        )
+
+
+def _build_light_palette():
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor("#F5F7FA"))
+    palette.setColor(QPalette.WindowText, QColor("#17202A"))
+    palette.setColor(QPalette.Base, QColor("#FFFFFF"))
+    palette.setColor(QPalette.AlternateBase, QColor("#EEF2F6"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ToolTipText, QColor("#17202A"))
+    palette.setColor(QPalette.Text, QColor("#17202A"))
+    palette.setColor(QPalette.Button, QColor("#E8EDF2"))
+    palette.setColor(QPalette.ButtonText, QColor("#17202A"))
+    palette.setColor(QPalette.BrightText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.Link, QColor("#1269A6"))
+    palette.setColor(QPalette.Highlight, QColor("#B9EAF5"))
+    palette.setColor(QPalette.HighlightedText, QColor("#0B2533"))
+    palette.setColor(QPalette.Mid, QColor("#A8B1BA"))
+    palette.setColor(QPalette.Dark, QColor("#65707A"))
+    palette.setColor(QPalette.Light, QColor("#FFFFFF"))
+    palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#6D7780"))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#6D7780"))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#6D7780"))
+    return palette
+
+
+def _build_dark_palette():
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor("#1C2228"))
+    palette.setColor(QPalette.WindowText, QColor("#F0F4F8"))
+    palette.setColor(QPalette.Base, QColor("#11161B"))
+    palette.setColor(QPalette.AlternateBase, QColor("#20272E"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#2C343C"))
+    palette.setColor(QPalette.ToolTipText, QColor("#F0F4F8"))
+    palette.setColor(QPalette.Text, QColor("#F0F4F8"))
+    palette.setColor(QPalette.Button, QColor("#2A323A"))
+    palette.setColor(QPalette.ButtonText, QColor("#F0F4F8"))
+    palette.setColor(QPalette.BrightText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.Link, QColor("#8FC7FF"))
+    palette.setColor(QPalette.Highlight, QColor("#155E75"))
+    palette.setColor(QPalette.HighlightedText, QColor("#ECFEFF"))
+    palette.setColor(QPalette.Mid, QColor("#56616D"))
+    palette.setColor(QPalette.Dark, QColor("#0C1116"))
+    palette.setColor(QPalette.Light, QColor("#3A444F"))
+    palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#9099A3"))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#9099A3"))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#9099A3"))
+    return palette
+
+
+def _theme_stylesheet(mode):
+    if mode != "dark":
+        return ""
+    return """
+        QToolTip {
+            color: #F0F4F8;
+            background-color: #2C343C;
+            border: 1px solid #56616D;
+        }
+    """
 
 
 class TitleOverflowDelegate(QStyledItemDelegate):
@@ -1649,7 +1847,9 @@ class FileInspectionDialog(QDialog):
         self.player.setAudioOutput(self.audio_output)
 
         apply_window_icon(self)
-        self.setWindowTitle("File Inspection")
+        language = _message_parent_language(parent)
+        t = lambda text: translate_text(text, language)
+        self.setWindowTitle(t("File Inspection"))
         self.resize(940, 640)
         layout = QVBoxLayout(self)
 
@@ -1657,7 +1857,7 @@ class FileInspectionDialog(QDialog):
         layout.addWidget(splitter, stretch=1)
 
         self.file_tree = QTreeWidget()
-        self.file_tree.setHeaderLabel("Loaded Files")
+        self.file_tree.setHeaderLabel(t("Loaded Files"))
         self.file_tree.setMinimumWidth(220)
         self.file_tree.setUniformRowHeights(True)
         self.file_tree.setRootIsDecorated(False)
@@ -1674,10 +1874,10 @@ class FileInspectionDialog(QDialog):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 0, 0, 0)
 
-        self.channel_group = QGroupBox("Channels", self)
+        self.channel_group = QGroupBox(t("Channels"), self)
         channel_layout = QVBoxLayout(self.channel_group)
-        self.show_piano_only_checkbox = QCheckBox("Show Piano Channels Only", self)
-        self.show_piano_only_checkbox.setToolTip("Limit the piano roll and preview to channels that look like piano parts.")
+        self.show_piano_only_checkbox = QCheckBox(t("Show Piano Channels Only"), self)
+        self.show_piano_only_checkbox.setToolTip(t("Limit the piano roll and preview to channels that look like piano parts."))
         channel_layout.addWidget(self.show_piano_only_checkbox)
         channel_grid = QGridLayout()
         self.channel_checkboxes = {}
@@ -1709,20 +1909,20 @@ class FileInspectionDialog(QDialog):
         right_layout.addLayout(position_row)
 
         controls = QHBoxLayout()
-        self.play_button = QPushButton("Play", self)
-        self.stop_button = QPushButton("Stop", self)
+        self.play_button = QPushButton(t("Play"), self)
+        self.stop_button = QPushButton(t("Stop"), self)
         controls.addWidget(self.play_button)
         controls.addWidget(self.stop_button)
         controls.addStretch()
-        self.volume_label = QLabel("Preview volume", self)
-        self.volume_label.setToolTip("Playback volume for the generated preview.")
+        self.volume_label = QLabel(t("Preview volume"), self)
+        self.volume_label.setToolTip(t("Playback volume for the generated preview."))
         self.volume_slider = QSlider(Qt.Horizontal, self)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(35)
         self.volume_slider.setSingleStep(5)
         self.volume_slider.setPageStep(10)
         self.volume_slider.setFixedWidth(150)
-        self.volume_slider.setToolTip("Playback volume for the generated preview.")
+        self.volume_slider.setToolTip(t("Playback volume for the generated preview."))
         self.volume_value_label = QLabel("35%", self)
         self.volume_value_label.setMinimumWidth(42)
         self.volume_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -1748,7 +1948,7 @@ class FileInspectionDialog(QDialog):
 
         close_row = QHBoxLayout()
         close_row.addStretch()
-        close_button = QPushButton("Close", self)
+        close_button = QPushButton(t("Close"), self)
         close_row.addWidget(close_button)
         layout.addLayout(close_row)
 
@@ -1961,7 +2161,13 @@ class FileInspectionDialog(QDialog):
         self.preview_progress_bar.setVisible(False)
         if self._closing or "cancelled" in str(message).lower():
             return
-        QMessageBox.warning(self, "Playback Failed", f"Could not prepare playback preview.\n\nDetails: {message}")
+        language = _message_parent_language(self)
+        QMessageBox.warning(
+            self,
+            catalog_tr("playback.failed.title", language),
+            f"{catalog_tr('playback.failed.message', language)}\n\n"
+            f"{catalog_tr('error.details_label', language)}: {message}",
+        )
 
     def _on_preview_render_finished(self):
         worker = self.preview_render_worker
@@ -2211,6 +2417,8 @@ class MidiTitleWindow(QMainWindow):
     SETTING_SKIP_UPDATE_REMINDERS = "skip_update_reminders"
     SETTING_WRITE_TAG_SIDECARS = "write_tag_sidecars"
     SETTING_WRITE_METADATA_SUMMARY = "write_metadata_summary"
+    SETTING_LANGUAGE = "language"
+    SETTING_APPEARANCE_MODE = "appearance_mode"
     SETTING_HIDE_CHOICES_RESET_VERSION = "hide_choices_reset_version"
     HIDE_CHOICES_RESET_VERSION = 1
     SETTING_GW_SECTOR_REPORT_HIDE_VERSION = "gw_sector_report_hide_version"
@@ -2301,6 +2509,14 @@ class MidiTitleWindow(QMainWindow):
         self.updateCheckManual = False
         self.updateCheckStartupScheduled = False
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        self.currentLanguage = normalize_language_code(
+            self.settings.value(self.SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
+        )
+        self.systemPalette = QApplication.palette()
+        self.currentAppearanceMode = self._normalized_appearance_mode(
+            self.settings.value(self.SETTING_APPEARANCE_MODE, "system") or "system"
+        )
+        self._apply_appearance_mode(self.currentAppearanceMode, persist=False, refresh=False)
         self._reset_user_hide_choices_if_needed()
         self._reset_gw_sector_report_hide_choices_if_needed()
         self._shownGwSectorReportFingerprints = set()
@@ -2322,7 +2538,7 @@ class MidiTitleWindow(QMainWindow):
         source_layout.setContentsMargins(0, 0, 0, 0)
         source_layout.setSpacing(10)
 
-        self.choose_button = QPushButton("Open MIDI Folder")
+        self.choose_button = QPushButton(self._lt("Open MIDI Folder"))
         self.choose_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.choose_button.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.choose_button.setToolTip(
@@ -2331,7 +2547,7 @@ class MidiTitleWindow(QMainWindow):
         self.choose_button.clicked.connect(self.browse_directory)
         source_layout.addWidget(self.choose_button, stretch=1)
 
-        self.open_image_button = QPushButton("Open Image")
+        self.open_image_button = QPushButton(self._lt("Open Image"))
         self.open_image_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.open_image_button.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.open_image_button.setToolTip(
@@ -2340,7 +2556,7 @@ class MidiTitleWindow(QMainWindow):
         self.open_image_button.clicked.connect(self.open_image_dialog)
         source_layout.addWidget(self.open_image_button, stretch=1)
 
-        self.read_floppy_button = QPushButton("Read Floppy")
+        self.read_floppy_button = QPushButton(self._lt("Read Floppy"))
         self.read_floppy_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.read_floppy_button.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.read_floppy_button.setToolTip(
@@ -2356,7 +2572,7 @@ class MidiTitleWindow(QMainWindow):
         # 0: Delete ("X"), 1: FullPath (hidden), 2: 📋, 3: Filename, 4: Title, 5: Compat warning (>32), 6: MIDI type
         self.table = DropTableWidget(0, 7)
         self._apply_table_selection_style()
-        self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
+        self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
         self.table.setToolTip(
             "Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename."
         )
@@ -2451,6 +2667,7 @@ class MidiTitleWindow(QMainWindow):
         controls_layout.setSpacing(10)
 
         options_group = QGroupBox("Options")
+        self.optionsGroup = options_group
         options_group.setToolTip("Display and compatibility preferences for the file list.")
         options_layout = QVBoxLayout(options_group)
         options_layout.setContentsMargins(10, 14, 10, 10)
@@ -2496,12 +2713,14 @@ class MidiTitleWindow(QMainWindow):
         self.modeBannerLabel.setToolTip("Shows the current editing mode and active source.")
 
         utilities_group = QGroupBox("Utilities")
+        self.utilitiesGroup = utilities_group
         utilities_group.setToolTip("Batch tools that run across every listed file immediately.")
         utilities_layout = QVBoxLayout(utilities_group)
         utilities_layout.setContentsMargins(10, 14, 10, 10)
         utilities_layout.setSpacing(6)
 
         utilities_hint = QLabel("Apply to all listed files:")
+        self.utilitiesHintLabel = utilities_hint
         utilities_hint.setWordWrap(True)
         utilities_hint.setAlignment(Qt.AlignCenter)
         utilities_layout.addWidget(utilities_hint)
@@ -2553,6 +2772,7 @@ class MidiTitleWindow(QMainWindow):
         utilities_layout.addStretch()
 
         actions_group = QGroupBox("File Actions")
+        self.actionsGroup = actions_group
         actions_group.setToolTip("Save files, create images, or clear the current list.")
         actions_layout = QVBoxLayout(actions_group)
         actions_layout.setContentsMargins(10, 14, 10, 10)
@@ -2560,7 +2780,7 @@ class MidiTitleWindow(QMainWindow):
 
         # Clear button (styled to match Save button)
         self.clearButton = QToolButton()
-        self.clearButton.setText("Clear")
+        self.clearButton.setText(self._lt("Clear"))
         self.clearButton.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.clearButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clearButton.setMinimumHeight(36)
@@ -2568,14 +2788,14 @@ class MidiTitleWindow(QMainWindow):
         self.clearButton.clicked.connect(self.clear_list)
 
         self.saveButton = QToolButton()
-        self.saveButton.setText("Save")
+        self.saveButton.setText(self._lt("Save"))
         self.saveButton.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.saveButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.saveButton.setMinimumHeight(36)
         self.saveButton.clicked.connect(self.save_pending_changes)
 
         self.saveAsButton = QToolButton()
-        self.saveAsButton.setText("Save As")
+        self.saveAsButton.setText(self._lt("Save As"))
         self.saveAsButton.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.saveAsButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.saveAsButton.setMinimumHeight(36)
@@ -2583,7 +2803,7 @@ class MidiTitleWindow(QMainWindow):
         self.saveAsButton.clicked.connect(self.save_as_changes)
 
         self.saveAsImageButton = QToolButton()
-        self.saveAsImageButton.setText("Save As Image")
+        self.saveAsImageButton.setText(self._lt("Save As Image"))
         self.saveAsImageButton.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.saveAsImageButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.saveAsImageButton.setMinimumHeight(36)
@@ -2632,6 +2852,7 @@ class MidiTitleWindow(QMainWindow):
         pianodir_meta_layout.setSpacing(8)
 
         album_title_label = QLabel("Album Title")
+        self.albumTitleLabel = album_title_label
         album_title_label.setToolTip(
             "Album title stored in the Yamaha E-SEQ directory file when supported."
         )
@@ -2646,6 +2867,7 @@ class MidiTitleWindow(QMainWindow):
         pianodir_meta_layout.addWidget(self.imagePianodirTitleEdit, stretch=3)
 
         catalog_label = QLabel("Catalog Number")
+        self.catalogNumberLabel = catalog_label
         catalog_label.setToolTip(
             "Catalog number stored in the Yamaha E-SEQ directory file when supported."
         )
@@ -2807,7 +3029,48 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesFormatUsbAction.triggered.connect(self.format_disklavier_usb_stick)
         self.utilitiesMenu.addAction(self.utilitiesFormatUsbAction)
 
+        self.settingsMenu = self.menuBar().addMenu(self._t("menu.settings"))
+        self.appearanceMenu = self.settingsMenu.addMenu(self._t("menu.appearance"))
+        self.appearanceActionGroup = QActionGroup(self)
+        self.appearanceActionGroup.setExclusive(True)
+        self.appearanceActions = {}
+        for mode, message_id in (
+            ("system", "theme.system"),
+            ("light", "theme.light"),
+            ("dark", "theme.dark"),
+        ):
+            action = QAction(self._t(message_id), self)
+            action.setCheckable(True)
+            action.setChecked(mode == self._appearance_mode())
+            action.setData(mode)
+            action.triggered.connect(lambda _checked=False, appearance_mode=mode: self._set_appearance_mode(appearance_mode))
+            self.appearanceActionGroup.addAction(action)
+            self.appearanceMenu.addAction(action)
+            self.appearanceActions[mode] = action
+        self.settingsMenu.addSeparator()
+        self.languageMenu = self.settingsMenu.addMenu(self._t("menu.language"))
+        self.languageActionGroup = QActionGroup(self)
+        self.languageActionGroup.setExclusive(True)
+        self.languageActions = {}
+        for language in language_options():
+            action = QAction(self._language_menu_label(language), self)
+            action.setCheckable(True)
+            action.setChecked(language.code == self._language_code())
+            action.setData(language.code)
+            action.triggered.connect(
+                lambda _checked=False, language_code=language.code: self._set_language(language_code)
+            )
+            self.languageActionGroup.addAction(action)
+            self.languageMenu.addAction(action)
+            self.languageActions[language.code] = action
+        self.settingsMenu.addSeparator()
+        self.settingsResetHiddenDialogsAction = QAction(self._t("settings.reset_hidden_dialogs"), self)
+        self.settingsResetHiddenDialogsAction.setToolTip(self._t("settings.reset_hidden_dialogs.tooltip"))
+        self.settingsResetHiddenDialogsAction.triggered.connect(self.reset_hidden_dialog_settings)
+        self.settingsMenu.addAction(self.settingsResetHiddenDialogsAction)
+
         help_menu = self.menuBar().addMenu("&Help")
+        self.helpMenu = help_menu
         self.helpCheckUpdatesAction = QAction("Check for Updates...", self)
         self.helpCheckUpdatesAction.triggered.connect(lambda: self.check_for_updates(manual=True))
         help_menu.addAction(self.helpCheckUpdatesAction)
@@ -2821,17 +3084,17 @@ class MidiTitleWindow(QMainWindow):
         help_menu.addAction(self.helpCheckUpdatesAtStartupAction)
         help_menu.addSeparator()
 
-        welcome_action = QAction("Show Welcome Screen", self)
-        welcome_action.triggered.connect(self.show_welcome_dialog)
-        help_menu.addAction(welcome_action)
+        self.helpWelcomeAction = QAction("Show Welcome Screen", self)
+        self.helpWelcomeAction.triggered.connect(self.show_welcome_dialog)
+        help_menu.addAction(self.helpWelcomeAction)
 
-        disclaimer_action = QAction("Disclaimer", self)
-        disclaimer_action.triggered.connect(self.show_disclaimer_dialog)
-        help_menu.addAction(disclaimer_action)
+        self.helpDisclaimerAction = QAction("Disclaimer", self)
+        self.helpDisclaimerAction.triggered.connect(self.show_disclaimer_dialog)
+        help_menu.addAction(self.helpDisclaimerAction)
 
-        about_action = QAction("About APS MIDI Prep Tool", self)
-        about_action.triggered.connect(self.show_about_dialog)
-        help_menu.addAction(about_action)
+        self.helpAboutAction = QAction("About APS MIDI Prep Tool", self)
+        self.helpAboutAction.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(self.helpAboutAction)
         self._update_compat_warning_ui()
         self.table.setColumnHidden(6, False)
 
@@ -2840,6 +3103,197 @@ class MidiTitleWindow(QMainWindow):
         self.table.viewport().installEventFilter(self)
         self._update_floppy_save_option_ui()
         self._update_menu_actions()
+        self._refresh_translated_ui()
+
+    def _normalized_appearance_mode(self, mode):
+        mode = str(mode or "system").strip().lower()
+        return mode if mode in {"system", "light", "dark"} else "system"
+
+    def _appearance_mode(self):
+        return self._normalized_appearance_mode(getattr(self, "currentAppearanceMode", "system"))
+
+    def _apply_appearance_mode(self, mode, *, persist=True, refresh=True):
+        mode = self._normalized_appearance_mode(mode)
+        self.currentAppearanceMode = mode
+        if persist:
+            self.settings.setValue(self.SETTING_APPEARANCE_MODE, mode)
+            self.settings.sync()
+
+        app = QApplication.instance()
+        if app is not None:
+            if mode == "dark":
+                app.setPalette(_build_dark_palette())
+                app.setStyleSheet(_theme_stylesheet("dark"))
+            elif mode == "light":
+                app.setPalette(_build_light_palette())
+                app.setStyleSheet(_theme_stylesheet("light"))
+            else:
+                app.setPalette(getattr(self, "systemPalette", QApplication.palette()))
+                app.setStyleSheet(_theme_stylesheet("system"))
+
+        if hasattr(self, "appearanceActions"):
+            for action_mode, action in self.appearanceActions.items():
+                action.setChecked(action_mode == mode)
+        if refresh:
+            self._apply_table_selection_style()
+            self._refresh_theme_sensitive_widgets()
+
+    def _set_appearance_mode(self, mode):
+        self._apply_appearance_mode(mode, persist=True, refresh=True)
+
+    def _refresh_theme_sensitive_widgets(self):
+        for widget_name in (
+            "diskUsageBar",
+            "eseqCountBar",
+            "writeProtectToggle",
+            "table",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                if widget_name == "table" and hasattr(widget, "viewport"):
+                    widget.viewport().update()
+                else:
+                    widget.update()
+        self._apply_table_selection_style()
+
+    def _language_code(self):
+        return normalize_language_code(getattr(self, "currentLanguage", DEFAULT_LANGUAGE))
+
+    def _t(self, message_id, **kwargs):
+        return catalog_tr(message_id, self._language_code(), **kwargs)
+
+    def _lt(self, text, **kwargs):
+        return translate_text(text, self._language_code(), **kwargs)
+
+    def _language_menu_label(self, language):
+        if language.native_name == language.english_name:
+            return language.native_name
+        return f"{language.native_name} ({language.english_name})"
+
+    def _refresh_settings_menu_text(self):
+        if hasattr(self, "settingsMenu"):
+            self.settingsMenu.setTitle(self._t("menu.settings"))
+        if hasattr(self, "appearanceMenu"):
+            self.appearanceMenu.setTitle(self._t("menu.appearance"))
+        for mode, message_id in (
+            ("system", "theme.system"),
+            ("light", "theme.light"),
+            ("dark", "theme.dark"),
+        ):
+            action = getattr(self, "appearanceActions", {}).get(mode)
+            if action is not None:
+                action.setText(self._t(message_id))
+                action.setChecked(mode == self._appearance_mode())
+        if hasattr(self, "languageMenu"):
+            self.languageMenu.setTitle(self._t("menu.language"))
+        if hasattr(self, "settingsResetHiddenDialogsAction"):
+            self.settingsResetHiddenDialogsAction.setText(self._t("settings.reset_hidden_dialogs"))
+            self.settingsResetHiddenDialogsAction.setToolTip(self._t("settings.reset_hidden_dialogs.tooltip"))
+        for language in language_options():
+            action = getattr(self, "languageActions", {}).get(language.code)
+            if action is not None:
+                action.setText(self._language_menu_label(language))
+                action.setChecked(language.code == self._language_code())
+
+    def _set_language(self, language_code):
+        language_code = normalize_language_code(language_code)
+        if language_code == self._language_code():
+            self._refresh_translated_ui()
+            return
+        self.currentLanguage = language_code
+        self.settings.setValue(self.SETTING_LANGUAGE, language_code)
+        self.settings.sync()
+        self._refresh_translated_ui()
+        language = next((option for option in language_options() if option.code == language_code), None)
+        language_name = self._language_menu_label(language) if language is not None else language_code
+        QMessageBox.information(
+            self,
+            self._t("settings.language_updated.title"),
+            self._t("settings.language_updated.message", language=language_name),
+        )
+
+    def _set_table_headers(self, labels):
+        self.table.setHorizontalHeaderLabels([self._lt(label) for label in labels])
+
+    def _refresh_translated_ui(self):
+        self._refresh_settings_menu_text()
+        if hasattr(self, "fileMenu"):
+            self.fileMenu.setTitle(self._lt("&File"))
+        if hasattr(self, "utilitiesMenu"):
+            self.utilitiesMenu.setTitle(self._lt("&Utilities"))
+        if hasattr(self, "helpMenu"):
+            self.helpMenu.setTitle(self._lt("&Help"))
+
+        for widget_name, text in (
+            ("optionsGroup", "Options"),
+            ("utilitiesGroup", "Utilities"),
+            ("actionsGroup", "File Actions"),
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setTitle(self._lt(text))
+
+        for widget_name, text in (
+            ("compat_warning_checkbox", "Long title warning"),
+            ("format_disklavier_checkbox", "Format for Disklavier screen"),
+            ("backup_checkbox", "Back up before saving"),
+            ("utilitiesHintLabel", "Apply to all listed files:"),
+            ("albumTitleLabel", "Album Title"),
+            ("catalogNumberLabel", "Catalog Number"),
+            ("album_subfolder_checkbox", "Create Album Subfolder"),
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setText(self._lt(text))
+
+        if hasattr(self, "imagePianodirTitleEdit"):
+            self.imagePianodirTitleEdit.setPlaceholderText(self._lt("Album title"))
+        if hasattr(self, "imagePianodirCatalogEdit"):
+            self.imagePianodirCatalogEdit.setPlaceholderText(self._lt("Catalog number"))
+
+        self._apply_compact_button_labels()
+        if self.is_image_mode():
+            self._apply_image_mode_ui()
+        elif self.is_local_eseq_mode():
+            self._apply_local_eseq_mode_ui()
+        else:
+            self._apply_midi_mode_ui()
+        self._refresh_static_action_text()
+        self._update_compat_warning_ui()
+        self._update_floppy_save_option_ui()
+        self._update_menu_actions()
+
+    def _refresh_static_action_text(self):
+        action_texts = (
+            ("fileNewImageAction", "New Image..."),
+            ("fileOpenFolderAction", "Open MIDI Folder..."),
+            ("fileOpenImageAction", "Open Image..."),
+            ("fileReadFloppyAction", "Read Floppy..."),
+            ("fileImageFloppyAction", "Image Floppy..."),
+            ("fileCreateTagSidecarsAction", "Create Tag Sidecars When Saving"),
+            ("fileCreateMetadataSummaryAction", "Create Metadata Summary When Saving"),
+            ("fileSaveToFloppyAction", "Save To Floppy..."),
+            ("fileWriteImageToFloppyAction", "Write Current Image to Floppy..."),
+            ("fileAutoWriteProtectAction", "Auto Write-Protect"),
+            ("utilitiesSongListAction", "Song List..."),
+            ("utilitiesFileInspectionAction", "File Inspection..."),
+            ("utilitiesRecoverImageAction", "Recover Damaged Image..."),
+            ("utilitiesRenameAction", "Rename All to DOS 8.3"),
+            ("utilitiesSmfAction", "Convert All SMF1 to SMF0"),
+            ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI"),
+            ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ"),
+            ("utilitiesFormatFloppyAction", "Format Floppy Disk..."),
+            ("utilitiesFormatUsbAction", "Format USB Stick..."),
+            ("helpCheckUpdatesAction", "Check for Updates..."),
+            ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup"),
+            ("helpWelcomeAction", "Show Welcome Screen"),
+            ("helpDisclaimerAction", "Disclaimer"),
+            ("helpAboutAction", "About APS MIDI Prep Tool"),
+        )
+        for action_name, text in action_texts:
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setText(self._lt(text))
 
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
@@ -2858,7 +3312,10 @@ class MidiTitleWindow(QMainWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() in {QEvent.ApplicationPaletteChange, QEvent.PaletteChange}:
+            if self._appearance_mode() == "system":
+                self.systemPalette = QApplication.palette()
             self._apply_table_selection_style()
+            self._refresh_theme_sensitive_widgets()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2882,8 +3339,57 @@ class MidiTitleWindow(QMainWindow):
 
     def _exec_child_dialog(self, dialog):
         dialog.setWindowModality(Qt.WindowModal)
+        self._translate_dialog_tree(dialog)
         self._center_child_dialog(dialog)
         return dialog.exec()
+
+    def _translate_dialog_tree(self, dialog):
+        if dialog is None:
+            return
+        widgets = [dialog]
+        widgets.extend(dialog.findChildren(QWidget))
+        for widget in widgets:
+            tooltip = widget.toolTip()
+            if tooltip:
+                widget.setToolTip(self._lt(tooltip))
+            if isinstance(widget, QDialog):
+                title = widget.windowTitle()
+                if title:
+                    widget.setWindowTitle(self._lt(title))
+            if isinstance(widget, QLabel):
+                text = widget.text()
+                if text:
+                    widget.setText(self._lt(text))
+            if isinstance(widget, QGroupBox):
+                title = widget.title()
+                if title:
+                    widget.setTitle(self._lt(title))
+            if isinstance(widget, QAbstractButton):
+                text = widget.text()
+                if text:
+                    widget.setText(self._lt(text))
+            if isinstance(widget, QLineEdit):
+                placeholder = widget.placeholderText()
+                if placeholder:
+                    widget.setPlaceholderText(self._lt(placeholder))
+            if isinstance(widget, QComboBox):
+                for index in range(widget.count()):
+                    text = widget.itemText(index)
+                    if text:
+                        widget.setItemText(index, self._lt(text))
+            if isinstance(widget, QSpinBox):
+                special_text = widget.specialValueText()
+                if special_text:
+                    widget.setSpecialValueText(self._lt(special_text))
+            if isinstance(widget, QTreeWidget):
+                header = widget.headerItem()
+                if header is not None:
+                    for column in range(header.columnCount()):
+                        text = header.text(column)
+                        if text:
+                            header.setText(column, self._lt(text))
+            if isinstance(widget, QDialogButtonBox):
+                self._translate_dialog_button_box(widget)
 
     def _progress_dialog_title(self, dialog):
         current_title = (dialog.windowTitle() or "").strip()
@@ -2911,66 +3417,43 @@ class MidiTitleWindow(QMainWindow):
 
     def _clean_error_detail(self, detail):
         text = str(detail or "").strip()
-        return text or "No detailed error message was provided."
+        return text or self._t("error.no_detail")
 
     def _guidance_for_error_detail(self, detail):
-        text = str(detail or "")
-        lower = text.lower()
-        if not text:
-            return ""
-        if "mtools" in lower or any(command in lower for command in ("mformat", "mcopy", "mdir", "mdel", "mren")):
-            return (
-                "Install mtools, or use an AppImage build that bundles mtools. "
-                "Then try the operation again."
-            )
-        if "greaseweazle cli" in lower or "greaseweazle" in lower and "not found" in lower:
-            return (
-                "Install the Greaseweazle CLI, or use an AppImage build that bundles it. "
-                "The command should be available as 'gw' or 'greaseweazle'."
-            )
-        if "permission denied" in lower or "access is denied" in lower:
-            return (
-                "Check that the file or floppy device is writable by your user. "
-                "On Linux, unmount the disk before direct floppy writes and make sure your user has device access."
-            )
-        if "device or resource busy" in lower or "text file busy" in lower or "could not lock" in lower:
-            return "Close file managers or other programs using the disk, unmount it if needed, and try again."
-        if "disk full" in lower or "no directory slots" in lower or "too large to fit" in lower:
-            return "Remove files, choose a larger disk format, or split the set across multiple images."
-        if "already exists" in lower:
-            return "Choose a different output name, or rename/remove the existing file and try again."
-        if "unsupported image" in lower or "unsupported output image" in lower:
-            return "Use a supported floppy image type such as IMG, BIN, IMA, or HFE."
-        if "fat12" in lower or "boot sector" in lower:
-            return "Make sure the source is an IBM/Yamaha FAT12 floppy or image. For protected Yamaha disks, try Read Floppy or a Greaseweazle capture."
-        return ""
+        return guidance_for_error_detail(detail, self._language_code())
+
+    def _ensure_sentence(self, text):
+        text = str(text or "").strip()
+        if not text or text[-1:] in ".!?。！？":
+            return text
+        return f"{text}."
 
     def _show_operation_error(self, title, summary, detail=None, *, guidance=None):
         detail_text = self._clean_error_detail(detail)
-        message = summary.rstrip(".") + "."
+        message = self._ensure_sentence(self._lt(summary))
         if detail_text:
-            message += f"\n\nDetails: {detail_text}"
-        guidance_text = guidance if guidance is not None else self._guidance_for_error_detail(detail_text)
+            message += f"\n\n{self._t('error.details_label')}: {detail_text}"
+        guidance_text = self._lt(guidance) if guidance is not None else self._guidance_for_error_detail(detail_text)
         if guidance_text:
-            message += f"\n\n{guidance_text.rstrip('.')}."
-        QMessageBox.critical(self, title, message)
+            message += f"\n\n{self._ensure_sentence(guidance_text)}"
+        QMessageBox.critical(self, self._lt(title), message)
 
     def _limited_message_list(self, messages, *, max_rows=10):
         cleaned = [str(message).strip() for message in messages if str(message).strip()]
         preview = "\n".join(cleaned[:max_rows])
         if len(cleaned) > max_rows:
-            preview += f"\n...and {len(cleaned) - max_rows} more."
-        return preview or "No detailed error message was provided."
+            preview += f"\n{self._t('error.more_count', count=len(cleaned) - max_rows)}"
+        return preview or self._t("error.no_detail")
 
     def _show_error_list(self, title, summary, errors, *, max_rows=10, warning=False, guidance=""):
         details = self._limited_message_list(errors, max_rows=max_rows)
-        message = summary.rstrip(".") + f".\n\n{details}"
+        message = f"{self._ensure_sentence(self._lt(summary))}\n\n{details}"
         if guidance:
-            message += f"\n\n{guidance.rstrip('.')}."
+            message += f"\n\n{self._ensure_sentence(self._lt(guidance))}"
         if warning:
-            QMessageBox.warning(self, title, message)
+            QMessageBox.warning(self, self._lt(title), message)
         else:
-            QMessageBox.critical(self, title, message)
+            QMessageBox.critical(self, self._lt(title), message)
 
     def _apply_stage_progress(self, dialog, step, total, message):
         if dialog is None:
@@ -3292,8 +3775,8 @@ class MidiTitleWindow(QMainWindow):
         prompt.setInformativeText(detail)
         prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         prompt.setDefaultButton(QMessageBox.Yes)
-        prompt.button(QMessageBox.Yes).setText("Convert to MIDI")
-        prompt.button(QMessageBox.No).setText("Not Now")
+        prompt.button(QMessageBox.Yes).setText(self._lt("Convert to MIDI"))
+        prompt.button(QMessageBox.No).setText(self._lt("Not Now"))
         return self._exec_child_dialog(prompt) == QMessageBox.Yes
 
     def _v50_nseq_converter_args(self, mode):
@@ -3644,8 +4127,8 @@ class MidiTitleWindow(QMainWindow):
         prompt.setInformativeText(detail)
         prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         prompt.setDefaultButton(QMessageBox.Yes)
-        prompt.button(QMessageBox.Yes).setText("Convert to MIDI")
-        prompt.button(QMessageBox.No).setText("Not Now")
+        prompt.button(QMessageBox.Yes).setText(self._lt("Convert to MIDI"))
+        prompt.button(QMessageBox.No).setText(self._lt("Not Now"))
         return self._exec_child_dialog(prompt) == QMessageBox.Yes
 
     def _convert_electone_evt_paths_to_midi_paths(self, evt_paths):
@@ -4052,8 +4535,8 @@ class MidiTitleWindow(QMainWindow):
         prompt.setInformativeText(detail)
         prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         prompt.setDefaultButton(QMessageBox.Yes)
-        prompt.button(QMessageBox.Yes).setText("Convert to MIDI")
-        prompt.button(QMessageBox.No).setText("Not Now")
+        prompt.button(QMessageBox.Yes).setText(self._lt("Convert to MIDI"))
+        prompt.button(QMessageBox.No).setText(self._lt("Not Now"))
         return self._exec_child_dialog(prompt) == QMessageBox.Yes
 
     def _convert_mpc_seq_paths_to_midi_paths(self, seq_paths):
@@ -4402,7 +4885,7 @@ class MidiTitleWindow(QMainWindow):
         )
         output_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Raw SCP Capture",
+            self._lt("Save Raw SCP Capture"),
             default_path,
             "SCP flux capture (*.scp *.SCP)",
         )
@@ -4567,7 +5050,7 @@ class MidiTitleWindow(QMainWindow):
         for index, disk_format in enumerate(DISK_FORMATS):
             label = f"{disk_format.label} ({display_bytes(disk_format.size_bytes)})"
             if disk_format.key == failed_key:
-                label += " - current"
+                label += f" - {self._lt('current')}"
             format_combo.addItem(label, disk_format)
             if suggested_format is not None and disk_format.key == suggested_format.key:
                 selected_index = index
@@ -4583,7 +5066,7 @@ class MidiTitleWindow(QMainWindow):
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         ok_button = buttons.button(QDialogButtonBox.Ok)
         if ok_button is not None:
-            ok_button.setText("Try Selected Format")
+            ok_button.setText(self._lt("Try Selected Format"))
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
@@ -4642,7 +5125,7 @@ class MidiTitleWindow(QMainWindow):
         default_path = os.path.join(os.path.dirname(os.path.abspath(capture_path)), default_name)
         output_path, _selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Save Converted Image",
+            self._lt("Save Converted Image"),
             default_path,
             "Raw sector image (*.img);;All files (*)",
         )
@@ -4927,6 +5410,31 @@ class MidiTitleWindow(QMainWindow):
             self.settings.setValue(setting_key, False)
         self.settings.setValue(self.SETTING_GW_SECTOR_REPORT_HIDE_VERSION, self.GW_SECTOR_REPORT_HIDE_VERSION)
 
+    def _hidden_dialog_setting_keys(self):
+        return (
+            self.SETTING_SKIP_TYPE0_WARNING,
+            self.SETTING_SKIP_IMAGE_REMOVE_WARNING,
+            self.SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING,
+            self.SETTING_SKIP_FLOPPY_WRITE_WARNING,
+            self.SETTING_HIDE_RECOVERY_COMPLETE_DIALOG,
+            self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
+            self.SETTING_SKIP_UPDATE_REMINDERS,
+            *self.GW_SECTOR_REPORT_HIDE_SETTINGS.values(),
+        )
+
+    def reset_hidden_dialog_settings(self):
+        for setting_key in self._hidden_dialog_setting_keys():
+            self.settings.setValue(setting_key, False)
+        self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_SWITCH_MODE, "ask")
+        self.settings.setValue(self.SETTING_HIDE_CHOICES_RESET_VERSION, self.HIDE_CHOICES_RESET_VERSION)
+        self.settings.setValue(self.SETTING_GW_SECTOR_REPORT_HIDE_VERSION, self.GW_SECTOR_REPORT_HIDE_VERSION)
+        self.settings.sync()
+        QMessageBox.information(
+            self,
+            self._t("settings.reset_hidden_dialogs.done.title"),
+            self._t("settings.reset_hidden_dialogs.done.message"),
+        )
+
     def _gw_sector_report_setting_key(self, report_type):
         return self.GW_SECTOR_REPORT_HIDE_SETTINGS.get(
             str(report_type or "").lower(),
@@ -4991,13 +5499,13 @@ class MidiTitleWindow(QMainWindow):
             summary_parts.append(str(report.get("summary")))
         if not rows:
             if not summary_parts:
-                summary_parts.append("No Greaseweazle sector map was available for this operation.")
+                summary_parts.append(self._t("gw.sector.no_map"))
         elif found is not None and total is not None:
-            summary_parts.append(f"Greaseweazle reported {found} of {total} expected sector position(s).")
+            summary_parts.append(self._t("gw.sector.expected", found=found, total=total))
         else:
             summary_parts.append(f"Green dots: {good}. Red dots: {bad}.")
         if bad:
-            summary_parts.append(f"{bad} sector position(s) need attention.")
+            summary_parts.append(self._t("gw.sector.attention", count=bad))
 
         png_path = ""
         try:
@@ -5016,7 +5524,7 @@ class MidiTitleWindow(QMainWindow):
             summary.setWordWrap(True)
             layout.addWidget(summary)
 
-            legend = QLabel("Green dots are good sector positions. Red dots are bad or missing sector positions.")
+            legend = QLabel(self._t("gw.sector.legend"))
             legend.setWordWrap(True)
             layout.addWidget(legend)
 
@@ -5029,12 +5537,12 @@ class MidiTitleWindow(QMainWindow):
             layout.addWidget(image_label)
 
             action_name = {
-                "read": "Greaseweazle reads",
-                "write": "Greaseweazle writes",
-                "convert": "Greaseweazle image conversions",
-                "recover": "disk recovery operations",
-            }.get(report_type, "this Greaseweazle transaction type")
-            hide_checkbox = QCheckBox(f"Do not show this sector map after {action_name}")
+                "read": self._t("gw.action.read"),
+                "write": self._t("gw.action.write"),
+                "convert": self._t("gw.action.convert"),
+                "recover": self._t("gw.action.recover"),
+            }.get(report_type, self._t("gw.action.convert"))
+            hide_checkbox = QCheckBox(self._t("gw.sector.hide", action=action_name))
             layout.addWidget(hide_checkbox)
 
             buttons = self._make_dialog_button_box(QDialogButtonBox.Ok, dialog)
@@ -5064,10 +5572,10 @@ class MidiTitleWindow(QMainWindow):
         dialog = QMessageBox(self)
         apply_window_icon(dialog)
         dialog.setIcon(QMessageBox.Information)
-        dialog.setWindowTitle(title)
-        dialog.setText(message)
+        dialog.setWindowTitle(self._lt(title))
+        dialog.setText(self._lt(message))
         dialog.setStandardButtons(QMessageBox.Ok)
-        hide_checkbox = QCheckBox(checkbox_text)
+        hide_checkbox = QCheckBox(self._lt(checkbox_text))
         dialog.setCheckBox(hide_checkbox)
         self._exec_child_dialog(dialog)
         if hide_checkbox.isChecked():
@@ -5089,11 +5597,11 @@ class MidiTitleWindow(QMainWindow):
         dialog = QMessageBox(self)
         apply_window_icon(dialog)
         dialog.setIcon(QMessageBox.Question)
-        dialog.setWindowTitle(title)
-        dialog.setText(message)
+        dialog.setWindowTitle(self._lt(title))
+        dialog.setText(self._lt(message))
         dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         dialog.setDefaultButton(default_button)
-        hide_checkbox = QCheckBox(checkbox_text)
+        hide_checkbox = QCheckBox(self._lt(checkbox_text))
         dialog.setCheckBox(hide_checkbox)
         confirmed = self._exec_child_dialog(dialog) == QMessageBox.Yes
         if confirmed and hide_checkbox.isChecked() and setting_key:
@@ -5108,11 +5616,11 @@ class MidiTitleWindow(QMainWindow):
         dialog = QMessageBox(self)
         apply_window_icon(dialog)
         dialog.setIcon(icon)
-        dialog.setWindowTitle(title)
-        dialog.setText(message)
+        dialog.setWindowTitle(self._lt(title))
+        dialog.setText(self._lt(message))
         dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         dialog.setDefaultButton(QMessageBox.No)
-        skip_checkbox = QCheckBox("Do not remind me again for this action")
+        skip_checkbox = QCheckBox(self._t("dialog.do_not_remind_again"))
         dialog.setCheckBox(skip_checkbox)
 
         confirmed = self._exec_child_dialog(dialog) == QMessageBox.Yes
@@ -5373,13 +5881,13 @@ class MidiTitleWindow(QMainWindow):
         self.compat_warning_checkbox.setEnabled(not locked)
         if locked:
             self.compat_warning_checkbox.setToolTip(
-                "Disabled while editing E-SEQ files because the 32-character limit is already enforced."
+                self._lt("Disabled while editing E-SEQ files because the 32-character limit is already enforced.")
             )
             self.table.setColumnHidden(5, True)
             self.title_delegate.set_highlight_enabled(False)
         else:
             self.compat_warning_checkbox.setToolTip(
-                "Highlight title characters beyond the 32-character legacy compatibility limit."
+                self._lt("Highlight title characters beyond the 32-character legacy compatibility limit.")
             )
             self.table.setColumnHidden(5, not self.compat_warning_checkbox.isChecked())
             self.title_delegate.set_highlight_enabled(self.compat_warning_checkbox.isChecked())
@@ -5431,45 +5939,45 @@ class MidiTitleWindow(QMainWindow):
         if is_floppy and not self._original_write_is_allowed():
             self.saveButton.setEnabled(False)
             self.saveButton.setToolTip(
-                "Original floppy write is protected. Turn on Overwrite Original, or use Save As or Save As Image."
+                self._lt("Original floppy write is protected. Turn on Overwrite Original, or use Save As or Save As Image.")
             )
             self.saveAsButton.setToolTip(
-                "Save the current floppy session's listed files to a destination folder and leave Floppy Mode."
+                self._lt("Save the current floppy session's listed files to a destination folder and leave Floppy Mode.")
             )
-            self.saveAsImageButton.setToolTip("Save the current floppy session as a separate image file.")
+            self.saveAsImageButton.setToolTip(self._lt("Save the current floppy session as a separate image file."))
         elif is_floppy:
             self.saveButton.setEnabled(True)
             if self.image_session is not None and self.image_session.source_kind == "floppy_usb":
                 self.saveButton.setToolTip(
-                    "Save pending file changes directly back to the floppy currently loaded in Floppy Mode."
+                    self._lt("Save pending file changes directly back to the floppy currently loaded in Floppy Mode.")
                 )
             else:
-                self.saveButton.setToolTip("Write pending changes back to the floppy currently loaded in Floppy Mode.")
+                self.saveButton.setToolTip(self._lt("Write pending changes back to the floppy currently loaded in Floppy Mode."))
             self.saveAsButton.setToolTip(
-                "Save the current floppy session's listed files to a destination folder and leave Floppy Mode."
+                self._lt("Save the current floppy session's listed files to a destination folder and leave Floppy Mode.")
             )
-            self.saveAsImageButton.setToolTip("Save the current floppy session as a separate image file.")
+            self.saveAsImageButton.setToolTip(self._lt("Save the current floppy session as a separate image file."))
         elif is_image and not self._original_write_is_allowed():
             self.saveButton.setEnabled(False)
             self.saveButton.setToolTip(
-                "Original image write is protected. Turn on Overwrite Original, or use Save As or Save As Image."
+                self._lt("Original image write is protected. Turn on Overwrite Original, or use Save As or Save As Image.")
             )
             self.saveAsButton.setToolTip(
-                "Save the current image session's listed files to a destination folder and leave Image Mode."
+                self._lt("Save the current image session's listed files to a destination folder and leave Image Mode.")
             )
-            self.saveAsImageButton.setToolTip("Save the current image session as a separate image file.")
+            self.saveAsImageButton.setToolTip(self._lt("Save the current image session as a separate image file."))
         elif is_image:
             self.saveButton.setEnabled(True)
-            self.saveButton.setToolTip("Write pending image changes back to the currently loaded image.")
+            self.saveButton.setToolTip(self._lt("Write pending image changes back to the currently loaded image."))
             self.saveAsButton.setToolTip(
-                "Save the current image session's listed files to a destination folder and leave Image Mode."
+                self._lt("Save the current image session's listed files to a destination folder and leave Image Mode.")
             )
-            self.saveAsImageButton.setToolTip("Save the current image session as a separate image file.")
+            self.saveAsImageButton.setToolTip(self._lt("Save the current image session as a separate image file."))
         else:
             self.saveButton.setEnabled(True)
-            self.saveButton.setToolTip("Write pending file changes to the currently listed files.")
-            self.saveAsButton.setToolTip("Save copies with current titles and filenames to a selected destination folder.")
-            self.saveAsImageButton.setToolTip("Create one or more floppy images from the currently listed files.")
+            self.saveButton.setToolTip(self._lt("Write pending file changes to the currently listed files."))
+            self.saveAsButton.setToolTip(self._lt("Save copies with current titles and filenames to a selected destination folder."))
+            self.saveAsImageButton.setToolTip(self._lt("Create one or more floppy images from the currently listed files."))
         self._update_menu_actions()
 
     def _has_pending_image_changes(self):
@@ -5538,28 +6046,28 @@ class MidiTitleWindow(QMainWindow):
         return self.midiScratchDir
 
     def _set_mode_banner(self, headline, detail=""):
-        text = headline.strip().upper()
+        text = self._lt(headline).strip().upper()
         if detail:
             text += f"\n{detail}"
         self.modeBannerLabel.setText(text)
 
     def _apply_compact_button_labels(self):
         if hasattr(self, "renameAllButton"):
-            self.renameAllButton.setText("Rename 8.3")
+            self.renameAllButton.setText(self._lt("Rename 8.3"))
         if hasattr(self, "convertType0Button"):
-            self.convertType0Button.setText("SMF1 -> SMF0")
+            self.convertType0Button.setText(self._lt("SMF1 -> SMF0"))
         if hasattr(self, "convertEseqToMidiButton"):
-            self.convertEseqToMidiButton.setText("E-SEQ -> MIDI")
+            self.convertEseqToMidiButton.setText(self._lt("E-SEQ -> MIDI"))
         if hasattr(self, "convertMidiToEseqButton"):
-            self.convertMidiToEseqButton.setText("MIDI -> E-SEQ")
+            self.convertMidiToEseqButton.setText(self._lt("MIDI -> E-SEQ"))
         if hasattr(self, "clearButton"):
-            self.clearButton.setText("Clear")
+            self.clearButton.setText(self._lt("Clear"))
         if hasattr(self, "saveButton"):
-            self.saveButton.setText("Save")
+            self.saveButton.setText(self._lt("Save"))
         if hasattr(self, "saveAsButton"):
-            self.saveAsButton.setText("Save As")
+            self.saveAsButton.setText(self._lt("Save As"))
         if hasattr(self, "saveAsImageButton"):
-            self.saveAsImageButton.setText("Save As Image")
+            self.saveAsImageButton.setText(self._lt("Save As Image"))
 
     def _update_menu_actions(self):
         if not hasattr(self, "fileSaveAction"):
@@ -5590,19 +6098,19 @@ class MidiTitleWindow(QMainWindow):
             self.fileImageFloppyAction.setToolTip(capture_tooltip)
             self.fileImageFloppyAction.setStatusTip(capture_tooltip)
 
-        self.fileSaveAction.setText("Save")
+        self.fileSaveAction.setText(self._lt("Save"))
         self.fileSaveAction.setEnabled(self.saveButton.isEnabled())
         self.fileSaveAction.setToolTip(self.saveButton.toolTip())
         self.fileSaveAction.setStatusTip(self.saveButton.toolTip())
 
-        self.fileSaveAsAction.setText("Save As...")
+        self.fileSaveAsAction.setText(self._lt("Save As..."))
         self.fileSaveAsAction.setEnabled(self.saveAsButton.isEnabled())
         self.fileSaveAsAction.setToolTip(self.saveAsButton.toolTip())
         self.fileSaveAsAction.setStatusTip(self.saveAsButton.toolTip())
 
-        image_action_text = "Save As Image..."
+        image_action_text = self._lt("Save As Image...")
         if self.is_image_mode():
-            image_action_text = "Save As Image..."
+            image_action_text = self._lt("Save As Image...")
         self.fileSaveAsImageAction.setText(image_action_text)
         self.fileSaveAsImageAction.setEnabled(self.saveAsImageButton.isEnabled())
         self.fileSaveAsImageAction.setToolTip(self.saveAsImageButton.toolTip())
@@ -6337,8 +6845,8 @@ class MidiTitleWindow(QMainWindow):
         layout.addWidget(text_box, stretch=1)
 
         buttons_row = QHBoxLayout()
-        copy_button = QPushButton("Copy to Clipboard", dialog)
-        close_button = QPushButton("Close", dialog)
+        copy_button = QPushButton(self._lt("Copy to Clipboard"), dialog)
+        close_button = QPushButton(self._lt("Close"), dialog)
         buttons_row.addWidget(copy_button)
         buttons_row.addStretch()
         buttons_row.addWidget(close_button)
@@ -7355,7 +7863,7 @@ class MidiTitleWindow(QMainWindow):
             tooltip = "Rename every listed MIDI file to DOS 8.3 format (00.MID, 01.MID, ...)."
         else:
             tooltip = disabled_tooltip or "Rename 8.3 is not needed for the current list."
-        self.renameAllButton.setToolTip(tooltip)
+        self.renameAllButton.setToolTip(self._lt(tooltip))
 
     def _set_type0_enabled(self, enabled, disabled_tooltip=""):
         self.convertType0Button.setEnabled(bool(enabled))
@@ -7363,7 +7871,7 @@ class MidiTitleWindow(QMainWindow):
             tooltip = "Convert every listed MIDI file to SMF0 / MIDI Type 0."
         else:
             tooltip = disabled_tooltip or "SMF1 -> SMF0 is not needed for the current list."
-        self.convertType0Button.setToolTip(tooltip)
+        self.convertType0Button.setToolTip(self._lt(tooltip))
 
     def _image_mode_file_counts(self):
         midi_count = 0
@@ -7608,17 +8116,19 @@ class MidiTitleWindow(QMainWindow):
 
     def _apply_midi_mode_ui(self):
         self._apply_compact_button_labels()
-        self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
-        self.choose_button.setText("Open MIDI Folder")
-        self.choose_button.setToolTip("Select a folder to scan for .mid and .midi files.")
+        self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
+        self.choose_button.setText(self._lt("Open MIDI Folder"))
+        self.choose_button.setToolTip(self._lt("Select a folder to scan for .mid and .midi files."))
         self.open_image_button.setEnabled(True)
-        self.open_image_button.setToolTip("Open a floppy image file for editing in Image Mode.")
+        self.open_image_button.setText(self._lt("Open Image"))
+        self.open_image_button.setToolTip(self._lt("Open a floppy image file for editing in Image Mode."))
         self.read_floppy_button.setEnabled(True)
+        self.read_floppy_button.setText(self._lt("Read Floppy"))
         self.read_floppy_button.setToolTip(
-            "Read a floppy from a floppy drive or from a Greaseweazle-connected drive."
+            self._lt("Read a floppy from a floppy drive or from a Greaseweazle-connected drive.")
         )
         self.table.setToolTip(
-            "Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename."
+            self._lt("Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename.")
         )
         self._set_rename_all_enabled(True)
         self._set_type0_enabled(True)
@@ -7628,10 +8138,10 @@ class MidiTitleWindow(QMainWindow):
         self.saveButton.setVisible(True)
         self.saveAsButton.setVisible(True)
         self.saveAsImageButton.setVisible(True)
-        self.saveButton.setToolTip("Write pending title edits to the currently listed files.")
-        self.saveAsButton.setToolTip("Save copies with current titles to a selected destination folder.")
-        self.saveAsImageButton.setToolTip("Create one or more floppy images from the currently listed files.")
-        self.clearButton.setToolTip("Remove all files from the current list.")
+        self.saveButton.setToolTip(self._lt("Write pending title edits to the currently listed files."))
+        self.saveAsButton.setToolTip(self._lt("Save copies with current titles to a selected destination folder."))
+        self.saveAsImageButton.setToolTip(self._lt("Create one or more floppy images from the currently listed files."))
+        self.clearButton.setToolTip(self._lt("Remove all files from the current list."))
         self._set_mode_banner("MIDI Mode", self._regular_mode_context_label())
         self._update_compat_warning_ui()
         self._update_floppy_save_option_ui()
@@ -7645,14 +8155,16 @@ class MidiTitleWindow(QMainWindow):
         self._apply_compact_button_labels()
         mode_label = self._eseq_mode_label(self.regularEseqVariant)
         directory_name = self._eseq_directory_filename(self.regularEseqVariant)
-        self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
-        self.choose_button.setText("Open MIDI Folder")
+        self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
+        self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(f"Leave {mode_label} Mode and select a folder to scan for .mid and .midi files.")
         self.open_image_button.setEnabled(True)
-        self.open_image_button.setToolTip("Open a floppy image file for editing in Image Mode.")
+        self.open_image_button.setText(self._lt("Open Image"))
+        self.open_image_button.setToolTip(self._lt("Open a floppy image file for editing in Image Mode."))
         self.read_floppy_button.setEnabled(True)
+        self.read_floppy_button.setText(self._lt("Read Floppy"))
         self.read_floppy_button.setToolTip(
-            "Read a floppy from a floppy drive or from a Greaseweazle-connected drive."
+            self._lt("Read a floppy from a floppy drive or from a Greaseweazle-connected drive.")
         )
         self.table.setToolTip(
             f"{mode_label} Mode: edit local MIDI and E-SEQ titles, and manage the local {directory_name} row."
@@ -7668,8 +8180,8 @@ class MidiTitleWindow(QMainWindow):
         self.saveAsImageButton.setVisible(True)
         self.saveButton.setToolTip(f"Write pending title edits to the currently listed local files and update {directory_name}.")
         self.saveAsButton.setToolTip(f"Save local E-SEQ files and {directory_name} to a selected destination folder.")
-        self.saveAsImageButton.setToolTip("Create one or more floppy images from the currently listed files.")
-        self.clearButton.setToolTip("Remove all files from the current E-SEQ list.")
+        self.saveAsImageButton.setToolTip(self._lt("Create one or more floppy images from the currently listed files."))
+        self.clearButton.setToolTip(self._lt("Remove all files from the current E-SEQ list."))
         self._set_mode_banner(f"{mode_label} Mode", self._regular_mode_context_label())
         self._update_compat_warning_ui()
         self._update_floppy_save_option_ui()
@@ -7708,14 +8220,16 @@ class MidiTitleWindow(QMainWindow):
         self._apply_compact_button_labels()
         mode_name = self.image_session.mode_name if self.image_session is not None else "Image Mode"
         mode_banner = self._disk_mode_banner_headline()
-        self.table.setHorizontalHeaderLabels(["X", "ImagePath", "📋", "Filename", "Title", "Long", "Type"])
-        self.choose_button.setText("Open MIDI Folder")
+        self._set_table_headers(["X", "ImagePath", "📋", "Filename", "Title", "Long", "Type"])
+        self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(f"Leave {mode_name} and select a folder to scan for .mid and .midi files.")
         self.open_image_button.setEnabled(True)
-        self.open_image_button.setToolTip("Open another floppy image file for editing in Image Mode.")
+        self.open_image_button.setText(self._lt("Open Image"))
+        self.open_image_button.setToolTip(self._lt("Open another floppy image file for editing in Image Mode."))
         self.read_floppy_button.setEnabled(True)
+        self.read_floppy_button.setText(self._lt("Read Floppy"))
         self.read_floppy_button.setToolTip(
-            "Read another floppy from a floppy drive or a Greaseweazle-connected drive."
+            self._lt("Read another floppy from a floppy drive or a Greaseweazle-connected drive.")
         )
         self.table.setToolTip(
             f"{mode_banner}: edit titles, rename files, remove rows to delete files on Save, or drop files to add them."
@@ -7726,19 +8240,19 @@ class MidiTitleWindow(QMainWindow):
         self.convertMidiToEseqButton.setEnabled(True)
         self.table.setColumnHidden(6, False)
         if self.image_session is not None and self.image_session.source_kind.startswith("floppy"):
-            self.clearButton.setToolTip("Leave Floppy Mode and clear the current floppy list.")
+            self.clearButton.setToolTip(self._lt("Leave Floppy Mode and clear the current floppy list."))
         else:
             self.saveButton.setToolTip(
-                "Save pending title edits, filename edits, removals, and additions back into the image."
+                self._lt("Save pending title edits, filename edits, removals, and additions back into the image.")
             )
-            self.clearButton.setToolTip("Leave Image Mode and clear the current image list.")
+            self.clearButton.setToolTip(self._lt("Leave Image Mode and clear the current image list."))
         self.saveButton.setVisible(True)
         self.saveAsButton.setVisible(True)
         self.saveAsButton.setToolTip(
             f"Save the current {mode_name.lower()}'s listed files to a destination folder and leave {mode_name}."
         )
         self.saveAsImageButton.setVisible(True)
-        self.saveAsImageButton.setText("Save As Image")
+        self.saveAsImageButton.setText(self._lt("Save As Image"))
         self.saveAsImageButton.setToolTip(f"Save the current {mode_name.lower()} as a separate image file.")
         self._set_mode_banner(mode_banner, self.image_session.source_name if self.image_session is not None else "")
         self._update_compat_warning_ui()
@@ -8019,7 +8533,22 @@ class MidiTitleWindow(QMainWindow):
         button_box.setContentsMargins(0, 8, 6, 4)
         if button_box.layout() is not None:
             button_box.layout().setSpacing(8)
+        self._translate_dialog_button_box(button_box)
         return button_box
+
+    def _translate_dialog_button_box(self, button_box):
+        button_labels = {
+            QDialogButtonBox.Ok: "OK",
+            QDialogButtonBox.Cancel: "Cancel",
+            QDialogButtonBox.Close: "Close",
+            QDialogButtonBox.Yes: "Yes",
+            QDialogButtonBox.No: "No",
+            QDialogButtonBox.Save: "Save",
+        }
+        for standard_button, label in button_labels.items():
+            button = button_box.button(standard_button)
+            if button is not None:
+                button.setText(self._lt(label))
 
     def _make_dialog_form_grid(self):
         form_grid = QGridLayout()
@@ -8030,7 +8559,7 @@ class MidiTitleWindow(QMainWindow):
         return form_grid
 
     def _make_dialog_form_label(self, text):
-        label = QLabel(text)
+        label = QLabel(self._lt(text))
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         return label
 
@@ -8098,7 +8627,7 @@ class MidiTitleWindow(QMainWindow):
             type_combo.clear()
             selected_index = 0
             for index, (ext, label) in enumerate(options):
-                type_combo.addItem(label, ext)
+                type_combo.addItem(self._lt(label), ext)
                 if ext == current_ext:
                     selected_index = index
             type_combo.setCurrentIndex(selected_index)
@@ -8374,7 +8903,7 @@ class MidiTitleWindow(QMainWindow):
         combo.clear()
         selected_index = 0
         for index, (ext, label) in enumerate(self._greaseweazle_image_type_options(include_none=include_none)):
-            combo.addItem(label, ext)
+            combo.addItem(self._lt(label), ext)
             if ext == default_ext:
                 selected_index = index
         combo.setCurrentIndex(selected_index)
@@ -8606,7 +9135,7 @@ class MidiTitleWindow(QMainWindow):
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         ok_button = buttons.button(QDialogButtonBox.Ok)
         if ok_button is not None:
-            ok_button.setText("Image")
+            ok_button.setText(self._lt("Image"))
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
@@ -8997,19 +9526,19 @@ class MidiTitleWindow(QMainWindow):
             if is_recovery:
                 if is_gw:
                     recovery_hint.setText(
-                        "Recovery may take a long time and opens recovered data in a new editable image copy."
+                        self._lt("Recovery may take a long time and opens recovered data in a new editable image copy.")
                     )
                 else:
                     recovery_hint.setText(
-                        "Recovery copies the selected full disk size first; most Yamaha Disklavier floppies are IBM 720K DD."
+                        self._lt("Recovery copies the selected full disk size first; most Yamaha Disklavier floppies are IBM 720K DD.")
                     )
             else:
-                recovery_hint.setText("Normal read uses fast file-level reading when possible.")
+                recovery_hint.setText(self._lt("Normal read uses fast file-level reading when possible."))
             ok_enabled = bool(greaseweazle_devices) if is_gw else bool(floppy_drives)
             ok_button = buttons.button(QDialogButtonBox.Ok)
             if ok_button is not None:
                 ok_button.setEnabled(ok_enabled)
-                ok_button.setText("Recover" if is_recovery else "Read")
+                ok_button.setText(self._lt("Recover" if is_recovery else "Read"))
             QTimer.singleShot(0, resize_dialog_to_content)
 
         source_combo.currentIndexChanged.connect(refresh_dialog_state)
@@ -9376,10 +9905,8 @@ class MidiTitleWindow(QMainWindow):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(8)
 
-        format_text = disk_format.label if disk_format is not None else "current image format"
-        hint = QLabel(
-            f"Choose a formatted floppy drive to receive the current {format_text} file list."
-        )
+        format_text = disk_format.label if disk_format is not None else self._lt("image format")
+        hint = QLabel(self._t("dialog.save_to_floppy.hint", format=format_text))
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -9399,7 +9926,7 @@ class MidiTitleWindow(QMainWindow):
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         ok_button = buttons.button(QDialogButtonBox.Ok)
         if ok_button is not None:
-            ok_button.setText("Save")
+            ok_button.setText(self._lt("Save"))
             ok_button.setEnabled(bool(floppy_drives))
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -9436,8 +9963,8 @@ class MidiTitleWindow(QMainWindow):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(8)
 
-        format_text = disk_format.label if disk_format is not None else "current image format"
-        hint = QLabel(f"Choose where to write the current {format_text} image.")
+        format_text = disk_format.label if disk_format is not None else self._lt("image format")
+        hint = QLabel(self._t("dialog.write_image_to_floppy.hint", format=format_text))
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -9837,7 +10364,7 @@ class MidiTitleWindow(QMainWindow):
             )
             output_path, _ = QFileDialog.getSaveFileName(
                 self,
-                "Save Raw SCP Capture",
+                self._lt("Save Raw SCP Capture"),
                 default_path,
                 "SCP flux capture (*.scp *.SCP)",
             )
@@ -9890,7 +10417,7 @@ class MidiTitleWindow(QMainWindow):
         default_path = os.path.expanduser("~")
         image_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Open Floppy Image",
+            self._lt("Open Floppy Image"),
             default_path,
             filters,
         )
@@ -9917,7 +10444,7 @@ class MidiTitleWindow(QMainWindow):
             image_edit.setText(saved_image_path)
         image_row.addWidget(image_edit, stretch=1)
 
-        browse_button = QPushButton("Browse...")
+        browse_button = QPushButton(self._lt("Browse..."))
         image_row.addWidget(browse_button)
 
         format_combo = QComboBox(dialog)
@@ -9956,7 +10483,7 @@ class MidiTitleWindow(QMainWindow):
         def browse_image():
             selected_path, _ = QFileDialog.getOpenFileName(
                 dialog,
-                "Choose Damaged Floppy Image",
+                self._lt("Choose Damaged Floppy Image"),
                 browse_start_path(),
                 self._image_open_filters(),
             )
@@ -10764,7 +11291,7 @@ class MidiTitleWindow(QMainWindow):
                 return
             leaving_image_mode = True
 
-        directory = QFileDialog.getExistingDirectory(self, "Open MIDI Folder")
+        directory = QFileDialog.getExistingDirectory(self, self._lt("Open MIDI Folder"))
         if directory:
             if leaving_image_mode:
                 self._reset_image_state()
@@ -11335,8 +11862,8 @@ class MidiTitleWindow(QMainWindow):
         prompt_box.setCheckBox(remember_checkbox)
         prompt_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         prompt_box.setDefaultButton(QMessageBox.Yes)
-        prompt_box.button(QMessageBox.Yes).setText("Convert and Exit")
-        prompt_box.button(QMessageBox.No).setText("Cancel")
+        prompt_box.button(QMessageBox.Yes).setText(self._lt("Convert and Exit"))
+        prompt_box.button(QMessageBox.No).setText(self._lt("Cancel"))
 
         should_switch = self._exec_child_dialog(prompt_box) == QMessageBox.Yes
         if remember_checkbox.isChecked():
@@ -13688,23 +14215,7 @@ class MidiTitleWindow(QMainWindow):
         message_label.setOpenExternalLinks(True)
         message_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
         message_label.setTextFormat(Qt.RichText)
-        message_label.setText(
-            """
-            <p>APS MIDI Prep Tool is provided for lawful preservation, repair, and compatibility work.</p>
-            <p>Use copies whenever possible, keep backups, and test outputs before relying on them.
-            You are responsible for any data loss, disk damage, instrument behavior, or other results
-            from using the software.</p>
-            <p>Use the tool only with disks and files you own or are authorized to preserve, convert, or modify.
-            Do not use it to distribute copyrighted music, commercial player-piano libraries, proprietary
-            software, or other material you do not have the right to share.</p>
-            <p>This software is independent and is not affiliated with Yamaha, PianoDisc, Nalbantov,
-            Greaseweazle, or other companies mentioned. Trademarks belong to their respective owners.</p>
-            <p><strong>Alex's Piano Service LLC policies:</strong><br>
-            <a href="https://www.alexanderpeppe.com/disclaimer/">Disclaimer</a> &nbsp;|&nbsp;
-            <a href="https://www.alexanderpeppe.com/privacy-policy/">Privacy Policy</a> &nbsp;|&nbsp;
-            <a href="https://www.alexanderpeppe.com/dmca-policy/">DMCA Policy</a></p>
-            """
-        )
+        message_label.setText(self._t("dialog.disclaimer.html"))
         layout.addWidget(message_label)
 
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok, dialog)
@@ -13715,7 +14226,7 @@ class MidiTitleWindow(QMainWindow):
     def show_about_dialog(self):
         dialog = QDialog(self)
         apply_window_icon(dialog)
-        dialog.setWindowTitle(f"About {APP_TITLE_WITH_VERSION}")
+        dialog.setWindowTitle(self._t("dialog.about.title", app=APP_TITLE_WITH_VERSION))
         dialog.setModal(True)
         dialog.setMinimumWidth(420)
 
@@ -13740,16 +14251,16 @@ class MidiTitleWindow(QMainWindow):
         website_label = QLabel(f'<a href="{APP_WEBSITE}">{APP_WEBSITE}</a>', dialog)
         website_label.setAlignment(Qt.AlignCenter)
         website_label.setOpenExternalLinks(True)
-        website_label.setToolTip("Project website.")
+        website_label.setToolTip(self._lt("Project website."))
         layout.addWidget(website_label)
 
         info_label = QLabel(
             (
                 f"{APP_COPYRIGHT_NOTICE}<br>"
-                f"Author: {APP_AUTHOR}<br>"
+                f"{self._lt('Author')}: {APP_AUTHOR}<br>"
                 f"{APP_COMPANY}<br>"
                 f"{APP_COMPANY_ADDRESS}<br>"
-                f"License: {APP_LICENSE}"
+                f"{self._lt('License')}: {APP_LICENSE}"
             ),
             dialog,
         )
@@ -13929,7 +14440,7 @@ class MidiTitleWindow(QMainWindow):
         default_path = os.path.join(source_dir, f"{source_stem}_edited.{default_ext or fallback_ext}")
         output_path, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Save As Image",
+            self._lt("Save As Image"),
             default_path,
             filters,
         )
@@ -14044,7 +14555,7 @@ class MidiTitleWindow(QMainWindow):
             type_combo.clear()
             selected_index = 0
             for index, (ext, label) in enumerate(options):
-                type_combo.addItem(label, ext)
+                type_combo.addItem(self._lt(label), ext)
                 if ext == current_ext:
                     selected_index = index
             type_combo.setCurrentIndex(selected_index)
@@ -14080,7 +14591,7 @@ class MidiTitleWindow(QMainWindow):
         default_path = self._default_save_as_path(f"midi_floppy.{output_ext}")
         output_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save As Image",
+            self._lt("Save As Image"),
             default_path,
             f"{output_label} (*.{output_ext})",
         )
@@ -14657,7 +15168,7 @@ class MidiTitleWindow(QMainWindow):
 
             dest_dir = QFileDialog.getExistingDirectory(
                 self,
-                "Select Destination Folder",
+                self._lt("Select Destination Folder"),
                 self._last_save_as_location(),
             )
             if not dest_dir:
@@ -14705,7 +15216,7 @@ class MidiTitleWindow(QMainWindow):
 
         dest_dir = QFileDialog.getExistingDirectory(
             self,
-            "Select Destination Folder",
+            self._lt("Select Destination Folder"),
             self._last_save_as_location(),
         )
         if not dest_dir:

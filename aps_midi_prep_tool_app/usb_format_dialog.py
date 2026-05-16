@@ -25,17 +25,18 @@ from PySide6.QtWidgets import (
 )
 
 from .icon_utils import apply_window_icon
+from .message_catalog import DEFAULT_LANGUAGE, normalize_language_code, translate_text
 from .ui_utils import center_dialog_on_parent, is_dark_theme
-from .usb_formatter import (
+from .formatting import (
     FAT32_LAYOUT_LABELS,
     FAT32_LAYOUT_MBR,
     FAT32_LAYOUT_SUPERFLOPPY,
     UsbDriveInfo,
     UsbFormatCancelled,
     display_bytes,
-    format_usb_drive,
     list_removable_usb_drives,
 )
+from .formatting.usb_format_launcher import run_usb_format_for_gui
 
 
 class UsbFormatWorker(QThread):
@@ -63,7 +64,7 @@ class UsbFormatWorker(QThread):
 
     def run(self):
         try:
-            result = format_usb_drive(
+            result = run_usb_format_for_gui(
                 self.drive_info,
                 self.layout_kind,
                 volume_label=self.volume_label,
@@ -151,8 +152,10 @@ class QRectLike:
 class UsbFormatDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        language_method = getattr(parent, "_language_code", None)
+        self.language_code = normalize_language_code(language_method() if callable(language_method) else DEFAULT_LANGUAGE)
         apply_window_icon(self)
-        self.setWindowTitle("Format USB Stick for Disklavier")
+        self.setWindowTitle(self._lt("Format USB Stick for Disklavier"))
         self.setModal(True)
         self.setMinimumWidth(720)
         self.devices = []
@@ -166,20 +169,56 @@ class UsbFormatDialog(QDialog):
         self.refresh_devices()
         QTimer.singleShot(0, lambda: center_dialog_on_parent(self, parent))
 
+    def _lt(self, text):
+        return translate_text(text, self.language_code)
+
+    def _translate_dialog_button_box(self):
+        button_labels = {
+            QDialogButtonBox.Ok: "OK",
+            QDialogButtonBox.Cancel: "Cancel",
+            QDialogButtonBox.Close: "Close",
+        }
+        for standard_button, label in button_labels.items():
+            button = self.buttons.button(standard_button) if hasattr(self, "buttons") else None
+            if button is not None:
+                button.setText(self._lt(label))
+
+    def _show_message(self, icon, title, message, buttons=QMessageBox.Ok, default_button=QMessageBox.NoButton):
+        dialog = QMessageBox(self)
+        apply_window_icon(dialog)
+        dialog.setIcon(icon)
+        dialog.setWindowTitle(self._lt(title))
+        dialog.setText(self._lt(message))
+        dialog.setStandardButtons(buttons)
+        if default_button != QMessageBox.NoButton:
+            dialog.setDefaultButton(default_button)
+        for standard_button, label in (
+            (QMessageBox.Ok, "OK"),
+            (QMessageBox.Cancel, "Cancel"),
+            (QMessageBox.Yes, "Yes"),
+            (QMessageBox.No, "No"),
+        ):
+            button = dialog.button(standard_button)
+            if button is not None:
+                button.setText(self._lt(label))
+        return dialog.exec()
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(10)
 
         intro = QLabel(
-            "Prepare a removable USB stick as FAT32 for Yamaha Disklavier and PianoForce workflows."
+            self._lt("Prepare a removable USB stick as FAT32 for Yamaha Disklavier and PianoForce workflows.")
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         self.warning_label = QLabel(
-            "Formatting erases the entire selected removable device and cannot be undone. "
-            "Confirm the device, capacity, and current contents before continuing."
+            self._lt(
+                "Formatting erases the entire selected removable device and cannot be undone. "
+                "Confirm the device, capacity, and current contents before continuing."
+            )
         )
         self.warning_label.setWordWrap(True)
         self.warning_label.setStyleSheet(
@@ -187,12 +226,12 @@ class UsbFormatDialog(QDialog):
         )
         layout.addWidget(self.warning_label)
 
-        device_group = QGroupBox("Device")
+        device_group = QGroupBox(self._lt("Device"))
         device_layout = QGridLayout(device_group)
         device_layout.setColumnStretch(1, 1)
         self.device_combo = QComboBox(device_group)
-        self.refresh_button = QPushButton("Refresh", device_group)
-        device_layout.addWidget(QLabel("USB stick:"), 0, 0)
+        self.refresh_button = QPushButton(self._lt("Refresh"), device_group)
+        device_layout.addWidget(QLabel(self._lt("USB stick:")), 0, 0)
         device_layout.addWidget(self.device_combo, 0, 1)
         device_layout.addWidget(self.refresh_button, 0, 2)
         self.device_detail_label = QLabel(device_group)
@@ -200,17 +239,27 @@ class UsbFormatDialog(QDialog):
         device_layout.addWidget(self.device_detail_label, 1, 1, 1, 2)
         layout.addWidget(device_group)
 
-        format_group = QGroupBox("Format")
+        format_group = QGroupBox(self._lt("Format"))
         format_layout = QGridLayout(format_group)
         format_layout.setColumnStretch(1, 1)
         self.mode_group = QButtonGroup(format_group)
-        self.superfloppy_radio = QRadioButton("Superfloppy FAT32 (no partitions)", format_group)
+        self.superfloppy_radio = QRadioButton(self._lt("Superfloppy FAT32 (no partitions)"), format_group)
         self.superfloppy_radio.setChecked(True)
         self.mode_group.addButton(self.superfloppy_radio)
-        self.mbr_radio = QRadioButton("MBR with one FAT32 partition", format_group)
+        self.mbr_radio = QRadioButton(self._lt("MBR with one FAT32 partition"), format_group)
         self.mode_group.addButton(self.mbr_radio)
-        self.superfloppy_hint = QLabel("For Yamaha E3 and ENSPIRE Disklaviers.", format_group)
-        self.mbr_hint = QLabel("For PianoForce disks.", format_group)
+        self.superfloppy_hint = QLabel(
+            self._lt(
+                "Best for devices that need FAT32 with no partition table: Nalbantov and Gotek-style USB floppy emulators, plus older Yamaha/Disklavier/keyboard readers."
+            ),
+            format_group,
+        )
+        self.mbr_hint = QLabel(
+            self._lt(
+                "Best for devices that expect a normal partitioned USB stick: most Yamaha Clavinova/CVP/CLP instruments, QRS/PNOmation and PianoForce players, and newer computers/keyboards."
+            ),
+            format_group,
+        )
         self.superfloppy_hint.setWordWrap(True)
         self.mbr_hint.setWordWrap(True)
         format_layout.addWidget(self.superfloppy_radio, 0, 0, 1, 2)
@@ -220,24 +269,24 @@ class UsbFormatDialog(QDialog):
         self.label_edit = QLineEdit(format_group)
         self.label_edit.setMaxLength(11)
         self.label_edit.setText("DISKLAV")
-        self.label_edit.setToolTip("FAT32 volume label. FAT labels are limited to 11 characters.")
-        format_layout.addWidget(QLabel("Volume label:"), 4, 0)
+        self.label_edit.setToolTip(self._lt("FAT32 volume label. FAT labels are limited to 11 characters."))
+        format_layout.addWidget(QLabel(self._lt("Volume label:")), 4, 0)
         format_layout.addWidget(self.label_edit, 4, 1)
         layout.addWidget(format_group)
 
-        preview_group = QGroupBox("Current Contents")
+        preview_group = QGroupBox(self._lt("Current Contents"))
         preview_layout = QHBoxLayout(preview_group)
         self.usage_chart = UsbUsagePieChart(preview_group)
         preview_layout.addWidget(self.usage_chart)
         self.contents_tree = QTreeWidget(preview_group)
-        self.contents_tree.setHeaderLabels(["Item", "Size", "Details"])
+        self.contents_tree.setHeaderLabels([self._lt("Item"), self._lt("Size"), self._lt("Details")])
         self.contents_tree.setRootIsDecorated(True)
         self.contents_tree.setSelectionMode(QAbstractItemView.NoSelection)
         self.contents_tree.setMinimumHeight(210)
         preview_layout.addWidget(self.contents_tree, stretch=1)
         layout.addWidget(preview_group, stretch=1)
 
-        self.confirm_checkbox = QCheckBox("I understand this will erase the selected USB stick.", self)
+        self.confirm_checkbox = QCheckBox(self._lt("I understand this will erase the selected USB stick."), self)
         layout.addWidget(self.confirm_checkbox)
 
         self.progress_bar = QProgressBar(self)
@@ -251,8 +300,9 @@ class UsbFormatDialog(QDialog):
         layout.addWidget(self.status_label)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Close, self)
-        self.format_button = QPushButton("Format USB Stick", self.buttons)
+        self.format_button = QPushButton(self._lt("Format USB Stick"), self.buttons)
         self.buttons.addButton(self.format_button, QDialogButtonBox.DestructiveRole)
+        self._translate_dialog_button_box()
         layout.addWidget(self.buttons)
 
     def _connect_ui(self):
@@ -271,7 +321,7 @@ class UsbFormatDialog(QDialog):
         current = self._selected_device()
         if current is not None:
             previous_path = current.device_path
-        self.status_label.setText("Scanning removable USB devices...")
+        self.status_label.setText(self._lt("Scanning removable USB devices..."))
         QApplication.processEvents()
         self.devices = list_removable_usb_drives()
         self.device_combo.blockSignals(True)
@@ -285,7 +335,7 @@ class UsbFormatDialog(QDialog):
             self.device_combo.setCurrentIndex(selected_index)
             self.device_combo.setEnabled(True)
         else:
-            self.device_combo.addItem("No removable USB sticks detected", None)
+            self.device_combo.addItem(self._lt("No removable USB sticks detected"), None)
             self.device_combo.setEnabled(False)
         self.device_combo.blockSignals(False)
         self.status_label.setText("")
@@ -311,17 +361,17 @@ class UsbFormatDialog(QDialog):
         self.contents_tree.clear()
         if device is None:
             self.device_detail_label.setText(
-                "Connect a USB stick, then refresh. Only storage devices reported by the operating system as removable are listed."
+                self._lt("Connect a USB stick, then refresh. Only storage devices reported by the operating system as removable are listed.")
             )
             self.usage_chart.set_slices([])
-            self._add_tree_message("No removable USB stick is selected.")
+            self._add_tree_message(self._lt("No removable USB stick is selected."))
             self._refresh_action_state()
             return
 
-        mount_text = ", ".join(device.mountpoints) if device.mountpoints else "not mounted"
-        detail = f"{device.display_name}\nCurrent mount points: {mount_text}"
+        mount_text = ", ".join(device.mountpoints) if device.mountpoints else self._lt("not mounted")
+        detail = f"{device.display_name}\n{self._lt('Current mount points:')} {mount_text}"
         if device.read_only:
-            detail += "\nThis device is read-only and cannot be formatted."
+            detail += f"\n{self._lt('This device is read-only and cannot be formatted.')}"
         self.device_detail_label.setText(detail)
         self._populate_contents_tree(device)
         self._populate_usage_chart(device)
@@ -342,30 +392,30 @@ class UsbFormatDialog(QDialog):
 
         self.usage_chart.set_slices(
             [
-                ("Used", used, "#D45B5B"),
-                ("Free", free, "#4C9F70"),
-                ("Unallocated", unallocated, "#6D8CC7"),
-                ("Unknown", unknown, "#9AA1A9"),
+                (self._lt("Used"), used, "#D45B5B"),
+                (self._lt("Free"), free, "#4C9F70"),
+                (self._lt("Unallocated"), unallocated, "#6D8CC7"),
+                (self._lt("Unknown"), unknown, "#9AA1A9"),
             ]
         )
 
     def _populate_contents_tree(self, device):
         if not device.volumes:
-            self._add_tree_message("No readable volumes or partitions were detected.")
+            self._add_tree_message(self._lt("No readable volumes or partitions were detected."))
             return
         for volume in device.volumes:
             details = []
             if volume.file_system:
                 details.append(volume.file_system)
             if volume.label:
-                details.append(f"Label: {volume.label}")
+                details.append(f"{self._lt('Label:')} {volume.label}")
             if volume.mountpoints:
-                details.append("Mounted: " + ", ".join(volume.mountpoints))
+                details.append(self._lt("Mounted:") + " " + ", ".join(volume.mountpoints))
             volume_item = QTreeWidgetItem(
                 [
                     volume.display_name,
                     display_bytes(volume.size_bytes),
-                    " - ".join(details) if details else "No mounted file-system details",
+                    " - ".join(details) if details else self._lt("No mounted file-system details"),
                 ]
             )
             self.contents_tree.addTopLevelItem(volume_item)
@@ -380,7 +430,7 @@ class UsbFormatDialog(QDialog):
                     )
                     volume_item.addChild(child)
             else:
-                volume_item.addChild(QTreeWidgetItem(["No top-level files could be shown", "", "Unmounted or unreadable"]))
+                volume_item.addChild(QTreeWidgetItem([self._lt("No top-level files could be shown"), "", self._lt("Unmounted or unreadable")]))
             volume_item.setExpanded(True)
         for column in range(self.contents_tree.columnCount()):
             self.contents_tree.resizeColumnToContents(column)
@@ -410,16 +460,16 @@ class UsbFormatDialog(QDialog):
             return
         layout_kind = self._selected_layout_kind()
         layout_label = FAT32_LAYOUT_LABELS[layout_kind]
-        target_family = "Yamaha E3 and ENSPIRE Disklaviers" if layout_kind == FAT32_LAYOUT_SUPERFLOPPY else "PianoForce disks"
+        target_family = self.superfloppy_hint.text() if layout_kind == FAT32_LAYOUT_SUPERFLOPPY else self.mbr_hint.text()
         message = (
-            f"Erase and format this USB stick?\n\n"
-            f"Device: {device.display_name}\n"
-            f"Format: {layout_label}\n"
-            f"Use: {target_family}\n\n"
-            "This cannot be undone. The existing partition table, files, and disk contents will be removed."
+            f"{self._lt('Erase and format this USB stick?')}\n\n"
+            f"{self._lt('Device:')} {device.display_name}\n"
+            f"{self._lt('Format:')} {layout_label}\n"
+            f"{self._lt('Use:')} {target_family}\n\n"
+            f"{self._lt('This cannot be undone. The existing partition table, files, and disk contents will be removed.')}"
         )
-        confirmed = QMessageBox.warning(
-            self,
+        confirmed = self._show_message(
+            QMessageBox.Warning,
             "Confirm USB Format",
             message,
             QMessageBox.Yes | QMessageBox.No,
@@ -433,11 +483,11 @@ class UsbFormatDialog(QDialog):
         self.format_result = None
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
-        self.status_label.setText("Starting USB format...")
+        self.status_label.setText(self._lt("Starting USB format..."))
         self.format_button.setEnabled(False)
         close_button = self.buttons.button(QDialogButtonBox.Close)
         if close_button is not None:
-            close_button.setText("Cancel")
+            close_button.setText(self._lt("Cancel"))
         self._refresh_action_state()
 
         self.worker = UsbFormatWorker(device, layout_kind, self.label_edit.text().strip(), self)
@@ -466,17 +516,17 @@ class UsbFormatDialog(QDialog):
         self.confirm_checkbox.setChecked(False)
 
     def _on_format_failed(self, message):
-        self.status_label.setText("USB format failed.")
-        QMessageBox.critical(
-            self,
+        self.status_label.setText(self._lt("USB format failed."))
+        self._show_message(
+            QMessageBox.Critical,
             "USB Format Failed",
             str(message or "The USB stick was not formatted."),
         )
 
     def _on_format_cancelled(self, _message):
-        self.status_label.setText("USB formatting cancelled.")
-        QMessageBox.warning(
-            self,
+        self.status_label.setText(self._lt("USB formatting cancelled."))
+        self._show_message(
+            QMessageBox.Warning,
             "USB Format Cancelled",
             "Formatting was cancelled. The USB stick may be partially formatted; format it again before using it.",
         )
@@ -488,7 +538,7 @@ class UsbFormatDialog(QDialog):
             self.worker = None
         close_button = self.buttons.button(QDialogButtonBox.Close)
         if close_button is not None:
-            close_button.setText("Close")
+            close_button.setText(self._lt("Close"))
             close_button.setEnabled(True)
         self._refresh_action_state()
         if self.was_formatted:
@@ -498,7 +548,7 @@ class UsbFormatDialog(QDialog):
 
     def _close_or_cancel(self):
         if self._is_running and self.worker is not None:
-            self.status_label.setText("Cancelling USB format...")
+            self.status_label.setText(self._lt("Cancelling USB format..."))
             self.worker.cancel()
             self.buttons.button(QDialogButtonBox.Close).setEnabled(False)
             return
