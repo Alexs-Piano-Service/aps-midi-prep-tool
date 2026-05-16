@@ -19,7 +19,7 @@ from math import exp, pi, sin
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QTableWidget,
     QTableWidgetItem,
+    QKeySequenceEdit,
     QLineEdit,
     QFileDialog,
     QMessageBox as QtQMessageBox,
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QProgressDialog,
     QProgressBar,
+    QProxyStyle,
     QDialog,
     QDialogButtonBox,
     QCheckBox,
@@ -312,6 +314,27 @@ class QMessageBox(QtQMessageBox):
         )
 
 
+class _TooltipDelayStyle(QProxyStyle):
+    DEFAULT_WAKE_UP_DELAY_MS = 700
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
+            base_delay = super().styleHint(hint, option, widget, returnData)
+            return base_delay if base_delay >= 400 else self.DEFAULT_WAKE_UP_DELAY_MS
+        if hint == QStyle.StyleHint.SH_ToolTip_FallAsleepDelay:
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
+
+
+def install_tooltip_delay_style(app=None):
+    app = app or QApplication.instance()
+    if app is None or getattr(app, "_aps_tooltip_delay_style", None) is not None:
+        return
+    style = _TooltipDelayStyle(app.style())
+    app.setStyle(style)
+    app._aps_tooltip_delay_style = style
+
+
 def _build_light_palette():
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor("#F5F7FA"))
@@ -358,18 +381,6 @@ def _build_dark_palette():
     palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#9099A3"))
     palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#9099A3"))
     return palette
-
-
-def _theme_stylesheet(mode):
-    if mode != "dark":
-        return ""
-    return """
-        QToolTip {
-            color: #F0F4F8;
-            background-color: #2C343C;
-            border: 1px solid #56616D;
-        }
-    """
 
 
 class TitleOverflowDelegate(QStyledItemDelegate):
@@ -784,7 +795,6 @@ class GreaseweazleSectorGrid(QWidget):
         self.success_color = QColor("#2FA866")
         self.failure_color = QColor("#D14D4D")
         self.empty_color = QColor("#69737C")
-        self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setMinimumSize(self.sizeHint())
         self.setMaximumSize(self.sizeHint())
@@ -809,22 +819,28 @@ class GreaseweazleSectorGrid(QWidget):
         status = statuses[col] if col < len(statuses) else " "
         return row, col, status
 
-    def mouseMoveEvent(self, event):
-        hit = self._status_at_position(event.pos())
+    def _tooltip_for_position(self, pos):
+        hit = self._status_at_position(pos)
         if hit is None:
-            QToolTip.hideText()
-            return super().mouseMoveEvent(event)
+            return ""
         row, col, status = hit
         sector = int(row.get("sector", 0)) + 1
         head = row.get("head", 0)
         if status == ".":
-            message = f"Cylinder {col}, head {head}, sector {sector}: read successfully."
-        else:
-            label = status if str(status).strip() else "missing"
-            message = f"Cylinder {col}, head {head}, sector {sector}: {label}."
-        global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
-        QToolTip.showText(global_pos, message, self)
-        return super().mouseMoveEvent(event)
+            return f"Cylinder {col}, head {head}, sector {sector}: read successfully."
+        label = status if str(status).strip() else "missing"
+        return f"Cylinder {col}, head {head}, sector {sector}: {label}."
+
+    def event(self, event):
+        if event.type() == QEvent.ToolTip:
+            message = self._tooltip_for_position(event.pos())
+            if message:
+                QToolTip.showText(event.globalPos(), message, self)
+            else:
+                QToolTip.hideText()
+                event.ignore()
+            return True
+        return super().event(event)
 
     def leaveEvent(self, event):
         QToolTip.hideText()
@@ -2419,6 +2435,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_WRITE_METADATA_SUMMARY = "write_metadata_summary"
     SETTING_LANGUAGE = "language"
     SETTING_APPEARANCE_MODE = "appearance_mode"
+    SETTING_KEYBOARD_SHORTCUT_PREFIX = "keyboard_shortcuts"
     SETTING_HIDE_CHOICES_RESET_VERSION = "hide_choices_reset_version"
     HIDE_CHOICES_RESET_VERSION = 1
     SETTING_GW_SECTOR_REPORT_HIDE_VERSION = "gw_sector_report_hide_version"
@@ -2442,6 +2459,7 @@ class MidiTitleWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        install_tooltip_delay_style()
         self.setWindowTitle(APP_NAME)
         apply_window_icon(self)
         self.resize(860, 800)
@@ -2932,6 +2950,9 @@ class MidiTitleWindow(QMainWindow):
         self.fileSaveAsAction.triggered.connect(self.save_as_changes)
         self.fileMenu.addAction(self.fileSaveAsAction)
 
+        self.fileClearListAction = QAction("Clear List", self)
+        self.fileClearListAction.triggered.connect(self.clear_list)
+
         self.fileCreateTagSidecarsAction = QAction("Create Tag Sidecars When Saving", self)
         self.fileCreateTagSidecarsAction.setCheckable(True)
         self.fileCreateTagSidecarsAction.setChecked(self._tag_sidecars_enabled())
@@ -2952,6 +2973,8 @@ class MidiTitleWindow(QMainWindow):
         self.fileSaveAsImageAction = QAction("Save As Image...", self)
         self.fileSaveAsImageAction.triggered.connect(self.save_as_image)
         self.fileMenu.addAction(self.fileSaveAsImageAction)
+
+        self.fileMenu.addAction(self.fileClearListAction)
 
         self.fileSaveToFloppyAction = QAction("Save To Floppy...", self)
         self.fileSaveToFloppyAction.setToolTip(
@@ -3064,6 +3087,10 @@ class MidiTitleWindow(QMainWindow):
             self.languageMenu.addAction(action)
             self.languageActions[language.code] = action
         self.settingsMenu.addSeparator()
+        self.settingsKeyboardShortcutsAction = QAction("Keyboard Shortcuts...", self)
+        self.settingsKeyboardShortcutsAction.triggered.connect(self.show_keyboard_shortcuts_dialog)
+        self.settingsMenu.addAction(self.settingsKeyboardShortcutsAction)
+
         self.settingsResetHiddenDialogsAction = QAction(self._t("settings.reset_hidden_dialogs"), self)
         self.settingsResetHiddenDialogsAction.setToolTip(self._t("settings.reset_hidden_dialogs.tooltip"))
         self.settingsResetHiddenDialogsAction.triggered.connect(self.reset_hidden_dialog_settings)
@@ -3095,6 +3122,7 @@ class MidiTitleWindow(QMainWindow):
         self.helpAboutAction = QAction("About APS MIDI Prep Tool", self)
         self.helpAboutAction.triggered.connect(self.show_about_dialog)
         help_menu.addAction(self.helpAboutAction)
+        self._setup_keyboard_shortcuts()
         self._update_compat_warning_ui()
         self.table.setColumnHidden(6, False)
 
@@ -3123,13 +3151,10 @@ class MidiTitleWindow(QMainWindow):
         if app is not None:
             if mode == "dark":
                 app.setPalette(_build_dark_palette())
-                app.setStyleSheet(_theme_stylesheet("dark"))
             elif mode == "light":
                 app.setPalette(_build_light_palette())
-                app.setStyleSheet(_theme_stylesheet("light"))
             else:
                 app.setPalette(getattr(self, "systemPalette", QApplication.palette()))
-                app.setStyleSheet(_theme_stylesheet("system"))
 
         if hasattr(self, "appearanceActions"):
             for action_mode, action in self.appearanceActions.items():
@@ -3182,12 +3207,16 @@ class MidiTitleWindow(QMainWindow):
         ):
             action = getattr(self, "appearanceActions", {}).get(mode)
             if action is not None:
-                action.setText(self._t(message_id))
+                action.setText(self._menu_action_text(self._t(message_id), message_id.split(".")[-1][:1]))
                 action.setChecked(mode == self._appearance_mode())
         if hasattr(self, "languageMenu"):
             self.languageMenu.setTitle(self._t("menu.language"))
+        if hasattr(self, "settingsKeyboardShortcutsAction"):
+            self.settingsKeyboardShortcutsAction.setText(self._menu_action_text("Keyboard Shortcuts...", "K"))
         if hasattr(self, "settingsResetHiddenDialogsAction"):
-            self.settingsResetHiddenDialogsAction.setText(self._t("settings.reset_hidden_dialogs"))
+            self.settingsResetHiddenDialogsAction.setText(
+                self._with_mnemonic(self._t("settings.reset_hidden_dialogs"), "R")
+            )
             self.settingsResetHiddenDialogsAction.setToolTip(self._t("settings.reset_hidden_dialogs.tooltip"))
         for language in language_options():
             action = getattr(self, "languageActions", {}).get(language.code)
@@ -3214,6 +3243,208 @@ class MidiTitleWindow(QMainWindow):
 
     def _set_table_headers(self, labels):
         self.table.setHorizontalHeaderLabels([self._lt(label) for label in labels])
+
+    def _keyboard_shortcut_specs(self):
+        return (
+            {"id": "file.new_image", "category": "File", "label": "New Image...", "action": "fileNewImageAction", "default": "Ctrl+N"},
+            {"id": "file.open_folder", "category": "File", "label": "Open MIDI Folder...", "action": "fileOpenFolderAction", "default": "Ctrl+O"},
+            {"id": "file.open_image", "category": "File", "label": "Open Image...", "action": "fileOpenImageAction", "default": "Ctrl+Shift+O"},
+            {"id": "file.read_floppy", "category": "File", "label": "Read Floppy...", "action": "fileReadFloppyAction", "default": "Ctrl+R"},
+            {"id": "file.image_floppy", "category": "File", "label": "Image Floppy...", "action": "fileImageFloppyAction", "default": "Ctrl+I"},
+            {"id": "file.save", "category": "File", "label": "Save", "action": "fileSaveAction", "default": "Ctrl+S"},
+            {"id": "file.save_as", "category": "File", "label": "Save As...", "action": "fileSaveAsAction", "default": "Ctrl+Shift+S"},
+            {"id": "file.save_as_image", "category": "File", "label": "Save As Image...", "action": "fileSaveAsImageAction", "default": "Ctrl+Shift+I"},
+            {"id": "file.clear_list", "category": "File", "label": "Clear List", "action": "fileClearListAction", "default": "Ctrl+Shift+Delete"},
+            {"id": "file.save_to_floppy", "category": "File", "label": "Save To Floppy...", "action": "fileSaveToFloppyAction", "default": "Ctrl+F"},
+            {"id": "file.write_image_to_floppy", "category": "File", "label": "Write Current Image to Floppy...", "action": "fileWriteImageToFloppyAction", "default": "Ctrl+Shift+F"},
+            {"id": "file.auto_write_protect", "category": "File", "label": "Auto Write-Protect", "action": "fileAutoWriteProtectAction", "default": "Ctrl+Shift+P"},
+            {"id": "file.create_tag_sidecars", "category": "File", "label": "Create Tag Sidecars When Saving", "action": "fileCreateTagSidecarsAction", "default": "Ctrl+Shift+T"},
+            {"id": "file.create_metadata_summary", "category": "File", "label": "Create Metadata Summary When Saving", "action": "fileCreateMetadataSummaryAction", "default": "Ctrl+Shift+Y"},
+            {"id": "utilities.song_list", "category": "Utilities", "label": "Song List...", "action": "utilitiesSongListAction", "default": "F3"},
+            {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
+            {"id": "utilities.rename", "category": "Utilities", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
+            {"id": "utilities.smf0", "category": "Utilities", "label": "Convert All SMF1 to SMF0", "action": "utilitiesSmfAction", "default": "Ctrl+Shift+0"},
+            {"id": "utilities.eseq_to_midi", "category": "Utilities", "label": "Convert All E-SEQ to MIDI", "action": "utilitiesEseqToMidiAction", "default": "Ctrl+Shift+M"},
+            {"id": "utilities.midi_to_eseq", "category": "Utilities", "label": "Convert All MIDI to E-SEQ", "action": "utilitiesMidiToEseqAction", "default": "Ctrl+Shift+E"},
+            {"id": "utilities.recover_image", "category": "Utilities", "label": "Recover Damaged Image...", "action": "utilitiesRecoverImageAction", "default": "Ctrl+Shift+D"},
+            {"id": "utilities.format_floppy", "category": "Utilities", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
+            {"id": "utilities.format_usb", "category": "Utilities", "label": "Format USB Stick...", "action": "utilitiesFormatUsbAction", "default": "F7"},
+            {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
+            {"id": "help.check_updates", "category": "Help", "label": "Check for Updates...", "action": "helpCheckUpdatesAction", "default": "F9"},
+            {"id": "help.welcome", "category": "Help", "label": "Show Welcome Screen", "action": "helpWelcomeAction", "default": "F1"},
+            {"id": "help.about", "category": "Help", "label": "About APS MIDI Prep Tool", "action": "helpAboutAction", "default": "Ctrl+F1"},
+        )
+
+    def _shortcut_settings_key(self, shortcut_id):
+        return f"{self.SETTING_KEYBOARD_SHORTCUT_PREFIX}/{shortcut_id}"
+
+    def _normalized_shortcut_text(self, shortcut_text):
+        return QKeySequence(str(shortcut_text or "")).toString(QKeySequence.PortableText)
+
+    def _shortcut_text_for_spec(self, spec):
+        stored = self.settings.value(self._shortcut_settings_key(spec["id"]), None)
+        if stored is None:
+            return self._normalized_shortcut_text(spec["default"])
+        return self._normalized_shortcut_text(stored)
+
+    def _shortcut_sequence_for_spec(self, spec):
+        return QKeySequence(self._shortcut_text_for_spec(spec))
+
+    def _setup_keyboard_shortcuts(self):
+        for shortcut in getattr(self, "keyboardShortcutObjects", {}).values():
+            shortcut.setEnabled(False)
+            shortcut.deleteLater()
+        self.keyboardShortcutObjects = {}
+        for spec in self._keyboard_shortcut_specs():
+            sequence = self._shortcut_sequence_for_spec(spec)
+            if sequence.isEmpty():
+                continue
+            shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(
+                lambda action_name=spec["action"]: self._trigger_keyboard_shortcut(action_name)
+            )
+            self.keyboardShortcutObjects[spec["id"]] = shortcut
+
+    def _trigger_keyboard_shortcut(self, action_name):
+        action = getattr(self, action_name, None)
+        if action is not None and action.isEnabled():
+            action.trigger()
+
+    def _save_keyboard_shortcuts(self, shortcut_text_by_id):
+        for spec in self._keyboard_shortcut_specs():
+            shortcut_text = self._normalized_shortcut_text(shortcut_text_by_id.get(spec["id"], ""))
+            default_text = self._normalized_shortcut_text(spec["default"])
+            key = self._shortcut_settings_key(spec["id"])
+            if shortcut_text == default_text:
+                self.settings.remove(key)
+            else:
+                self.settings.setValue(key, shortcut_text)
+        self.settings.sync()
+        self._setup_keyboard_shortcuts()
+
+    def _shortcut_conflict(self, shortcut_text_by_id, specs):
+        seen = {}
+        for spec in specs:
+            sequence_text = str(shortcut_text_by_id.get(spec["id"], "") or "").strip()
+            if not sequence_text:
+                continue
+            sequence_text = self._normalized_shortcut_text(sequence_text)
+            if not sequence_text:
+                continue
+            if sequence_text in seen:
+                return sequence_text, seen[sequence_text], spec
+            seen[sequence_text] = spec
+        return None
+
+    def show_keyboard_shortcuts_dialog(self):
+        specs = self._keyboard_shortcut_specs()
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._lt("Keyboard Shortcuts"))
+        dialog.resize(760, 520)
+
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(self._lt("Change the keyboard shortcuts used by the main window commands."), dialog)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        table = QTableWidget(len(specs), 3, dialog)
+        table.setHorizontalHeaderLabels([
+            self._lt("Category"),
+            self._lt("Command"),
+            self._lt("Shortcut"),
+        ])
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.ElideRight)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+
+        sample_editor = QKeySequenceEdit(table)
+        shortcut_row_height = max(
+            34,
+            table.fontMetrics().height() + 16,
+            sample_editor.sizeHint().height() + 8,
+        )
+        sample_editor.deleteLater()
+        table.verticalHeader().setDefaultSectionSize(shortcut_row_height)
+
+        editors = {}
+        for row, spec in enumerate(specs):
+            category_item = QTableWidgetItem(self._lt(spec["category"]))
+            command_item = QTableWidgetItem(self._lt(spec["label"]).replace("&", ""))
+            for item in (category_item, command_item):
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            table.setItem(row, 0, category_item)
+            table.setItem(row, 1, command_item)
+
+            editor = QKeySequenceEdit(self._shortcut_sequence_for_spec(spec), table)
+            if hasattr(editor, "setClearButtonEnabled"):
+                editor.setClearButtonEnabled(True)
+            table.setCellWidget(row, 2, editor)
+            editors[spec["id"]] = editor
+            table.setRowHeight(row, shortcut_row_height)
+
+        layout.addWidget(table, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        restore_button = buttons.addButton(self._lt("Restore Defaults"), QDialogButtonBox.ResetRole)
+        clear_button = buttons.addButton(self._lt("Clear Selected"), QDialogButtonBox.ActionRole)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        def restore_defaults():
+            for spec in specs:
+                editors[spec["id"]].setKeySequence(QKeySequence(spec["default"]))
+
+        def clear_selected():
+            row = table.currentRow()
+            if 0 <= row < len(specs):
+                editors[specs[row]["id"]].clear()
+
+        restore_button.clicked.connect(restore_defaults)
+        clear_button.clicked.connect(clear_selected)
+        layout.addWidget(buttons)
+
+        while self._exec_child_dialog(dialog) == QDialog.Accepted:
+            shortcut_text_by_id = {
+                spec["id"]: editors[spec["id"]].keySequence().toString(QKeySequence.PortableText)
+                for spec in specs
+            }
+            conflict = self._shortcut_conflict(shortcut_text_by_id, specs)
+            if conflict is not None:
+                sequence_text, first_spec, second_spec = conflict
+                QMessageBox.warning(
+                    self,
+                    self._lt("Duplicate Shortcut"),
+                    (
+                        f"{sequence_text} is assigned to both "
+                        f"{self._lt(first_spec['label']).replace('&', '')} and "
+                        f"{self._lt(second_spec['label']).replace('&', '')}."
+                    ),
+                )
+                continue
+            self._save_keyboard_shortcuts(shortcut_text_by_id)
+            self.status_label.setText(self._lt("Keyboard shortcuts updated."))
+            return
+
+    def _with_mnemonic(self, text, mnemonic):
+        if not mnemonic or "&" in text:
+            return text
+        target = str(mnemonic).lower()
+        for index, char in enumerate(text):
+            if char.lower() == target:
+                return f"{text[:index]}&{text[index:]}"
+        return text
+
+    def _menu_action_text(self, text, mnemonic=""):
+        return self._with_mnemonic(self._lt(text), mnemonic)
 
     def _refresh_translated_ui(self):
         self._refresh_settings_menu_text()
@@ -3265,35 +3496,36 @@ class MidiTitleWindow(QMainWindow):
 
     def _refresh_static_action_text(self):
         action_texts = (
-            ("fileNewImageAction", "New Image..."),
-            ("fileOpenFolderAction", "Open MIDI Folder..."),
-            ("fileOpenImageAction", "Open Image..."),
-            ("fileReadFloppyAction", "Read Floppy..."),
-            ("fileImageFloppyAction", "Image Floppy..."),
-            ("fileCreateTagSidecarsAction", "Create Tag Sidecars When Saving"),
-            ("fileCreateMetadataSummaryAction", "Create Metadata Summary When Saving"),
-            ("fileSaveToFloppyAction", "Save To Floppy..."),
-            ("fileWriteImageToFloppyAction", "Write Current Image to Floppy..."),
-            ("fileAutoWriteProtectAction", "Auto Write-Protect"),
-            ("utilitiesSongListAction", "Song List..."),
-            ("utilitiesFileInspectionAction", "File Inspection..."),
-            ("utilitiesRecoverImageAction", "Recover Damaged Image..."),
-            ("utilitiesRenameAction", "Rename All to DOS 8.3"),
-            ("utilitiesSmfAction", "Convert All SMF1 to SMF0"),
-            ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI"),
-            ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ"),
-            ("utilitiesFormatFloppyAction", "Format Floppy Disk..."),
-            ("utilitiesFormatUsbAction", "Format USB Stick..."),
-            ("helpCheckUpdatesAction", "Check for Updates..."),
-            ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup"),
-            ("helpWelcomeAction", "Show Welcome Screen"),
-            ("helpDisclaimerAction", "Disclaimer"),
-            ("helpAboutAction", "About APS MIDI Prep Tool"),
+            ("fileNewImageAction", "New Image...", "N"),
+            ("fileOpenFolderAction", "Open MIDI Folder...", "F"),
+            ("fileOpenImageAction", "Open Image...", "O"),
+            ("fileReadFloppyAction", "Read Floppy...", "R"),
+            ("fileImageFloppyAction", "Image Floppy...", "I"),
+            ("fileClearListAction", "Clear List", "C"),
+            ("fileCreateTagSidecarsAction", "Create Tag Sidecars When Saving", "G"),
+            ("fileCreateMetadataSummaryAction", "Create Metadata Summary When Saving", "D"),
+            ("fileSaveToFloppyAction", "Save To Floppy...", "T"),
+            ("fileWriteImageToFloppyAction", "Write Current Image to Floppy...", "W"),
+            ("fileAutoWriteProtectAction", "Auto Write-Protect", "P"),
+            ("utilitiesSongListAction", "Song List...", "S"),
+            ("utilitiesFileInspectionAction", "File Inspection...", "I"),
+            ("utilitiesRecoverImageAction", "Recover Damaged Image...", "D"),
+            ("utilitiesRenameAction", "Rename All to DOS 8.3", "R"),
+            ("utilitiesSmfAction", "Convert All SMF1 to SMF0", "0"),
+            ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
+            ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ", "M"),
+            ("utilitiesFormatFloppyAction", "Format Floppy Disk...", "F"),
+            ("utilitiesFormatUsbAction", "Format USB Stick...", "U"),
+            ("helpCheckUpdatesAction", "Check for Updates...", "C"),
+            ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup", "S"),
+            ("helpWelcomeAction", "Show Welcome Screen", "W"),
+            ("helpDisclaimerAction", "Disclaimer", "D"),
+            ("helpAboutAction", "About APS MIDI Prep Tool", "A"),
         )
-        for action_name, text in action_texts:
+        for action_name, text, mnemonic in action_texts:
             action = getattr(self, action_name, None)
             if action is not None:
-                action.setText(self._lt(text))
+                action.setText(self._menu_action_text(text, mnemonic))
 
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
@@ -6098,23 +6330,28 @@ class MidiTitleWindow(QMainWindow):
             self.fileImageFloppyAction.setToolTip(capture_tooltip)
             self.fileImageFloppyAction.setStatusTip(capture_tooltip)
 
-        self.fileSaveAction.setText(self._lt("Save"))
+        self.fileSaveAction.setText(self._menu_action_text("Save", "S"))
         self.fileSaveAction.setEnabled(self.saveButton.isEnabled())
         self.fileSaveAction.setToolTip(self.saveButton.toolTip())
         self.fileSaveAction.setStatusTip(self.saveButton.toolTip())
 
-        self.fileSaveAsAction.setText(self._lt("Save As..."))
+        self.fileSaveAsAction.setText(self._menu_action_text("Save As...", "A"))
         self.fileSaveAsAction.setEnabled(self.saveAsButton.isEnabled())
         self.fileSaveAsAction.setToolTip(self.saveAsButton.toolTip())
         self.fileSaveAsAction.setStatusTip(self.saveAsButton.toolTip())
 
-        image_action_text = self._lt("Save As Image...")
+        image_action_text = self._menu_action_text("Save As Image...", "M")
         if self.is_image_mode():
-            image_action_text = self._lt("Save As Image...")
+            image_action_text = self._menu_action_text("Save As Image...", "M")
         self.fileSaveAsImageAction.setText(image_action_text)
         self.fileSaveAsImageAction.setEnabled(self.saveAsImageButton.isEnabled())
         self.fileSaveAsImageAction.setToolTip(self.saveAsImageButton.toolTip())
         self.fileSaveAsImageAction.setStatusTip(self.saveAsImageButton.toolTip())
+
+        if hasattr(self, "fileClearListAction"):
+            self.fileClearListAction.setEnabled(self.clearButton.isEnabled())
+            self.fileClearListAction.setToolTip(self.clearButton.toolTip())
+            self.fileClearListAction.setStatusTip(self.clearButton.toolTip())
 
         if hasattr(self, "fileSaveToFloppyAction"):
             enabled = self.choose_button.isEnabled() and self.is_image_mode()

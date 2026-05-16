@@ -85,11 +85,11 @@ class UsbUsagePieChart(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.slices = []
-        self.setMinimumSize(170, 132)
+        self.setMinimumSize(150, 132)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     def sizeHint(self):
-        return QSize(210, 142)
+        return QSize(150, 142)
 
     def set_slices(self, slices):
         self.slices = [(str(label), max(0, int(value or 0)), QColor(color)) for label, value, color in slices]
@@ -101,7 +101,6 @@ class UsbUsagePieChart(QWidget):
         rect = self.rect().adjusted(8, 8, -8, -8)
         pie_size = min(rect.height(), 112)
         pie_rect = rect.adjusted(0, 0, -(rect.width() - pie_size), -(rect.height() - pie_size))
-        legend_left = pie_rect.right() + 14
         total = sum(value for _label, value, _color in self.slices)
 
         if total <= 0:
@@ -109,8 +108,6 @@ class UsbUsagePieChart(QWidget):
             painter.setBrush(color)
             painter.setPen(QPen(color.darker(120), 1))
             painter.drawEllipse(pie_rect)
-            painter.setPen(QColor("#D8DEE5") if is_dark_theme() else QColor("#47515A"))
-            painter.drawText(rect.adjusted(pie_size + 14, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, "No readable usage")
             return
 
         start_angle = 90 * 16
@@ -122,31 +119,6 @@ class UsbUsagePieChart(QWidget):
             painter.setPen(QPen(color.darker(125), 1))
             painter.drawPie(pie_rect, start_angle, -span)
             start_angle -= span
-
-        painter.setPen(QColor("#D8DEE5") if is_dark_theme() else QColor("#2E343B"))
-        font = painter.font()
-        font.setPointSize(max(8, font.pointSize() - 1))
-        painter.setFont(font)
-        y = rect.top() + 4
-        for label, value, color in self.slices:
-            if value <= 0:
-                continue
-            marker = QRectLike(legend_left, y + 3, 9, 9)
-            painter.setBrush(color)
-            painter.setPen(Qt.NoPen)
-            painter.drawRect(marker.x, marker.y, marker.w, marker.h)
-            painter.setPen(QColor("#D8DEE5") if is_dark_theme() else QColor("#2E343B"))
-            text = f"{label}: {display_bytes(value)}"
-            painter.drawText(legend_left + 15, y, max(10, rect.right() - legend_left - 15), 18, Qt.AlignLeft, text)
-            y += 20
-
-
-class QRectLike:
-    def __init__(self, x, y, w, h):
-        self.x = int(x)
-        self.y = int(y)
-        self.w = int(w)
-        self.h = int(h)
 
 
 class UsbFormatDialog(QDialog):
@@ -242,6 +214,7 @@ class UsbFormatDialog(QDialog):
         format_group = QGroupBox(self._lt("Format"))
         format_layout = QGridLayout(format_group)
         format_layout.setColumnStretch(1, 1)
+        format_layout.setColumnStretch(2, 0)
         self.mode_group = QButtonGroup(format_group)
         self.superfloppy_radio = QRadioButton(self._lt("Superfloppy FAT32 (no partitions)"), format_group)
         self.superfloppy_radio.setChecked(True)
@@ -249,40 +222,51 @@ class UsbFormatDialog(QDialog):
         self.mbr_radio = QRadioButton(self._lt("MBR with one FAT32 partition"), format_group)
         self.mode_group.addButton(self.mbr_radio)
         self.superfloppy_hint = QLabel(
-            self._lt(
-                "Best for devices that need FAT32 with no partition table: Nalbantov and Gotek-style USB floppy emulators, plus older Yamaha/Disklavier/keyboard readers."
-            ),
+            self._lt("For USB floppy emulators and older Yamaha/Disklavier readers."),
             format_group,
         )
         self.mbr_hint = QLabel(
-            self._lt(
-                "Best for devices that expect a normal partitioned USB stick: most Yamaha Clavinova/CVP/CLP instruments, QRS/PNOmation and PianoForce players, and newer computers/keyboards."
-            ),
+            self._lt("For PianoForce, modern Yamaha instruments, and computers."),
             format_group,
         )
         self.superfloppy_hint.setWordWrap(True)
         self.mbr_hint.setWordWrap(True)
+        self.format_info_button = QPushButton(self._lt("More info..."), format_group)
+        self.format_info_button.setFlat(True)
+        self.format_info_button.setCursor(Qt.PointingHandCursor)
         format_layout.addWidget(self.superfloppy_radio, 0, 0, 1, 2)
-        format_layout.addWidget(self.superfloppy_hint, 1, 1)
-        format_layout.addWidget(self.mbr_radio, 2, 0, 1, 2)
-        format_layout.addWidget(self.mbr_hint, 3, 1)
+        format_layout.addWidget(self.format_info_button, 0, 2, alignment=Qt.AlignRight | Qt.AlignTop)
+        format_layout.addWidget(self.superfloppy_hint, 1, 1, 1, 2)
+        format_layout.addWidget(self.mbr_radio, 2, 0, 1, 3)
+        format_layout.addWidget(self.mbr_hint, 3, 1, 1, 2)
         self.label_edit = QLineEdit(format_group)
         self.label_edit.setMaxLength(11)
         self.label_edit.setText("DISKLAV")
         self.label_edit.setToolTip(self._lt("FAT32 volume label. FAT labels are limited to 11 characters."))
         format_layout.addWidget(QLabel(self._lt("Volume label:")), 4, 0)
-        format_layout.addWidget(self.label_edit, 4, 1)
+        format_layout.addWidget(self.label_edit, 4, 1, 1, 2)
         layout.addWidget(format_group)
 
         preview_group = QGroupBox(self._lt("Current Contents"))
         preview_layout = QHBoxLayout(preview_group)
+        usage_layout = QVBoxLayout()
+        usage_layout.setContentsMargins(0, 0, 0, 0)
+        usage_layout.setSpacing(6)
         self.usage_chart = UsbUsagePieChart(preview_group)
-        preview_layout.addWidget(self.usage_chart)
+        usage_layout.addWidget(self.usage_chart, alignment=Qt.AlignHCenter)
+        self.usage_status_label = QLabel(preview_group)
+        self.usage_status_label.setWordWrap(True)
+        self.usage_status_label.setAlignment(Qt.AlignCenter)
+        self.usage_status_label.setMinimumWidth(160)
+        usage_layout.addWidget(self.usage_status_label)
+        usage_layout.addStretch()
+        preview_layout.addLayout(usage_layout)
         self.contents_tree = QTreeWidget(preview_group)
         self.contents_tree.setHeaderLabels([self._lt("Item"), self._lt("Size"), self._lt("Details")])
         self.contents_tree.setRootIsDecorated(True)
         self.contents_tree.setSelectionMode(QAbstractItemView.NoSelection)
         self.contents_tree.setMinimumHeight(210)
+        self.contents_tree.setMinimumWidth(400)
         preview_layout.addWidget(self.contents_tree, stretch=1)
         layout.addWidget(preview_group, stretch=1)
 
@@ -311,8 +295,18 @@ class UsbFormatDialog(QDialog):
         self.confirm_checkbox.toggled.connect(self._refresh_action_state)
         self.superfloppy_radio.toggled.connect(self._refresh_mode_text)
         self.mbr_radio.toggled.connect(self._refresh_mode_text)
+        self.format_info_button.clicked.connect(self._show_format_info)
         self.format_button.clicked.connect(self._start_format)
         self.buttons.rejected.connect(self._close_or_cancel)
+
+    def _show_format_info(self):
+        message = (
+            f"{self._lt('Superfloppy FAT32 (no partitions)')}\n"
+            f"{self._lt('Best for devices that need FAT32 with no partition table: Nalbantov and Gotek-style USB floppy emulators, plus older Yamaha/Disklavier/keyboard readers.')}\n\n"
+            f"{self._lt('MBR with one FAT32 partition')}\n"
+            f"{self._lt('Best for devices that expect a normal partitioned USB stick: most Yamaha Clavinova/CVP/CLP instruments, QRS/PNOmation and PianoForce players, and newer computers/keyboards.')}"
+        )
+        self._show_message(QMessageBox.Information, "Format Layout Info", message)
 
     def refresh_devices(self):
         if self._is_running:
@@ -364,6 +358,7 @@ class UsbFormatDialog(QDialog):
                 self._lt("Connect a USB stick, then refresh. Only storage devices reported by the operating system as removable are listed.")
             )
             self.usage_chart.set_slices([])
+            self.usage_status_label.setText(self._lt("No readable usage"))
             self._add_tree_message(self._lt("No removable USB stick is selected."))
             self._refresh_action_state()
             return
@@ -388,7 +383,23 @@ class UsbFormatDialog(QDialog):
         elif volume_size > used + free:
             unknown = volume_size - used - free
         if not device.volumes:
+            unallocated = 0
             unknown = int(device.size_bytes or 0)
+
+        if device.volumes:
+            usage_lines = [
+                f"{self._lt(label)}: {display_bytes(value)}"
+                for label, value in (
+                    ("Used", used),
+                    ("Free", free),
+                    ("Unallocated", unallocated),
+                    ("Unknown", unknown),
+                )
+                if value > 0
+            ]
+            self.usage_status_label.setText("\n".join(usage_lines) if usage_lines else self._lt("No readable usage"))
+        else:
+            self.usage_status_label.setText(self._lt("No readable usage"))
 
         self.usage_chart.set_slices(
             [
@@ -436,7 +447,10 @@ class UsbFormatDialog(QDialog):
             self.contents_tree.resizeColumnToContents(column)
 
     def _add_tree_message(self, message):
-        self.contents_tree.addTopLevelItem(QTreeWidgetItem([message, "", ""]))
+        item = QTreeWidgetItem([message, "", ""])
+        item.setToolTip(0, message)
+        self.contents_tree.addTopLevelItem(item)
+        item.setFirstColumnSpanned(True)
 
     def _refresh_action_state(self):
         device = self._selected_device()
@@ -451,6 +465,7 @@ class UsbFormatDialog(QDialog):
         self.device_combo.setEnabled(not self._is_running and bool(self.devices))
         self.superfloppy_radio.setEnabled(not self._is_running)
         self.mbr_radio.setEnabled(not self._is_running)
+        self.format_info_button.setEnabled(not self._is_running)
         self.label_edit.setEnabled(not self._is_running)
         self.confirm_checkbox.setEnabled(not self._is_running)
 

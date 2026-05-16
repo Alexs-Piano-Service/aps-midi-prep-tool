@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication
 
 from .app_info import APP_NAME, APP_VERSION, LEGACY_SETTINGS_APP, SETTINGS_APP, SETTINGS_ORG
 from .onboarding_dialog import show_first_time_dialog
-from .main_window import MidiTitleWindow
+from .main_window import MidiTitleWindow, install_tooltip_delay_style
 from .icon_utils import apply_window_icon, load_app_icon
 
 
@@ -55,6 +55,7 @@ def _migrate_legacy_settings() -> None:
 def main():
     _set_windows_app_id()
     app = QApplication(sys.argv)
+    install_tooltip_delay_style(app)
     _migrate_legacy_settings()
     app.setOrganizationName(SETTINGS_ORG)
     app.setApplicationName(APP_NAME)
