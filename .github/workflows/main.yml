@@ -25,13 +25,31 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { pip install -r requirements.txt }
-          pip install pyinstaller
+          if (Test-Path requirements-build.txt) {
+            pip install -r requirements-build.txt
+          } elseif (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+            pip install pyinstaller
+          } else {
+            pip install pyinstaller
+          }
 
       - name: Build Windows EXE
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --onefile --name APSMIDIPrepTool aps_midi_prep_tool.py
+          $pyInstallerArgs = @(
+            "--noconfirm",
+            "--onefile",
+            "--windowed",
+            "--name", "APSMIDIPrepTool",
+            "--icon", "aps_midi_prep_tool_app/aps.ico",
+            "--manifest", "manifests/main_as_invoker.xml"
+          )
+          $gwExe = "aps_midi_prep_tool_app/bin/greaseweazle/gw.exe"
+          if (Test-Path $gwExe) {
+            $pyInstallerArgs += @("--add-binary", "$gwExe;aps_midi_prep_tool_app/bin/greaseweazle")
+          }
+          pyinstaller @pyInstallerArgs aps_midi_prep_tool.py
 
       - name: Install AzureSignTool
         shell: pwsh
@@ -57,7 +75,7 @@ jobs:
             -kvs "$env:AZURE_CLIENT_SECRET" `
             -tr "http://timestamp.acs.microsoft.com" `
             -td sha256 `
-            -fd sha256 `image workflows, and PIANODIR.FIL generation. 
+            -fd sha256 `
             -dlib "Azure.CodeSigning.Dlib.dll" `
             -dmdf "$env:AZURE_TRUSTED_SIGNING_ACCOUNT/$env:AZURE_TRUSTED_SIGNING_PROFILE" `
             "$exe"

@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -343,6 +344,7 @@ DISK_FORMATS = [
 
 DISK_FORMAT_BY_SIZE = {fmt.size_bytes: fmt for fmt in DISK_FORMATS}
 DISK_FORMAT_BY_KEY = {fmt.key: fmt for fmt in DISK_FORMATS}
+MAX_FLOPPY_DRIVE_BYTES = 100 * 1024 * 1024
 
 NON_FAT_GW_FORMATS = [
     DiskFormat("mac.800", "Macintosh 800K GCR/HFS", 819200),
@@ -714,7 +716,65 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None, 
 
 
 def _find_gw():
-    return shutil.which("gw") or shutil.which("greaseweazle")
+    found = shutil.which("gw") or shutil.which("greaseweazle")
+    if found:
+        return found
+    return _find_bundled_gw()
+
+
+def _command_name_variants(command_name):
+    name = str(command_name or "").strip()
+    if not name:
+        return []
+    variants = [name]
+    if os.name == "nt" and not os.path.splitext(name)[1]:
+        variants.extend(f"{name}{suffix}" for suffix in (".exe", ".cmd", ".bat"))
+    return variants
+
+
+def _bundled_tool_search_dirs():
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_or_bundle_root = os.path.dirname(package_dir)
+    bases = [
+        getattr(sys, "_MEIPASS", ""),
+        os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else "",
+        package_dir,
+        repo_or_bundle_root,
+    ]
+    suffixes = (
+        "",
+        "bin",
+        os.path.join("bin", "greaseweazle"),
+        os.path.join("aps_midi_prep_tool_app", "bin"),
+        os.path.join("aps_midi_prep_tool_app", "bin", "greaseweazle"),
+    )
+    dirs = []
+    seen = set()
+    for base in bases:
+        if not base:
+            continue
+        for suffix in suffixes:
+            path = os.path.abspath(os.path.join(base, suffix))
+            normalized = os.path.normcase(path)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            dirs.append(path)
+    return dirs
+
+
+def _find_bundled_command(*command_names):
+    for directory in _bundled_tool_search_dirs():
+        for command_name in command_names:
+            for filename in _command_name_variants(command_name):
+                path = os.path.join(directory, filename)
+                if os.path.isfile(path) and (os.name == "nt" or os.access(path, os.X_OK)):
+                    return path
+    return None
+
+
+def _find_bundled_gw():
+    return _find_bundled_command("gw", "greaseweazle")
 
 
 def _dependency_command_message(command_name):
@@ -741,7 +801,7 @@ def _dependency_command_message(command_name):
 def _missing_greaseweazle_message(action):
     return (
         f"Greaseweazle CLI was not found, so the app cannot {action}. "
-        "Install Greaseweazle or run an AppImage build that bundles it, and make sure "
+        "Install Greaseweazle or use a build that bundles gw.exe, and make sure "
         "the command is available as 'gw' or 'greaseweazle'."
     )
 
@@ -779,6 +839,10 @@ def _model_looks_like_floppy(model):
     return any(hint in model_text for hint in FLOPPY_DRIVE_MODEL_HINTS)
 
 
+def _size_exceeds_floppy_drive_limit(size_bytes):
+    return int(size_bytes or 0) > MAX_FLOPPY_DRIVE_BYTES
+
+
 def _list_linux_floppy_drives():
     lsblk = shutil.which("lsblk")
     if not lsblk:
@@ -814,6 +878,8 @@ def _list_linux_floppy_drives():
         transport = (device.get("tran") or "").strip().lower()
         model = (device.get("model") or "").strip()
         size_bytes = _parse_int(device.get("size"), 0)
+        if _size_exceeds_floppy_drive_limit(size_bytes):
+            continue
         supported_size = size_bytes in DISK_FORMAT_BY_SIZE
         removable = bool(device.get("rm"))
         looks_like_floppy = (
@@ -920,6 +986,34 @@ def _windows_volume_label(root_path):
     return ""
 
 
+def _windows_volume_total_size(root_path):
+    root_path = _windows_filesystem_root(root_path) or str(root_path or "").strip()
+    if not root_path:
+        return 0
+    try:
+        ctypes, wintypes, kernel32 = _windows_ctypes()
+        kernel32.GetDiskFreeSpaceExW.argtypes = [
+            wintypes.LPCWSTR,
+            ctypes.POINTER(ctypes.c_ulonglong),
+            ctypes.POINTER(ctypes.c_ulonglong),
+            ctypes.POINTER(ctypes.c_ulonglong),
+        ]
+        kernel32.GetDiskFreeSpaceExW.restype = wintypes.BOOL
+        free_available = ctypes.c_ulonglong()
+        total_bytes = ctypes.c_ulonglong()
+        total_free = ctypes.c_ulonglong()
+        if kernel32.GetDiskFreeSpaceExW(
+            root_path,
+            ctypes.byref(free_available),
+            ctypes.byref(total_bytes),
+            ctypes.byref(total_free),
+        ):
+            return int(total_bytes.value)
+    except Exception:
+        pass
+    return 0
+
+
 def _windows_device_io_control(handle, control_code, out_buffer=None):
     ctypes, wintypes, kernel32 = _windows_ctypes()
     kernel32.DeviceIoControl.argtypes = [
@@ -976,13 +1070,13 @@ def _windows_detect_floppy_size(raw_path):
                     * geometry.SectorsPerTrack
                     * geometry.BytesPerSector
                 )
-                if size in DISK_FORMAT_BY_SIZE:
+                if size > 0:
                     return size
 
             length_info = _LengthInfo()
             if _windows_device_io_control(volume.handle, 0x0007405C, length_info):
                 size = int(length_info.Length)
-                if size in DISK_FORMAT_BY_SIZE:
+                if size > 0:
                     return size
 
             for disk_format in sorted(DISK_FORMATS, key=lambda item: item.size_bytes, reverse=True):
@@ -1018,8 +1112,14 @@ def _list_windows_floppy_drives():
         if kernel32.GetDriveTypeW(root_path) != DRIVE_REMOVABLE:
             continue
 
+        volume_size_bytes = _windows_volume_total_size(root_path)
+        if _size_exceeds_floppy_drive_limit(volume_size_bytes):
+            continue
+
         raw_path = _windows_raw_volume_path(f"{letter}:")
         size_bytes = _windows_detect_floppy_size(raw_path)
+        if _size_exceeds_floppy_drive_limit(size_bytes):
+            continue
         # Protected or empty USB floppy drives may not look filesystem-ready to
         # Windows but can still be usable once the user chooses the disk size.
         if size_bytes > 0 and size_bytes not in DISK_FORMAT_BY_SIZE and letter not in {"A", "B"}:
@@ -1045,6 +1145,202 @@ def list_floppy_drives():
     return _list_linux_floppy_drives()
 
 
+GREASEWEAZLE_USB_IDS = (
+    ("1209", "4D69"),
+)
+
+
+def _hardware_id_looks_like_greaseweazle(text):
+    normalized = str(text or "").upper()
+    return any(f"VID_{vid}&PID_{pid}" in normalized for vid, pid in GREASEWEAZLE_USB_IDS)
+
+
+def _normalize_windows_com_port(port_name):
+    port = str(port_name or "").strip()
+    if not port:
+        return ""
+    raw_match = re.fullmatch(r"\\\\\.\\(COM\d+)", port, flags=re.IGNORECASE)
+    if raw_match:
+        return raw_match.group(1).upper()
+    if re.fullmatch(r"COM\d+", port, flags=re.IGNORECASE):
+        return port.upper()
+    return ""
+
+
+def _extract_windows_com_port(text):
+    match = re.search(r"\b(COM\d+)\b", str(text or ""), flags=re.IGNORECASE)
+    return match.group(1).upper() if match else ""
+
+
+def _windows_greaseweazle_device_from_info(name="", device_id="", status="", port_name=""):
+    if device_id and not _hardware_id_looks_like_greaseweazle(device_id):
+        return None
+    port = _normalize_windows_com_port(port_name) or _extract_windows_com_port(name)
+    if not port:
+        return None
+
+    label = str(name or "").strip() or "Greaseweazle USB Serial Device"
+    if "greaseweazle" not in label.lower():
+        label = f"Greaseweazle {label}"
+    status_text = str(status or "").strip()
+    if status_text and status_text.upper() != "OK":
+        label = f"{label} [{status_text}]"
+    return GreaseweazleDeviceInfo(path=port, label=label)
+
+
+def _dedupe_greaseweazle_devices(devices):
+    deduped = []
+    seen_paths = set()
+    for device in devices:
+        if not isinstance(device, GreaseweazleDeviceInfo):
+            continue
+        path_key = os.path.normcase(str(device.path or "").strip())
+        if not path_key or path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        deduped.append(device)
+    return deduped
+
+
+def _list_windows_greaseweazle_devices_from_pnp():
+    if os.name != "nt":
+        return []
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        return []
+
+    id_pattern = "|".join(f"VID_{vid}&PID_{pid}" for vid, pid in GREASEWEAZLE_USB_IDS)
+    script = rf"""
+$items = Get-CimInstance Win32_PnPEntity |
+    Where-Object {{ $_.DeviceID -match '{id_pattern}' }} |
+    ForEach-Object {{
+        $portName = $null
+        try {{
+            $keyPath = 'HKLM:\SYSTEM\CurrentControlSet\Enum\' + $_.DeviceID + '\Device Parameters'
+            $portName = (Get-ItemProperty -Path $keyPath -Name PortName -ErrorAction Stop).PortName
+        }} catch {{}}
+        [PSCustomObject]@{{
+            Name = $_.Name
+            DeviceID = $_.DeviceID
+            Status = $_.Status
+            PortName = $portName
+        }}
+    }}
+@($items) | ConvertTo-Json -Depth 4 -Compress
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        **windows_subprocess_kwargs(),
+    )
+    if result.returncode != 0:
+        return []
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    if isinstance(payload, dict):
+        payload = [payload]
+    devices = []
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict):
+            continue
+        device = _windows_greaseweazle_device_from_info(
+            name=item.get("Name", ""),
+            device_id=item.get("DeviceID", ""),
+            status=item.get("Status", ""),
+            port_name=item.get("PortName", ""),
+        )
+        if device is not None:
+            devices.append(device)
+    return _dedupe_greaseweazle_devices(devices)
+
+
+def _winreg_query_value(key, value_name):
+    try:
+        import winreg
+
+        value, _value_type = winreg.QueryValueEx(key, value_name)
+    except OSError:
+        return ""
+    return str(value or "").strip()
+
+
+def _winreg_subkey_names(key):
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    names = []
+    index = 0
+    while True:
+        try:
+            names.append(winreg.EnumKey(key, index))
+        except OSError:
+            break
+        index += 1
+    return names
+
+
+def _list_windows_greaseweazle_devices_from_registry():
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    devices = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\USB") as usb_key:
+            hardware_keys = _winreg_subkey_names(usb_key)
+    except OSError:
+        return []
+
+    for hardware_key_name in hardware_keys:
+        if not _hardware_id_looks_like_greaseweazle(hardware_key_name):
+            continue
+        hardware_path = rf"SYSTEM\CurrentControlSet\Enum\USB\{hardware_key_name}"
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, hardware_path) as hardware_key:
+                instance_names = _winreg_subkey_names(hardware_key)
+        except OSError:
+            continue
+
+        for instance_name in instance_names:
+            instance_path = rf"{hardware_path}\{instance_name}"
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, instance_path) as instance_key:
+                    friendly_name = _winreg_query_value(instance_key, "FriendlyName")
+                    device_desc = _winreg_query_value(instance_key, "DeviceDesc")
+            except OSError:
+                continue
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, rf"{instance_path}\Device Parameters") as params_key:
+                    port_name = _winreg_query_value(params_key, "PortName")
+            except OSError:
+                port_name = ""
+
+            device = _windows_greaseweazle_device_from_info(
+                name=friendly_name or device_desc,
+                device_id=rf"USB\{hardware_key_name}\{instance_name}",
+                port_name=port_name,
+            )
+            if device is not None:
+                devices.append(device)
+    return _dedupe_greaseweazle_devices(devices)
+
+
+def _list_windows_greaseweazle_devices():
+    return (
+        _list_windows_greaseweazle_devices_from_pnp()
+        or _list_windows_greaseweazle_devices_from_registry()
+    )
+
+
 def list_greaseweazle_devices():
     devices = []
     seen_paths = set()
@@ -1063,6 +1359,11 @@ def list_greaseweazle_devices():
 
     if devices:
         return devices
+
+    if os.name == "nt":
+        devices = _list_windows_greaseweazle_devices()
+        if devices:
+            return devices
 
     gw = _find_gw()
     if not gw:
