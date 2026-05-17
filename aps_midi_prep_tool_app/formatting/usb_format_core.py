@@ -793,6 +793,12 @@ def _build_root_directory_label_entry(layout):
     return bytes(entry)
 
 
+def _build_root_directory_label_sector(layout):
+    sector = bytearray(layout.bytes_per_sector)
+    sector[0:32] = _build_root_directory_label_entry(layout)
+    return bytes(sector)
+
+
 def _build_mbr(start_lba, sector_count):
     if start_lba < 1 or sector_count <= 0 or start_lba > 0xFFFFFFFF or sector_count > 0xFFFFFFFF:
         raise UsbFormatError("The FAT32 partition is outside the supported MBR size range.")
@@ -871,7 +877,7 @@ def _write_fat32_filesystem(
         end_progress=end_progress,
         message="Clearing root directory...",
     )
-    writer.write_at(root_offset, _build_root_directory_label_entry(layout))
+    writer.write_at(root_offset, _build_root_directory_label_sector(layout))
 
 
 def _quick_wipe_device(writer, size_bytes, *, progress_callback=None, cancel_callback=None, start_progress=0, end_progress=100):

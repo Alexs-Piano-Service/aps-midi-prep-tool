@@ -229,30 +229,41 @@ class _WindowsPhysicalDriveWriter:
     def __exit__(self, _exc_type, _exc, _traceback):
         self.close()
 
-    def _seek(self, offset):
+    def _seek(self, offset, *, length=None):
+        offset = int(offset)
         new_pos = ctypes.c_longlong()
         ok = self.kernel32.SetFilePointerEx(
             self.handle,
-            int(offset),
+            offset,
             ctypes.byref(new_pos),
             self.FILE_BEGIN,
         )
         if not ok:
-            raise UsbFormatError(_windows_last_error_message(f"Could not seek {self.path}"))
+            detail = f"Could not seek {self.path} to offset {offset}"
+            if length is not None:
+                detail += f" for length {int(length)}"
+            raise UsbFormatError(_windows_last_error_message(detail))
 
     def write_at(self, offset, data):
-        self._seek(offset)
+        offset = int(offset)
+        length = len(data)
+        self._seek(offset, length=length)
         buffer = ctypes.create_string_buffer(data)
         written = wintypes.DWORD()
         ok = self.kernel32.WriteFile(
             self.handle,
             buffer,
-            len(data),
+            length,
             ctypes.byref(written),
             None,
         )
-        if not ok or int(written.value) != len(data):
-            raise UsbFormatError(_windows_last_error_message(f"Could not write {self.path}"))
+        written_length = int(written.value)
+        if not ok or written_length != length:
+            detail = (
+                f"Could not write {self.path} at offset {offset} length {length}"
+                f" (wrote {written_length})"
+            )
+            raise UsbFormatError(_windows_last_error_message(detail))
 
     def flush(self):
         if not self.kernel32.FlushFileBuffers(self.handle):

@@ -198,11 +198,15 @@ class _PosixRawDeviceWriter:
         self.close()
 
     def write_at(self, offset, data):
+        offset = int(offset)
+        length = len(data)
         try:
-            self._file.seek(int(offset))
+            self._file.seek(offset)
             self._file.write(data)
         except OSError as exc:
-            raise UsbFormatError(f"Could not write {self.path}: {exc}") from exc
+            raise UsbFormatError(
+                f"Could not write {self.path} at offset {offset} length {length}: {exc}"
+            ) from exc
 
     def flush(self):
         try:
