@@ -2456,6 +2456,28 @@ class MidiTitleWindow(QMainWindow):
     TITLE_COLUMN_MIN_CHARS = 32
     TITLE_COLUMN_PADDING = 30
     USER_RESIZABLE_EDGE_COLUMNS = {3, 4, 5, 6}
+    CONTROL_PANEL_CONTENT_ROWS = 3
+    CONTROL_PANEL_ROW_HEIGHT = 40
+    CONTROL_PANEL_SPACING = 6
+    CONTROL_PANEL_MARGINS = (10, 14, 10, 10)
+
+    def _build_control_panel_grid(self, group):
+        panel_layout = QVBoxLayout(group)
+        panel_layout.setContentsMargins(*self.CONTROL_PANEL_MARGINS)
+        panel_layout.setSpacing(self.CONTROL_PANEL_SPACING)
+
+        grid_layout = QGridLayout()
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setHorizontalSpacing(self.CONTROL_PANEL_SPACING)
+        grid_layout.setVerticalSpacing(self.CONTROL_PANEL_SPACING)
+        for row in range(self.CONTROL_PANEL_CONTENT_ROWS):
+            grid_layout.setRowMinimumHeight(row, self.CONTROL_PANEL_ROW_HEIGHT)
+        grid_layout.setColumnStretch(0, 1)
+        grid_layout.setColumnStretch(1, 1)
+
+        panel_layout.addLayout(grid_layout)
+        panel_layout.addStretch()
+        return grid_layout
 
     def __init__(self):
         super().__init__()
@@ -2687,9 +2709,7 @@ class MidiTitleWindow(QMainWindow):
         options_group = QGroupBox("Options")
         self.optionsGroup = options_group
         options_group.setToolTip("Display and compatibility preferences for the file list.")
-        options_layout = QVBoxLayout(options_group)
-        options_layout.setContentsMargins(10, 14, 10, 10)
-        options_layout.setSpacing(6)
+        options_grid = self._build_control_panel_grid(options_group)
 
         show_compat_warning = self.settings.value(self.SETTING_SHOW_COMPAT_WARNING, True, type=bool)
         self.compat_warning_checkbox = QCheckBox("Long title warning")
@@ -2699,7 +2719,7 @@ class MidiTitleWindow(QMainWindow):
         )
         self.compat_warning_checkbox.toggled.connect(self.toggle_compat_warnings)
         self.title_delegate.set_highlight_enabled(show_compat_warning)
-        options_layout.addWidget(self.compat_warning_checkbox, alignment=Qt.AlignLeft)
+        options_grid.addWidget(self.compat_warning_checkbox, 0, 0, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
         format_disklavier_screen = self.settings.value(
             self.SETTING_FORMAT_DISKLAVIER_SCREEN, False, type=bool
@@ -2710,7 +2730,7 @@ class MidiTitleWindow(QMainWindow):
             "When editing titles, use the Disklavier's two 16-character screen rows."
         )
         self.format_disklavier_checkbox.toggled.connect(self.toggle_format_disklavier_screen)
-        options_layout.addWidget(self.format_disklavier_checkbox, alignment=Qt.AlignLeft)
+        options_grid.addWidget(self.format_disklavier_checkbox, 1, 0, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
         store_backups = self.settings.value(self.SETTING_STORE_BACKUPS, False, type=bool)
         self.backup_checkbox = QCheckBox("Back up before saving")
@@ -2719,9 +2739,7 @@ class MidiTitleWindow(QMainWindow):
             "Before overwriting, back up images beside the image and individual files into a backup folder."
         )
         self.backup_checkbox.toggled.connect(self.toggle_store_backups)
-        options_layout.addWidget(self.backup_checkbox, alignment=Qt.AlignLeft)
-
-        options_layout.addStretch()
+        options_grid.addWidget(self.backup_checkbox, 2, 0, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
         self.modeBannerLabel = QLabel("MIDI MODE")
         self.modeBannerLabel.setAlignment(Qt.AlignCenter)
@@ -2733,15 +2751,13 @@ class MidiTitleWindow(QMainWindow):
         utilities_group = QGroupBox("Utilities")
         self.utilitiesGroup = utilities_group
         utilities_group.setToolTip("Batch tools that run across every listed file immediately.")
-        utilities_layout = QVBoxLayout(utilities_group)
-        utilities_layout.setContentsMargins(10, 14, 10, 10)
-        utilities_layout.setSpacing(6)
+        utilities_buttons_layout = self._build_control_panel_grid(utilities_group)
 
         utilities_hint = QLabel("Apply to all listed files:")
         self.utilitiesHintLabel = utilities_hint
         utilities_hint.setWordWrap(True)
         utilities_hint.setAlignment(Qt.AlignCenter)
-        utilities_layout.addWidget(utilities_hint)
+        utilities_buttons_layout.addWidget(utilities_hint, 0, 0, 1, 2, Qt.AlignCenter)
 
         self.renameAllButton = QPushButton("Rename 8.3")
         self.renameAllButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2776,25 +2792,15 @@ class MidiTitleWindow(QMainWindow):
         self.convertMidiToEseqButton.clicked.connect(self.convert_all_midi_to_eseq)
         self._apply_compact_button_labels()
 
-        utilities_buttons_layout = QGridLayout()
-        utilities_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        utilities_buttons_layout.setHorizontalSpacing(6)
-        utilities_buttons_layout.setVerticalSpacing(6)
-        utilities_buttons_layout.addWidget(self.renameAllButton, 0, 0)
-        utilities_buttons_layout.addWidget(self.convertType0Button, 0, 1)
-        utilities_buttons_layout.addWidget(self.convertEseqToMidiButton, 1, 0)
-        utilities_buttons_layout.addWidget(self.convertMidiToEseqButton, 1, 1)
-        utilities_buttons_layout.setColumnStretch(0, 1)
-        utilities_buttons_layout.setColumnStretch(1, 1)
-        utilities_layout.addLayout(utilities_buttons_layout)
-        utilities_layout.addStretch()
+        utilities_buttons_layout.addWidget(self.renameAllButton, 1, 0)
+        utilities_buttons_layout.addWidget(self.convertType0Button, 1, 1)
+        utilities_buttons_layout.addWidget(self.convertEseqToMidiButton, 2, 0)
+        utilities_buttons_layout.addWidget(self.convertMidiToEseqButton, 2, 1)
 
         actions_group = QGroupBox("File Actions")
         self.actionsGroup = actions_group
         actions_group.setToolTip("Save files, create images, or clear the current list.")
-        actions_layout = QVBoxLayout(actions_group)
-        actions_layout.setContentsMargins(10, 14, 10, 10)
-        actions_layout.setSpacing(6)
+        actions_buttons_layout = self._build_control_panel_grid(actions_group)
 
         # Clear button (styled to match Save button)
         self.clearButton = QToolButton()
@@ -2829,17 +2835,6 @@ class MidiTitleWindow(QMainWindow):
         self.saveAsImageButton.clicked.connect(self.save_as_image)
         self._apply_compact_button_labels()
 
-        actions_buttons_layout = QGridLayout()
-        actions_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        actions_buttons_layout.setHorizontalSpacing(6)
-        actions_buttons_layout.setVerticalSpacing(6)
-        actions_buttons_layout.addWidget(self.clearButton, 0, 0)
-        actions_buttons_layout.addWidget(self.saveAsButton, 1, 0)
-        actions_buttons_layout.addWidget(self.saveAsImageButton, 1, 1)
-        actions_buttons_layout.setColumnStretch(0, 1)
-        actions_buttons_layout.setColumnStretch(1, 1)
-        actions_layout.addLayout(actions_buttons_layout)
-
         save_with_toggle_widget = QWidget(actions_group)
         save_with_toggle_layout = QHBoxLayout(save_with_toggle_widget)
         save_with_toggle_layout.setContentsMargins(0, 0, 0, 0)
@@ -2849,9 +2844,11 @@ class MidiTitleWindow(QMainWindow):
         self.writeProtectToggle.toggled.connect(self.toggle_original_write)
         self.writeProtectToggle.setVisible(False)
         save_with_toggle_layout.addWidget(self.writeProtectToggle, alignment=Qt.AlignCenter)
-        actions_buttons_layout.addWidget(save_with_toggle_widget, 0, 1)
 
-        actions_layout.addStretch()
+        actions_buttons_layout.addWidget(self.clearButton, 0, 0)
+        actions_buttons_layout.addWidget(save_with_toggle_widget, 0, 1)
+        actions_buttons_layout.addWidget(self.saveAsButton, 1, 0, 1, 2)
+        actions_buttons_layout.addWidget(self.saveAsImageButton, 2, 0, 1, 2)
 
         for section in (options_group, utilities_group, actions_group):
             section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -8964,8 +8961,11 @@ class MidiTitleWindow(QMainWindow):
         target_combo = QComboBox(dialog)
         target_combo.addItem("Floppy Drive", "floppy_usb")
         target_combo.addItem("Greaseweazle", "floppy_gw")
-        if not floppy_drives and greaseweazle_devices:
-            target_combo.setCurrentIndex(1)
+        self._restore_read_floppy_source_selection(
+            target_combo,
+            has_floppy_drives=bool(floppy_drives),
+            has_greaseweazle_devices=bool(greaseweazle_devices),
+        )
 
         format_combo = QComboBox(dialog)
         default_index = 0
@@ -9073,6 +9073,7 @@ class MidiTitleWindow(QMainWindow):
                 return None
             selected_drive = drive_options[gw_drive_combo.currentIndex()]
             self._remember_greaseweazle_dialog_selection(selected_device, selected_drive)
+            self._remember_read_floppy_dialog_selection(target_kind)
             selected_source = GreaseweazleFloppySource(
                 device_path=selected_device.path,
                 drive=selected_drive,
@@ -9084,6 +9085,7 @@ class MidiTitleWindow(QMainWindow):
             selected_source = drive_combo.currentData()
             if not isinstance(selected_source, FloppyDriveInfo):
                 return None
+            self._remember_read_floppy_dialog_selection(target_kind)
             target_name = selected_source.display_name
             drive_size_bytes = selected_source.size_bytes
 
@@ -9204,10 +9206,10 @@ class MidiTitleWindow(QMainWindow):
             preferred_source = "floppy_gw"
         elif saved_source == "floppy_usb" and has_floppy_drives:
             preferred_source = "floppy_usb"
-        elif not has_floppy_drives and has_greaseweazle_devices:
-            preferred_source = "floppy_gw"
         elif has_floppy_drives:
             preferred_source = "floppy_usb"
+        elif has_greaseweazle_devices:
+            preferred_source = "floppy_gw"
 
         if preferred_source:
             index = source_combo.findData(preferred_source)
@@ -10208,8 +10210,11 @@ class MidiTitleWindow(QMainWindow):
         target_combo = QComboBox(dialog)
         target_combo.addItem("Floppy Drive", "floppy_usb")
         target_combo.addItem("Greaseweazle", "floppy_gw")
-        if not floppy_drives and greaseweazle_devices:
-            target_combo.setCurrentIndex(1)
+        self._restore_read_floppy_source_selection(
+            target_combo,
+            has_floppy_drives=bool(floppy_drives),
+            has_greaseweazle_devices=bool(greaseweazle_devices),
+        )
 
         common_grid = self._make_dialog_form_grid()
         target_label = self._add_dialog_form_row(common_grid, 0, "Write using:", target_combo)
@@ -10288,6 +10293,7 @@ class MidiTitleWindow(QMainWindow):
                 return None
             selected_drive = drive_options[gw_drive_combo.currentIndex()]
             self._remember_greaseweazle_dialog_selection(selected_device, selected_drive)
+            self._remember_read_floppy_dialog_selection(target_kind)
             target = GreaseweazleFloppySource(
                 device_path=selected_device.path,
                 drive=selected_drive,
@@ -10303,6 +10309,7 @@ class MidiTitleWindow(QMainWindow):
         target = drive_combo.currentData()
         if not isinstance(target, FloppyDriveInfo):
             return None
+        self._remember_read_floppy_dialog_selection(target_kind)
         return {
             "target_kind": "floppy_usb",
             "target": target,

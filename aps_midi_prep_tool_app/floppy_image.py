@@ -762,6 +762,23 @@ def _notify_progress(progress_callback, step, total, message):
         progress_callback(step, total, message)
 
 
+FLOPPY_DRIVE_MODEL_HINTS = (
+    "floppy",
+    "fdd",
+    "fd-05",
+    "mitsumi",
+    "teac",
+    "uf000",
+    "y-e data",
+    "yedata",
+)
+
+
+def _model_looks_like_floppy(model):
+    model_text = str(model or "").strip().lower()
+    return any(hint in model_text for hint in FLOPPY_DRIVE_MODEL_HINTS)
+
+
 def _list_linux_floppy_drives():
     lsblk = shutil.which("lsblk")
     if not lsblk:
@@ -794,20 +811,19 @@ def _list_linux_floppy_drives():
             continue
 
         path = device.get("path") or ""
-        size_bytes = _parse_int(device.get("size"), 0)
-        if size_bytes not in DISK_FORMAT_BY_SIZE:
-            continue
-
         transport = (device.get("tran") or "").strip().lower()
         model = (device.get("model") or "").strip()
+        size_bytes = _parse_int(device.get("size"), 0)
+        supported_size = size_bytes in DISK_FORMAT_BY_SIZE
         removable = bool(device.get("rm"))
         looks_like_floppy = (
-            removable
-            or transport == "usb"
-            or path.startswith("/dev/fd")
-            or "floppy" in model.lower()
+            path.startswith("/dev/fd")
+            or _model_looks_like_floppy(model)
+            or (supported_size and (removable or transport == "usb"))
         )
         if not looks_like_floppy:
+            continue
+        if size_bytes > 0 and not supported_size:
             continue
 
         mountpoints = tuple(
@@ -1004,9 +1020,9 @@ def _list_windows_floppy_drives():
 
         raw_path = _windows_raw_volume_path(f"{letter}:")
         size_bytes = _windows_detect_floppy_size(raw_path)
-        # Protected floppy disks may not look filesystem-ready to Windows but
-        # can still be readable through the app's raw/protected-disk path.
-        if size_bytes not in DISK_FORMAT_BY_SIZE and letter not in {"A", "B"}:
+        # Protected or empty USB floppy drives may not look filesystem-ready to
+        # Windows but can still be usable once the user chooses the disk size.
+        if size_bytes > 0 and size_bytes not in DISK_FORMAT_BY_SIZE and letter not in {"A", "B"}:
             continue
         drives.append(
             FloppyDriveInfo(
@@ -1686,12 +1702,36 @@ def _handle_gw_write_progress_line(progress_callback, state, line):
     _handle_gw_track_progress_line(progress_callback, state, line, action="Writing")
 
 
+def _gw_reset_device(gw, source, progress_callback=None, cancel_callback=None, *, operation_label="operation"):
+    args = [gw, "reset"]
+    device_path = str(getattr(source, "device_path", "") or "").strip()
+    if device_path:
+        args.append(f"--device={device_path}")
+
+    _notify_progress(progress_callback, 0, 0, "Resetting Greaseweazle device...")
+    try:
+        _run_command(args, "Greaseweazle reset failed", cancel_callback=cancel_callback)
+    except FloppyOperationCancelled:
+        raise
+    except FloppyImageError:
+        _notify_progress(
+            progress_callback,
+            0,
+            0,
+            f"Greaseweazle reset failed; continuing with {operation_label}...",
+        )
+        return False
+    _notify_progress(progress_callback, 0, 0, f"Greaseweazle reset complete; starting {operation_label}...")
+    return True
+
+
 def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback=None):
     gw = _find_gw()
     if not gw:
         raise FloppyImageError(_missing_greaseweazle_message("read from a floppy drive"))
     if os.path.exists(output_path):
         os.remove(output_path)
+    _gw_reset_device(gw, source, progress_callback, cancel_callback, operation_label="read")
 
     raw_capture = (
         bool(source.archival_quality)
@@ -1747,6 +1787,7 @@ def _gw_write_floppy(source, input_path, progress_callback=None, cancel_callback
     gw = _find_gw()
     if not gw:
         raise FloppyImageError(_missing_greaseweazle_message("write to a floppy drive"))
+    _gw_reset_device(gw, source, progress_callback, cancel_callback, operation_label="write")
 
     args = [
         gw,
