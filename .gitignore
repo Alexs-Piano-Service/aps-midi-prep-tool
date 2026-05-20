@@ -32,3 +32,5 @@ aps_midi_prep_tool_app/soundfonts/*.sf3
 Makefile
 requirements-build.txt
 scripts/build_appimage.sh
+
+squashfs-root/

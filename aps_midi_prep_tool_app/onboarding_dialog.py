@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .message_catalog import DEFAULT_LANGUAGE, normalize_language_code, translate_text
 from .ui_utils import center_dialog_on_parent
 from .app_info import (
     APP_TITLE_WITH_VERSION,
@@ -23,6 +24,13 @@ from .app_info import (
     SETTINGS_APP,
     SETTINGS_ORG,
 )
+
+
+SETTING_LANGUAGE = "language"
+
+
+def _settings_language_code(settings):
+    return normalize_language_code(settings.value(SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE)
 
 
 def _workflow_page(title, body_html, body_font_stack):
@@ -60,6 +68,8 @@ def _workflow_page(title, body_html, body_font_stack):
 
 def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_show=False):
     settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+    language_code = _settings_language_code(settings)
+    t = lambda text: translate_text(text, language_code)
     skip_dialog = settings.value("skip_first_time_dialog", False, type=bool)
 
     if force_show or not skip_dialog:
@@ -75,7 +85,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             dialog.setWindowModality(Qt.WindowModal)
         if app_icon is not None and not app_icon.isNull():
             dialog.setWindowIcon(app_icon)
-        dialog.setWindowTitle(f"Welcome to {APP_TITLE_WITH_VERSION}")
+        dialog.setWindowTitle(f"{t('Welcome to')} {APP_TITLE_WITH_VERSION}")
         dialog.setModal(True)
         dialog.setMinimumSize(560, 390)
 
@@ -91,7 +101,9 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>Edit MIDI and E-SEQ title metadata.</li>
                   <li>Copy or back up Yamaha floppies and floppy images.</li>
                   <li>Prepare HFE images for Nalbantov emulators.</li>
+                  <li>Format removable USB sticks for Disklavier and PianoForce workflows.</li>
                   <li>Convert E-SEQ to MIDI, MIDI to E-SEQ, and SMF1 to SMF0.</li>
+                  <li>Use <strong>File</strong> for sources and save behavior, <strong>Disk</strong> for floppy/media operations, and <strong>Utilities</strong> for batch tools.</li>
                 </ul>
                 <p><a href="{APP_WEBSITE}">alexanderpeppe.com</a></p>
                 """,
@@ -99,11 +111,11 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             (
                 "Extract Files From Floppy",
                 """
-                <p>Use <strong>Read Floppy</strong> for a floppy drive or Greaseweazle, or
-                <strong>Open Image</strong> for IMG, HFE, BIN, and related image files.</p>
+                <p>Use <strong>Disk &gt; Read Floppy...</strong> for a floppy drive or Greaseweazle, or
+                <strong>File &gt; Open &gt; Open Image...</strong> for IMG, HFE, BIN, and related image files.</p>
                 <ul>
-                  <li><strong>Save As</strong> copies the listed files to a folder.</li>
-                  <li><strong>Save As Image</strong> creates a new floppy image without touching the original.</li>
+                  <li><strong>File &gt; Save As...</strong> copies the listed files to a folder.</li>
+                  <li><strong>File &gt; Save As Image...</strong> creates a new floppy image without touching the original.</li>
                   <li>The app repairs Yamaha copy-protected boot sectors in the working copy.</li>
                   <li>Use recovery mode when normal reading fails or the disk is physically damaged.</li>
                   <li>For fragile or difficult disks, use Greaseweazle and choose archival SCP when you want a raw flux capture.</li>
@@ -119,23 +131,25 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 <p>Use this path when you want to create a fresh Disklavier floppy or add files to
                 an existing disk.</p>
                 <ul>
-                  <li>For a blank disk, use <strong>Utilities &gt; Format Floppy Disk...</strong>; IBM 720K DD is the usual Disklavier choice.</li>
+                  <li>For a blank disk, use <strong>Disk &gt; Format Floppy Disk...</strong>; IBM 720K DD is the usual Disklavier choice.</li>
                   <li>Check the E-SEQ option when preparing a PianoSoft-style disk with a generated directory file.</li>
-                  <li>For an existing disk, use <strong>Read Floppy</strong>, then drag new files into the list.</li>
+                  <li>For an existing disk, use <strong>Disk &gt; Read Floppy...</strong>, then drag new files into the list.</li>
                   <li>In E-SEQ modes, dropped MIDI files are staged as E-SEQ automatically.</li>
-                  <li><strong>Save</strong> writes pending changes back to the current floppy when overwrite is enabled.</li>
-                  <li><strong>File &gt; Save To Floppy...</strong> saves the current listed files to a selected formatted floppy drive.</li>
-                  <li><strong>File &gt; Write Current Image to Floppy...</strong> rewrites a whole disk from the current image.</li>
+                  <li><strong>File &gt; Save</strong> writes pending changes back to the current floppy when overwrite is enabled.</li>
+                  <li><strong>File &gt; Write Protection &gt; Write-Protect Original</strong> controls whether Save may overwrite the current floppy or image.</li>
+                  <li><strong>Disk &gt; Save To Floppy...</strong> saves the current listed files to a selected formatted floppy drive.</li>
+                  <li><strong>Disk &gt; Write Current Image to Floppy...</strong> rewrites a whole disk from the current image.</li>
                 </ul>
                 """,
             ),
             (
                 "Save For Nalbantov",
                 """
-                <p>Use <strong>Save As Image</strong> and choose <strong>HFE (Nalbantov)</strong>
+                <p>Use <strong>File &gt; Save As Image...</strong> and choose <strong>HFE (Nalbantov)</strong>
                 when preparing a USB stick for a Nalbantov floppy disk emulator.</p>
                 <ul>
                   <li>Copy the finished HFE file to a USB stick formatted for the emulator.</li>
+                  <li>Use <strong>Disk &gt; Format USB Stick...</strong> when you need to prepare a removable USB stick as FAT32.</li>
                   <li>To replace a virtual disk slot, rename or copy the output over one of the existing <strong>DSKA####.hfe</strong> files on the Nalbantov USB stick.</li>
                   <li>For older E-SEQ-only Disklaviers, convert MIDI to E-SEQ and let the tool generate PIANODIR.FIL.</li>
                   <li>Do not mix MIDI files with E-SEQ files and PIANODIR.FIL on the same disk image.</li>
@@ -148,11 +162,11 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 "Convert E-SEQ to MIDI",
                 """
                 <p>Open an E-SEQ folder, floppy image, or floppy disk, then use
-                <strong>E-SEQ -&gt; MIDI</strong>.</p>
+                <strong>Utilities &gt; Convert &gt; Convert All E-SEQ to MIDI</strong>.</p>
                 <ul>
                   <li>Conversions are staged in the file list first.</li>
                   <li>Song titles, timing, and Yamaha PIANODIR information are preserved where possible.</li>
-                  <li>Nothing is written until you choose <strong>Save</strong>, <strong>Save As</strong>, or <strong>Save As Image</strong>.</li>
+                  <li>Nothing is written until you choose <strong>File &gt; Save</strong>, <strong>File &gt; Save As...</strong>, or <strong>File &gt; Save As Image...</strong>.</li>
                 </ul>
                 """,
             ),
@@ -160,11 +174,12 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 "Convert MIDI to E-SEQ",
                 """
                 <p>Open a MIDI folder, or drag MIDI files into the table, then use
-                <strong>MIDI -&gt; E-SEQ</strong> to prepare Yamaha E-SEQ files.</p>
+                <strong>Utilities &gt; Convert &gt; Convert All MIDI to E-SEQ</strong> to prepare Yamaha E-SEQ files.</p>
                 <ul>
                   <li>E-SEQ titles are limited to 32 characters.</li>
                   <li>In any E-SEQ mode, dropped MIDI files are staged as E-SEQ and Type 1 MIDI is converted to Type 0 first.</li>
                   <li>The tool can generate or refresh <strong>PIANODIR.FIL</strong>.</li>
+                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> controls album folders when exporting files.</li>
                   <li>E-SEQ disks support up to 60 songs, and floppy/image size limits still apply.</li>
                 </ul>
                 """,
@@ -172,11 +187,12 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             (
                 "Edit Titles",
                 """
-                <p>Use <strong>Open MIDI Folder</strong>, or drag files into the table, to edit
+                <p>Use <strong>File &gt; Open &gt; Open MIDI Folder...</strong>, or drag files into the table, to edit
                 local MIDI or E-SEQ titles.</p>
                 <ul>
                   <li>Click the <strong>Title</strong> column to edit a song title.</li>
-                  <li>Use <strong>Format for Disklavier screen</strong> for two 16-character E-SEQ rows.</li>
+                  <li>Use <strong>View &gt; Format for Disklavier screen</strong> for two 16-character E-SEQ rows.</li>
+                  <li>Use <strong>View &gt; Long title warning</strong> to show or hide the legacy title-length warning.</li>
                   <li>Use <strong>Save</strong> for the current files, or <strong>Save As</strong> for copies.</li>
                 </ul>
                 """,
@@ -187,7 +203,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 <p>Some Yamaha workflows need Standard MIDI File Type 0, also called SMF0.</p>
                 <ul>
                   <li>Open a MIDI folder, or drag MIDI files directly into the table.</li>
-                  <li>Use <strong>SMF1 -&gt; SMF0</strong> to convert Type 1 files to single-track MIDI.</li>
+                  <li>Use <strong>Utilities &gt; Convert &gt; Convert All SMF1 to SMF0</strong> to convert Type 1 files to single-track MIDI.</li>
                   <li>Files that are already Type 0 are left unchanged.</li>
                 </ul>
                 """,
@@ -197,11 +213,16 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 """
                 <p>The app is cautious with originals, especially floppies and disk images.</p>
                 <ul>
-                  <li><strong>Save</strong> writes back to the current source only when overwrite is allowed.</li>
-                  <li><strong>Save As</strong> writes files to a selected folder.</li>
-                  <li><strong>Save As Image</strong> creates a new image file.</li>
-                  <li><strong>Back up before saving</strong> creates backups before overwriting.</li>
-                  <li><strong>Create Tag Sidecars When Saving</strong> creates optional tag sidecar files only for local folder saves.</li>
+                  <li><strong>File &gt; Save</strong> writes back to the current source only when overwrite is allowed.</li>
+                  <li><strong>File &gt; Save As...</strong> writes files to a selected folder.</li>
+                  <li><strong>File &gt; Save As Image...</strong> creates a new image file.</li>
+                  <li><strong>File &gt; Write Protection &gt; Write-Protect Original</strong> keeps Save from overwriting images or floppies until you turn protection off.</li>
+                  <li><strong>File &gt; Save Options &gt; Back up before Saving</strong> creates backups before overwriting.</li>
+                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> creates album folders for Yamaha E-SEQ exports.</li>
+                  <li><strong>File &gt; Save Options &gt; Create Tag Sidecars When Saving</strong> creates optional tag sidecar files only for local folder saves.</li>
+                  <li><strong>File &gt; Save Options &gt; Create Metadata Summary When Saving</strong> creates an optional MIDI metadata summary for folder saves.</li>
+                  <li><strong>View &gt; View Logs...</strong> shows live console output for troubleshooting.</li>
+                  <li><strong>Settings &gt; Keyboard Shortcuts...</strong> lists the default hotkeys and lets you customize them.</li>
                 </ul>
                 """,
             ),
@@ -219,28 +240,28 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
         selector_layout = QHBoxLayout()
         selector_layout.setContentsMargins(0, 0, 0, 0)
         selector_layout.setSpacing(8)
-        selector_label = QLabel("Workflow")
+        selector_label = QLabel(t("Workflow"))
         workflow_selector = QComboBox(dialog)
         for page_title, _ in pages:
-            workflow_selector.addItem(page_title)
+            workflow_selector.addItem(t(page_title))
         selector_layout.addWidget(selector_label)
         selector_layout.addWidget(workflow_selector, stretch=1)
         layout.addLayout(selector_layout)
 
         page_stack = QStackedWidget(dialog)
         for page_title, page_html in pages:
-            page_stack.addWidget(_workflow_page(page_title, page_html, body_font_stack))
+            page_stack.addWidget(_workflow_page(t(page_title), page_html, body_font_stack))
         layout.addWidget(page_stack, stretch=1)
 
-        dont_show_checkbox = QCheckBox("Do not show this dialog again")
+        dont_show_checkbox = QCheckBox(t("Do not show this dialog again"))
         layout.addWidget(dont_show_checkbox)
 
         nav_layout = QHBoxLayout()
         nav_layout.setContentsMargins(0, 0, 0, 0)
         page_count_label = QLabel(dialog)
-        back_button = QPushButton("Back", dialog)
-        next_button = QPushButton("Next", dialog)
-        close_button = QPushButton("Close", dialog)
+        back_button = QPushButton(t("Back"), dialog)
+        next_button = QPushButton(t("Next"), dialog)
+        close_button = QPushButton(t("Close"), dialog)
         nav_layout.addWidget(page_count_label)
         nav_layout.addStretch()
         nav_layout.addWidget(back_button)
@@ -255,7 +276,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 workflow_selector.setCurrentIndex(index)
             back_button.setEnabled(index > 0)
             next_button.setEnabled(index < len(pages) - 1)
-            page_count_label.setText(f"{index + 1} of {len(pages)}")
+            page_count_label.setText(f"{index + 1} {t('of')} {len(pages)}")
 
         workflow_selector.currentIndexChanged.connect(set_page)
         back_button.clicked.connect(lambda: set_page(page_stack.currentIndex() - 1))

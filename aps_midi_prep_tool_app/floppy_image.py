@@ -1408,6 +1408,8 @@ def _mformat_args_for_disk_format(disk_format):
 
 def _protected_layout_for_disk_format(disk_format):
     if not isinstance(disk_format, DiskFormat):
+        disk_format = GW_FORMAT_BY_KEY.get(_disk_format_key(disk_format))
+    if not isinstance(disk_format, DiskFormat):
         return None
     for layout in _PROTECTED_FAT12_LAYOUTS:
         if _layout_total_size(layout) == disk_format.size_bytes:
@@ -1643,7 +1645,15 @@ def _gw_expected_sectors_per_track(disk_format):
     return int(layout.get("sectors_per_track") or 0)
 
 
+def _gw_expected_track_total(disk_format):
+    layout = DISK_FORMAT_TRACK_LAYOUTS.get(_disk_format_key(disk_format))
+    if not layout:
+        return 0
+    return int(layout.get("cylinders") or 0) * int(layout.get("heads") or 0)
+
+
 _GW_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_GW_YAMAHA_COPY_PROTECTION_STATUS = "p"
 
 
 def _clean_gw_output_line(line):
@@ -1686,9 +1696,10 @@ def _track_status_line_to_counts(clean_line, expected_sectors):
     }
 
 
-def _sector_rows_from_track_counts(track_counts):
+def _sector_rows_from_track_counts(track_counts, disk_format=None):
     if not track_counts:
         return []
+    protected_layout = _protected_layout_for_disk_format(disk_format)
     max_cylinder = max(item["cylinder"] for item in track_counts)
     max_sector = max(item["total"] for item in track_counts)
     heads = sorted({item["head"] for item in track_counts})
@@ -1702,9 +1713,19 @@ def _sector_rows_from_track_counts(track_counts):
         head = item["head"]
         found = item["found"]
         total = item["total"]
+        missing_count = max(0, total - found)
+        yamaha_protected_first_sector = bool(
+            protected_layout
+            and cylinder == 0
+            and head == 0
+            and missing_count == 1
+        )
         for sector in range(total):
             grid.setdefault((head, sector), [" "] * (max_cylinder + 1))
-            grid[(head, sector)][cylinder] = "." if sector < found else "x"
+            if yamaha_protected_first_sector:
+                grid[(head, sector)][cylinder] = "x" if sector == 0 else "."
+            else:
+                grid[(head, sector)][cylinder] = "." if sector < found else "x"
 
     rows = []
     for head in heads:
@@ -1713,6 +1734,38 @@ def _sector_rows_from_track_counts(track_counts):
             if statuses.strip():
                 rows.append({"head": head, "sector": sector, "statuses": statuses})
     return rows
+
+
+def _annotate_yamaha_copy_protection_sector(rows, disk_format=None):
+    if not rows or not _protected_layout_for_disk_format(disk_format):
+        return
+
+    first_head_sectors = sorted(
+        int(row.get("sector", 0))
+        for row in rows
+        if int(row.get("head", 0)) == 0
+    )
+    if not first_head_sectors:
+        return
+    if 0 in first_head_sectors:
+        first_sector = 0
+    elif 1 in first_head_sectors:
+        first_sector = 1
+    else:
+        return
+
+    for row in rows:
+        if int(row.get("head", 0)) != 0 or int(row.get("sector", 0)) != first_sector:
+            continue
+        statuses = list(str(row.get("statuses", "")))
+        if not statuses:
+            return
+        status = statuses[0]
+        if status == "." or not str(status).strip():
+            return
+        statuses[0] = _GW_YAMAHA_COPY_PROTECTION_STATUS
+        row["statuses"] = "".join(statuses)
+        return
 
 
 def _parse_gw_sector_map(output, disk_format=None):
@@ -1745,23 +1798,27 @@ def _parse_gw_sector_map(output, disk_format=None):
             track_counts.append(track_count)
 
     if not rows and track_counts:
-        rows = _sector_rows_from_track_counts(track_counts)
+        rows = _sector_rows_from_track_counts(track_counts, disk_format)
         found = sum(item["found"] for item in track_counts)
         total = sum(item["total"] for item in track_counts)
 
     if not rows and found is None and total is None:
         return {}
 
+    _annotate_yamaha_copy_protection_sector(rows, disk_format)
     good = 0
     bad = 0
+    protected = 0
     for row in rows:
         for char in row["statuses"]:
             if char == ".":
                 good += 1
+            elif char == _GW_YAMAHA_COPY_PROTECTION_STATUS:
+                protected += 1
             elif str(char).strip():
                 bad += 1
     if found is not None and total is not None and found < total:
-        bad = max(bad, total - found)
+        bad = max(bad, max(0, total - found - protected))
 
     return {
         "rows": rows,
@@ -1769,6 +1826,7 @@ def _parse_gw_sector_map(output, disk_format=None):
         "total": total,
         "good": good,
         "bad": bad,
+        "expected_yamaha_protection": protected,
         "has_failures": bad > 0,
     }
 
@@ -1938,6 +1996,66 @@ def _gw_short_status(status_text):
     return status
 
 
+def _notify_gw_progress(progress_callback, state, step, total, message):
+    progress_key = (int(step or 0), int(total or 0), str(message or ""))
+    if state.get("last_progress") == progress_key:
+        return
+    state["last_progress"] = progress_key
+    _notify_progress(progress_callback, progress_key[0], progress_key[1], progress_key[2])
+
+
+def _gw_first_track_protection_status(clean_line, disk_format):
+    if not _protected_layout_for_disk_format(disk_format):
+        return ""
+    expected_sectors = _gw_expected_sectors_per_track(disk_format)
+    track_count = _track_status_line_to_counts(clean_line, expected_sectors)
+    if not track_count:
+        return ""
+    if track_count["cylinder"] != 0 or track_count["head"] != 0:
+        return ""
+    if max(0, track_count["total"] - track_count["found"]) != 1:
+        return ""
+    return "Yamaha copy protection?"
+
+
+def _gw_first_track_retrying(clean_line, disk_format, status_text):
+    if not _protected_layout_for_disk_format(disk_format):
+        return False
+    expected_sectors = _gw_expected_sectors_per_track(disk_format)
+    track_count = _track_status_line_to_counts(clean_line, expected_sectors)
+    if (
+        track_count
+        and track_count["cylinder"] == 0
+        and track_count["head"] == 0
+        and track_count["found"] < track_count["total"]
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:retry|fail|failed|error|bad|missing|lost|no\s+flux)\b",
+            status_text or "",
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _gw_first_track_protection_message(action, completed_tracks, total_tracks, confirmed=False):
+    status = "Yamaha copy protection?" if confirmed else "checking possible Yamaha copy protection"
+    if total_tracks > 0:
+        return f"{action} T0.0 ({completed_tracks}/{total_tracks})... {status}"
+    return f"{action} T0.0... {status}"
+
+
+def _gw_intermediate_progress_message(action, completed_tracks, total_tracks, disk_format):
+    if (
+        action == "Reading"
+        and completed_tracks == 0
+        and _protected_layout_for_disk_format(disk_format)
+    ):
+        return "Reading first track; checking possible Yamaha copy protection..."
+    return f"{action} floppy via Greaseweazle ({completed_tracks}/{total_tracks} tracks)..."
+
+
 def _handle_gw_track_progress_line(progress_callback, state, line, *, action="Reading"):
     clean_line = _clean_gw_output_line(line)
     if not clean_line:
@@ -1945,20 +2063,25 @@ def _handle_gw_track_progress_line(progress_callback, state, line, *, action="Re
     if clean_line.startswith("*** "):
         return
 
+    disk_format = state.get("disk_format")
+
     header_match = re.match(r"^(?:Reading|Writing)\s+(?P<trackspec>.+?)(?:\s+revs=\d+)?$", clean_line)
     if header_match:
-        total_tracks = _extract_gw_track_total(header_match.group("trackspec"))
+        parsed_total_tracks = _extract_gw_track_total(header_match.group("trackspec"))
+        total_tracks = parsed_total_tracks or int(state.get("total_tracks") or 0)
         state["total_tracks"] = total_tracks
-        state["seen_tracks"] = set()
+        if parsed_total_tracks > 0:
+            state["seen_tracks"] = set()
         if total_tracks > 0:
-            _notify_progress(
+            _notify_gw_progress(
                 progress_callback,
+                state,
                 0,
                 total_tracks,
                 f"{action} floppy via Greaseweazle (0/{total_tracks} tracks)...",
             )
         else:
-            _notify_progress(progress_callback, 0, 0, clean_line)
+            _notify_gw_progress(progress_callback, state, 0, 1, clean_line)
         return
 
     if clean_line.startswith("Format "):
@@ -1967,32 +2090,74 @@ def _handle_gw_track_progress_line(progress_callback, state, line, *, action="Re
     track_match = re.match(r"^T(?P<cyl>\d+)\.(?P<head>\d+)(?:\s+<-.*)?\s*:\s*(?P<status>.*)$", clean_line)
     if track_match:
         track_key = (int(track_match.group("cyl")), int(track_match.group("head")))
+        first_track_candidate = bool(
+            action == "Reading"
+            and track_key == (0, 0)
+            and _protected_layout_for_disk_format(disk_format)
+        )
+        status_text = track_match.group("status")
+        protection_status = _gw_first_track_protection_status(clean_line, disk_format)
+        first_track_protection = bool(
+            first_track_candidate
+            and (
+                protection_status
+                or state.get("first_track_protection_active")
+                or _gw_first_track_retrying(clean_line, disk_format, status_text)
+            )
+        )
+        if protection_status:
+            state["first_track_protection_confirmed"] = True
+        if first_track_protection:
+            state["first_track_protection_active"] = True
+        else:
+            state["first_track_protection_active"] = False
         seen_tracks = state.setdefault("seen_tracks", set())
         seen_tracks.add(track_key)
         completed_tracks = len(seen_tracks)
         total_tracks = state.get("total_tracks", 0)
         track_label = f"T{track_match.group('cyl')}.{track_match.group('head')}"
-        status = _gw_short_status(track_match.group("status"))
+        status = protection_status
+        if first_track_protection:
+            status = "Yamaha copy protection?"
+        elif not status:
+            status = _gw_short_status(status_text)
         if total_tracks > 0:
-            message = f"{action} {track_label} ({completed_tracks}/{total_tracks})..."
-            if status:
-                message = f"{message} {status}"
-            _notify_progress(progress_callback, completed_tracks, total_tracks, message)
+            if first_track_protection:
+                message = _gw_first_track_protection_message(
+                    action,
+                    completed_tracks,
+                    total_tracks,
+                    confirmed=bool(state.get("first_track_protection_confirmed")),
+                )
+            else:
+                message = f"{action} {track_label} ({completed_tracks}/{total_tracks})..."
+                if status:
+                    message = f"{message} {status}"
+            _notify_gw_progress(progress_callback, state, completed_tracks, total_tracks, message)
         else:
-            _notify_progress(progress_callback, 0, 0, clean_line)
+            _notify_gw_progress(progress_callback, state, 0, 1, clean_line)
         return
 
     total_tracks = state.get("total_tracks", 0)
     completed_tracks = len(state.get("seen_tracks", set()))
     if total_tracks > 0:
-        _notify_progress(
-            progress_callback,
-            completed_tracks,
-            total_tracks,
-            clean_line,
-        )
+        if state.get("first_track_protection_active"):
+            message = _gw_first_track_protection_message(
+                action,
+                completed_tracks,
+                total_tracks,
+                confirmed=bool(state.get("first_track_protection_confirmed")),
+            )
+        else:
+            message = _gw_intermediate_progress_message(
+                action,
+                completed_tracks,
+                total_tracks,
+                disk_format,
+            )
+        _notify_gw_progress(progress_callback, state, completed_tracks, total_tracks, message)
     else:
-        _notify_progress(progress_callback, 0, 0, clean_line)
+        _notify_gw_progress(progress_callback, state, 0, 1, clean_line)
 
 
 def _handle_gw_read_progress_line(progress_callback, state, line):
@@ -2059,7 +2224,12 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
-    progress_state = {"total_tracks": 0, "seen_tracks": set(), "command_failed": ""}
+    progress_state = {
+        "total_tracks": _gw_expected_track_total(source.disk_format),
+        "seen_tracks": set(),
+        "command_failed": "",
+        "disk_format": source.disk_format,
+    }
 
     def _progress_line_callback(line):
         clean_line = _clean_gw_output_line(line)
@@ -2100,7 +2270,11 @@ def _gw_write_floppy(source, input_path, progress_callback=None, cancel_callback
         args.append(f"--device={source.device_path}")
     args.append(input_path)
 
-    progress_state = {"total_tracks": 0, "seen_tracks": set()}
+    progress_state = {
+        "total_tracks": _gw_expected_track_total(source.disk_format),
+        "seen_tracks": set(),
+        "disk_format": source.disk_format,
+    }
 
     def _progress_line_callback(line):
         _handle_gw_write_progress_line(progress_callback, progress_state, line)
@@ -2851,7 +3025,7 @@ def _read_windows_filesystem_drive_listing(drive_path):
     except OSError as exc:
         raise FloppyImageError(
             f"Could not read floppy drive {drive_path}: {exc}. "
-            "If this is a protected or damaged disk, use Read Floppy with recovery instead."
+            "If this is a protected or damaged disk, use Disk > Read Floppy... with recovery instead."
         ) from exc
 
     try:
@@ -3994,11 +4168,16 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         "If this is a non-FAT disk or a difficult original, try reading it with Greaseweazle.",
                         fallback_allowed=True,
                     )
-                _notify_progress(progress_callback, 10, 100, "Yamaha protected disk recognized; creating working copy...")
+                _notify_progress(
+                    progress_callback,
+                    10,
+                    100,
+                    "Possible Yamaha-protected disk recognized; creating working copy...",
+                )
                 serial = zlib.crc32(fat_area + root_dir) & 0xFFFFFFFF
                 boot = _build_standard_fat12_boot_sector(matched_layout, serial, _find_volume_label(root_dir))
                 repair_result = YamahaRepairResult(
-                    "Fast floppy read applied Yamaha copy-protection repair: sector 0 appears blank/corrupt.",
+                    "Fast floppy read rebuilt a FAT12 boot sector for possible Yamaha copy protection: sector 0 appears blank/corrupt.",
                     True,
                 )
                 extra_bad_ranges = len(candidate_fat_bad_ranges) + len(candidate_root_bad_ranges)
@@ -4222,7 +4401,10 @@ def prepare_yamaha_bytes(data, output_path):
 
     write_output(repaired)
 
-    return YamahaRepairResult("Yamaha copy-protection repair applied: " + detection["notes"] + ".", True)
+    return YamahaRepairResult(
+        "Yamaha-compatible boot-sector repair applied: " + detection["notes"] + ".",
+        True,
+    )
 
 
 def _disk_format_for_image(img_path):
@@ -4920,7 +5102,7 @@ class FloppyImageSession:
                     raise FloppyImageError(
                         "Fast floppy read recognized this disk but could not finish without losing data.\n\n"
                         f"Details: {fast_exc}\n\n"
-                        "Use Read Floppy with Start in recovery mode for a slower full-disk recovery pass."
+                        "Use Disk > Read Floppy... with Start in recovery mode for a slower full-disk recovery pass."
                     ) from fast_exc
                 _notify_progress(
                     progress_callback,
@@ -4960,7 +5142,7 @@ class FloppyImageSession:
                 raise FloppyImageError(
                     "Fast floppy read finished, but the resulting floppy image could not be scanned.\n\n"
                     f"Details: {scan_exc}\n\n"
-                    "Use Read Floppy with Start in recovery mode for a slower full-disk recovery pass."
+                    "Use Disk > Read Floppy... with Start in recovery mode for a slower full-disk recovery pass."
                 ) from scan_exc
             _notify_progress(progress_callback, 100, 100, "Opening floppy contents...")
             _raise_if_cancelled(cancel_callback)
@@ -5125,6 +5307,11 @@ class FloppyImageSession:
             _notify_progress(progress_callback, progress_step, total_steps, "Scanning floppy contents...")
             read_image_listing(working_img)
             _raise_if_cancelled(cancel_callback)
+            report_sector_map = (
+                conversion_sector_map
+                if gw_source.archival_quality and conversion_sector_map
+                else read_sector_map
+            )
             return cls(
                 source_copy,
                 "img",
@@ -5140,20 +5327,10 @@ class FloppyImageSession:
                 gw_sector_reports=_gw_sector_reports(
                     _gw_sector_report(
                         "read",
-                        read_sector_map,
+                        report_sector_map,
                         title="Greaseweazle Read Sector Map",
-                        summary=f"Read {gw_source.display_name}.",
-                        disk_format=gw_source.disk_format,
-                    ),
-                    _gw_sector_report(
-                        "convert",
-                        conversion_sector_map,
-                        title="Greaseweazle Conversion Sector Map",
-                        summary=f"Converted the Greaseweazle capture as {gw_source.disk_format.label}.",
                         disk_format=gw_source.disk_format,
                     )
-                    if gw_source.archival_quality
-                    else None,
                 ),
             )
         except Exception:
@@ -5274,15 +5451,7 @@ class FloppyImageSession:
                 gw_source=retry_source,
                 capture_path=capture_path,
                 capture_ext="scp",
-                gw_sector_reports=_gw_sector_reports(
-                    _gw_sector_report(
-                        "convert",
-                        locals().get("conversion_sector_map", {}),
-                        title="Greaseweazle Conversion Sector Map",
-                        summary=f"Converted the saved Greaseweazle capture as {disk_format.label}.",
-                        disk_format=disk_format,
-                    ),
-                ),
+                gw_sector_reports=(),
             )
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -6480,7 +6649,7 @@ class FloppyImageSession:
         if nested_entries:
             raise FloppyImageError(
                 "File-level Save To Floppy only supports root-directory floppy files. "
-                "Use Write Current Image to Floppy for disks with folders."
+                "Use Disk > Write Current Image to Floppy... for disks with folders."
             )
 
         permission_hint = (
@@ -6624,7 +6793,7 @@ class FloppyImageSession:
         if nested_entries:
             raise FloppyImageError(
                 "File-level Save To Floppy only supports root-directory floppy files. "
-                "Use Write Current Image to Floppy for disks with folders."
+                "Use Disk > Write Current Image to Floppy... for disks with folders."
             )
 
         compare_keys = [
@@ -6955,7 +7124,7 @@ class FloppyImageSession:
             elif file_level:
                 raise FloppyImageError(
                     "File-level Save To Floppy requires a floppy drive. "
-                    "Use Write Current Image to Floppy for Greaseweazle writes."
+                    "Use Disk > Write Current Image to Floppy... for Greaseweazle writes."
                 )
             elif target_kind == "floppy_gw":
                 if not isinstance(target, GreaseweazleFloppySource):

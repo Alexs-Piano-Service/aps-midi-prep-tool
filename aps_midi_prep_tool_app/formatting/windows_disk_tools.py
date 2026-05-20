@@ -12,7 +12,6 @@ from .usb_format_core import (
     UsbFormatError,
     UsbVolumeInfo,
     _MIN_USB_STICK_BYTES,
-    _content_entries_for_mountpoints,
     _parse_bool,
     _parse_int,
     _raise_if_cancelled,
@@ -121,7 +120,6 @@ def _windows_volume_from_partition(partition):
     size_bytes = _parse_int(partition.get("VolumeSize"), 0) or _parse_int(partition.get("Size"), 0)
     free_bytes = _parse_int(partition.get("SizeRemaining"), 0)
     used_bytes = max(0, size_bytes - free_bytes) if free_bytes else 0
-    contents = _content_entries_for_mountpoints(tuple(mountpoints))
     return UsbVolumeInfo(
         path=f"Partition {partition.get('PartitionNumber') or ''}".strip(),
         label=(partition.get("FileSystemLabel") or "").strip(),
@@ -130,7 +128,7 @@ def _windows_volume_from_partition(partition):
         used_bytes=used_bytes,
         free_bytes=free_bytes,
         mountpoints=tuple(mountpoints),
-        contents=contents,
+        contents=(),
     )
 
 

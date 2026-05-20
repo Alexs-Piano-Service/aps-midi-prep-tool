@@ -5,6 +5,48 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
+## [0.6.4] - 2026-05-19
+
+### Added
+
+- View menu with `Long title warning`, `Format for Disklavier screen`, `Hide Status`, `Hide Quick Panel`, `Hide Album Info`, and `View Logs...`.
+- Live console log window with realtime stdout/stderr capture, search, pause, follow, copy, save, and clear controls.
+- Disk menu that groups floppy/image media actions: `Read Floppy...`, `Image Floppy...`, `Save To Floppy...`, `Write Current Image to Floppy...`, recovery, and format tools.
+- File menu submenus for `Save Options` and `Write Protection`, including `Create Album Subfolder`, `Back up before Saving`, `Write-Protect Original`, tag sidecars, and metadata summaries.
+- Default keyboard shortcuts for the current File, Disk, View, Utilities, Settings, and Help menu commands.
+- Optional `Do not show this dialog again` choice for Save As Image completion messages.
+- `Trim Title Spaces` utility and hotkey, plus a Read Floppy option to clean Disklavier-spaced titles after normal or Greaseweazle reads.
+
+### Changed
+
+- Welcome workflows and README guidance now reflect the current menu labels and safety options.
+- Menus were reorganized so File focuses on source/save behavior, Disk focuses on floppy and media operations, and Utilities focuses on inspection and batch conversion tools.
+- Album Title and Catalog Number remain visible by default for Save As album-folder workflows, can be hidden from View, and refresh or blank when a disk is read.
+- Image and floppy save confirmation wording now describes renamed files as updates rather than removals.
+- Write-protect wording is consistently hyphenated as `Write-Protect Original`.
+
+### Fixed
+
+- Save warnings shown during a single-file image rename no longer imply the file is being removed.
+- New log-window and save-confirmation dialog text now participates in the language catalog.
+- Greaseweazle sector maps now mark a blank first sector as possible Yamaha copy protection instead of reporting it as damage that needs attention.
+- Archival Greaseweazle reads now show one logical read sector-map dialog after the raw capture conversion.
+- Greaseweazle progress now stays determinate when a blank first sector produces extra status output.
+- App-owned dialogs and progress windows now recenter on the APS MIDI Prep Tool window when shown.
+- Greaseweazle read sector-map dialog text is now shorter, with a localized compact color legend.
+- Greaseweazle sector-map dialogs now show a polished visual legend with colored markers.
+- Opening a saved Greaseweazle read no longer shows a second conversion sector-map dialog after the read map.
+- Greaseweazle retry chatter now renders as a steady progress message instead of rapidly changing dialog text.
+- Greaseweazle first-track possible Yamaha copy-protection progress now stays stable while sector retries are reported.
+- Greaseweazle image-save defaults now use the disk catalog number, stripped to filename-safe letters and numbers, when available.
+- The Greaseweazle read progress dialog now explicitly shows and recenters after its first progress updates.
+- Save As Image no longer shows a Greaseweazle conversion sector map after a Greaseweazle disk read.
+- Greaseweazle read sector maps now show after a disk read when available, with the existing `Do not show` preference still available.
+- Save As Image now keeps progress visible while reopening a newly saved HFE or other converted image, avoiding a blank apparent hang after export.
+- The immediate post-read Greaseweazle HFE save now writes the just-read capture directly instead of applying repairs or staged title edits meant for a later explicit Save As Image.
+- Modal dialogs and progress windows now recenter when their contents resize, including Greaseweazle read messages and possible Yamaha copy-protection notes.
+- Album Title and Catalog Number now remain populated when saving/exporting a disk session switches the app back to MIDI Mode.
+
 ## [0.6.1] - 2026-05-05
 
 ### Added

@@ -104,6 +104,7 @@ from .disk_session_worker import (
 from .icon_utils import apply_window_icon
 from .onboarding_dialog import show_first_time_dialog
 from .usb_format_dialog import UsbFormatDialog
+from .console_log import ConsoleLogDialog, get_console_log_bus
 from .additional_formats import electone_mdr_to_midi, mpc_seq_to_midi, v50_nseq_to_midi
 from .floppy_image import (
     DISK_FORMATS,
@@ -243,6 +244,11 @@ class QMessageBox(QtQMessageBox):
         if defaultButton != QtQMessageBox.StandardButton.NoButton:
             box.setDefaultButton(defaultButton)
         _translate_message_box_buttons(box, _message_parent_language(parent))
+        if hasattr(parent, "_center_child_dialog"):
+            parent._center_child_dialog(box)
+        else:
+            center_dialog_on_parent(box, parent)
+            QTimer.singleShot(0, lambda: center_dialog_on_parent(box, parent))
         return box.exec()
 
     @staticmethod
@@ -312,6 +318,28 @@ class QMessageBox(QtQMessageBox):
             buttons,
             defaultButton,
         )
+
+
+class ClearableStatusLabel(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._clear_button = None
+
+    def set_clear_button(self, button):
+        self._clear_button = button
+        self._sync_clear_button()
+
+    def setText(self, text):
+        super().setText(text)
+        self._sync_clear_button()
+
+    def clear(self):
+        super().clear()
+        self._sync_clear_button()
+
+    def _sync_clear_button(self):
+        if self._clear_button is not None:
+            self._clear_button.setVisible(bool(self.text().strip()))
 
 
 class _TooltipDelayStyle(QProxyStyle):
@@ -794,6 +822,7 @@ class GreaseweazleSectorGrid(QWidget):
         self.padding = 8
         self.success_color = QColor("#2FA866")
         self.failure_color = QColor("#D14D4D")
+        self.protection_color = QColor("#D89B2B")
         self.empty_color = QColor("#69737C")
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setMinimumSize(self.sizeHint())
@@ -828,6 +857,8 @@ class GreaseweazleSectorGrid(QWidget):
         head = row.get("head", 0)
         if status == ".":
             return f"Cylinder {col}, head {head}, sector {sector}: read successfully."
+        if status == "p":
+            return f"Cylinder {col}, head {head}, sector {sector}: possible Yamaha copy protection."
         label = status if str(status).strip() else "missing"
         return f"Cylinder {col}, head {head}, sector {sector}: {label}."
 
@@ -867,6 +898,8 @@ class GreaseweazleSectorGrid(QWidget):
                 status = statuses[col] if col < len(statuses) else " "
                 if status == ".":
                     color = self.success_color
+                elif status == "p":
+                    color = self.protection_color
                 elif str(status).strip():
                     color = self.failure_color
                 else:
@@ -912,6 +945,8 @@ def render_greaseweazle_sector_map_image(sector_map, palette=None):
             status = statuses[col] if col < len(statuses) else " "
             if status == ".":
                 color = QColor("#2FA866")
+            elif status == "p":
+                color = QColor("#D89B2B")
             elif str(status).strip():
                 color = QColor("#D14D4D")
             else:
@@ -2403,11 +2438,15 @@ class MidiTitleWindow(QMainWindow):
     SETTINGS_APP = APP_SETTINGS_APP
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
+    SETTING_HIDE_STATUS = "hide_status"
+    SETTING_HIDE_QUICK_PANEL = "hide_quick_panel"
+    SETTING_HIDE_ALBUM_METADATA = "hide_album_metadata"
     SETTING_SKIP_TYPE0_WARNING = "skip_type0_warning"
     SETTING_SKIP_IMAGE_REMOVE_WARNING = "skip_image_remove_warning"
     SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING = "skip_image_delete_on_save_warning"
     SETTING_SKIP_FLOPPY_WRITE_WARNING = "skip_floppy_write_warning"
     SETTING_HIDE_RECOVERY_COMPLETE_DIALOG = "hide_recovery_complete_dialog"
+    SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG = "hide_save_as_image_complete_dialog"
     SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT = "skip_eseq_to_midi_conversion_prompt"
     SETTING_ALLOW_FLOPPY_SAVE = "allow_floppy_save"
     SETTING_CONFIRM_IMAGE_SAVE = "confirm_image_save"
@@ -2425,6 +2464,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_READ_FLOPPY_GW_RETRIES = "read_floppy_gw_retries"
     SETTING_READ_FLOPPY_CONVERT_TO_MIDI = "read_floppy_convert_to_midi"
     SETTING_READ_FLOPPY_START_RECOVERY = "read_floppy_start_recovery"
+    SETTING_READ_FLOPPY_TRIM_TITLES = "read_floppy_trim_titles"
     SETTING_RECOVERY_IMAGE_PATH = "disk_recovery_image_path"
     SETTING_RECOVERY_IMAGE_FORMAT = "disk_recovery_image_format"
     SETTING_RECOVERY_FLOPPY_FORMAT = "disk_recovery_floppy_format"
@@ -2526,6 +2566,7 @@ class MidiTitleWindow(QMainWindow):
         self.diskLoadShouldOfferCapture = False
         self.diskLoadContext = {}
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadTrimTitles = False
         self.v50NseqPromptedSessionPath = ""
         self.electoneMdrPromptedSessionPath = ""
         self.mpcSeqPromptedSessionPath = ""
@@ -2694,15 +2735,37 @@ class MidiTitleWindow(QMainWindow):
         main_layout.addWidget(self.eseqReorderWidget)
 
         # Status label
-        self.status_label = QLabel("")
+        self.statusWidget = QWidget()
+        status_layout = QGridLayout(self.statusWidget)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(0)
+
+        self.status_label = ClearableStatusLabel("", self.statusWidget)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumHeight(42)
+        self.status_label.setContentsMargins(24, 0, 24, 0)
         self.status_label.setToolTip("Operation status, warnings, and progress messages.")
-        main_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.status_label, 0, 0)
+
+        self.statusClearButton = QToolButton(self.statusWidget)
+        self.statusClearButton.setAutoRaise(True)
+        self.statusClearButton.setFocusPolicy(Qt.NoFocus)
+        self.statusClearButton.setFixedSize(18, 18)
+        self.statusClearButton.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
+        self.statusClearButton.setIconSize(QSize(10, 10))
+        self.statusClearButton.setToolTip("Clear status message.")
+        self.statusClearButton.clicked.connect(self.status_label.clear)
+        status_layout.addWidget(self.statusClearButton, 0, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self.status_label.set_clear_button(self.statusClearButton)
+        main_layout.addWidget(self.statusWidget)
+        self.statusWidget.setVisible(
+            not self.settings.value(self.SETTING_HIDE_STATUS, True, type=bool)
+        )
 
         # Controls area: grouped into equally spaced sections for clarity.
-        controls_layout = QHBoxLayout()
+        self.quickPanelWidget = QWidget()
+        controls_layout = QHBoxLayout(self.quickPanelWidget)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(10)
 
@@ -2856,7 +2919,10 @@ class MidiTitleWindow(QMainWindow):
         controls_layout.addWidget(options_group, stretch=1)
         controls_layout.addWidget(utilities_group, stretch=1)
         controls_layout.addWidget(actions_group, stretch=1)
-        main_layout.addLayout(controls_layout)
+        main_layout.addWidget(self.quickPanelWidget)
+        self.quickPanelWidget.setVisible(
+            not self.settings.value(self.SETTING_HIDE_QUICK_PANEL, False, type=bool)
+        )
 
         self.imagePianodirMetadataWidget = QWidget()
         self.imagePianodirMetadataWidget.setToolTip(
@@ -2879,6 +2945,7 @@ class MidiTitleWindow(QMainWindow):
         self.imagePianodirTitleEdit.setToolTip(
             "Album title stored in the Yamaha E-SEQ directory file when supported."
         )
+        self.imagePianodirTitleEdit.textChanged.connect(self._update_image_pianodir_metadata_ui)
         pianodir_meta_layout.addWidget(self.imagePianodirTitleEdit, stretch=3)
 
         catalog_label = QLabel("Catalog Number")
@@ -2894,6 +2961,7 @@ class MidiTitleWindow(QMainWindow):
         self.imagePianodirCatalogEdit.setToolTip(
             "Catalog number stored in the Yamaha E-SEQ directory file when supported."
         )
+        self.imagePianodirCatalogEdit.textChanged.connect(self._update_image_pianodir_metadata_ui)
         self.imagePianodirCatalogEdit.editingFinished.connect(self._normalize_pianodir_catalog_field)
         pianodir_meta_layout.addWidget(self.imagePianodirCatalogEdit, stretch=1)
 
@@ -2909,46 +2977,47 @@ class MidiTitleWindow(QMainWindow):
         self.album_subfolder_checkbox.setVisible(False)
         pianodir_meta_layout.addWidget(self.album_subfolder_checkbox)
 
-        self.imagePianodirMetadataWidget.setVisible(False)
+        self.imagePianodirMetadataWidget.setVisible(
+            not self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
+        )
         main_layout.addWidget(self.imagePianodirMetadataWidget)
         main_layout.addWidget(self.modeBannerLabel)
 
         self.fileMenu = self.menuBar().addMenu("&File")
         self.fileNewImageAction = QAction("New Image...", self)
         self.fileNewImageAction.triggered.connect(self.new_image_dialog)
-        self.fileMenu.addAction(self.fileNewImageAction)
 
         self.fileOpenFolderAction = QAction("Open MIDI Folder...", self)
         self.fileOpenFolderAction.triggered.connect(self.browse_directory)
-        self.fileMenu.addAction(self.fileOpenFolderAction)
 
         self.fileOpenImageAction = QAction("Open Image...", self)
         self.fileOpenImageAction.triggered.connect(self.open_image_dialog)
-        self.fileMenu.addAction(self.fileOpenImageAction)
 
         self.fileReadFloppyAction = QAction("Read Floppy...", self)
         self.fileReadFloppyAction.triggered.connect(self.load_floppy_drive)
-        self.fileMenu.addAction(self.fileReadFloppyAction)
 
         self.fileImageFloppyAction = QAction("Image Floppy...", self)
         self.fileImageFloppyAction.setToolTip(
             "Copy a physical floppy to an image file without opening or scanning its contents."
         )
         self.fileImageFloppyAction.triggered.connect(self.image_floppy_disk)
-        self.fileMenu.addAction(self.fileImageFloppyAction)
-
-        self.fileMenu.addSeparator()
 
         self.fileSaveAction = QAction("Save", self)
         self.fileSaveAction.triggered.connect(self.save_pending_changes)
-        self.fileMenu.addAction(self.fileSaveAction)
 
         self.fileSaveAsAction = QAction("Save As...", self)
         self.fileSaveAsAction.triggered.connect(self.save_as_changes)
-        self.fileMenu.addAction(self.fileSaveAsAction)
 
         self.fileClearListAction = QAction("Clear List", self)
         self.fileClearListAction.triggered.connect(self.clear_list)
+
+        self.fileCreateAlbumSubfolderAction = QAction("Create Album Subfolder", self)
+        self.fileCreateAlbumSubfolderAction.setCheckable(True)
+        self.fileCreateAlbumSubfolderAction.setChecked(self.album_subfolder_checkbox.isChecked())
+        self.fileCreateAlbumSubfolderAction.setToolTip(
+            "When saving Yamaha E-SEQ files to a folder, create a subfolder named from the album title and catalog number."
+        )
+        self.fileCreateAlbumSubfolderAction.toggled.connect(self.toggle_album_subfolder)
 
         self.fileCreateTagSidecarsAction = QAction("Create Tag Sidecars When Saving", self)
         self.fileCreateTagSidecarsAction.setCheckable(True)
@@ -2969,25 +3038,19 @@ class MidiTitleWindow(QMainWindow):
 
         self.fileSaveAsImageAction = QAction("Save As Image...", self)
         self.fileSaveAsImageAction.triggered.connect(self.save_as_image)
-        self.fileMenu.addAction(self.fileSaveAsImageAction)
-
-        self.fileMenu.addAction(self.fileClearListAction)
 
         self.fileSaveToFloppyAction = QAction("Save To Floppy...", self)
         self.fileSaveToFloppyAction.setToolTip(
             "Save the current listed files directly to a formatted floppy drive without rewriting the whole disk image."
         )
         self.fileSaveToFloppyAction.triggered.connect(self.save_to_floppy)
-        self.fileMenu.addAction(self.fileSaveToFloppyAction)
 
         self.fileWriteImageToFloppyAction = QAction("Write Current Image to Floppy...", self)
         self.fileWriteImageToFloppyAction.setToolTip(
             "Write the currently loaded image or floppy session to a physical floppy disk."
         )
         self.fileWriteImageToFloppyAction.triggered.connect(self.write_image_to_floppy)
-        self.fileMenu.addAction(self.fileWriteImageToFloppyAction)
 
-        self.fileMenu.addSeparator()
         self.fileAutoWriteProtectAction = QAction("Auto Write-Protect", self)
         self.fileAutoWriteProtectAction.setCheckable(True)
         self.fileAutoWriteProtectAction.setChecked(self._auto_write_protect_on_load())
@@ -2995,9 +3058,101 @@ class MidiTitleWindow(QMainWindow):
             "When enabled, newly read floppies and newly opened images start with original writes protected."
         )
         self.fileAutoWriteProtectAction.toggled.connect(self.toggle_auto_write_protect_on_load)
-        self.fileMenu.addAction(self.fileAutoWriteProtectAction)
-        self.fileMenu.addAction(self.fileCreateTagSidecarsAction)
-        self.fileMenu.addAction(self.fileCreateMetadataSummaryAction)
+        self.fileWriteProtectOriginalAction = QAction("Write-Protect Original", self)
+        self.fileWriteProtectOriginalAction.setCheckable(True)
+        self.fileWriteProtectOriginalAction.setToolTip(
+            "Protect the currently open image or floppy from being overwritten by Save."
+        )
+        self.fileWriteProtectOriginalAction.toggled.connect(self.toggle_original_write_protection)
+        self.fileBackUpBeforeSavingAction = QAction("Back up before Saving", self)
+        self.fileBackUpBeforeSavingAction.setCheckable(True)
+        self.fileBackUpBeforeSavingAction.setChecked(self.backup_checkbox.isChecked())
+        self.fileBackUpBeforeSavingAction.setToolTip(
+            "Before overwriting, back up images beside the image and individual files into a backup folder."
+        )
+        self.fileBackUpBeforeSavingAction.toggled.connect(self.backup_checkbox.setChecked)
+
+        self.fileMenu.addAction(self.fileNewImageAction)
+        self.fileOpenMenu = self.fileMenu.addMenu(self._lt("Open"))
+        self.fileOpenMenu.addAction(self.fileOpenFolderAction)
+        self.fileOpenMenu.addAction(self.fileOpenImageAction)
+        self.fileMenu.addSeparator()
+        self.fileMenu.addAction(self.fileSaveAction)
+        self.fileMenu.addAction(self.fileSaveAsAction)
+        self.fileMenu.addAction(self.fileSaveAsImageAction)
+        self.fileMenu.addSeparator()
+        self.fileMenu.addAction(self.fileClearListAction)
+        self.fileMenu.addSeparator()
+        self.fileSaveOptionsMenu = self.fileMenu.addMenu(self._lt("Save Options"))
+        self.fileSaveOptionsMenu.addAction(self.fileCreateAlbumSubfolderAction)
+        self.fileSaveOptionsMenu.addAction(self.fileBackUpBeforeSavingAction)
+        self.fileSaveOptionsMenu.addSeparator()
+        self.fileSaveOptionsMenu.addAction(self.fileCreateTagSidecarsAction)
+        self.fileSaveOptionsMenu.addAction(self.fileCreateMetadataSummaryAction)
+        self.fileWriteProtectionMenu = self.fileMenu.addMenu(self._lt("Write Protection"))
+        self.fileWriteProtectionMenu.addAction(self.fileAutoWriteProtectAction)
+        self.fileWriteProtectionMenu.addAction(self.fileWriteProtectOriginalAction)
+
+        self.diskMenu = self.menuBar().addMenu(self._lt("&Disk"))
+        self.diskMenu.addAction(self.fileReadFloppyAction)
+        self.diskMenu.addAction(self.fileImageFloppyAction)
+        self.diskMenu.addSeparator()
+        self.diskMenu.addAction(self.fileSaveToFloppyAction)
+        self.diskMenu.addAction(self.fileWriteImageToFloppyAction)
+        self.diskMenu.addSeparator()
+
+        self.viewMenu = self.menuBar().addMenu("&View")
+        self.viewLongTitleWarningAction = QAction("Long title warning", self)
+        self.viewLongTitleWarningAction.setCheckable(True)
+        self.viewLongTitleWarningAction.setChecked(self.compat_warning_checkbox.isChecked())
+        self.viewLongTitleWarningAction.setToolTip(
+            "Highlight title characters beyond the 32-character legacy compatibility limit."
+        )
+        self.viewLongTitleWarningAction.toggled.connect(self.compat_warning_checkbox.setChecked)
+        self.viewMenu.addAction(self.viewLongTitleWarningAction)
+
+        self.viewFormatDisklavierScreenAction = QAction("Format for Disklavier screen", self)
+        self.viewFormatDisklavierScreenAction.setCheckable(True)
+        self.viewFormatDisklavierScreenAction.setChecked(self.format_disklavier_checkbox.isChecked())
+        self.viewFormatDisklavierScreenAction.setToolTip(
+            "When editing titles, use the Disklavier's two 16-character screen rows."
+        )
+        self.viewFormatDisklavierScreenAction.toggled.connect(self.format_disklavier_checkbox.setChecked)
+        self.viewMenu.addAction(self.viewFormatDisklavierScreenAction)
+
+        self.viewMenu.addSeparator()
+        self.viewHideStatusAction = QAction("Hide Status", self)
+        self.viewHideStatusAction.setCheckable(True)
+        self.viewHideStatusAction.setChecked(
+            self.settings.value(self.SETTING_HIDE_STATUS, True, type=bool)
+        )
+        self.viewHideStatusAction.setToolTip("Hide the operation status text beneath the file list.")
+        self.viewHideStatusAction.toggled.connect(self.toggle_hide_status)
+        self.viewMenu.addAction(self.viewHideStatusAction)
+
+        self.viewHideQuickPanelAction = QAction("Hide Quick Panel", self)
+        self.viewHideQuickPanelAction.setCheckable(True)
+        self.viewHideQuickPanelAction.setChecked(
+            self.settings.value(self.SETTING_HIDE_QUICK_PANEL, False, type=bool)
+        )
+        self.viewHideQuickPanelAction.setToolTip("Hide the Options, Utilities, and File Actions panel.")
+        self.viewHideQuickPanelAction.toggled.connect(self.toggle_hide_quick_panel)
+        self.viewMenu.addAction(self.viewHideQuickPanelAction)
+
+        self.viewHideAlbumMetadataAction = QAction("Hide Album Info", self)
+        self.viewHideAlbumMetadataAction.setCheckable(True)
+        self.viewHideAlbumMetadataAction.setChecked(
+            self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
+        )
+        self.viewHideAlbumMetadataAction.setToolTip("Hide the Album Title and Catalog Number fields.")
+        self.viewHideAlbumMetadataAction.toggled.connect(self.toggle_hide_album_metadata)
+        self.viewMenu.addAction(self.viewHideAlbumMetadataAction)
+
+        self.viewMenu.addSeparator()
+        self.viewLogsAction = QAction("View Logs...", self)
+        self.viewLogsAction.setToolTip("Open a live view of console output from this session.")
+        self.viewLogsAction.triggered.connect(self.show_console_log_window)
+        self.viewMenu.addAction(self.viewLogsAction)
 
         self.utilitiesMenu = self.menuBar().addMenu("&Utilities")
         self.utilitiesSongListAction = QAction("Song List...", self)
@@ -3015,39 +3170,48 @@ class MidiTitleWindow(QMainWindow):
             "Recover song data from a damaged floppy image and open the result as a new editable image copy."
         )
         self.utilitiesRecoverImageAction.triggered.connect(self.recover_damaged_image_dialog)
+        self.diskMenu.addAction(self.utilitiesRecoverImageAction)
 
         self.utilitiesRenameAction = QAction("Rename All to DOS 8.3", self)
         self.utilitiesRenameAction.triggered.connect(self.rename_all_for_disk)
         self.utilitiesMenu.addAction(self.utilitiesRenameAction)
 
+        self.utilitiesTrimTitleSpacesAction = QAction("Trim Title Spaces", self)
+        self.utilitiesTrimTitleSpacesAction.setToolTip(
+            "Trim leading/trailing title spaces and collapse repeated spaces for all listed titles."
+        )
+        self.utilitiesTrimTitleSpacesAction.triggered.connect(self.trim_title_spaces_for_all)
+        self.utilitiesMenu.addAction(self.utilitiesTrimTitleSpacesAction)
+
         self.utilitiesSmfAction = QAction("Convert All SMF1 to SMF0", self)
         self.utilitiesSmfAction.triggered.connect(self.convert_all_to_type0)
-        self.utilitiesMenu.addAction(self.utilitiesSmfAction)
 
         self.utilitiesEseqToMidiAction = QAction("Convert All E-SEQ to MIDI", self)
         self.utilitiesEseqToMidiAction.triggered.connect(self.convert_all_eseq_to_midi)
 
         self.utilitiesMidiToEseqAction = QAction("Convert All MIDI to E-SEQ", self)
         self.utilitiesMidiToEseqAction.triggered.connect(self.convert_all_midi_to_eseq)
-        self.utilitiesMenu.addAction(self.utilitiesMidiToEseqAction)
-        self.utilitiesMenu.addAction(self.utilitiesEseqToMidiAction)
 
         self.utilitiesMenu.addSeparator()
-        self.utilitiesMenu.addAction(self.utilitiesRecoverImageAction)
+        self.utilitiesConvertMenu = self.utilitiesMenu.addMenu(self._lt("Convert"))
+        self.utilitiesConvertMenu.addAction(self.utilitiesSmfAction)
+        self.utilitiesConvertMenu.addAction(self.utilitiesEseqToMidiAction)
+        self.utilitiesConvertMenu.addAction(self.utilitiesMidiToEseqAction)
 
         self.utilitiesFormatFloppyAction = QAction("Format Floppy Disk...", self)
         self.utilitiesFormatFloppyAction.setToolTip(
             "Format a physical floppy disk for Yamaha Disklavier use."
         )
         self.utilitiesFormatFloppyAction.triggered.connect(self.format_disklavier_floppy)
-        self.utilitiesMenu.addAction(self.utilitiesFormatFloppyAction)
+        self.diskMenu.addSeparator()
+        self.diskMenu.addAction(self.utilitiesFormatFloppyAction)
 
         self.utilitiesFormatUsbAction = QAction("Format USB Stick...", self)
         self.utilitiesFormatUsbAction.setToolTip(
             "Format a removable USB stick as FAT32 for Disklavier or PianoForce use."
         )
         self.utilitiesFormatUsbAction.triggered.connect(self.format_disklavier_usb_stick)
-        self.utilitiesMenu.addAction(self.utilitiesFormatUsbAction)
+        self.diskMenu.addAction(self.utilitiesFormatUsbAction)
 
         self.settingsMenu = self.menuBar().addMenu(self._t("menu.settings"))
         self.appearanceMenu = self.settingsMenu.addMenu(self._t("menu.appearance"))
@@ -3246,26 +3410,36 @@ class MidiTitleWindow(QMainWindow):
             {"id": "file.new_image", "category": "File", "label": "New Image...", "action": "fileNewImageAction", "default": "Ctrl+N"},
             {"id": "file.open_folder", "category": "File", "label": "Open MIDI Folder...", "action": "fileOpenFolderAction", "default": "Ctrl+O"},
             {"id": "file.open_image", "category": "File", "label": "Open Image...", "action": "fileOpenImageAction", "default": "Ctrl+Shift+O"},
-            {"id": "file.read_floppy", "category": "File", "label": "Read Floppy...", "action": "fileReadFloppyAction", "default": "Ctrl+R"},
-            {"id": "file.image_floppy", "category": "File", "label": "Image Floppy...", "action": "fileImageFloppyAction", "default": "Ctrl+I"},
+            {"id": "file.read_floppy", "category": "Disk", "label": "Read Floppy...", "action": "fileReadFloppyAction", "default": "Ctrl+R"},
+            {"id": "file.image_floppy", "category": "Disk", "label": "Image Floppy...", "action": "fileImageFloppyAction", "default": "Ctrl+I"},
             {"id": "file.save", "category": "File", "label": "Save", "action": "fileSaveAction", "default": "Ctrl+S"},
             {"id": "file.save_as", "category": "File", "label": "Save As...", "action": "fileSaveAsAction", "default": "Ctrl+Shift+S"},
             {"id": "file.save_as_image", "category": "File", "label": "Save As Image...", "action": "fileSaveAsImageAction", "default": "Ctrl+Shift+I"},
             {"id": "file.clear_list", "category": "File", "label": "Clear List", "action": "fileClearListAction", "default": "Ctrl+Shift+Delete"},
-            {"id": "file.save_to_floppy", "category": "File", "label": "Save To Floppy...", "action": "fileSaveToFloppyAction", "default": "Ctrl+F"},
-            {"id": "file.write_image_to_floppy", "category": "File", "label": "Write Current Image to Floppy...", "action": "fileWriteImageToFloppyAction", "default": "Ctrl+Shift+F"},
+            {"id": "file.save_to_floppy", "category": "Disk", "label": "Save To Floppy...", "action": "fileSaveToFloppyAction", "default": "Ctrl+F"},
+            {"id": "file.write_image_to_floppy", "category": "Disk", "label": "Write Current Image to Floppy...", "action": "fileWriteImageToFloppyAction", "default": "Ctrl+Shift+F"},
             {"id": "file.auto_write_protect", "category": "File", "label": "Auto Write-Protect", "action": "fileAutoWriteProtectAction", "default": "Ctrl+Shift+P"},
+            {"id": "file.write_protect_original", "category": "File", "label": "Write-Protect Original", "action": "fileWriteProtectOriginalAction", "default": "Ctrl+Alt+P"},
+            {"id": "file.create_album_subfolder", "category": "File", "label": "Create Album Subfolder", "action": "fileCreateAlbumSubfolderAction", "default": "Ctrl+Shift+A"},
+            {"id": "file.back_up_before_saving", "category": "File", "label": "Back up before Saving", "action": "fileBackUpBeforeSavingAction", "default": "Ctrl+Alt+B"},
             {"id": "file.create_tag_sidecars", "category": "File", "label": "Create Tag Sidecars When Saving", "action": "fileCreateTagSidecarsAction", "default": "Ctrl+Shift+T"},
             {"id": "file.create_metadata_summary", "category": "File", "label": "Create Metadata Summary When Saving", "action": "fileCreateMetadataSummaryAction", "default": "Ctrl+Shift+Y"},
+            {"id": "view.long_title_warning", "category": "View", "label": "Long title warning", "action": "viewLongTitleWarningAction", "default": "Ctrl+Alt+W"},
+            {"id": "view.format_disklavier_screen", "category": "View", "label": "Format for Disklavier screen", "action": "viewFormatDisklavierScreenAction", "default": "Ctrl+Alt+D"},
+            {"id": "view.hide_status", "category": "View", "label": "Hide Status", "action": "viewHideStatusAction", "default": "Ctrl+Alt+S"},
+            {"id": "view.hide_quick_panel", "category": "View", "label": "Hide Quick Panel", "action": "viewHideQuickPanelAction", "default": "Ctrl+Alt+Q"},
+            {"id": "view.hide_album_metadata", "category": "View", "label": "Hide Album Info", "action": "viewHideAlbumMetadataAction", "default": "Ctrl+Alt+A"},
+            {"id": "view.logs", "category": "View", "label": "View Logs...", "action": "viewLogsAction", "default": "F8"},
             {"id": "utilities.song_list", "category": "Utilities", "label": "Song List...", "action": "utilitiesSongListAction", "default": "F3"},
             {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
             {"id": "utilities.rename", "category": "Utilities", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
+            {"id": "utilities.trim_title_spaces", "category": "Utilities", "label": "Trim Title Spaces", "action": "utilitiesTrimTitleSpacesAction", "default": "Ctrl+Shift+Space"},
             {"id": "utilities.smf0", "category": "Utilities", "label": "Convert All SMF1 to SMF0", "action": "utilitiesSmfAction", "default": "Ctrl+Shift+0"},
             {"id": "utilities.eseq_to_midi", "category": "Utilities", "label": "Convert All E-SEQ to MIDI", "action": "utilitiesEseqToMidiAction", "default": "Ctrl+Shift+M"},
             {"id": "utilities.midi_to_eseq", "category": "Utilities", "label": "Convert All MIDI to E-SEQ", "action": "utilitiesMidiToEseqAction", "default": "Ctrl+Shift+E"},
-            {"id": "utilities.recover_image", "category": "Utilities", "label": "Recover Damaged Image...", "action": "utilitiesRecoverImageAction", "default": "Ctrl+Shift+D"},
-            {"id": "utilities.format_floppy", "category": "Utilities", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
-            {"id": "utilities.format_usb", "category": "Utilities", "label": "Format USB Stick...", "action": "utilitiesFormatUsbAction", "default": "F7"},
+            {"id": "utilities.recover_image", "category": "Disk", "label": "Recover Damaged Image...", "action": "utilitiesRecoverImageAction", "default": "Ctrl+Shift+D"},
+            {"id": "utilities.format_floppy", "category": "Disk", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
+            {"id": "utilities.format_usb", "category": "Disk", "label": "Format USB Stick...", "action": "utilitiesFormatUsbAction", "default": "F7"},
             {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
             {"id": "help.check_updates", "category": "Help", "label": "Check for Updates...", "action": "helpCheckUpdatesAction", "default": "F9"},
             {"id": "help.welcome", "category": "Help", "label": "Show Welcome Screen", "action": "helpWelcomeAction", "default": "F1"},
@@ -3431,6 +3605,20 @@ class MidiTitleWindow(QMainWindow):
             self.status_label.setText(self._lt("Keyboard shortcuts updated."))
             return
 
+    def show_console_log_window(self):
+        dialog = getattr(self, "consoleLogDialog", None)
+        if dialog is None:
+            dialog = ConsoleLogDialog(get_console_log_bus(), self)
+            dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            apply_window_icon(dialog)
+            self._translate_dialog_tree(dialog)
+            dialog.destroyed.connect(lambda _obj=None: setattr(self, "consoleLogDialog", None))
+            self.consoleLogDialog = dialog
+            self._center_child_dialog(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def _with_mnemonic(self, text, mnemonic):
         if not mnemonic or "&" in text:
             return text
@@ -3447,6 +3635,18 @@ class MidiTitleWindow(QMainWindow):
         self._refresh_settings_menu_text()
         if hasattr(self, "fileMenu"):
             self.fileMenu.setTitle(self._lt("&File"))
+        for menu_name, text in (
+            ("fileOpenMenu", "Open"),
+            ("fileSaveOptionsMenu", "Save Options"),
+            ("fileWriteProtectionMenu", "Write Protection"),
+            ("diskMenu", "&Disk"),
+            ("utilitiesConvertMenu", "Convert"),
+        ):
+            menu = getattr(self, menu_name, None)
+            if menu is not None:
+                menu.setTitle(self._lt(text))
+        if hasattr(self, "viewMenu"):
+            self.viewMenu.setTitle(self._lt("&View"))
         if hasattr(self, "utilitiesMenu"):
             self.utilitiesMenu.setTitle(self._lt("&Utilities"))
         if hasattr(self, "helpMenu"):
@@ -3499,15 +3699,25 @@ class MidiTitleWindow(QMainWindow):
             ("fileReadFloppyAction", "Read Floppy...", "R"),
             ("fileImageFloppyAction", "Image Floppy...", "I"),
             ("fileClearListAction", "Clear List", "C"),
+            ("fileCreateAlbumSubfolderAction", "Create Album Subfolder", "A"),
+            ("fileBackUpBeforeSavingAction", "Back up before Saving", "B"),
             ("fileCreateTagSidecarsAction", "Create Tag Sidecars When Saving", "G"),
             ("fileCreateMetadataSummaryAction", "Create Metadata Summary When Saving", "D"),
             ("fileSaveToFloppyAction", "Save To Floppy...", "T"),
             ("fileWriteImageToFloppyAction", "Write Current Image to Floppy...", "W"),
             ("fileAutoWriteProtectAction", "Auto Write-Protect", "P"),
+            ("fileWriteProtectOriginalAction", "Write-Protect Original", "O"),
+            ("viewLongTitleWarningAction", "Long title warning", "L"),
+            ("viewFormatDisklavierScreenAction", "Format for Disklavier screen", "F"),
+            ("viewHideStatusAction", "Hide Status", "S"),
+            ("viewHideQuickPanelAction", "Hide Quick Panel", "Q"),
+            ("viewHideAlbumMetadataAction", "Hide Album Info", "A"),
+            ("viewLogsAction", "View Logs...", "V"),
             ("utilitiesSongListAction", "Song List...", "S"),
             ("utilitiesFileInspectionAction", "File Inspection...", "I"),
             ("utilitiesRecoverImageAction", "Recover Damaged Image...", "D"),
             ("utilitiesRenameAction", "Rename All to DOS 8.3", "R"),
+            ("utilitiesTrimTitleSpacesAction", "Trim Title Spaces", "T"),
             ("utilitiesSmfAction", "Convert All SMF1 to SMF0", "0"),
             ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
             ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ", "M"),
@@ -3525,6 +3735,14 @@ class MidiTitleWindow(QMainWindow):
                 action.setText(self._menu_action_text(text, mnemonic))
 
     def eventFilter(self, obj, event):
+        if isinstance(obj, QDialog) and bool(obj.property("_aps_center_on_parent")):
+            if event.type() in {QEvent.Show, QEvent.ShowToParent}:
+                self._schedule_center_child_dialog(obj)
+            elif (
+                bool(obj.property("_aps_recenter_on_content_change"))
+                and event.type() in {QEvent.Resize, QEvent.LayoutRequest}
+            ):
+                self._schedule_center_child_dialog(obj, delays=(0, 25))
         if obj is self.table.viewport():
             if event.type() == QEvent.Resize:
                 self._resize_table_columns_to_fill()
@@ -3563,13 +3781,36 @@ class MidiTitleWindow(QMainWindow):
         super().resizeEvent(event)
         self._resize_table_columns_to_fill()
 
-    def _center_child_dialog(self, dialog):
+    def _center_child_dialog_now(self, dialog):
         center_dialog_on_parent(dialog, self)
+
+    def _schedule_center_child_dialog(self, dialog, delays=(0,)):
+        def center_if_alive():
+            try:
+                if dialog is not None:
+                    self._center_child_dialog_now(dialog)
+            except RuntimeError:
+                pass
+
+        for delay in delays:
+            QTimer.singleShot(max(0, int(delay)), center_if_alive)
+
+    def _center_child_dialog(self, dialog, *, recenter_on_content_change=False):
+        if dialog is None:
+            return
+        dialog.setProperty("_aps_center_on_parent", True)
+        if recenter_on_content_change:
+            dialog.setProperty("_aps_recenter_on_content_change", True)
+        if not bool(dialog.property("_aps_center_event_filter")):
+            dialog.installEventFilter(self)
+            dialog.setProperty("_aps_center_event_filter", True)
+        self._center_child_dialog_now(dialog)
+        self._schedule_center_child_dialog(dialog, delays=(0, 25, 100))
 
     def _exec_child_dialog(self, dialog):
         dialog.setWindowModality(Qt.WindowModal)
         self._translate_dialog_tree(dialog)
-        self._center_child_dialog(dialog)
+        self._center_child_dialog(dialog, recenter_on_content_change=True)
         return dialog.exec()
 
     def _translate_dialog_tree(self, dialog):
@@ -3641,8 +3882,17 @@ class MidiTitleWindow(QMainWindow):
         dialog.setWindowTitle(self._progress_dialog_title(dialog))
         dialog.setWindowModality(Qt.WindowModal)
         dialog.setMinimumDuration(0)
-        self._center_child_dialog(dialog)
+        dialog.setProperty("_aps_progress_center_updates_remaining", 4)
+        self._center_child_dialog(dialog, recenter_on_content_change=True)
         return dialog
+
+    def _show_centered_progress_dialog(self, dialog):
+        if dialog is None:
+            return
+        self._center_child_dialog(dialog)
+        dialog.show()
+        QApplication.processEvents()
+        self._center_child_dialog(dialog)
 
     def _clean_error_detail(self, detail):
         text = str(detail or "").strip()
@@ -3692,9 +3942,15 @@ class MidiTitleWindow(QMainWindow):
                 dialog.setRange(0, total)
             dialog.setValue(max(0, min(step, total)))
         else:
-            dialog.setRange(0, 0)
+            if dialog.maximum() <= dialog.minimum():
+                dialog.setRange(0, 1)
+                dialog.setValue(0)
         dialog.setLabelText(message)
         QApplication.processEvents()
+        remaining_centers = int(dialog.property("_aps_progress_center_updates_remaining") or 0)
+        if remaining_centers > 0:
+            dialog.setProperty("_aps_progress_center_updates_remaining", remaining_centers - 1)
+            self._schedule_center_child_dialog(dialog, delays=(0, 25))
 
     def _set_disk_load_busy(self, busy):
         is_busy = bool(busy)
@@ -3766,6 +4022,7 @@ class MidiTitleWindow(QMainWindow):
         self._prepare_progress_dialog(progress_dialog)
         progress_dialog.setAutoClose(False)
         self._apply_stage_progress(progress_dialog, 0, progress_total, initial_message)
+        self._show_centered_progress_dialog(progress_dialog)
 
         worker = DiskSessionLoadWorker(
             load_kind,
@@ -3841,6 +4098,8 @@ class MidiTitleWindow(QMainWindow):
                 exc,
             )
             return
+
+        self._apply_pending_floppy_read_title_trim()
 
         if should_offer_capture:
             self._offer_save_greaseweazle_capture()
@@ -5100,6 +5359,7 @@ class MidiTitleWindow(QMainWindow):
         capture_path = getattr(capture, "capture_path", "")
         if not isinstance(gw_source, GreaseweazleFloppySource) or not capture_path:
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadTrimTitles = False
             self._show_operation_error(
                 "Greaseweazle Capture Failed",
                 "The Greaseweazle SCP capture could not be prepared for saving",
@@ -5121,6 +5381,7 @@ class MidiTitleWindow(QMainWindow):
         if not output_path:
             capture.cleanup()
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadTrimTitles = False
             self.status_label.setText("Greaseweazle capture was not saved; opening cancelled.")
             return
         if image_extension(output_path) != "scp":
@@ -5132,6 +5393,7 @@ class MidiTitleWindow(QMainWindow):
         except Exception as exc:
             capture.cleanup()
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadTrimTitles = False
             self._show_operation_error(
                 "SCP Save Failed",
                 f"Could not save the raw Greaseweazle capture to {os.path.basename(output_path)}",
@@ -5147,7 +5409,6 @@ class MidiTitleWindow(QMainWindow):
                 {
                     "type": "read",
                     "title": "Greaseweazle Read Sector Map",
-                    "summary": f"Read {gw_source.display_name}.",
                     "sector_map": getattr(capture, "sector_map", {}) or {},
                     "disk_format": gw_source.disk_format,
                 }
@@ -5239,6 +5500,7 @@ class MidiTitleWindow(QMainWindow):
         found = sector_map.get("found")
         total = sector_map.get("total")
         bad = int(sector_map.get("bad") or 0)
+        protected = int(sector_map.get("expected_yamaha_protection") or 0)
         has_sector_failures = bool(sector_map.get("has_failures") or bad > 0)
         if reason == "format_mismatch" and not has_sector_failures:
             summary_text = "The SCP capture read successfully, but the selected disk format appears to be wrong."
@@ -5247,10 +5509,14 @@ class MidiTitleWindow(QMainWindow):
             if suggested_format is not None:
                 summary_text += f"\nDetected format: {suggested_format.label}."
         elif found is not None and total is not None:
-            summary_text = (
-                f"Greaseweazle found {found} of {total} expected sector(s). "
-                f"{bad} sector position(s) need attention."
-            )
+            summary_text = f"Greaseweazle found {found} of {total} expected sector(s)."
+            if protected:
+                summary_text += (
+                    "\nThe blank first sector may be Yamaha copy protection; "
+                    "it is not counted as a failed sector here."
+                )
+            if bad:
+                summary_text += f"\n{bad} sector position(s) need attention."
             if current_format is not None:
                 summary_text += f"\nSelected format: {current_format.label}."
         else:
@@ -5347,6 +5613,7 @@ class MidiTitleWindow(QMainWindow):
         self._exec_child_dialog(dialog)
         if dialog.clickedButton() is not save_button:
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadTrimTitles = False
             self.status_label.setText("Greaseweazle conversion stopped; the source image was not changed.")
             return
 
@@ -5360,12 +5627,14 @@ class MidiTitleWindow(QMainWindow):
         )
         if not output_path:
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadTrimTitles = False
             self.status_label.setText("Greaseweazle conversion stopped; no converted image was saved.")
             return
         if not os.path.splitext(output_path)[1]:
             output_path = f"{output_path}.img"
 
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadTrimTitles = False
         self._start_floppy_image_capture_worker(
             "image_convert",
             capture_path,
@@ -5385,6 +5654,7 @@ class MidiTitleWindow(QMainWindow):
         capture_path = details.get("capture_path") or ""
         if not capture_path or not os.path.isfile(capture_path):
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadTrimTitles = False
             self._show_operation_error(
                 "Greaseweazle Conversion Failed",
                 "The Greaseweazle capture could not be converted",
@@ -5395,6 +5665,7 @@ class MidiTitleWindow(QMainWindow):
         retry_format = self._choose_greaseweazle_retry_format(details)
         if retry_format is None:
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadTrimTitles = False
             self.status_label.setText(
                 f"Greaseweazle conversion stopped. Raw capture saved at {capture_path}."
             )
@@ -5430,6 +5701,7 @@ class MidiTitleWindow(QMainWindow):
             self.diskLoadProgressDialog = None
         self.status_label.setText("Disk operation cancelled.")
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadTrimTitles = False
         self.pendingDiskRecoveryRequest = None
         self.pendingGwConversionDetails = None
         if self.pendingGwCapture:
@@ -5491,6 +5763,7 @@ class MidiTitleWindow(QMainWindow):
                 request.get("message", ""),
             )
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadTrimTitles = False
             self.diskLoadContext = {}
             return
         if request.get("load_kind") == "floppy_usb":
@@ -5565,6 +5838,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
+        self._apply_pending_floppy_read_title_trim()
 
         song_count = sum(1 for entry in listing.entries if not is_pianodir_path(entry.path))
         self._information_with_optional_hide(
@@ -5572,7 +5846,7 @@ class MidiTitleWindow(QMainWindow):
             title="Recovery Complete",
             message=(
                 f"Recovered {len(listing.entries)} file(s), including {song_count} song file(s), into a new editable image copy.\n\n"
-                "The original source was not modified. Review the recovered list, then use Save As Image or Write Current Image to Floppy to keep a clean copy."
+                "The original source was not modified. Review the recovered list, then use File > Save As Image... or Disk > Write Current Image to Floppy... to keep a clean copy."
             ),
             checkbox_text="Do not show this recovery complete message again",
         )
@@ -5598,6 +5872,7 @@ class MidiTitleWindow(QMainWindow):
             guidance="If this is a physical floppy, try a different drive, a Greaseweazle capture with more retries, or a known-good disk image",
         )
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadTrimTitles = False
 
     def _on_disk_recovery_cancelled(self, _message):
         if self.diskRecoveryProgressDialog is not None:
@@ -5605,6 +5880,7 @@ class MidiTitleWindow(QMainWindow):
             self.diskRecoveryProgressDialog = None
         self.status_label.setText("Disk recovery cancelled.")
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadTrimTitles = False
 
     def _on_disk_recovery_finished(self):
         self._set_disk_load_busy(False)
@@ -5624,6 +5900,7 @@ class MidiTitleWindow(QMainWindow):
             self.SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING,
             self.SETTING_SKIP_FLOPPY_WRITE_WARNING,
             self.SETTING_HIDE_RECOVERY_COMPLETE_DIALOG,
+            self.SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG,
             self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
             self.SETTING_SKIP_UPDATE_REMINDERS,
         ):
@@ -5646,6 +5923,7 @@ class MidiTitleWindow(QMainWindow):
             self.SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING,
             self.SETTING_SKIP_FLOPPY_WRITE_WARNING,
             self.SETTING_HIDE_RECOVERY_COMPLETE_DIALOG,
+            self.SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG,
             self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
             self.SETTING_SKIP_UPDATE_REMINDERS,
             *self.GW_SECTOR_REPORT_HIDE_SETTINGS.values(),
@@ -5680,6 +5958,7 @@ class MidiTitleWindow(QMainWindow):
         self._shownGwSectorReportFingerprints = set()
 
     def _gw_sector_report_fingerprint(self, report):
+        report_type = str((report or {}).get("type") or "convert").lower()
         sector_map = (report or {}).get("sector_map") or {}
         rows = tuple(
             (
@@ -5690,6 +5969,7 @@ class MidiTitleWindow(QMainWindow):
             for row in sector_map.get("rows") or []
         )
         return (
+            report_type,
             rows,
             sector_map.get("found"),
             sector_map.get("total"),
@@ -5704,6 +5984,79 @@ class MidiTitleWindow(QMainWindow):
         if not image.save(png_path, "PNG"):
             raise OSError("Could not render Greaseweazle sector map PNG.")
         return png_path
+
+    def _gw_sector_legend_marker(self, color, parent):
+        marker = QLabel(parent)
+        marker.setFixedSize(8, 8)
+        marker.setStyleSheet(
+            f"background-color: {QColor(color).name()}; "
+            "border-radius: 4px;"
+        )
+        return marker
+
+    def _gw_sector_legend_item(self, color, text, parent):
+        item = QWidget(parent)
+        item_layout = QHBoxLayout(item)
+        item_layout.setContentsMargins(0, 0, 0, 0)
+        item_layout.setSpacing(5)
+        item_layout.addWidget(self._gw_sector_legend_marker(color, item), 0, Qt.AlignVCenter)
+
+        label = QLabel(text, item)
+        label.setWordWrap(False)
+        label.setObjectName("gwSectorLegendItemLabel")
+        item_layout.addWidget(label, 0, Qt.AlignVCenter)
+        return item
+
+    def _build_gw_sector_legend(self, protected, parent):
+        legend = QWidget(parent)
+        legend.setObjectName("gwSectorLegend")
+        legend.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+
+        legend_layout = QHBoxLayout(legend)
+        legend_layout.setContentsMargins(9, 5, 10, 5)
+        legend_layout.setSpacing(14)
+
+        title = QLabel(f"{self._t('gw.sector.legend.title')}:", legend)
+        title.setObjectName("gwSectorLegendTitle")
+        legend_layout.addWidget(title, 0, Qt.AlignVCenter)
+
+        legend_layout.addWidget(
+            self._gw_sector_legend_item("#2FA866", self._t("gw.sector.legend.ok"), legend),
+            0,
+            Qt.AlignVCenter,
+        )
+        legend_layout.addWidget(
+            self._gw_sector_legend_item("#D14D4D", self._t("gw.sector.legend.bad_missing"), legend),
+            0,
+            Qt.AlignVCenter,
+        )
+        if protected:
+            legend_layout.addWidget(
+                self._gw_sector_legend_item(
+                    "#D89B2B",
+                    self._t("gw.sector.legend.yamaha_protection"),
+                    legend,
+                ),
+                0,
+                Qt.AlignVCenter,
+            )
+
+        background = self.palette().color(QPalette.AlternateBase)
+        border = self.palette().color(QPalette.Mid)
+        legend.setStyleSheet(
+            "QWidget#gwSectorLegend {"
+            f"background: {background.name()};"
+            f"border: 1px solid {border.name()};"
+            "border-radius: 6px;"
+            "}"
+            "QLabel#gwSectorLegendTitle {"
+            "font-weight: 600;"
+            "}"
+            "QLabel#gwSectorLegendItemLabel {"
+            "padding-right: 1px;"
+            "}"
+        )
+        return legend
 
     def _show_greaseweazle_sector_report(self, report):
         report = dict(report or {})
@@ -5723,6 +6076,7 @@ class MidiTitleWindow(QMainWindow):
         total = sector_map.get("total")
         good = int(sector_map.get("good") or 0)
         bad = int(sector_map.get("bad") or 0)
+        protected = int(sector_map.get("expected_yamaha_protection") or 0)
         summary_parts = []
         if report.get("summary"):
             summary_parts.append(str(report.get("summary")))
@@ -5733,6 +6087,8 @@ class MidiTitleWindow(QMainWindow):
             summary_parts.append(self._t("gw.sector.expected", found=found, total=total))
         else:
             summary_parts.append(f"Green dots: {good}. Red dots: {bad}.")
+        if protected:
+            summary_parts.append(self._t("gw.sector.yamaha_protection"))
         if bad:
             summary_parts.append(self._t("gw.sector.attention", count=bad))
 
@@ -5753,9 +6109,7 @@ class MidiTitleWindow(QMainWindow):
             summary.setWordWrap(True)
             layout.addWidget(summary)
 
-            legend = QLabel(self._t("gw.sector.legend"))
-            legend.setWordWrap(True)
-            layout.addWidget(legend)
+            layout.addWidget(self._build_gw_sector_legend(protected, dialog), 0, Qt.AlignLeft)
 
             pixmap = QPixmap(png_path)
             image_label = QLabel(dialog)
@@ -5793,6 +6147,14 @@ class MidiTitleWindow(QMainWindow):
         for report in reports or ():
             shown = self._show_greaseweazle_sector_report(report) or shown
         return shown
+
+    def _show_save_as_image_complete(self, message_id, **kwargs):
+        self._information_with_optional_hide(
+            setting_key=self.SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG,
+            title=self._t("save_as_image.complete.title"),
+            message=self._t(message_id, **kwargs),
+            checkbox_text="Do not show this dialog again",
+        )
 
     def _information_with_optional_hide(self, *, setting_key, title, message, checkbox_text):
         if self.settings.value(setting_key, False, type=bool):
@@ -6037,26 +6399,64 @@ class MidiTitleWindow(QMainWindow):
             self._is_adjusting_columns = False
 
     def toggle_compat_warnings(self, state):
-        self.settings.setValue(self.SETTING_SHOW_COMPAT_WARNING, bool(state))
+        enabled = bool(state)
+        self.settings.setValue(self.SETTING_SHOW_COMPAT_WARNING, enabled)
+        checkbox = getattr(self, "compat_warning_checkbox", None)
+        if checkbox is not None and checkbox.isChecked() != enabled:
+            checkbox.setChecked(enabled)
+        action = getattr(self, "viewLongTitleWarningAction", None)
+        if action is not None and action.isChecked() != enabled:
+            action.setChecked(enabled)
         self._update_compat_warning_ui()
         self._resize_table_columns_to_fill()
         if self._compat_warning_is_active():
             self.refresh_compat_indicators()
 
     def toggle_format_disklavier_screen(self, state):
-        self.settings.setValue(self.SETTING_FORMAT_DISKLAVIER_SCREEN, bool(state))
-
-    def _enable_disklavier_screen_format_option(self):
+        enabled = bool(state)
+        self.settings.setValue(self.SETTING_FORMAT_DISKLAVIER_SCREEN, enabled)
         checkbox = getattr(self, "format_disklavier_checkbox", None)
-        if checkbox is None:
-            return
-        if checkbox.isChecked():
-            self.settings.setValue(self.SETTING_FORMAT_DISKLAVIER_SCREEN, True)
-            return
-        checkbox.setChecked(True)
+        if checkbox is not None and checkbox.isChecked() != enabled:
+            checkbox.setChecked(enabled)
+        action = getattr(self, "viewFormatDisklavierScreenAction", None)
+        if action is not None and action.isChecked() != enabled:
+            action.setChecked(enabled)
 
     def toggle_store_backups(self, state):
-        self.settings.setValue(self.SETTING_STORE_BACKUPS, bool(state))
+        enabled = bool(state)
+        self.settings.setValue(self.SETTING_STORE_BACKUPS, enabled)
+        checkbox = getattr(self, "backup_checkbox", None)
+        if checkbox is not None and checkbox.isChecked() != enabled:
+            checkbox.setChecked(enabled)
+        action = getattr(self, "fileBackUpBeforeSavingAction", None)
+        if action is not None and action.isChecked() != enabled:
+            action.setChecked(enabled)
+
+    def toggle_hide_status(self, state):
+        hidden = bool(state)
+        self.settings.setValue(self.SETTING_HIDE_STATUS, hidden)
+        if hasattr(self, "statusWidget"):
+            self.statusWidget.setVisible(not hidden)
+        action = getattr(self, "viewHideStatusAction", None)
+        if action is not None and action.isChecked() != hidden:
+            action.setChecked(hidden)
+
+    def toggle_hide_quick_panel(self, state):
+        hidden = bool(state)
+        self.settings.setValue(self.SETTING_HIDE_QUICK_PANEL, hidden)
+        if hasattr(self, "quickPanelWidget"):
+            self.quickPanelWidget.setVisible(not hidden)
+        action = getattr(self, "viewHideQuickPanelAction", None)
+        if action is not None and action.isChecked() != hidden:
+            action.setChecked(hidden)
+
+    def toggle_hide_album_metadata(self, state):
+        hidden = bool(state)
+        self.settings.setValue(self.SETTING_HIDE_ALBUM_METADATA, hidden)
+        self._update_image_pianodir_metadata_ui()
+        action = getattr(self, "viewHideAlbumMetadataAction", None)
+        if action is not None and action.isChecked() != hidden:
+            action.setChecked(hidden)
 
     def _original_write_setting_key(self):
         if self.is_floppy_mode():
@@ -6090,8 +6490,23 @@ class MidiTitleWindow(QMainWindow):
         self.settings.setValue(setting_key, bool(state))
         self._update_floppy_save_option_ui()
 
+    def toggle_original_write_protection(self, protected):
+        setting_key = self._original_write_setting_key()
+        if setting_key is None:
+            self._update_floppy_save_option_ui()
+            return
+        self.settings.setValue(setting_key, not bool(protected))
+        self._update_floppy_save_option_ui()
+
     def toggle_album_subfolder(self, state):
-        self.settings.setValue(self.SETTING_ESEQ_EXPORT_ALBUM_SUBFOLDER, bool(state))
+        enabled = bool(state)
+        self.settings.setValue(self.SETTING_ESEQ_EXPORT_ALBUM_SUBFOLDER, enabled)
+        checkbox = getattr(self, "album_subfolder_checkbox", None)
+        if checkbox is not None and checkbox.isChecked() != enabled:
+            checkbox.setChecked(enabled)
+        action = getattr(self, "fileCreateAlbumSubfolderAction", None)
+        if action is not None and action.isChecked() != enabled:
+            action.setChecked(enabled)
 
     def is_image_mode(self):
         return self.image_session is not None
@@ -6108,16 +6523,23 @@ class MidiTitleWindow(QMainWindow):
     def _update_compat_warning_ui(self):
         locked = self._is_compat_warning_locked()
         self.compat_warning_checkbox.setEnabled(not locked)
+        action = getattr(self, "viewLongTitleWarningAction", None)
+        if action is not None:
+            action.setEnabled(not locked)
         if locked:
-            self.compat_warning_checkbox.setToolTip(
-                self._lt("Disabled while editing E-SEQ files because the 32-character limit is already enforced.")
-            )
+            tooltip = self._lt("Disabled while editing E-SEQ files because the 32-character limit is already enforced.")
+            self.compat_warning_checkbox.setToolTip(tooltip)
+            if action is not None:
+                action.setToolTip(tooltip)
+                action.setStatusTip(tooltip)
             self.table.setColumnHidden(5, True)
             self.title_delegate.set_highlight_enabled(False)
         else:
-            self.compat_warning_checkbox.setToolTip(
-                self._lt("Highlight title characters beyond the 32-character legacy compatibility limit.")
-            )
+            tooltip = self._lt("Highlight title characters beyond the 32-character legacy compatibility limit.")
+            self.compat_warning_checkbox.setToolTip(tooltip)
+            if action is not None:
+                action.setToolTip(tooltip)
+                action.setStatusTip(tooltip)
             self.table.setColumnHidden(5, not self.compat_warning_checkbox.isChecked())
             self.title_delegate.set_highlight_enabled(self.compat_warning_checkbox.isChecked())
         self.table.viewport().update()
@@ -6162,13 +6584,27 @@ class MidiTitleWindow(QMainWindow):
                 self.writeProtectToggle.setChecked(self._original_write_is_allowed())
                 self.writeProtectToggle.blockSignals(False)
                 self.writeProtectToggle._refresh_tooltip()
+        if hasattr(self, "fileWriteProtectOriginalAction"):
+            protected = not self._original_write_is_allowed() if show_original_write_toggle else True
+            target_label = "floppy" if is_floppy else ("image" if is_image else "original")
+            tooltip = (
+                f"Write protected for this {target_label}. Use Save As or Save As Image instead."
+                if protected else
+                f"Write enabled for this {target_label}. Save will modify the original."
+            )
+            self.fileWriteProtectOriginalAction.setEnabled(show_original_write_toggle)
+            self.fileWriteProtectOriginalAction.blockSignals(True)
+            self.fileWriteProtectOriginalAction.setChecked(protected)
+            self.fileWriteProtectOriginalAction.blockSignals(False)
+            self.fileWriteProtectOriginalAction.setToolTip(self._lt(tooltip))
+            self.fileWriteProtectOriginalAction.setStatusTip(self._lt(tooltip))
         if not hasattr(self, "saveButton"):
             return
 
         if is_floppy and not self._original_write_is_allowed():
             self.saveButton.setEnabled(False)
             self.saveButton.setToolTip(
-                self._lt("Original floppy write is protected. Turn on Overwrite Original, or use Save As or Save As Image.")
+                self._lt("Original floppy write is protected. Turn off File > Write Protection > Write-Protect Original, or use Save As or Save As Image.")
             )
             self.saveAsButton.setToolTip(
                 self._lt("Save the current floppy session's listed files to a destination folder and leave Floppy Mode.")
@@ -6189,7 +6625,7 @@ class MidiTitleWindow(QMainWindow):
         elif is_image and not self._original_write_is_allowed():
             self.saveButton.setEnabled(False)
             self.saveButton.setToolTip(
-                self._lt("Original image write is protected. Turn on Overwrite Original, or use Save As or Save As Image.")
+                self._lt("Original image write is protected. Turn off File > Write Protection > Write-Protect Original, or use Save As or Save As Image.")
             )
             self.saveAsButton.setToolTip(
                 self._lt("Save the current image session's listed files to a destination folder and leave Image Mode.")
@@ -6370,6 +6806,8 @@ class MidiTitleWindow(QMainWindow):
             )
             self.fileWriteImageToFloppyAction.setStatusTip(self.fileWriteImageToFloppyAction.toolTip())
 
+        self._refresh_trim_title_spaces_action_state()
+
         self.utilitiesRenameAction.setEnabled(self.renameAllButton.isEnabled())
         self.utilitiesRenameAction.setToolTip(self.renameAllButton.toolTip())
         self.utilitiesRenameAction.setStatusTip(self.renameAllButton.toolTip())
@@ -6426,6 +6864,22 @@ class MidiTitleWindow(QMainWindow):
                 if enabled else
                 "Please wait for the current operation to finish before changing metadata summary output."
             )
+        if hasattr(self, "fileCreateAlbumSubfolderAction"):
+            enabled = self.choose_button.isEnabled()
+            self.fileCreateAlbumSubfolderAction.setEnabled(enabled)
+            self.fileCreateAlbumSubfolderAction.setStatusTip(
+                "Create an album subfolder when exporting Yamaha E-SEQ files with album metadata."
+                if enabled else
+                "Please wait for the current operation to finish before changing album subfolder output."
+            )
+        if hasattr(self, "fileBackUpBeforeSavingAction"):
+            enabled = self.choose_button.isEnabled()
+            self.fileBackUpBeforeSavingAction.setEnabled(enabled)
+            self.fileBackUpBeforeSavingAction.setStatusTip(
+                "Create backups before overwriting files or images."
+                if enabled else
+                "Please wait for the current operation to finish before changing backup behavior."
+            )
         if hasattr(self, "fileAutoWriteProtectAction"):
             enabled = self.choose_button.isEnabled()
             self.fileAutoWriteProtectAction.setEnabled(enabled)
@@ -6434,6 +6888,26 @@ class MidiTitleWindow(QMainWindow):
                 if enabled else
                 "Please wait for the current operation to finish before changing write-protect behavior."
             )
+        if hasattr(self, "fileWriteProtectOriginalAction"):
+            enabled = self.choose_button.isEnabled() and self._original_write_setting_key() is not None
+            self.fileWriteProtectOriginalAction.setEnabled(enabled)
+            if not enabled and self._original_write_setting_key() is None:
+                self.fileWriteProtectOriginalAction.setStatusTip(
+                    "Open an image or floppy session before changing current write protection."
+                )
+        if hasattr(self, "viewFormatDisklavierScreenAction"):
+            self.viewFormatDisklavierScreenAction.setStatusTip(
+                "Use the Disklavier's two 16-character screen rows when editing titles."
+            )
+        if hasattr(self, "viewHideStatusAction"):
+            self.viewHideStatusAction.setStatusTip("Hide or show the operation status text beneath the file list.")
+        if hasattr(self, "viewHideQuickPanelAction"):
+            self.viewHideQuickPanelAction.setStatusTip("Hide or show the Options, Utilities, and File Actions panel.")
+        if hasattr(self, "viewHideAlbumMetadataAction"):
+            self.viewHideAlbumMetadataAction.setStatusTip("Hide or show the Album Title and Catalog Number fields.")
+        if hasattr(self, "viewLogsAction"):
+            self.viewLogsAction.setEnabled(True)
+            self.viewLogsAction.setStatusTip("Open a live view of console output from this session.")
 
         has_listed_files = self.choose_button.isEnabled() and any(
             self.table.item(row, 1) is not None and not self._is_special_pianodir_row(row)
@@ -6449,12 +6923,14 @@ class MidiTitleWindow(QMainWindow):
         self.loadedImagePianodirMetadata = metadata
         self.imagePianodirTitleEdit.setText(metadata.disk_title)
         self.imagePianodirCatalogEdit.setText(metadata.catalog_number)
+        self._update_image_pianodir_metadata_ui()
 
     def _set_loaded_regular_pianodir_metadata(self, metadata=None):
         metadata = metadata or PianodirMetadata()
         self.loadedRegularPianodirMetadata = metadata
         self.imagePianodirTitleEdit.setText(metadata.disk_title)
         self.imagePianodirCatalogEdit.setText(metadata.catalog_number)
+        self._update_image_pianodir_metadata_ui()
 
     def _current_image_pianodir_metadata(self):
         return PianodirMetadata(
@@ -6476,10 +6952,13 @@ class MidiTitleWindow(QMainWindow):
             self.imagePianodirCatalogEdit.setText(normalized)
 
     def _current_visible_pianodir_metadata(self):
-        if self._pianodir_metadata_fields_should_show() and self.is_image_mode():
+        if self.is_image_mode():
             return self._current_image_pianodir_metadata()
-        if self._pianodir_metadata_fields_should_show() and self.is_local_eseq_mode():
+        if self.is_local_eseq_mode():
             return self._current_regular_pianodir_metadata()
+        field_metadata = self._current_regular_pianodir_metadata()
+        if self._metadata_has_text(field_metadata):
+            return field_metadata
         if self._metadata_has_text(self.pendingExportPianodirMetadata):
             return self.pendingExportPianodirMetadata
         return PianodirMetadata()
@@ -6493,11 +6972,32 @@ class MidiTitleWindow(QMainWindow):
             )
         )
 
+    def _current_album_metadata_for_preservation(self):
+        metadata = self._current_visible_pianodir_metadata()
+        if self._metadata_has_text(metadata):
+            return metadata
+        return None
+
+    def _restore_album_metadata_if_needed(self, metadata):
+        if not self._metadata_has_text(metadata):
+            return
+        current_metadata = self._current_regular_pianodir_metadata()
+        if self._metadata_has_text(current_metadata):
+            self.pendingExportPianodirMetadata = current_metadata
+            return
+        self.pendingExportPianodirMetadata = metadata
+        if hasattr(self, "imagePianodirTitleEdit"):
+            self.imagePianodirTitleEdit.setText(metadata.disk_title)
+        if hasattr(self, "imagePianodirCatalogEdit"):
+            self.imagePianodirCatalogEdit.setText(metadata.catalog_number)
+        self._update_image_pianodir_metadata_ui()
+
     def _image_pianodir_metadata_changed(self):
         return (
             self.is_image_mode()
             and self.imageHasPianodir
             and not self.pendingDeletePianodir
+            and not self._is_clavinova_eseq_variant(self.imageEseqVariant)
             and self._current_image_pianodir_metadata() != self.loadedImagePianodirMetadata
         )
 
@@ -6505,11 +7005,17 @@ class MidiTitleWindow(QMainWindow):
         return (
             self.is_local_eseq_mode()
             and self.regularHasPianodir
+            and not self._is_clavinova_eseq_variant(self.regularEseqVariant)
             and self._current_regular_pianodir_metadata() != self.loadedRegularPianodirMetadata
         )
 
     def _image_pianodir_metadata_for_save(self):
-        if not self.is_image_mode() or not self.imageHasPianodir or self.pendingDeletePianodir:
+        if (
+            not self.is_image_mode()
+            or not self.imageHasPianodir
+            or self.pendingDeletePianodir
+            or self._is_clavinova_eseq_variant(self.imageEseqVariant)
+        ):
             return None
         metadata = self._current_image_pianodir_metadata()
         if metadata == self.loadedImagePianodirMetadata:
@@ -6517,7 +7023,11 @@ class MidiTitleWindow(QMainWindow):
         return metadata
 
     def _regular_pianodir_metadata_for_save(self):
-        if not self.is_local_eseq_mode() or not (self.regularHasPianodir or self.pendingGeneratePianodir):
+        if (
+            not self.is_local_eseq_mode()
+            or not (self.regularHasPianodir or self.pendingGeneratePianodir)
+            or self._is_clavinova_eseq_variant(self.regularEseqVariant)
+        ):
             return None
         metadata = self._current_regular_pianodir_metadata()
         if metadata == self.loadedRegularPianodirMetadata:
@@ -6536,19 +7046,19 @@ class MidiTitleWindow(QMainWindow):
         return self.is_local_eseq_mode() and (self.regularHasPianodir or self.pendingGeneratePianodir)
 
     def _album_subfolder_option_should_show(self):
-        return self._pianodir_metadata_fields_should_show() or (
-            self._metadata_has_text(self.pendingExportPianodirMetadata)
-            and (
-                bool(self.pendingRegularConversions)
-                or bool(self.pendingImageReplacements)
-                or bool(self.pendingImageRenames)
-            )
+        return (
+            self._pianodir_metadata_fields_should_show()
+            or self._metadata_has_text(self._current_visible_pianodir_metadata())
         )
 
+    def _album_metadata_fields_are_hidden(self):
+        return self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
+
     def _update_image_pianodir_metadata_ui(self):
-        should_show = self._pianodir_metadata_fields_should_show()
+        if not hasattr(self, "imagePianodirMetadataWidget"):
+            return
         album_option_should_show = self._album_subfolder_option_should_show()
-        self.imagePianodirMetadataWidget.setVisible(should_show or album_option_should_show)
+        self.imagePianodirMetadataWidget.setVisible(not self._album_metadata_fields_are_hidden())
         if hasattr(self, "album_subfolder_checkbox"):
             self.album_subfolder_checkbox.setVisible(album_option_should_show)
             self.album_subfolder_checkbox.setEnabled(album_option_should_show)
@@ -6616,6 +7126,28 @@ class MidiTitleWindow(QMainWindow):
         if text.upper() in reserved_names:
             text = f"{text} Album"
         return text[:150].rstrip(" .") or "Yamaha E-SEQ Disk"
+
+    def _catalog_filename_stem(self, metadata=None):
+        candidates = [metadata] if metadata is not None else [
+            self._current_visible_pianodir_metadata(),
+            self.loadedImagePianodirMetadata,
+            self.loadedRegularPianodirMetadata,
+            self.pendingExportPianodirMetadata,
+        ]
+        for candidate in candidates:
+            catalog_number = normalize_pianodir_catalog_number(
+                getattr(candidate, "catalog_number", "") or ""
+            )
+            stem = re.sub(r"[^A-Za-z0-9]+", "", catalog_number)[:150]
+            if stem:
+                if stem.upper() in {
+                    "CON", "PRN", "AUX", "NUL",
+                    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+                }:
+                    stem = f"{stem}Disk"
+                return stem
+        return ""
 
     def _album_subfolder_name(self):
         metadata = self._current_visible_pianodir_metadata()
@@ -6725,8 +7257,9 @@ class MidiTitleWindow(QMainWindow):
         self.pendingRegularConversions.clear()
         self.pendingRegularRenames.clear()
 
-    def _set_listed_file_info(self, full_path, *, title_mode="", midi_type="", is_midi=False, order_key=b""):
+    def _set_listed_file_info(self, full_path, *, title="", title_mode="", midi_type="", is_midi=False, order_key=b""):
         self.listedFileInfo[full_path] = {
+            "title": title or "",
             "title_mode": title_mode or "",
             "midi_type": midi_type or "",
             "is_midi": bool(is_midi),
@@ -7089,6 +7622,7 @@ class MidiTitleWindow(QMainWindow):
         copy_button.clicked.connect(lambda: QApplication.clipboard().setText(text_box.toPlainText()))
         close_button.clicked.connect(dialog.close)
         self.songListDialog = dialog
+        self._center_child_dialog(dialog)
         dialog.show()
 
     def _inspection_items(self):
@@ -7132,6 +7666,7 @@ class MidiTitleWindow(QMainWindow):
             initial_row = selected_row
         dialog = FileInspectionDialog(items, parent=self, initial_row=initial_row)
         self.fileInspectionDialog = dialog
+        self._center_child_dialog(dialog)
         dialog.show()
 
     def _supports_eseq_reordering(self):
@@ -7955,7 +8490,6 @@ class MidiTitleWindow(QMainWindow):
 
         self.regularEseqMode = self.regularHasPianodir or any(spec[4] == "eseq" for spec in regular_specs)
         if self.regularEseqMode:
-            self._enable_disklavier_screen_format_option()
             regular_specs.sort(
                 key=lambda spec: (
                     0 if spec[4] == "eseq" else 1,
@@ -8106,6 +8640,168 @@ class MidiTitleWindow(QMainWindow):
         else:
             tooltip = disabled_tooltip or "SMF1 -> SMF0 is not needed for the current list."
         self.convertType0Button.setToolTip(self._lt(tooltip))
+
+    @staticmethod
+    def _trim_title_spacing(title):
+        text = str(title or "").replace("\x00", " ")
+        if len(text) > 16 and text[15].islower() and text[16].isupper():
+            text = f"{text[:16]} {text[16:]}"
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _set_trim_title_spaces_enabled(self, enabled, disabled_tooltip=""):
+        if enabled:
+            tooltip = "Trim leading/trailing title spaces and collapse repeated spaces for every listed title."
+        else:
+            tooltip = disabled_tooltip or "No listed titles need spacing cleanup."
+        translated_tooltip = self._lt(tooltip)
+        self._trimTitleSpacesActionEnabled = bool(enabled)
+        self._trimTitleSpacesActionTooltip = translated_tooltip
+        action = getattr(self, "utilitiesTrimTitleSpacesAction", None)
+        if action is not None:
+            action.setEnabled(bool(enabled))
+            action.setToolTip(translated_tooltip)
+            action.setStatusTip(translated_tooltip)
+
+    def _row_title_mode(self, row):
+        path_item = self.table.item(row, 1)
+        if path_item is None:
+            return ""
+        if self.is_image_mode():
+            return self._image_path_title_mode(path_item.text())
+        return self._listed_file_title_mode(path_item.text())
+
+    def _row_has_real_title_for_trim(self, row, title_mode):
+        if title_mode not in {"midi", "eseq"}:
+            return False
+        path_item = self.table.item(row, 1)
+        if path_item is None:
+            return False
+        path = path_item.text()
+        if self.is_image_mode():
+            return path in self.pendingImageTitleEdits or bool(self._image_info_for_path(path).get("title", ""))
+        return path in self.pendingEdits or bool(self._listed_file_info(path).get("title", ""))
+
+    def _row_title_spacing_needs_trim(self, row):
+        if self._is_special_pianodir_row(row):
+            return False
+        title_mode = self._row_title_mode(row)
+        if not self._row_has_real_title_for_trim(row, title_mode):
+            return False
+        current_title = self._row_raw_title(row)
+        if current_title == "No title found.":
+            return False
+        return self._trim_title_spacing(current_title) != current_title
+
+    def _title_spacing_trim_needed(self):
+        for row in range(self.table.rowCount()):
+            if self._row_title_spacing_needs_trim(row):
+                return True
+        return False
+
+    def _refresh_trim_title_spaces_action_state(self):
+        if not self.choose_button.isEnabled():
+            self._set_trim_title_spaces_enabled(
+                False,
+                "Please wait for the current operation to finish before trimming title spaces.",
+            )
+            return
+        self._set_trim_title_spaces_enabled(
+            self._title_spacing_trim_needed(),
+            "No listed MIDI or E-SEQ titles need spacing cleanup.",
+        )
+
+    def _validate_trimmed_title(self, filename, title_mode, new_title):
+        if not new_title:
+            return f"{filename}: title would become blank."
+        validation_error = validate_legacy_title_input(new_title)
+        if validation_error:
+            return f"{filename}: {validation_error}"
+        if title_mode == "eseq" and len(new_title.encode("latin1")) > 32:
+            return f"{filename}: E-SEQ titles must be 32 characters or fewer."
+        return ""
+
+    def _stage_trimmed_title_for_row(self, row, new_title, title_mode):
+        path_item = self.table.item(row, 1)
+        filename_item = self.table.item(row, 3)
+        if path_item is None:
+            return False
+        path = path_item.text()
+        filename = filename_item.text() if filename_item is not None else os.path.basename(path)
+        if self.is_image_mode():
+            self.pendingImageTitleEdits[path] = new_title
+        else:
+            self.pendingEdits[path] = new_title
+        self.table.setItem(
+            row,
+            4,
+            self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename),
+        )
+        self._update_compat_indicator(row, new_title)
+        return True
+
+    def _stage_trim_title_spaces_for_all(self, *, show_summary=True):
+        changed_count = 0
+        errors = []
+        for row in range(self.table.rowCount()):
+            if not self._row_title_spacing_needs_trim(row):
+                continue
+            title_mode = self._row_title_mode(row)
+            current_title = self._row_raw_title(row)
+            new_title = self._trim_title_spacing(current_title)
+            filename_item = self.table.item(row, 3)
+            filename = filename_item.text() if filename_item is not None else "this file"
+            error = self._validate_trimmed_title(filename, title_mode, new_title)
+            if error:
+                errors.append(error)
+                continue
+            if self._stage_trimmed_title_for_row(row, new_title, title_mode):
+                changed_count += 1
+
+        if changed_count:
+            if self.is_image_mode():
+                self._reapply_image_centered_title_assumption()
+                write_hint = "Use Save, Save As, or Save As Image to write the updated titles."
+            else:
+                self._reapply_regular_centered_title_assumption()
+                write_hint = "Use Save, Save As, or Save As Image to write the updated titles."
+            self.status_label.setText(
+                f"Staged title spacing cleanup for {changed_count} file(s). {write_hint}"
+            )
+        elif show_summary and not errors:
+            QMessageBox.information(
+                self,
+                "Trim Titles Not Needed",
+                "No listed titles needed spacing cleanup.",
+            )
+
+        if errors:
+            self._show_error_list(
+                "Trim Titles Failed",
+                "Some titles could not be cleaned up",
+                errors,
+                warning=bool(changed_count),
+                guidance="Nothing has been written yet; review the listed files and try again",
+            )
+
+        self._update_floppy_save_option_ui()
+        if self.is_image_mode():
+            self._refresh_image_mode_action_state()
+        else:
+            self._refresh_regular_mode_action_state()
+        self._update_menu_actions()
+        return changed_count
+
+    def trim_title_spaces_for_all(self, _checked=False, *, show_summary=True):
+        if not self.choose_button.isEnabled():
+            QMessageBox.information(self, "Busy", "Please wait for the current operation to finish.")
+            return 0
+        return self._stage_trim_title_spaces_for_all(show_summary=show_summary)
+
+    def _apply_pending_floppy_read_title_trim(self):
+        if not self.pendingFloppyReadTrimTitles:
+            return 0
+        self.pendingFloppyReadTrimTitles = False
+        return self._stage_trim_title_spaces_for_all(show_summary=False)
 
     def _image_mode_file_counts(self):
         midi_count = 0
@@ -8762,6 +9458,20 @@ class MidiTitleWindow(QMainWindow):
 
         return callback
 
+    def _make_offset_progress_callback(self, progress_callback, base_step):
+        def callback(step, total, message):
+            try:
+                safe_step = int(step or 0)
+            except (TypeError, ValueError):
+                safe_step = 0
+            try:
+                safe_total = max(1, int(total or 1))
+            except (TypeError, ValueError):
+                safe_total = 1
+            progress_callback(base_step + safe_step, base_step + safe_total, message)
+
+        return callback
+
     def _make_dialog_button_box(self, buttons, parent):
         button_box = QDialogButtonBox(buttons, parent=parent)
         button_box.setContentsMargins(0, 8, 6, 4)
@@ -8926,7 +9636,7 @@ class MidiTitleWindow(QMainWindow):
             session = None
             progress_dialog.close()
             self.status_label.setText(
-                f"Created a new {disk_format.label} {mode_label} image. Use Save As Image or Write Current Image to Floppy when ready."
+                f"Created a new {disk_format.label} {mode_label} image. Use File > Save As Image... or Disk > Write Current Image to Floppy... when ready."
             )
         except Exception as exc:
             progress_dialog.close()
@@ -9727,6 +10437,23 @@ class MidiTitleWindow(QMainWindow):
         convert_layout.addWidget(convert_to_midi_checkbox, 0, 1)
         layout.addLayout(convert_layout)
 
+        trim_titles_checkbox = QCheckBox(self._lt("Trim title spaces after reading"))
+        trim_titles_checkbox.setChecked(
+            self.settings.value(self.SETTING_READ_FLOPPY_TRIM_TITLES, False, type=bool)
+        )
+        trim_titles_checkbox.setToolTip(
+            self._lt("After reading, remove leading/trailing title spaces and collapse repeated spaces.")
+        )
+
+        trim_layout = QGridLayout()
+        trim_layout.setContentsMargins(0, 0, 0, 0)
+        trim_layout.setHorizontalSpacing(12)
+        trim_layout.setColumnStretch(1, 1)
+        trim_label_spacer = QLabel("")
+        trim_layout.addWidget(trim_label_spacer, 0, 0)
+        trim_layout.addWidget(trim_titles_checkbox, 0, 1)
+        layout.addLayout(trim_layout)
+
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -9744,6 +10471,7 @@ class MidiTitleWindow(QMainWindow):
             gw_image_type_label,
             recovery_label_spacer,
             convert_label_spacer,
+            trim_label_spacer,
         ]
         form_label_width = max(label.sizeHint().width() for label in form_labels)
         for label in form_labels:
@@ -9791,8 +10519,10 @@ class MidiTitleWindow(QMainWindow):
         source_kind = source_combo.currentData()
         recover = recovery_checkbox.isChecked()
         convert_to_midi = convert_to_midi_checkbox.isChecked()
+        trim_titles = trim_titles_checkbox.isChecked()
         self.settings.setValue(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, convert_to_midi)
         self.settings.setValue(self.SETTING_READ_FLOPPY_START_RECOVERY, recover)
+        self.settings.setValue(self.SETTING_READ_FLOPPY_TRIM_TITLES, trim_titles)
         if source_kind == "floppy_usb":
             drive_info = drive_combo.currentData()
             if not isinstance(drive_info, FloppyDriveInfo):
@@ -9819,6 +10549,7 @@ class MidiTitleWindow(QMainWindow):
                     "progress_total": 100,
                     "offer_greaseweazle_capture": False,
                     "convert_to_midi": convert_to_midi,
+                    "trim_titles": trim_titles,
                 }
             return {
                 "load_kind": "floppy_usb",
@@ -9829,6 +10560,7 @@ class MidiTitleWindow(QMainWindow):
                 "progress_total": 100,
                 "offer_greaseweazle_capture": False,
                 "convert_to_midi": convert_to_midi,
+                "trim_titles": trim_titles,
             }
 
         selected_device = gw_device_combo.currentData()
@@ -9874,6 +10606,7 @@ class MidiTitleWindow(QMainWindow):
                 "progress_total": 100,
                 "offer_greaseweazle_capture": False,
                 "convert_to_midi": convert_to_midi,
+                "trim_titles": trim_titles,
             }
         progress_title = (
             "Reading Floppy via Greaseweazle (Raw SCP)"
@@ -9890,6 +10623,7 @@ class MidiTitleWindow(QMainWindow):
             "progress_total": progress_total,
             "offer_greaseweazle_capture": bool(save_image_ext),
             "convert_to_midi": convert_to_midi,
+            "trim_titles": trim_titles,
         }
 
     def _confirm_format_floppy(self, target_name, disk_format, *, eseq_disk=False, drive_size_bytes=0):
@@ -10555,7 +11289,7 @@ class MidiTitleWindow(QMainWindow):
         if reset_original_write:
             self._reset_original_write_permissions_for_new_media()
         self._apply_image_mode_ui()
-        self._load_image_rows(listing.entries, auto_enable_format=True)
+        self._load_image_rows(listing.entries)
 
         status = self._image_mode_summary()
         if session.repair_changed:
@@ -10596,10 +11330,7 @@ class MidiTitleWindow(QMainWindow):
             return
         if is_archival_scp:
             drive_name = self.image_session.gw_source.drive.lower()
-            catalog_number = normalize_pianodir_catalog_number(
-                getattr(self.loadedImagePianodirMetadata, "catalog_number", "")
-            )
-            default_stem = self._sanitize_export_folder_name(catalog_number) if catalog_number else ""
+            default_stem = self._catalog_filename_stem(self.loadedImagePianodirMetadata)
             if not default_stem:
                 default_stem = f"gw_drive_{drive_name}_raw"
             default_path = os.path.join(
@@ -10630,7 +11361,73 @@ class MidiTitleWindow(QMainWindow):
                     exc,
                 )
             return
-        self.save_image_as()
+        self._save_greaseweazle_read_image_now(preferred_ext)
+
+    def _save_greaseweazle_read_image_now(self, preferred_ext):
+        if self.image_session is None or self.image_session.source_kind != "floppy_gw":
+            return
+        preferred_ext = str(preferred_ext or "hfe").lower().lstrip(".") or "hfe"
+        filters, fallback_ext = output_filters(preferred_ext)
+        drive_name = "1"
+        if self.image_session.gw_source is not None:
+            drive_name = str(getattr(self.image_session.gw_source, "drive", "") or "1").lower()
+        catalog_stem = self._catalog_filename_stem()
+        source_stem = catalog_stem or f"gw_drive_{drive_name}"
+        default_suffix = "" if catalog_stem else "_edited"
+        source_dir = self._last_save_as_location(os.path.expanduser("~"))
+        default_path = os.path.join(source_dir, f"{source_stem}{default_suffix}.{preferred_ext or fallback_ext}")
+        output_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            self._lt("Save As Image"),
+            default_path,
+            filters,
+        )
+        if not output_path:
+            return
+
+        selected_ext = image_extension(output_path) or self._extension_from_filter(selected_filter) or fallback_ext
+        if not image_extension(output_path):
+            output_path = f"{output_path}.{selected_ext}"
+
+        progressDialog = QProgressDialog("Exporting floppy image...", None, 0, 5, self)
+        self._prepare_progress_dialog(progressDialog)
+        progressDialog.setAutoClose(False)
+        progressDialog.setCancelButton(None)
+        progress_callback = self._make_stage_progress_callback(progressDialog)
+        progress_callback(0, 5, "Preparing floppy export...")
+        QApplication.processEvents()
+
+        try:
+            # This post-read prompt is for preserving the just-read Greaseweazle disk image.
+            # Pending title edits remain staged for an explicit later Save/Save As Image.
+            source_img = str(getattr(self.image_session, "capture_path", "") or "")
+            if not source_img or not os.path.isfile(source_img):
+                source_img = self.image_session.working_img_path
+            self.image_session.write_image(
+                source_img,
+                output_path,
+                selected_ext,
+                progress_callback=progress_callback,
+            )
+            progress_callback(5, 5, "Finalizing floppy export...")
+            progressDialog.close()
+            self._remember_save_as_location(output_path)
+            self._show_save_as_image_complete(
+                "save_as_image.complete.saved_as",
+                filename=os.path.basename(output_path),
+            )
+            self.status_label.setText(
+                f"Saved Greaseweazle image as {os.path.basename(output_path)}.\n"
+                f"{self._image_mode_summary()}"
+            )
+        except Exception as exc:
+            progressDialog.close()
+            self._show_operation_error(
+                "Image Export Failed",
+                f"Could not create {os.path.basename(output_path)}",
+                exc,
+                guidance="Check that the destination folder is writable and that enough disk space is available",
+            )
 
     def _image_open_filters(self):
         common_exts = ("img", "vfd", "hfe", "bin")
@@ -10895,6 +11692,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadTrimTitles = False
         self._start_disk_load_worker(
             load_kind="image",
             source=image_path,
@@ -10914,6 +11712,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         self.pendingFloppyReadConvertToMidi = bool(options.get("convert_to_midi"))
+        self.pendingFloppyReadTrimTitles = bool(options.get("trim_titles"))
         if options.get("recover"):
             self._start_disk_recovery_worker(
                 {
@@ -11025,7 +11824,6 @@ class MidiTitleWindow(QMainWindow):
                     {
                         "type": "read",
                         "title": "Greaseweazle Read Sector Map",
-                        "summary": f"Read {source.display_name}.",
                         "sector_map": payload.get("sector_map") or {},
                         "disk_format": source.disk_format,
                     }
@@ -11082,7 +11880,7 @@ class MidiTitleWindow(QMainWindow):
             self.diskImageCaptureWorker.deleteLater()
             self.diskImageCaptureWorker = None
 
-    def _load_image_rows(self, entries, *, auto_enable_format=False):
+    def _load_image_rows(self, entries):
         self.imageFileInfo.clear()
         self.imageHasPianodir = False
         self.imagePianodirPopulated = False
@@ -11169,8 +11967,6 @@ class MidiTitleWindow(QMainWindow):
             self.imageEseqVariant = ESEQ_VARIANT_CLAVINOVA
 
         image_has_eseq_titles = self.imageHasPianodir or any(spec.get("title_mode") == "eseq" for spec in row_specs)
-        if image_has_eseq_titles and auto_enable_format:
-            self._enable_disklavier_screen_format_option()
         if image_has_eseq_titles:
             row_specs.sort(
                 key=lambda spec: (
@@ -12312,6 +13108,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         source_mode_name = self.image_session.mode_name if self.image_session is not None else "Image Mode"
+        album_metadata = self._current_album_metadata_for_preservation()
         self._reset_image_state()
 
         status_text = (
@@ -12321,6 +13118,7 @@ class MidiTitleWindow(QMainWindow):
         if omitted_count:
             status_text += f"\n{omitted_count} non-MIDI file(s) were not exported into MIDI Mode."
         self._load_midi_paths_into_list(midi_specs, status_text)
+        self._restore_album_metadata_if_needed(album_metadata)
 
     def _regular_used_output_filenames_for_directory(self, directory, *, exclude_row=None):
         directory_key = os.path.normcase(os.path.abspath(directory or ""))
@@ -12370,6 +13168,7 @@ class MidiTitleWindow(QMainWindow):
         self.pendingEdits.pop(source_path, None)
         self._set_listed_file_info(
             source_path,
+            title=title,
             title_mode=title_mode,
             midi_type=midi_type,
             is_midi=is_midi,
@@ -12722,6 +13521,7 @@ class MidiTitleWindow(QMainWindow):
             self.table.insertRow(row)
             self._set_listed_file_info(
                 full_path,
+                title=title,
                 title_mode=title_mode,
                 midi_type=midi_type,
                 is_midi=(title_mode == "midi"),
@@ -14216,12 +15016,16 @@ class MidiTitleWindow(QMainWindow):
         if delete_count == 0:
             return True
         container_label = "floppy disk" if self.is_floppy_mode() else "image"
+        entry_word = "file entry" if delete_count == 1 else "file entries"
+        title_id = "dialog.confirm_floppy_save.title" if self.is_floppy_mode() else "dialog.confirm_image_save.title"
         return self._confirm_with_optional_skip(
             setting_key=self.SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING,
-            title=f"Delete Files From {container_label.title()}",
-            message=(
-                f"Saving will permanently remove {delete_count} file(s) from the {container_label}.\n\n"
-                "Continue?"
+            title=self._t(title_id),
+            message=self._t(
+                "dialog.confirm_save_update.message",
+                count=delete_count,
+                entry_word=self._lt(entry_word),
+                container=self._lt(container_label),
             ),
         )
 
@@ -14235,14 +15039,14 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Save To Image Is Off",
-                "Use Save As to export files, use Save As Image to create a separate image, or enable Overwrite Original in File Actions.",
+                "Use Save As to export files, use Save As Image to create a separate image, or turn off File > Write Protection > Write-Protect Original.",
             )
             return
         if self.is_floppy_mode() and not self._original_write_is_allowed():
             QMessageBox.information(
                 self,
                 "Save To Floppy Is Off",
-                "Use Save As Image to save an image file, or enable Overwrite Original in File Actions.",
+                "Use Save As Image to save an image file, or turn off File > Write Protection > Write-Protect Original.",
             )
             return
         if not self._confirm_image_save_deletions():
@@ -14675,13 +15479,17 @@ class MidiTitleWindow(QMainWindow):
         if self.image_session.source_kind.startswith("floppy"):
             source_dir = os.path.expanduser("~")
             source_stem = "floppy_capture"
+            catalog_stem = ""
             if self.image_session.source_kind == "floppy_gw":
-                source_stem = f"gw_drive_{self.image_session.gw_source.drive.lower()}"
+                catalog_stem = self._catalog_filename_stem()
+                source_stem = catalog_stem or f"gw_drive_{self.image_session.gw_source.drive.lower()}"
         else:
             source_dir = os.path.dirname(self.image_session.source_path)
             source_stem = os.path.splitext(os.path.basename(self.image_session.source_path))[0]
+            catalog_stem = ""
         source_dir = self._last_save_as_location(source_dir)
-        default_path = os.path.join(source_dir, f"{source_stem}_edited.{default_ext or fallback_ext}")
+        default_suffix = "" if catalog_stem else "_edited"
+        default_path = os.path.join(source_dir, f"{source_stem}{default_suffix}.{default_ext or fallback_ext}")
         output_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             self._lt("Save As Image"),
@@ -14723,14 +15531,23 @@ class MidiTitleWindow(QMainWindow):
                 progress_callback=progress_callback,
             )
             export_sector_reports = getattr(self.image_session, "latest_gw_sector_reports", ())
-            progress_callback(5, 5, "Finalizing floppy export...")
-            progressDialog.close()
-            session = FloppyImageSession.load(output_path)
+            if self.image_session.source_kind == "floppy_gw":
+                export_sector_reports = ()
+            progress_callback(5, 9, "Opening saved floppy image...")
+            session = FloppyImageSession.load(
+                output_path,
+                progress_callback=self._make_offset_progress_callback(progress_callback, 5),
+            )
             listing = session.list_entries()
+            progress_callback(9, 9, "Finalizing floppy export...")
+            progressDialog.close()
             self._activate_disk_session(session, listing)
             self._remember_save_as_location(output_path)
             self._show_greaseweazle_sector_reports(export_sector_reports)
-            QMessageBox.information(self, "Save As Image Complete", f"Image saved as {os.path.basename(output_path)}.")
+            self._show_save_as_image_complete(
+                "save_as_image.complete.saved_as",
+                filename=os.path.basename(output_path),
+            )
             self.status_label.setText(self._image_mode_summary())
         except Exception as exc:
             progressDialog.close()
@@ -14998,22 +15815,24 @@ class MidiTitleWindow(QMainWindow):
                 progress_callback=progress_callback,
                 sector_report_callback=sector_reports.append,
             )
-            progressDialog.close()
 
             if len(output_paths) == 1:
-                session = FloppyImageSession.load(output_paths[0])
+                progress_callback(0, 4, "Opening saved floppy image...")
+                session = FloppyImageSession.load(output_paths[0], progress_callback=progress_callback)
                 listing = session.list_entries()
+                progress_callback(4, 4, "Finalizing floppy export...")
+                progressDialog.close()
                 self._activate_disk_session(session, listing)
                 self._remember_save_as_location(output_paths[0])
                 self._show_greaseweazle_sector_reports(sector_reports)
-                QMessageBox.information(
-                    self,
-                    "Save As Image Complete",
-                    f"Created {os.path.basename(output_paths[0])}.",
+                self._show_save_as_image_complete(
+                    "save_as_image.complete.created",
+                    filename=os.path.basename(output_paths[0]),
                 )
                 self.status_label.setText(self._image_mode_summary())
                 return
 
+            progressDialog.close()
             _, context_paths = self._materialize_export_context_files(file_specs, output_path)
             self._remember_save_as_location(output_paths[0] if output_paths else output_path)
             self._load_regular_files(
@@ -15026,10 +15845,10 @@ class MidiTitleWindow(QMainWindow):
             preview = "\n".join(os.path.basename(path) for path in output_paths[:10])
             if len(output_paths) > 10:
                 preview += f"\n...and {len(output_paths) - 10} more."
-            QMessageBox.information(
-                self,
-                "Save As Image Complete",
-                f"Created {len(output_paths)} image files:\n\n{preview}",
+            self._show_save_as_image_complete(
+                "save_as_image.complete.created_multiple",
+                count=len(output_paths),
+                preview=preview,
             )
             self._show_greaseweazle_sector_reports(sector_reports)
         except Exception as exc:
@@ -15348,6 +16167,9 @@ class MidiTitleWindow(QMainWindow):
                         break
             progressDialog.close()
             if not errors:
+                for full_path, update_spec in file_updates.items():
+                    if full_path in self.listedFileInfo and "title" in update_spec:
+                        self.listedFileInfo[full_path]["title"] = update_spec.get("title") or ""
                 for full_path, order_key in regular_order_key_edits.items():
                     if full_path in self.listedFileInfo:
                         self.listedFileInfo[full_path]["order_key"] = normalize_eseq_order_key(order_key)
@@ -15430,12 +16252,14 @@ class MidiTitleWindow(QMainWindow):
             try:
                 output_paths = self._export_image_session_files_to_folder(export_dir, progress_callback=progress_callback)
                 progressDialog.close()
+                album_metadata = self._current_album_metadata_for_preservation()
                 self._cleanup_midi_scratch_dir()
                 self._reset_image_state()
                 self._load_regular_files(
                     output_paths,
                     f"Current context moved to: \"{export_dir}\"",
                 )
+                self._restore_album_metadata_if_needed(album_metadata)
                 summary_errors, summary_path = self._write_metadata_summary_for_regular_rows(base_dir=export_dir)
                 message = "Files have been saved to the new folder."
                 if summary_path:

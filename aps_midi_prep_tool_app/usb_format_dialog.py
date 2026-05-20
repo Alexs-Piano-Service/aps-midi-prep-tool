@@ -1,3 +1,5 @@
+import os
+
 from PySide6.QtCore import QSize, Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -135,6 +137,7 @@ class UsbFormatDialog(QDialog):
         self.was_formatted = False
         self.format_result = None
         self._is_running = False
+        self.show_current_contents = os.name != "nt"
 
         self._build_ui()
         self._connect_ui()
@@ -186,12 +189,16 @@ class UsbFormatDialog(QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        self.warning_label = QLabel(
-            self._lt(
-                "Formatting erases the entire selected removable device and cannot be undone. "
-                "Confirm the device, capacity, and current contents before continuing."
-            )
+        warning_text = (
+            "Formatting erases the entire selected removable device and cannot be undone. "
+            "Confirm the device, capacity, and current contents before continuing."
         )
+        if not self.show_current_contents:
+            warning_text = (
+                "Formatting erases the entire selected removable device and cannot be undone. "
+                "Confirm the device and capacity before continuing."
+            )
+        self.warning_label = QLabel(self._lt(warning_text))
         self.warning_label.setWordWrap(True)
         self.warning_label.setStyleSheet(
             "QLabel { padding: 8px 10px; border: 1px solid #C57A00; background: #FFF4D6; color: #3D2A00; }"
@@ -247,28 +254,32 @@ class UsbFormatDialog(QDialog):
         format_layout.addWidget(self.label_edit, 4, 1, 1, 2)
         layout.addWidget(format_group)
 
-        preview_group = QGroupBox(self._lt("Current Contents"))
-        preview_layout = QHBoxLayout(preview_group)
-        usage_layout = QVBoxLayout()
-        usage_layout.setContentsMargins(0, 0, 0, 0)
-        usage_layout.setSpacing(6)
-        self.usage_chart = UsbUsagePieChart(preview_group)
-        usage_layout.addWidget(self.usage_chart, alignment=Qt.AlignHCenter)
-        self.usage_status_label = QLabel(preview_group)
-        self.usage_status_label.setWordWrap(True)
-        self.usage_status_label.setAlignment(Qt.AlignCenter)
-        self.usage_status_label.setMinimumWidth(160)
-        usage_layout.addWidget(self.usage_status_label)
-        usage_layout.addStretch()
-        preview_layout.addLayout(usage_layout)
-        self.contents_tree = QTreeWidget(preview_group)
-        self.contents_tree.setHeaderLabels([self._lt("Item"), self._lt("Size"), self._lt("Details")])
-        self.contents_tree.setRootIsDecorated(True)
-        self.contents_tree.setSelectionMode(QAbstractItemView.NoSelection)
-        self.contents_tree.setMinimumHeight(210)
-        self.contents_tree.setMinimumWidth(400)
-        preview_layout.addWidget(self.contents_tree, stretch=1)
-        layout.addWidget(preview_group, stretch=1)
+        self.usage_chart = None
+        self.usage_status_label = None
+        self.contents_tree = None
+        if self.show_current_contents:
+            preview_group = QGroupBox(self._lt("Current Contents"))
+            preview_layout = QHBoxLayout(preview_group)
+            usage_layout = QVBoxLayout()
+            usage_layout.setContentsMargins(0, 0, 0, 0)
+            usage_layout.setSpacing(6)
+            self.usage_chart = UsbUsagePieChart(preview_group)
+            usage_layout.addWidget(self.usage_chart, alignment=Qt.AlignHCenter)
+            self.usage_status_label = QLabel(preview_group)
+            self.usage_status_label.setWordWrap(True)
+            self.usage_status_label.setAlignment(Qt.AlignCenter)
+            self.usage_status_label.setMinimumWidth(160)
+            usage_layout.addWidget(self.usage_status_label)
+            usage_layout.addStretch()
+            preview_layout.addLayout(usage_layout)
+            self.contents_tree = QTreeWidget(preview_group)
+            self.contents_tree.setHeaderLabels([self._lt("Item"), self._lt("Size"), self._lt("Details")])
+            self.contents_tree.setRootIsDecorated(True)
+            self.contents_tree.setSelectionMode(QAbstractItemView.NoSelection)
+            self.contents_tree.setMinimumHeight(210)
+            self.contents_tree.setMinimumWidth(400)
+            preview_layout.addWidget(self.contents_tree, stretch=1)
+            layout.addWidget(preview_group, stretch=1)
 
         self.confirm_checkbox = QCheckBox(self._lt("I understand this will erase the selected USB stick."), self)
         layout.addWidget(self.confirm_checkbox)
@@ -352,14 +363,18 @@ class UsbFormatDialog(QDialog):
 
     def _refresh_selected_device(self):
         device = self._selected_device()
-        self.contents_tree.clear()
+        if self.contents_tree is not None:
+            self.contents_tree.clear()
         if device is None:
             self.device_detail_label.setText(
                 self._lt("Connect a USB stick, then refresh. Only storage devices reported by the operating system as removable are listed.")
             )
-            self.usage_chart.set_slices([])
-            self.usage_status_label.setText(self._lt("No readable usage"))
-            self._add_tree_message(self._lt("No removable USB stick is selected."))
+            if self.usage_chart is not None:
+                self.usage_chart.set_slices([])
+            if self.usage_status_label is not None:
+                self.usage_status_label.setText(self._lt("No readable usage"))
+            if self.contents_tree is not None:
+                self._add_tree_message(self._lt("No removable USB stick is selected."))
             self._refresh_action_state()
             return
 
@@ -368,8 +383,9 @@ class UsbFormatDialog(QDialog):
         if device.read_only:
             detail += f"\n{self._lt('This device is read-only and cannot be formatted.')}"
         self.device_detail_label.setText(detail)
-        self._populate_contents_tree(device)
-        self._populate_usage_chart(device)
+        if self.show_current_contents:
+            self._populate_contents_tree(device)
+            self._populate_usage_chart(device)
         self._refresh_action_state()
 
     def _populate_usage_chart(self, device):
@@ -411,6 +427,8 @@ class UsbFormatDialog(QDialog):
         )
 
     def _populate_contents_tree(self, device):
+        if self.contents_tree is None:
+            return
         if not device.volumes:
             self._add_tree_message(self._lt("No readable volumes or partitions were detected."))
             return
@@ -447,6 +465,8 @@ class UsbFormatDialog(QDialog):
             self.contents_tree.resizeColumnToContents(column)
 
     def _add_tree_message(self, message):
+        if self.contents_tree is None:
+            return
         item = QTreeWidgetItem([message, "", ""])
         item.setToolTip(0, message)
         self.contents_tree.addTopLevelItem(item)
