@@ -180,7 +180,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>E-SEQ titles are limited to 32 characters.</li>
                   <li>In any E-SEQ mode, dropped MIDI files are staged as E-SEQ and Type 1 MIDI is converted to Type 0 first.</li>
                   <li>The tool can generate or refresh <strong>PIANODIR.FIL</strong>.</li>
-                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> controls album folders when exporting files.</li>
+                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> controls album folders only for <strong>File &gt; Save As...</strong> folder exports.</li>
                   <li>E-SEQ disks support up to 60 songs, and floppy/image size limits still apply.</li>
                 </ul>
                 """,
@@ -219,7 +219,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li><strong>File &gt; Save As Image...</strong> creates a new image file.</li>
                   <li><strong>File &gt; Write Protection &gt; Write-Protect Original</strong> keeps Save from overwriting images or floppies until you turn protection off.</li>
                   <li><strong>File &gt; Save Options &gt; Back up before Saving</strong> creates backups before overwriting.</li>
-                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> creates album folders for Yamaha E-SEQ exports.</li>
+                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> creates album folders for <strong>File &gt; Save As...</strong> exports only. It never changes <strong>Save As Image</strong> or floppy-write destinations.</li>
                   <li><strong>File &gt; Save Options &gt; Create Tag Sidecars When Saving</strong> creates optional tag sidecar files only for local folder saves.</li>
                   <li><strong>File &gt; Save Options &gt; Create Metadata Summary When Saving</strong> creates an optional MIDI metadata summary for folder saves.</li>
                   <li><strong>View &gt; View Logs...</strong> shows live console output for troubleshooting.</li>

@@ -65,7 +65,7 @@ before you write anything back.
   status visibility, quick-panel visibility, album-info visibility, and realtime
   console logs.
 - Shows an empty-list drop target and highlights the file list during supported
-  file drags so MIDI and E-SEQ files are easier to add.
+  file drags so MIDI, E-SEQ, and disk-image files are easier to add.
 - Provides `Help > Report a Bug...` for sending a support report with app
   details and optional recent console logs.
 - Provides customizable keyboard shortcuts for current File, Disk, View,
@@ -105,8 +105,10 @@ Enable `File > Save Options > Back up before Saving` when you want APS MIDI
 Prep Tool to create a backup before overwriting local files or disk images.
 
 Enable `File > Save Options > Create Album Subfolder` when exporting Yamaha
-E-SEQ files and you want the destination folder grouped by the current album
-title and catalog number.
+E-SEQ files with `File > Save As...` and you want the destination folder
+grouped by the current album title and catalog number. Save As confirms whether
+it used an album subfolder or saved directly in the selected folder. This option
+does not affect `File > Save As Image...` or floppy writes.
 
 ### Prepare A Nalbantov USB Stick Image
 
@@ -145,6 +147,7 @@ The conversion is staged first. Original files are not modified until you save.
 - `PIANODIR.FIL` is generated or refreshed on save when needed.
 - `File > Save Options > Create Album Subfolder` controls whether folder
   exports use the current album title and catalog number for a subfolder.
+  Image saves and floppy writes always use the path or device you choose.
 
 ### Inspect A Song
 
@@ -183,8 +186,10 @@ session. It is useful when checking Greaseweazle, mtools, format, or conversion
 output while the app is still running.
 
 Use `Help > Report a Bug...` to send a bug report. The dialog can include a
-large recent tail of the live console log along with app and operating-system
-details.
+recent section of the live console log along with app and operating-system
+details. Unexpected operation-failure dialogs may also offer `Report This
+Bug...`, which opens the same report form with the error details already filled
+in.
 
 Use `Settings > Keyboard Shortcuts...` to review or customize the default
 hotkeys for all current File, Disk, View, Utilities, Settings, and Help menu

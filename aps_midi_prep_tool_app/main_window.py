@@ -3064,15 +3064,12 @@ class MidiTitleWindow(QMainWindow):
         self.album_subfolder_checkbox = QCheckBox("Create Album Subfolder")
         self.album_subfolder_checkbox.setChecked(use_album_subfolder)
         self.album_subfolder_checkbox.setToolTip(
-            "When exporting E-SEQ files or converting them to MIDI, place the files in a folder named from the catalog number and album title."
+            self._lt("For Save As folder exports, create a subfolder from the catalog number and album title. Save As Image and floppy writes are not affected.")
         )
         self.album_subfolder_checkbox.toggled.connect(self.toggle_album_subfolder)
-        self.album_subfolder_checkbox.setVisible(False)
         pianodir_meta_layout.addWidget(self.album_subfolder_checkbox)
 
-        self.imagePianodirMetadataWidget.setVisible(
-            not self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
-        )
+        self.imagePianodirMetadataWidget.setVisible(True)
         main_layout.addWidget(self.imagePianodirMetadataWidget)
         main_layout.addWidget(self.modeBannerLabel)
 
@@ -3108,7 +3105,7 @@ class MidiTitleWindow(QMainWindow):
         self.fileCreateAlbumSubfolderAction.setCheckable(True)
         self.fileCreateAlbumSubfolderAction.setChecked(self.album_subfolder_checkbox.isChecked())
         self.fileCreateAlbumSubfolderAction.setToolTip(
-            "When saving Yamaha E-SEQ files to a folder, create a subfolder named from the album title and catalog number."
+            self._lt("For Save As folder exports, create a subfolder from the catalog number and album title. Save As Image and floppy writes are not affected.")
         )
         self.fileCreateAlbumSubfolderAction.toggled.connect(self.toggle_album_subfolder)
 
@@ -3237,7 +3234,9 @@ class MidiTitleWindow(QMainWindow):
         self.viewHideAlbumMetadataAction.setChecked(
             self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
         )
-        self.viewHideAlbumMetadataAction.setToolTip("Hide the Album Title and Catalog Number fields.")
+        self.viewHideAlbumMetadataAction.setToolTip(
+            self._lt("Hide the Album Title and Catalog Number fields. Create Album Subfolder stays visible.")
+        )
         self.viewHideAlbumMetadataAction.toggled.connect(self.toggle_hide_album_metadata)
         self.viewMenu.addAction(self.viewHideAlbumMetadataAction)
 
@@ -4013,6 +4012,31 @@ class MidiTitleWindow(QMainWindow):
             return text
         return f"{text}."
 
+    def _prefilled_bug_report_details(self, message):
+        text = str(message or "").strip()
+        if not text:
+            return ""
+        return f"{self._lt('Error message shown by the app:')}\n\n{text}"
+
+    def _show_reportable_error_message(self, icon, title, message, *, offer_report=True):
+        box = QMessageBox(self)
+        apply_window_icon(box)
+        box.setIcon(icon)
+        box.setWindowTitle(self._lt(title))
+        box.setText(message)
+        ok_button = box.addButton(QMessageBox.Ok)
+        report_button = None
+        if offer_report:
+            report_button = box.addButton(self._lt("Report This Bug..."), QMessageBox.ActionRole)
+        box.setDefaultButton(ok_button)
+        self._exec_child_dialog(box)
+        if report_button is not None and box.clickedButton() is report_button:
+            self.show_bug_report_dialog(
+                summary=self._lt(title),
+                description=self._prefilled_bug_report_details(message),
+                include_logs=True,
+            )
+
     def _show_operation_error(self, title, summary, detail=None, *, guidance=None):
         detail_text = self._clean_error_detail(detail)
         message = self._ensure_sentence(self._lt(summary))
@@ -4021,7 +4045,7 @@ class MidiTitleWindow(QMainWindow):
         guidance_text = self._lt(guidance) if guidance is not None else self._guidance_for_error_detail(detail_text)
         if guidance_text:
             message += f"\n\n{self._ensure_sentence(guidance_text)}"
-        QMessageBox.critical(self, self._lt(title), message)
+        self._show_reportable_error_message(QMessageBox.Critical, title, message)
 
     def _limited_message_list(self, messages, *, max_rows=10):
         cleaned = [str(message).strip() for message in messages if str(message).strip()]
@@ -4038,7 +4062,7 @@ class MidiTitleWindow(QMainWindow):
         if warning:
             QMessageBox.warning(self, self._lt(title), message)
         else:
-            QMessageBox.critical(self, self._lt(title), message)
+            self._show_reportable_error_message(QMessageBox.Critical, title, message)
 
     def _apply_stage_progress(self, dialog, step, total, message):
         if dialog is None:
@@ -6974,12 +6998,19 @@ class MidiTitleWindow(QMainWindow):
             )
         if hasattr(self, "fileCreateAlbumSubfolderAction"):
             enabled = self.choose_button.isEnabled()
-            self.fileCreateAlbumSubfolderAction.setEnabled(enabled)
-            self.fileCreateAlbumSubfolderAction.setStatusTip(
-                "Create an album subfolder when exporting Yamaha E-SEQ files with album metadata."
-                if enabled else
-                "Please wait for the current operation to finish before changing album subfolder output."
+            album_subfolder_tooltip = self._lt(
+                "For Save As folder exports, create a subfolder from the catalog number and album title. Save As Image and floppy writes are not affected."
             )
+            self.fileCreateAlbumSubfolderAction.setEnabled(enabled)
+            self.fileCreateAlbumSubfolderAction.setToolTip(album_subfolder_tooltip)
+            self.fileCreateAlbumSubfolderAction.setStatusTip(
+                self._lt("Create an album subfolder only for Save As folder exports.")
+                if enabled else
+                self._lt("Please wait for the current operation to finish before changing album subfolder output.")
+            )
+            if hasattr(self, "album_subfolder_checkbox"):
+                self.album_subfolder_checkbox.setEnabled(enabled)
+                self.album_subfolder_checkbox.setToolTip(album_subfolder_tooltip)
         if hasattr(self, "fileBackUpBeforeSavingAction"):
             enabled = self.choose_button.isEnabled()
             self.fileBackUpBeforeSavingAction.setEnabled(enabled)
@@ -7012,7 +7043,9 @@ class MidiTitleWindow(QMainWindow):
         if hasattr(self, "viewHideQuickPanelAction"):
             self.viewHideQuickPanelAction.setStatusTip("Hide or show the Options, Utilities, and File Actions panel.")
         if hasattr(self, "viewHideAlbumMetadataAction"):
-            self.viewHideAlbumMetadataAction.setStatusTip("Hide or show the Album Title and Catalog Number fields.")
+            album_info_tip = self._lt("Hide the Album Title and Catalog Number fields. Create Album Subfolder stays visible.")
+            self.viewHideAlbumMetadataAction.setToolTip(album_info_tip)
+            self.viewHideAlbumMetadataAction.setStatusTip(album_info_tip)
         if hasattr(self, "viewLogsAction"):
             self.viewLogsAction.setEnabled(True)
             self.viewLogsAction.setStatusTip("Open a live view of console output from this session.")
@@ -7153,7 +7186,7 @@ class MidiTitleWindow(QMainWindow):
             )
         return self.is_local_eseq_mode() and (self.regularHasPianodir or self.pendingGeneratePianodir)
 
-    def _album_subfolder_option_should_show(self):
+    def _album_subfolder_metadata_available(self):
         return (
             self._pianodir_metadata_fields_should_show()
             or self._metadata_has_text(self._current_visible_pianodir_metadata())
@@ -7165,11 +7198,21 @@ class MidiTitleWindow(QMainWindow):
     def _update_image_pianodir_metadata_ui(self):
         if not hasattr(self, "imagePianodirMetadataWidget"):
             return
-        album_option_should_show = self._album_subfolder_option_should_show()
-        self.imagePianodirMetadataWidget.setVisible(not self._album_metadata_fields_are_hidden())
+        album_fields_visible = not self._album_metadata_fields_are_hidden()
+        self.imagePianodirMetadataWidget.setVisible(True)
+        for widget_name in (
+            "albumTitleLabel",
+            "imagePianodirTitleEdit",
+            "catalogNumberLabel",
+            "imagePianodirCatalogEdit",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(album_fields_visible)
         if hasattr(self, "album_subfolder_checkbox"):
-            self.album_subfolder_checkbox.setVisible(album_option_should_show)
-            self.album_subfolder_checkbox.setEnabled(album_option_should_show)
+            enabled = bool(getattr(self, "choose_button", None) is None or self.choose_button.isEnabled())
+            self.album_subfolder_checkbox.setVisible(True)
+            self.album_subfolder_checkbox.setEnabled(enabled)
 
     def _set_regular_mode_context(self, *, preferred_path="", file_paths=None):
         context_path = ""
@@ -7271,13 +7314,28 @@ class MidiTitleWindow(QMainWindow):
         return bool(
             checkbox is not None
             and checkbox.isChecked()
-            and self._album_subfolder_option_should_show()
+            and self._album_subfolder_metadata_available()
         )
 
     def _destination_with_album_subfolder(self, dest_dir):
         if not self._album_subfolder_option_applies():
             return dest_dir
         return os.path.join(dest_dir, self._album_subfolder_name())
+
+    def _save_as_album_subfolder_note(self, dest_dir, export_dir):
+        checkbox = getattr(self, "album_subfolder_checkbox", None)
+        if checkbox is None or not checkbox.isChecked():
+            return ""
+        dest_path = os.path.normcase(os.path.abspath(dest_dir))
+        export_path = os.path.normcase(os.path.abspath(export_dir))
+        if dest_path != export_path:
+            folder_name = os.path.basename(os.path.normpath(export_dir))
+            return self._lt("Saved in album subfolder: {folder}").format(folder=folder_name)
+        if not self._album_subfolder_metadata_available():
+            return self._lt(
+                "Create Album Subfolder is on, but no album title or catalog number is available, so files were saved directly in the selected folder."
+            )
+        return ""
 
     def _existing_directory_for_dialog_path(self, path):
         path = str(path or "").strip()
@@ -13835,6 +13893,11 @@ class MidiTitleWindow(QMainWindow):
         split_at = max(1, min(len(cleaned) - 1, len(cleaned) // 2))
         return cleaned[:split_at].strip(), cleaned[split_at:].strip()
 
+    @staticmethod
+    def _split_title_for_screen_fields(title):
+        text = str(title or "")[:32]
+        return text[:16], text[16:32]
+
     def _title_looks_centered(self, title):
         if not title or not title.strip():
             return False
@@ -14119,6 +14182,7 @@ class MidiTitleWindow(QMainWindow):
         self.table.setItem(row, 4, new_title_item)
         self._update_compat_indicator(row, new_title)
         self._reapply_image_centered_title_assumption()
+        self._update_menu_actions()
 
         warning = ""
         if self._compat_warning_is_active() and self._is_title_too_long(new_title):
@@ -14999,9 +15063,21 @@ class MidiTitleWindow(QMainWindow):
         ok_button = buttons.button(QDialogButtonBox.Ok)
         dialog_layout.addWidget(buttons)
 
+        initial_screen_fields = ["", ""]
+
+        def screen_fields_changed():
+            if not use_screen_format:
+                return False
+            return (
+                first_field.text()[:16] != initial_screen_fields[0]
+                or second_field.text()[:16] != initial_screen_fields[1]
+            )
+
         def composed_title():
             if use_screen_format:
-                return first_field.text()[:16].ljust(16) + second_field.text()[:16].ljust(16)
+                if not screen_fields_changed():
+                    return current_title
+                return first_field.text()[:16].rstrip() + second_field.text()[:16].rstrip()
             return editor.text()
 
         def update_state():
@@ -15033,12 +15109,11 @@ class MidiTitleWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
 
         if use_screen_format:
-            field_one, field_two = self._split_title_for_center_fields(
-                current_title,
-                enforce_limit=True,
-            )
+            field_one, field_two = self._split_title_for_screen_fields(current_title)
             first_field.setText(field_one)
             second_field.setText(field_two)
+            initial_screen_fields[0] = first_field.text()[:16]
+            initial_screen_fields[1] = second_field.text()[:16]
             field_stack.setCurrentWidget(centered_fields_widget)
         else:
             field_stack.setCurrentWidget(editor_page)
@@ -15088,6 +15163,7 @@ class MidiTitleWindow(QMainWindow):
             self.table.setItem(row, 4, new_title_item)
             self._update_compat_indicator(row, new_title)
             self._reapply_regular_centered_title_assumption()
+            self._update_menu_actions()
             warning = ""
             if self._compat_warning_is_active() and self._is_title_too_long(new_title):
                 warning = f"\nCompatibility warning: over {self.TITLE_COMPAT_LIMIT} characters."
@@ -15512,7 +15588,7 @@ class MidiTitleWindow(QMainWindow):
             },
         }
 
-    def show_bug_report_dialog(self):
+    def show_bug_report_dialog(self, _checked=False, *, summary="", description="", contact="", include_logs=True):
         dialog = QDialog(self)
         apply_window_icon(dialog)
         dialog.setWindowTitle(self._lt("Report a Bug"))
@@ -15538,11 +15614,17 @@ class MidiTitleWindow(QMainWindow):
 
         summary_edit = QLineEdit(dialog)
         summary_edit.setPlaceholderText(self._lt("Short summary"))
+        if summary:
+            summary_edit.setText(str(summary))
         description_edit = QPlainTextEdit(dialog)
         description_edit.setPlaceholderText(self._lt("What happened? What did you expect instead?"))
         description_edit.setMinimumHeight(150)
+        if description:
+            description_edit.setPlainText(str(description))
         contact_edit = QLineEdit(dialog)
         contact_edit.setPlaceholderText(self._lt("Optional email or contact info"))
+        if contact:
+            contact_edit.setText(str(contact))
 
         form_grid = self._make_dialog_form_grid()
         labels = [
@@ -15554,7 +15636,7 @@ class MidiTitleWindow(QMainWindow):
         layout.addLayout(form_grid)
 
         include_logs_checkbox = QCheckBox(self._lt("Include recent console logs"), dialog)
-        include_logs_checkbox.setChecked(True)
+        include_logs_checkbox.setChecked(bool(include_logs))
         layout.addWidget(include_logs_checkbox)
 
         log_note = QLabel(self._lt("Adds recent console output to help diagnose the problem."))
@@ -16618,13 +16700,14 @@ class MidiTitleWindow(QMainWindow):
             if not dest_dir:
                 return
             export_dir = self._destination_with_album_subfolder(dest_dir)
+            album_subfolder_note = self._save_as_album_subfolder_note(dest_dir, export_dir)
 
-            progressDialog = QProgressDialog("Saving files to new folder...", None, 0, max(1, self.table.rowCount()), self)
+            progressDialog = QProgressDialog(self._lt("Saving files to new folder..."), None, 0, max(1, self.table.rowCount()), self)
             self._prepare_progress_dialog(progressDialog)
             progressDialog.setAutoClose(False)
             progressDialog.setCancelButton(None)
             progress_callback = self._make_stage_progress_callback(progressDialog)
-            progress_callback(0, max(1, self.table.rowCount()), "Preparing exported files...")
+            progress_callback(0, max(1, self.table.rowCount()), self._lt("Preparing exported files..."))
             QApplication.processEvents()
 
             try:
@@ -16639,9 +16722,13 @@ class MidiTitleWindow(QMainWindow):
                 )
                 self._restore_album_metadata_if_needed(album_metadata)
                 summary_errors, summary_path = self._write_metadata_summary_for_regular_rows(base_dir=export_dir)
-                message = "Files have been saved to the new folder."
+                message = self._lt("Files have been saved to the new folder.")
+                if album_subfolder_note:
+                    message += f"\n\n{album_subfolder_note}"
                 if summary_path:
-                    message += f"\n\nMetadata summary written to {os.path.basename(summary_path)}."
+                    message += "\n\n" + self._lt("Metadata summary written to {filename}.").format(
+                        filename=os.path.basename(summary_path)
+                    )
                 if summary_errors:
                     self._show_error_list(
                         "Metadata Summary Failed",
@@ -16649,7 +16736,7 @@ class MidiTitleWindow(QMainWindow):
                         summary_errors,
                     )
                 self._remember_save_as_location(dest_dir)
-                QMessageBox.information(self, "Save As Complete", message)
+                QMessageBox.information(self, self._lt("Save As Complete"), message)
             except Exception as exc:
                 progressDialog.close()
                 self._show_operation_error(
@@ -16675,9 +16762,10 @@ class MidiTitleWindow(QMainWindow):
         if self.is_local_eseq_mode() and not self._ensure_pianodir_generation_for_save():
             return
         export_dir = self._destination_with_album_subfolder(dest_dir)
+        album_subfolder_note = self._save_as_album_subfolder_note(dest_dir, export_dir)
         os.makedirs(export_dir, exist_ok=True)
 
-        progressDialog = QProgressDialog("Saving files to new folder...", "Cancel", 0, max(1, self._regular_file_count()), self)
+        progressDialog = QProgressDialog(self._lt("Saving files to new folder..."), self._lt("Cancel"), 0, max(1, self._regular_file_count()), self)
         self._prepare_progress_dialog(progressDialog)
         row_count = self._regular_file_count()
         regular_order_key_edits = self._regular_eseq_order_key_edits() if self.is_local_eseq_mode() else {}
@@ -16742,10 +16830,14 @@ class MidiTitleWindow(QMainWindow):
                 output_paths,
                 f"Current context moved to: \"{export_dir}\"",
             )
-            message = "Files have been saved to the new folder."
+            message = self._lt("Files have been saved to the new folder.")
+            if album_subfolder_note:
+                message += f"\n\n{album_subfolder_note}"
             if self._tag_sidecars_enabled():
-                message += "\n\n.tags.txt sidecar file(s) were written next to the exported files."
+                message += "\n\n" + self._lt(".tags.txt sidecar file(s) were written next to the exported files.")
             if summary_path:
-                message += f"\n\nMetadata summary written to {os.path.basename(summary_path)}."
+                message += "\n\n" + self._lt("Metadata summary written to {filename}.").format(
+                    filename=os.path.basename(summary_path)
+                )
             self._remember_save_as_location(dest_dir)
-            QMessageBox.information(self, "Save As Complete", message)
+            QMessageBox.information(self, self._lt("Save As Complete"), message)

@@ -16,7 +16,8 @@ with release sections grouped by version and date.
 - Default keyboard shortcuts for the current File, Disk, View, Utilities, Settings, and Help menu commands.
 - Optional `Do not show this dialog again` choice for Save As Image completion messages.
 - `Trim Title Spaces` utility and hotkey, plus a Read Floppy option to clean Disklavier-spaced titles after normal or Greaseweazle reads.
-- `Help > Report a Bug...` action with a support-report dialog that sends app context and an optional recent console-log tail.
+- `Help > Report a Bug...` action with a support-report dialog that sends app context and optional recent console output.
+- `Report This Bug...` button on unexpected operation-failure dialogs, prefilled with the error message and recent logs enabled.
 - Empty file-list overlay text plus drag-hover highlighting for supported file drops.
 
 ### Changed
@@ -24,6 +25,8 @@ with release sections grouped by version and date.
 - Welcome workflows and README guidance now reflect the current menu labels and safety options.
 - Menus were reorganized so File focuses on source/save behavior, Disk focuses on floppy and media operations, and Utilities focuses on inspection and batch conversion tools.
 - Album Title and Catalog Number remain visible by default for Save As album-folder workflows, can be hidden from View, and refresh or blank when a disk is read.
+- `Create Album Subfolder` now stays visible even when Album Title and Catalog Number are hidden, and Save As now states whether it used the album subfolder or saved directly in the selected folder.
+- Save As folder-export language now clarifies that album subfolders never affect Save As Image or floppy writes.
 - Image and floppy save confirmation wording now describes renamed files as updates rather than removals.
 - Write-protect wording is consistently hyphenated as `Write-Protect Original`.
 
@@ -48,6 +51,7 @@ with release sections grouped by version and date.
 - The immediate post-read Greaseweazle HFE save now writes the just-read capture directly instead of applying repairs or staged title edits meant for a later explicit Save As Image.
 - Modal dialogs and progress windows now recenter when their contents resize, including Greaseweazle read messages and possible Yamaha copy-protection notes.
 - Album Title and Catalog Number now remain populated when saving/exporting a disk session switches the app back to MIDI Mode.
+- `Trim Title Spaces` now refreshes immediately after manual title edits, and the Disklavier screen title editor now shows the existing 16-character title lines directly without adding automatic padding.
 
 ## [0.6.1] - 2026-05-05
 
