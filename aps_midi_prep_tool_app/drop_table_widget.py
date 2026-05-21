@@ -13,6 +13,7 @@ class DropTableWidget(QTableWidget):
         super().__init__(rows, columns, parent)
         self.setAcceptDrops(True)
         self._drag_invite_active = False
+        self._drag_urls_supported_for_current_drag = None
 
     def _lt(self, text):
         window = self.window()
@@ -109,30 +110,79 @@ class DropTableWidget(QTableWidget):
         return False
 
     def _can_accept_drag_path(self, main_window, file_path):
-        if is_supported_image_path(file_path):
+        if not file_path:
+            return False
+        if self._safe_is_supported_image_path(file_path):
             return True
-        if getattr(main_window, "can_accept_electone_evt_path", lambda _path: False)(file_path):
+        if self._safe_main_window_path_check(main_window, "can_accept_electone_evt_path", file_path):
             return True
-        if getattr(main_window, "can_accept_v50_nseq_path", lambda _path: False)(file_path):
+        if self._safe_main_window_path_check(main_window, "can_accept_v50_nseq_path", file_path):
             return True
-        if getattr(main_window, "can_accept_mpc_seq_path", lambda _path: False)(file_path):
+        if self._safe_main_window_path_check(main_window, "can_accept_mpc_seq_path", file_path):
             return True
-        if getattr(main_window, "is_image_mode", lambda: False)() and os.path.isfile(file_path):
+        if self._safe_main_window_call(main_window, "is_image_mode") and self._safe_is_file(file_path):
             return True
-        return bool(getattr(main_window, "can_accept_regular_drop_path", lambda _path: False)(file_path))
+        return self._safe_main_window_path_check(main_window, "can_accept_regular_drop_path", file_path)
+
+    def _safe_is_supported_image_path(self, file_path):
+        try:
+            return bool(file_path and is_supported_image_path(file_path))
+        except Exception:
+            return False
+
+    def _safe_is_file(self, file_path):
+        try:
+            return bool(file_path and os.path.isfile(file_path))
+        except Exception:
+            return False
+
+    def _safe_main_window_call(self, main_window, method_name):
+        method = getattr(main_window, method_name, None)
+        if not callable(method):
+            return False
+        try:
+            return bool(method())
+        except Exception:
+            return False
+
+    def _safe_main_window_path_check(self, main_window, method_name, file_path):
+        method = getattr(main_window, method_name, None)
+        if not callable(method):
+            return False
+        try:
+            return bool(method(file_path))
+        except Exception:
+            return False
+
+    def _local_paths_from_urls(self, urls):
+        local_paths = []
+        for url in urls:
+            try:
+                file_path = url.toLocalFile()
+            except Exception:
+                continue
+            if file_path:
+                local_paths.append(file_path)
+        return local_paths
 
     def _drag_event_has_supported_urls(self, event):
-        if not event.mimeData().hasUrls():
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasUrls():
             return False
         main_window = self.window()
-        for url in event.mimeData().urls():
-            file_path = url.toLocalFile()
-            if self._can_accept_drag_path(main_window, file_path):
+        for file_path in self._local_paths_from_urls(mime_data.urls()):
+            try:
+                supported = self._can_accept_drag_path(main_window, file_path)
+            except Exception:
+                supported = False
+            if supported:
                 return True
         return False
 
     def dragEnterEvent(self, event):
-        if self._drag_event_has_supported_urls(event):
+        supported = self._drag_event_has_supported_urls(event)
+        self._drag_urls_supported_for_current_drag = supported
+        if supported:
             self._set_drag_invite_active(True)
             event.acceptProposedAction()
             return
@@ -140,7 +190,11 @@ class DropTableWidget(QTableWidget):
         event.ignore()
 
     def dragMoveEvent(self, event):
-        if self._drag_event_has_supported_urls(event):
+        supported = self._drag_urls_supported_for_current_drag
+        if supported is None:
+            supported = self._drag_event_has_supported_urls(event)
+            self._drag_urls_supported_for_current_drag = supported
+        if supported:
             self._set_drag_invite_active(True)
             event.acceptProposedAction()
         else:
@@ -148,16 +202,18 @@ class DropTableWidget(QTableWidget):
             event.ignore()
 
     def dragLeaveEvent(self, event):
+        self._drag_urls_supported_for_current_drag = None
         self._set_drag_invite_active(False)
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
+        self._drag_urls_supported_for_current_drag = None
         self._set_drag_invite_active(False)
-        if event.mimeData().hasUrls():
+        mime_data = event.mimeData()
+        if mime_data is not None and mime_data.hasUrls():
             main_window = self.window()
-            urls = event.mimeData().urls()
-            local_paths = [url.toLocalFile() for url in urls if url.toLocalFile()]
-            image_paths = [path for path in local_paths if is_supported_image_path(path)]
+            local_paths = self._local_paths_from_urls(mime_data.urls())
+            image_paths = [path for path in local_paths if self._safe_is_supported_image_path(path)]
 
             if image_paths and hasattr(main_window, "load_image_file"):
                 main_window.load_image_file(image_paths[0])
@@ -167,7 +223,7 @@ class DropTableWidget(QTableWidget):
             electone_evt_paths = [
                 path
                 for path in local_paths
-                if getattr(main_window, "can_accept_electone_evt_path", lambda _path: False)(path)
+                if self._safe_main_window_path_check(main_window, "can_accept_electone_evt_path", path)
             ]
             if electone_evt_paths and hasattr(main_window, "handle_electone_evt_file_drop"):
                 handled = main_window.handle_electone_evt_file_drop(local_paths)
@@ -187,7 +243,7 @@ class DropTableWidget(QTableWidget):
             v50_nseq_paths = [
                 path
                 for path in local_paths
-                if getattr(main_window, "can_accept_v50_nseq_path", lambda _path: False)(path)
+                if self._safe_main_window_path_check(main_window, "can_accept_v50_nseq_path", path)
             ]
             if v50_nseq_paths and hasattr(main_window, "handle_v50_nseq_file_drop"):
                 handled = main_window.handle_v50_nseq_file_drop(local_paths)
@@ -207,7 +263,7 @@ class DropTableWidget(QTableWidget):
             mpc_seq_paths = [
                 path
                 for path in local_paths
-                if getattr(main_window, "can_accept_mpc_seq_path", lambda _path: False)(path)
+                if self._safe_main_window_path_check(main_window, "can_accept_mpc_seq_path", path)
             ]
             if mpc_seq_paths and hasattr(main_window, "handle_mpc_seq_file_drop"):
                 handled = main_window.handle_mpc_seq_file_drop(local_paths)
@@ -224,7 +280,7 @@ class DropTableWidget(QTableWidget):
                     event.acceptProposedAction()
                     return
 
-            if getattr(main_window, "is_image_mode", lambda: False)():
+            if self._safe_main_window_call(main_window, "is_image_mode"):
                 if hasattr(main_window, "queue_image_additions"):
                     main_window.queue_image_additions(local_paths)
                 event.acceptProposedAction()
@@ -233,7 +289,7 @@ class DropTableWidget(QTableWidget):
             regular_paths = [
                 path
                 for path in local_paths
-                if getattr(main_window, "can_accept_regular_drop_path", lambda _path: False)(path)
+                if self._safe_main_window_path_check(main_window, "can_accept_regular_drop_path", path)
             ]
             if hasattr(main_window, "prepare_regular_file_drop"):
                 main_window.prepare_regular_file_drop(regular_paths)

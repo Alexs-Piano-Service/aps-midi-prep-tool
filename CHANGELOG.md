@@ -52,6 +52,7 @@ with release sections grouped by version and date.
 - Modal dialogs and progress windows now recenter when their contents resize, including Greaseweazle read messages and possible Yamaha copy-protection notes.
 - Album Title and Catalog Number now remain populated when saving/exporting a disk session switches the app back to MIDI Mode.
 - `Trim Title Spaces` now refreshes immediately after manual title edits, and the Disklavier screen title editor now shows the existing 16-character title lines directly without adding automatic padding.
+- Drag-and-drop now caches drag-enter validation and ignores path-sniffing errors so Windows drag-move events no longer repeatedly revalidate or reject valid drops.
 
 ## [0.6.1] - 2026-05-05
 
