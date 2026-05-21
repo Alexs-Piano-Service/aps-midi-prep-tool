@@ -64,6 +64,10 @@ before you write anything back.
 - Provides a `View` menu for title-warning display, Disklavier title formatting,
   status visibility, quick-panel visibility, album-info visibility, and realtime
   console logs.
+- Shows an empty-list drop target and highlights the file list during supported
+  file drags so MIDI and E-SEQ files are easier to add.
+- Provides `Help > Report a Bug...` for sending a support report with app
+  details and optional recent console logs.
 - Provides customizable keyboard shortcuts for current File, Disk, View,
   Utilities, Settings, and Help commands.
 - Optionally writes `.tags.txt` ID3 sidecar files for local folder exports.
@@ -177,6 +181,10 @@ As and album-folder options can use the current disk metadata.
 Use `View > View Logs...` to open a live console-output window for the current
 session. It is useful when checking Greaseweazle, mtools, format, or conversion
 output while the app is still running.
+
+Use `Help > Report a Bug...` to send a bug report. The dialog can include a
+large recent tail of the live console log along with app and operating-system
+details.
 
 Use `Settings > Keyboard Shortcuts...` to review or customize the default
 hotkeys for all current File, Disk, View, Utilities, Settings, and Help menu

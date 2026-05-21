@@ -1,14 +1,18 @@
 import datetime
 import argparse
 import contextlib
+import hashlib
+import hmac
 import io
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -18,7 +22,7 @@ from array import array
 from math import exp, pi, sin
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QThread, QTimer, QUrl, Signal, qVersion
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -171,6 +175,8 @@ from .app_info import (
     APP_TITLE_WITH_VERSION,
     APP_VERSION,
     APP_WEBSITE,
+    BUG_REPORT_SECRET,
+    BUG_REPORT_URL,
     SETTINGS_APP as APP_SETTINGS_APP,
     SETTINGS_ORG as APP_SETTINGS_ORG,
     UPDATE_CHECK_URL,
@@ -2429,6 +2435,91 @@ class UpdateCheckWorker(QThread):
             self.updateCheckFailed.emit(str(exc))
 
 
+class BugReportSubmitWorker(QThread):
+    reportSubmitted = Signal(dict)
+    reportFailed = Signal(str)
+
+    def __init__(self, url, payload, secret="", timeout_seconds=20, parent=None):
+        super().__init__(parent)
+        self.url = str(url or "")
+        self.payload = payload or {}
+        self.secret = str(secret or "")
+        self.timeout_seconds = max(1, int(timeout_seconds or 20))
+        self.result = {}
+        self.error_message = ""
+
+    def _request_body_and_headers(self):
+        body = json.dumps(
+            self.payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        timestamp = str(int(time.time()))
+        signature = "sha256=" + hmac.new(
+            self.secret.encode("utf-8"),
+            timestamp.encode("utf-8") + b"." + body,
+            hashlib.sha256,
+        ).hexdigest()
+        return body, {
+            "Accept": "application/json, text/plain;q=0.9, */*;q=0.5",
+            "Connection": "close",
+            "Content-Type": "application/json",
+            "X-APS-Timestamp": timestamp,
+            "X-APS-Signature": signature,
+            "User-Agent": "APS MIDI Prep Tool Bug Reporter",
+        }
+
+    def run(self):
+        try:
+            if self.isInterruptionRequested():
+                return
+            body, headers = self._request_body_and_headers()
+            request = urllib.request.Request(
+                self.url,
+                data=body,
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                response_body = response.read(256 * 1024)
+                status = int(getattr(response, "status", 200) or 200)
+                content_type = str(response.headers.get("Content-Type", ""))
+            if self.isInterruptionRequested():
+                return
+            text = response_body.decode("utf-8", errors="replace").strip()
+            if status not in (200, 202):
+                raise RuntimeError(f"Bug report failed: {status} {text}")
+            data = {}
+            if text and "json" in content_type.lower():
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict):
+                        data = parsed
+                except json.JSONDecodeError:
+                    data = {}
+            data.update({"status": status, "response_text": text})
+            self.result = data
+            self.reportSubmitted.emit(data)
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read(64 * 1024).decode("utf-8", errors="replace").strip()
+            except Exception:
+                detail = ""
+            message = f"HTTP {exc.code}"
+            if detail:
+                message += f": {detail}"
+            self.error_message = message
+            self.reportFailed.emit(message)
+        except urllib.error.URLError as exc:
+            message = str(getattr(exc, "reason", exc))
+            self.error_message = message
+            self.reportFailed.emit(message)
+        except Exception as exc:
+            message = str(exc)
+            self.error_message = message
+            self.reportFailed.emit(message)
+
+
 class MidiTitleWindow(QMainWindow):
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
@@ -2500,6 +2591,7 @@ class MidiTitleWindow(QMainWindow):
     CONTROL_PANEL_ROW_HEIGHT = 40
     CONTROL_PANEL_SPACING = 6
     CONTROL_PANEL_MARGINS = (10, 14, 10, 10)
+    BUG_REPORT_LOG_TAIL_CHARS = 256 * 1024
 
     def _build_control_panel_grid(self, group):
         panel_layout = QVBoxLayout(group)
@@ -2589,6 +2681,7 @@ class MidiTitleWindow(QMainWindow):
         self.updateCheckWorker = None
         self.updateCheckManual = False
         self.updateCheckStartupScheduled = False
+        self.bugReportWorker = None
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         self.currentLanguage = normalize_language_code(
             self.settings.value(self.SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
@@ -2648,14 +2741,14 @@ class MidiTitleWindow(QMainWindow):
 
         main_layout.addLayout(source_layout)
 
-        # Middle: Table for displaying MIDI files (using our DropTableWidget subclass)
+        # Middle: Table for displaying imported files (using our DropTableWidget subclass)
         # Column order:
         # 0: Delete ("X"), 1: FullPath (hidden), 2: 📋, 3: Filename, 4: Title, 5: Compat warning (>32), 6: MIDI type
         self.table = DropTableWidget(0, 7)
         self._apply_table_selection_style()
         self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
         self.table.setToolTip(
-            "Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename."
+            "Drop MIDI, E-SEQ, or disk image files here. Click a Title cell to edit."
         )
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
@@ -3270,6 +3363,13 @@ class MidiTitleWindow(QMainWindow):
         )
         self.helpCheckUpdatesAtStartupAction.toggled.connect(self.toggle_update_checks_at_startup)
         help_menu.addAction(self.helpCheckUpdatesAtStartupAction)
+
+        self.helpReportBugAction = QAction("Report a Bug...", self)
+        self.helpReportBugAction.setToolTip(
+            "Send a bug report with app details and optional recent console logs."
+        )
+        self.helpReportBugAction.triggered.connect(self.show_bug_report_dialog)
+        help_menu.addAction(self.helpReportBugAction)
         help_menu.addSeparator()
 
         self.helpWelcomeAction = QAction("Show Welcome Screen", self)
@@ -3442,6 +3542,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.format_usb", "category": "Disk", "label": "Format USB Stick...", "action": "utilitiesFormatUsbAction", "default": "F7"},
             {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
             {"id": "help.check_updates", "category": "Help", "label": "Check for Updates...", "action": "helpCheckUpdatesAction", "default": "F9"},
+            {"id": "help.report_bug", "category": "Help", "label": "Report a Bug...", "action": "helpReportBugAction", "default": "F10"},
             {"id": "help.welcome", "category": "Help", "label": "Show Welcome Screen", "action": "helpWelcomeAction", "default": "F1"},
             {"id": "help.about", "category": "Help", "label": "About APS MIDI Prep Tool", "action": "helpAboutAction", "default": "Ctrl+F1"},
         )
@@ -3725,6 +3826,7 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesFormatUsbAction", "Format USB Stick...", "U"),
             ("helpCheckUpdatesAction", "Check for Updates...", "C"),
             ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup", "S"),
+            ("helpReportBugAction", "Report a Bug...", "B"),
             ("helpWelcomeAction", "Show Welcome Screen", "W"),
             ("helpDisclaimerAction", "Disclaimer", "D"),
             ("helpAboutAction", "About APS MIDI Prep Tool", "A"),
@@ -3839,6 +3941,10 @@ class MidiTitleWindow(QMainWindow):
                 if text:
                     widget.setText(self._lt(text))
             if isinstance(widget, QLineEdit):
+                placeholder = widget.placeholderText()
+                if placeholder:
+                    widget.setPlaceholderText(self._lt(placeholder))
+            if isinstance(widget, QPlainTextEdit):
                 placeholder = widget.placeholderText()
                 if placeholder:
                     widget.setPlaceholderText(self._lt(placeholder))
@@ -6289,6 +6395,8 @@ class MidiTitleWindow(QMainWindow):
         if self.is_image_mode() and not self._confirm_discard_image_changes():
             event.ignore()
             return
+        if self.bugReportWorker is not None:
+            self.bugReportWorker.requestInterruption()
         self._reset_image_state()
         self._cleanup_midi_scratch_dir()
         super().closeEvent(event)
@@ -9058,7 +9166,7 @@ class MidiTitleWindow(QMainWindow):
             self._lt("Read a floppy from a floppy drive or from a Greaseweazle-connected drive.")
         )
         self.table.setToolTip(
-            self._lt("Drop MIDI files here, click a Title cell to edit, or click the clipboard icon to copy a filename.")
+            self._lt("Drop MIDI, E-SEQ, or disk image files here. Click a Title cell to edit.")
         )
         self._set_rename_all_enabled(True)
         self._set_type0_enabled(True)
@@ -15327,6 +15435,276 @@ class MidiTitleWindow(QMainWindow):
 
     def show_welcome_dialog(self):
         show_first_time_dialog(self.windowIcon(), parent=self, force_show=True)
+
+    def _bug_report_url(self):
+        return str(
+            os.environ.get("APS_MIDI_PREP_TOOL_BUG_REPORT_URL")
+            or BUG_REPORT_URL
+            or ""
+        ).strip()
+
+    def _bug_report_secret(self):
+        return str(
+            os.environ.get("APS_MIDI_PREP_TOOL_BUG_REPORT_SECRET")
+            or BUG_REPORT_SECRET
+            or ""
+        )
+
+    def _bug_report_context(self):
+        mode = "floppy" if self.is_floppy_mode() else "image" if self.is_image_mode() else "local_eseq" if self.is_local_eseq_mode() else "midi"
+        image_context = {}
+        if self.image_session is not None:
+            image_context = {
+                "source_kind": getattr(self.image_session, "source_kind", ""),
+                "source_name": getattr(self.image_session, "source_name", ""),
+                "source_ext": getattr(self.image_session, "source_ext", ""),
+                "disk_format": getattr(getattr(self.image_session, "disk_format", None), "label", ""),
+            }
+        return {
+            "mode": mode,
+            "row_count": self.table.rowCount() if hasattr(self, "table") else 0,
+            "pending_regular_edits": len(getattr(self, "pendingEdits", {}) or {}),
+            "pending_image_edits": len(getattr(self, "pendingImageTitleEdits", {}) or {}),
+            "pending_image_additions": len(getattr(self, "pendingImageAdditions", {}) or {}),
+            "pending_image_deletions": len(getattr(self, "pendingImageDeletes", set()) or set()),
+            "regular_context": getattr(self, "regularModeContextPath", ""),
+            "image": image_context,
+        }
+
+    def _build_bug_report_payload(self, *, summary, description, contact, include_logs):
+        report_id = uuid.uuid4().hex
+        log_tail = ""
+        total_log_chars = 0
+        log_error = ""
+        if include_logs:
+            try:
+                bus = get_console_log_bus()
+                total_log_chars = bus.total_text_chars()
+                log_tail = bus.tail_text(self.BUG_REPORT_LOG_TAIL_CHARS)
+            except Exception as exc:
+                log_error = str(exc)
+        return {
+            "report_id": report_id,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "summary": str(summary or "").strip(),
+            "description": str(description or "").strip(),
+            "contact": str(contact or "").strip(),
+            "app": {
+                "name": APP_NAME,
+                "version": APP_VERSION,
+                "title": APP_TITLE_WITH_VERSION,
+                "website": APP_WEBSITE,
+            },
+            "environment": {
+                "platform": platform.platform(),
+                "python": platform.python_version(),
+                "qt": qVersion(),
+                "executable": sys.executable,
+                "cwd": os.getcwd(),
+            },
+            "context": self._bug_report_context(),
+            "logs": {
+                "included": bool(include_logs and not log_error),
+                "tail_chars": len(log_tail),
+                "total_chars": total_log_chars,
+                "truncated": bool(include_logs and total_log_chars > len(log_tail)),
+                "text": log_tail,
+            },
+        }
+
+    def show_bug_report_dialog(self):
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._lt("Report a Bug"))
+        dialog.setModal(True)
+        dialog.setMinimumWidth(620)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            self._lt("Tell us what happened and what you expected instead.")
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        privacy = QLabel(
+            self._lt("The report includes app details. Logs are optional and may include recent console output and file paths.")
+        )
+        privacy.setWordWrap(True)
+        privacy.setStyleSheet("QLabel { color: palette(mid); }")
+        layout.addWidget(privacy)
+
+        summary_edit = QLineEdit(dialog)
+        summary_edit.setPlaceholderText(self._lt("Short summary"))
+        description_edit = QPlainTextEdit(dialog)
+        description_edit.setPlaceholderText(self._lt("What happened? What did you expect instead?"))
+        description_edit.setMinimumHeight(150)
+        contact_edit = QLineEdit(dialog)
+        contact_edit.setPlaceholderText(self._lt("Optional email or contact info"))
+
+        form_grid = self._make_dialog_form_grid()
+        labels = [
+            self._add_dialog_form_row(form_grid, 0, "Summary:", summary_edit),
+            self._add_dialog_form_row(form_grid, 1, "Details:", description_edit),
+            self._add_dialog_form_row(form_grid, 2, "Contact:", contact_edit),
+        ]
+        self._align_dialog_form_labels(labels)
+        layout.addLayout(form_grid)
+
+        include_logs_checkbox = QCheckBox(self._lt("Include recent console logs"), dialog)
+        include_logs_checkbox.setChecked(True)
+        layout.addWidget(include_logs_checkbox)
+
+        log_note = QLabel(self._lt("Adds recent console output to help diagnose the problem."))
+        log_note.setWordWrap(True)
+        log_note.setStyleSheet("QLabel { color: palette(mid); }")
+        layout.addWidget(log_note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel, parent=dialog)
+        send_button = buttons.addButton(self._lt("Send Report"), QDialogButtonBox.AcceptRole)
+        send_button.setDefault(True)
+        buttons.rejected.connect(dialog.reject)
+
+        def accept_if_valid():
+            if not summary_edit.text().strip() and not description_edit.toPlainText().strip():
+                QMessageBox.warning(
+                    dialog,
+                    self._lt("Bug Report Needs Detail"),
+                    self._lt("Add a short summary or describe what went wrong before sending."),
+                )
+                return
+            dialog.accept()
+
+        send_button.clicked.connect(accept_if_valid)
+        layout.addWidget(buttons)
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return
+
+        payload = self._build_bug_report_payload(
+            summary=summary_edit.text(),
+            description=description_edit.toPlainText(),
+            contact=contact_edit.text(),
+            include_logs=include_logs_checkbox.isChecked(),
+        )
+        self._submit_bug_report(payload)
+
+    def _submit_bug_report(self, payload):
+        endpoint = self._bug_report_url()
+        if not endpoint:
+            self._set_bug_report_feedback(self._lt("No bug report endpoint is configured for this build."))
+            return
+        if self.bugReportWorker is not None:
+            self._set_bug_report_feedback(self._lt("Please wait for the current bug report to finish sending."))
+            return
+
+        if hasattr(self, "helpReportBugAction"):
+            self.helpReportBugAction.setEnabled(False)
+        self._set_bug_report_feedback(self._lt("Sending bug report..."))
+
+        worker = BugReportSubmitWorker(endpoint, payload, self._bug_report_secret(), timeout_seconds=20)
+        worker.finished.connect(self._on_bug_report_finished)
+        self.bugReportWorker = worker
+        worker.start()
+
+    def _set_bug_report_feedback(self, message, *, stream_name=None):
+        text = str(message or "").strip()
+        if not text:
+            return
+        if hasattr(self, "status_label"):
+            self.status_label.setText(text)
+        if stream_name:
+            try:
+                get_console_log_bus().append(stream_name, f"{text}\n")
+            except Exception:
+                pass
+
+    def _short_bug_report_error(self, message):
+        text = re.sub(r"\s+", " ", str(message or "")).strip()
+        if not text:
+            return self._lt("The app could not send the bug report")
+        http_match = re.match(r"^(HTTP\s+\d+)", text, flags=re.IGNORECASE)
+        if http_match:
+            return http_match.group(1).upper()
+        if len(text) > 180:
+            return text[:177].rstrip() + "..."
+        return text
+
+    def _show_bug_report_message(self, icon, title, text, informative_text="", detailed_text=""):
+        box = QMessageBox(self)
+        apply_window_icon(box)
+        box.setIcon(icon)
+        box.setWindowTitle(self._lt(title))
+        box.setText(self._lt(text))
+        if informative_text:
+            box.setInformativeText(self._lt(informative_text))
+        if detailed_text:
+            detail = str(detailed_text)
+            if len(detail) > 4000:
+                detail = detail[:3997].rstrip() + "..."
+            box.setDetailedText(detail)
+        box.setStandardButtons(QMessageBox.Ok)
+        self._exec_child_dialog(box)
+
+    def _show_bug_report_success(self, response, report_id=""):
+        server_id = str(
+            response.get("report_id")
+            or response.get("id")
+            or response.get("ticket")
+            or ""
+        ).strip()
+        reference = server_id or report_id
+        message = self._lt("Bug report sent.")
+        if reference:
+            message += f" {self._lt('Reference')}: {reference}"
+        self._set_bug_report_feedback(message, stream_name="stdout")
+        informative_text = ""
+        if reference:
+            informative_text = f"{self._lt('Reference')}: {reference}"
+        self._show_bug_report_message(
+            QMessageBox.Information,
+            "Bug Report Sent",
+            "Bug report sent.",
+            informative_text,
+        )
+
+    def _show_bug_report_failure(self, message):
+        short_message = self._short_bug_report_error(message)
+        self._set_bug_report_feedback(
+            f"{self._lt('Bug report failed. See View > View Logs for details.')} ({short_message})",
+            stream_name="stderr",
+        )
+        try:
+            get_console_log_bus().append("stderr", f"Bug report failed detail: {message}\n")
+        except Exception:
+            pass
+        self._show_bug_report_message(
+            QMessageBox.Critical,
+            "Bug Report Failed",
+            "The app could not send the bug report",
+            f"{short_message}\n\n{self._lt('Bug report failed. See View > View Logs for details.')}",
+            message,
+        )
+
+    def _on_bug_report_finished(self):
+        worker = self.bugReportWorker
+        self.bugReportWorker = None
+        if hasattr(self, "helpReportBugAction"):
+            self.helpReportBugAction.setEnabled(True)
+        if worker is None:
+            return
+        response = dict(getattr(worker, "result", {}) or {})
+        error_message = str(getattr(worker, "error_message", "") or "")
+        report_id = ""
+        if isinstance(getattr(worker, "payload", None), dict):
+            report_id = str(worker.payload.get("report_id") or "")
+        worker.deleteLater()
+        if error_message:
+            QTimer.singleShot(0, lambda message=error_message: self._show_bug_report_failure(message))
+        else:
+            QTimer.singleShot(0, lambda data=response, rid=report_id: self._show_bug_report_success(data, rid))
 
     def toggle_update_checks_at_startup(self, enabled):
         enabled = bool(enabled)

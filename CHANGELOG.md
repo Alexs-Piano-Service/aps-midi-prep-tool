@@ -16,6 +16,8 @@ with release sections grouped by version and date.
 - Default keyboard shortcuts for the current File, Disk, View, Utilities, Settings, and Help menu commands.
 - Optional `Do not show this dialog again` choice for Save As Image completion messages.
 - `Trim Title Spaces` utility and hotkey, plus a Read Floppy option to clean Disklavier-spaced titles after normal or Greaseweazle reads.
+- `Help > Report a Bug...` action with a support-report dialog that sends app context and an optional recent console-log tail.
+- Empty file-list overlay text plus drag-hover highlighting for supported file drops.
 
 ### Changed
 

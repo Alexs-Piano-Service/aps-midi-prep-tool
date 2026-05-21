@@ -104,6 +104,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>Format removable USB sticks for Disklavier and PianoForce workflows.</li>
                   <li>Convert E-SEQ to MIDI, MIDI to E-SEQ, and SMF1 to SMF0.</li>
                   <li>Use <strong>File</strong> for sources and save behavior, <strong>Disk</strong> for floppy/media operations, and <strong>Utilities</strong> for batch tools.</li>
+                  <li>Use <strong>View &gt; View Logs...</strong> for live console output and <strong>Help &gt; Report a Bug...</strong> when you need to send a support report.</li>
                 </ul>
                 <p><a href="{APP_WEBSITE}">alexanderpeppe.com</a></p>
                 """,

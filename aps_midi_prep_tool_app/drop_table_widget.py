@@ -1,6 +1,7 @@
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QProgressDialog, QTableWidget
 
 from .floppy_image import is_supported_image_path
@@ -11,6 +12,93 @@ class DropTableWidget(QTableWidget):
     def __init__(self, rows, columns, parent=None):
         super().__init__(rows, columns, parent)
         self.setAcceptDrops(True)
+        self._drag_invite_active = False
+
+    def _lt(self, text):
+        window = self.window()
+        if window is self:
+            return text
+        translator = getattr(window, "_lt", None)
+        if callable(translator):
+            return translator(text)
+        return text
+
+    def _set_drag_invite_active(self, active):
+        active = bool(active)
+        if self._drag_invite_active == active:
+            return
+        self._drag_invite_active = active
+        self.viewport().update()
+
+    def setRowCount(self, rows):
+        super().setRowCount(rows)
+        self.viewport().update()
+
+    def insertRow(self, row):
+        super().insertRow(row)
+        self.viewport().update()
+
+    def removeRow(self, row):
+        super().removeRow(row)
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.rowCount() > 0 and not self._drag_invite_active:
+            return
+
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = self.viewport().rect().adjusted(18, 18, -18, -18)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        palette = self.palette()
+        accent = palette.highlight().color()
+        if self._drag_invite_active:
+            fill = QColor(accent)
+            fill.setAlpha(34)
+            border = QColor(accent)
+            border.setAlpha(185)
+            text_color = palette.text().color()
+            title = self._lt("Drop to import")
+            subtitle = self._lt("MIDI, E-SEQ, or disk image")
+        else:
+            fill = palette.base().color()
+            fill.setAlpha(214)
+            border = palette.mid().color()
+            border.setAlpha(92)
+            text_color = palette.text().color()
+            title = self._lt("Drop files or disk images here")
+            subtitle = self._lt("MIDI, E-SEQ, IMG, HFE, SCP, and other disk images")
+
+        card_width = min(rect.width(), 680)
+        card_height = min(rect.height(), 210)
+        card = QRect(0, 0, card_width, card_height)
+        card.moveCenter(rect.center())
+
+        painter.setBrush(fill)
+        border_pen = QPen(border, 2 if self._drag_invite_active else 1.5)
+        border_pen.setStyle(Qt.DashLine)
+        border_pen.setDashPattern([6, 5])
+        border_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(border_pen)
+        painter.drawRoundedRect(card, 8, 8)
+
+        title_font = QFont(self.font())
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 3)
+        painter.setFont(title_font)
+        painter.setPen(text_color)
+        title_rect = QRect(card.left() + 36, card.top() + 58, card.width() - 72, 50)
+        painter.drawText(title_rect, Qt.AlignCenter | Qt.TextWordWrap, title)
+
+        subtitle_font = QFont(self.font())
+        subtitle_font.setPointSize(max(8, subtitle_font.pointSize()))
+        painter.setFont(subtitle_font)
+        painter.setPen(palette.mid().color() if not self._drag_invite_active else text_color)
+        subtitle_rect = QRect(card.left() + 36, card.top() + 116, card.width() - 72, 42)
+        painter.drawText(subtitle_rect, Qt.AlignCenter | Qt.TextWordWrap, subtitle)
 
     def file_exists(self, file_path):
         """Return True if a row already contains this file (full path is stored in column 1)."""
@@ -20,35 +108,51 @@ class DropTableWidget(QTableWidget):
                 return True
         return False
 
+    def _can_accept_drag_path(self, main_window, file_path):
+        if is_supported_image_path(file_path):
+            return True
+        if getattr(main_window, "can_accept_electone_evt_path", lambda _path: False)(file_path):
+            return True
+        if getattr(main_window, "can_accept_v50_nseq_path", lambda _path: False)(file_path):
+            return True
+        if getattr(main_window, "can_accept_mpc_seq_path", lambda _path: False)(file_path):
+            return True
+        if getattr(main_window, "is_image_mode", lambda: False)() and os.path.isfile(file_path):
+            return True
+        return bool(getattr(main_window, "can_accept_regular_drop_path", lambda _path: False)(file_path))
+
+    def _drag_event_has_supported_urls(self, event):
+        if not event.mimeData().hasUrls():
+            return False
+        main_window = self.window()
+        for url in event.mimeData().urls():
+            file_path = url.toLocalFile()
+            if self._can_accept_drag_path(main_window, file_path):
+                return True
+        return False
+
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            main_window = self.window()
-            for url in event.mimeData().urls():
-                file_path = url.toLocalFile()
-                if is_supported_image_path(file_path):
-                    event.acceptProposedAction()
-                    return
-                if getattr(main_window, "can_accept_electone_evt_path", lambda _path: False)(file_path):
-                    event.acceptProposedAction()
-                    return
-                if getattr(main_window, "can_accept_v50_nseq_path", lambda _path: False)(file_path):
-                    event.acceptProposedAction()
-                    return
-                if getattr(main_window, "can_accept_mpc_seq_path", lambda _path: False)(file_path):
-                    event.acceptProposedAction()
-                    return
-                if getattr(main_window, "is_image_mode", lambda: False)() and os.path.isfile(file_path):
-                    event.acceptProposedAction()
-                    return
-                if getattr(main_window, "can_accept_regular_drop_path", lambda _path: False)(file_path):
-                    event.acceptProposedAction()
-                    return
+        if self._drag_event_has_supported_urls(event):
+            self._set_drag_invite_active(True)
+            event.acceptProposedAction()
+            return
+        self._set_drag_invite_active(False)
         event.ignore()
 
     def dragMoveEvent(self, event):
-        event.acceptProposedAction()
+        if self._drag_event_has_supported_urls(event):
+            self._set_drag_invite_active(True)
+            event.acceptProposedAction()
+        else:
+            self._set_drag_invite_active(False)
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._set_drag_invite_active(False)
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
+        self._set_drag_invite_active(False)
         if event.mimeData().hasUrls():
             main_window = self.window()
             urls = event.mimeData().urls()

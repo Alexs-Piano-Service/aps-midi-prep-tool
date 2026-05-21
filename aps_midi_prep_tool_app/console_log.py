@@ -29,6 +29,7 @@ class ConsoleLogBus(QObject):
         super().__init__()
         self._chunks = []
         self._lock = threading.RLock()
+        self._total_text_chars = 0
 
     def append(self, stream_name, text):
         if not text:
@@ -37,6 +38,7 @@ class ConsoleLogBus(QObject):
         text = str(text)
         with self._lock:
             self._chunks.append((timestamp, stream_name, text))
+            self._total_text_chars += len(text)
         try:
             self.chunk_written.emit(timestamp, stream_name, text)
         except RuntimeError:
@@ -49,6 +51,30 @@ class ConsoleLogBus(QObject):
     def plain_text(self):
         with self._lock:
             return "".join(text for _timestamp, _stream_name, text in self._chunks)
+
+    def total_text_chars(self):
+        with self._lock:
+            return self._total_text_chars
+
+    def tail_text(self, max_chars):
+        try:
+            remaining = max(0, int(max_chars or 0))
+        except (TypeError, ValueError):
+            remaining = 0
+        if remaining <= 0:
+            return ""
+        pieces = []
+        with self._lock:
+            for _timestamp, _stream_name, text in reversed(self._chunks):
+                if remaining <= 0:
+                    break
+                if len(text) <= remaining:
+                    pieces.append(text)
+                    remaining -= len(text)
+                else:
+                    pieces.append(text[-remaining:])
+                    remaining = 0
+        return "".join(reversed(pieces))
 
 
 class ConsoleCaptureStream:
