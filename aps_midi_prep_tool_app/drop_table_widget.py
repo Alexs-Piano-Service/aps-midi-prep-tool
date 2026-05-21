@@ -2,7 +2,7 @@ import os
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QApplication, QProgressDialog, QTableWidget
+from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog, QTableWidget
 
 from .floppy_image import is_supported_image_path
 from .ui_utils import center_dialog_on_parent
@@ -165,19 +165,44 @@ class DropTableWidget(QTableWidget):
                 local_paths.append(file_path)
         return local_paths
 
-    def _drag_event_has_supported_urls(self, event):
-        mime_data = event.mimeData()
-        if mime_data is None or not mime_data.hasUrls():
-            return False
-        main_window = self.window()
-        for file_path in self._local_paths_from_urls(mime_data.urls()):
+    def _safe_accept_event(self, event):
+        try:
+            event.acceptProposedAction()
+        except Exception:
+            pass
+
+    def _safe_ignore_event(self, event):
+        try:
+            event.ignore()
+        except Exception:
+            pass
+
+    def _show_drop_exception(self, main_window, exc):
+        detail = str(exc).strip() or repr(exc)
+        show_operation_error = getattr(main_window, "_show_operation_error", None)
+        if callable(show_operation_error):
             try:
-                supported = self._can_accept_drag_path(main_window, file_path)
+                show_operation_error(
+                    "Drop Failed",
+                    "The dropped files could not be added.",
+                    detail,
+                    guidance="Try using File > Open MIDI Folder... or File > Open Image... if Windows will not provide the dropped path.",
+                )
+                return
             except Exception:
-                supported = False
-            if supported:
-                return True
-        return False
+                pass
+        QMessageBox.warning(
+            self,
+            self._lt("Drop Failed"),
+            self._lt("The dropped files could not be added.") + f"\n\n{detail}",
+        )
+
+    def _drag_event_has_supported_urls(self, event):
+        try:
+            mime_data = event.mimeData()
+            return bool(mime_data is not None and mime_data.hasUrls())
+        except Exception:
+            return False
 
     def dragEnterEvent(self, event):
         supported = self._drag_event_has_supported_urls(event)
@@ -209,112 +234,135 @@ class DropTableWidget(QTableWidget):
     def dropEvent(self, event):
         self._drag_urls_supported_for_current_drag = None
         self._set_drag_invite_active(False)
-        mime_data = event.mimeData()
-        if mime_data is not None and mime_data.hasUrls():
-            main_window = self.window()
-            local_paths = self._local_paths_from_urls(mime_data.urls())
-            image_paths = [path for path in local_paths if self._safe_is_supported_image_path(path)]
+        progressDialog = None
+        main_window = self.window()
+        try:
+            mime_data = event.mimeData()
+            has_urls = mime_data is not None and mime_data.hasUrls()
+        except Exception as exc:
+            self._show_drop_exception(main_window, exc)
+            self._safe_accept_event(event)
+            return
+        if has_urls:
+            try:
+                local_paths = self._local_paths_from_urls(mime_data.urls())
+                image_paths = [path for path in local_paths if self._safe_is_supported_image_path(path)]
 
-            if image_paths and hasattr(main_window, "load_image_file"):
-                main_window.load_image_file(image_paths[0])
-                event.acceptProposedAction()
-                return
-
-            electone_evt_paths = [
-                path
-                for path in local_paths
-                if self._safe_main_window_path_check(main_window, "can_accept_electone_evt_path", path)
-            ]
-            if electone_evt_paths and hasattr(main_window, "handle_electone_evt_file_drop"):
-                handled = main_window.handle_electone_evt_file_drop(local_paths)
-                if handled:
-                    event.acceptProposedAction()
+                if image_paths and hasattr(main_window, "load_image_file"):
+                    main_window.load_image_file(image_paths[0])
+                    self._safe_accept_event(event)
                     return
-                electone_evt_path_set = {os.path.abspath(path) for path in electone_evt_paths}
-                local_paths = [
+
+                electone_evt_paths = [
                     path
                     for path in local_paths
-                    if os.path.abspath(path) not in electone_evt_path_set
+                    if self._safe_main_window_path_check(main_window, "can_accept_electone_evt_path", path)
                 ]
-                if not local_paths:
-                    event.acceptProposedAction()
-                    return
+                if electone_evt_paths and hasattr(main_window, "handle_electone_evt_file_drop"):
+                    handled = main_window.handle_electone_evt_file_drop(local_paths)
+                    if handled:
+                        self._safe_accept_event(event)
+                        return
+                    electone_evt_path_set = {os.path.abspath(path) for path in electone_evt_paths}
+                    local_paths = [
+                        path
+                        for path in local_paths
+                        if os.path.abspath(path) not in electone_evt_path_set
+                    ]
+                    if not local_paths:
+                        self._safe_accept_event(event)
+                        return
 
-            v50_nseq_paths = [
-                path
-                for path in local_paths
-                if self._safe_main_window_path_check(main_window, "can_accept_v50_nseq_path", path)
-            ]
-            if v50_nseq_paths and hasattr(main_window, "handle_v50_nseq_file_drop"):
-                handled = main_window.handle_v50_nseq_file_drop(local_paths)
-                if handled:
-                    event.acceptProposedAction()
-                    return
-                v50_nseq_path_set = {os.path.abspath(path) for path in v50_nseq_paths}
-                local_paths = [
+                v50_nseq_paths = [
                     path
                     for path in local_paths
-                    if os.path.abspath(path) not in v50_nseq_path_set
+                    if self._safe_main_window_path_check(main_window, "can_accept_v50_nseq_path", path)
                 ]
-                if not local_paths:
-                    event.acceptProposedAction()
-                    return
+                if v50_nseq_paths and hasattr(main_window, "handle_v50_nseq_file_drop"):
+                    handled = main_window.handle_v50_nseq_file_drop(local_paths)
+                    if handled:
+                        self._safe_accept_event(event)
+                        return
+                    v50_nseq_path_set = {os.path.abspath(path) for path in v50_nseq_paths}
+                    local_paths = [
+                        path
+                        for path in local_paths
+                        if os.path.abspath(path) not in v50_nseq_path_set
+                    ]
+                    if not local_paths:
+                        self._safe_accept_event(event)
+                        return
 
-            mpc_seq_paths = [
-                path
-                for path in local_paths
-                if self._safe_main_window_path_check(main_window, "can_accept_mpc_seq_path", path)
-            ]
-            if mpc_seq_paths and hasattr(main_window, "handle_mpc_seq_file_drop"):
-                handled = main_window.handle_mpc_seq_file_drop(local_paths)
-                if handled:
-                    event.acceptProposedAction()
-                    return
-                mpc_seq_path_set = {os.path.abspath(path) for path in mpc_seq_paths}
-                local_paths = [
+                mpc_seq_paths = [
                     path
                     for path in local_paths
-                    if os.path.abspath(path) not in mpc_seq_path_set
+                    if self._safe_main_window_path_check(main_window, "can_accept_mpc_seq_path", path)
                 ]
-                if not local_paths:
-                    event.acceptProposedAction()
+                if mpc_seq_paths and hasattr(main_window, "handle_mpc_seq_file_drop"):
+                    handled = main_window.handle_mpc_seq_file_drop(local_paths)
+                    if handled:
+                        self._safe_accept_event(event)
+                        return
+                    mpc_seq_path_set = {os.path.abspath(path) for path in mpc_seq_paths}
+                    local_paths = [
+                        path
+                        for path in local_paths
+                        if os.path.abspath(path) not in mpc_seq_path_set
+                    ]
+                    if not local_paths:
+                        self._safe_accept_event(event)
+                        return
+
+                if self._safe_main_window_call(main_window, "is_image_mode"):
+                    if hasattr(main_window, "queue_image_additions"):
+                        main_window.queue_image_additions(local_paths)
+                    self._safe_accept_event(event)
                     return
 
-            if self._safe_main_window_call(main_window, "is_image_mode"):
-                if hasattr(main_window, "queue_image_additions"):
-                    main_window.queue_image_additions(local_paths)
-                event.acceptProposedAction()
-                return
-
-            regular_paths = [
-                path
-                for path in local_paths
-                if self._safe_main_window_path_check(main_window, "can_accept_regular_drop_path", path)
-            ]
-            if hasattr(main_window, "prepare_regular_file_drop"):
-                main_window.prepare_regular_file_drop(regular_paths)
-            total = len(regular_paths)
-            progressDialog = None
-            if total > 1:
-                progressDialog = QProgressDialog("Adding files...", "Cancel", 0, total, main_window)
-                progressDialog.setWindowTitle("Adding Files")
-                progressDialog.setWindowModality(Qt.WindowModal)
-                progressDialog.setMinimumDuration(0)
-                center_dialog_on_parent(progressDialog, main_window)
-            results = []
-            for i, file_path in enumerate(regular_paths):
-                if hasattr(main_window, "add_regular_file_from_drop"):
-                    result = main_window.add_regular_file_from_drop(file_path)
-                    results.append(result)
-                    if result and result.get("status") == "cancelled":
-                        break
+                regular_paths = list(local_paths)
+                results = []
+                if hasattr(main_window, "prepare_regular_file_drop"):
+                    try:
+                        main_window.prepare_regular_file_drop(regular_paths)
+                    except Exception as exc:
+                        results.append({
+                            "status": "error",
+                            "path": "",
+                            "message": f"Could not prepare dropped files: {exc}",
+                        })
+                total = len(regular_paths)
+                if total > 1:
+                    progressDialog = QProgressDialog("Adding files...", "Cancel", 0, total, main_window)
+                    progressDialog.setWindowTitle("Adding Files")
+                    progressDialog.setWindowModality(Qt.WindowModal)
+                    progressDialog.setMinimumDuration(0)
+                    center_dialog_on_parent(progressDialog, main_window)
+                for i, file_path in enumerate(regular_paths):
+                    if hasattr(main_window, "add_regular_file_from_drop"):
+                        try:
+                            result = main_window.add_regular_file_from_drop(file_path)
+                        except Exception as exc:
+                            result = {
+                                "status": "error",
+                                "path": file_path,
+                                "message": f"Could not add dropped file: {exc}",
+                            }
+                        results.append(result)
+                        if result and result.get("status") == "cancelled":
+                            break
+                    if progressDialog:
+                        progressDialog.setValue(i + 1)
+                        QApplication.processEvents()
                 if progressDialog:
-                    progressDialog.setValue(i + 1)
-                    QApplication.processEvents()
-            if progressDialog:
-                progressDialog.close()
-            if hasattr(main_window, "finish_regular_file_drop"):
-                main_window.finish_regular_file_drop(results)
-            event.acceptProposedAction()
+                    progressDialog.close()
+                    progressDialog = None
+                if hasattr(main_window, "finish_regular_file_drop"):
+                    main_window.finish_regular_file_drop(results)
+                self._safe_accept_event(event)
+            except Exception as exc:
+                if progressDialog:
+                    progressDialog.close()
+                self._show_drop_exception(main_window, exc)
+                self._safe_accept_event(event)
         else:
-            event.ignore()
+            self._safe_ignore_event(event)

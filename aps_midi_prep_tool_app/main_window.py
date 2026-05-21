@@ -7217,15 +7217,29 @@ class MidiTitleWindow(QMainWindow):
     def _set_regular_mode_context(self, *, preferred_path="", file_paths=None):
         context_path = ""
         if preferred_path:
-            context_path = os.path.abspath(preferred_path)
+            try:
+                context_path = os.path.abspath(preferred_path)
+            except OSError:
+                context_path = str(preferred_path or "")
         elif file_paths:
-            abs_paths = [os.path.abspath(path) for path in file_paths if path]
+            abs_paths = []
+            for path in file_paths:
+                if not path:
+                    continue
+                try:
+                    abs_paths.append(os.path.abspath(path))
+                except OSError:
+                    continue
             if abs_paths:
                 try:
                     context_path = os.path.commonpath(abs_paths)
                 except ValueError:
                     context_path = os.path.dirname(abs_paths[0])
-                if not os.path.isdir(context_path):
+                try:
+                    context_is_dir = os.path.isdir(context_path)
+                except OSError:
+                    context_is_dir = False
+                if not context_is_dir:
                     context_path = os.path.dirname(abs_paths[0])
         self.regularModeContextPath = context_path
 
@@ -8232,7 +8246,11 @@ class MidiTitleWindow(QMainWindow):
         return title, midi_type, title_mode, is_midi, order_key
 
     def _regular_drop_file_kind(self, file_path):
-        if not file_path or not os.path.isfile(file_path):
+        try:
+            is_file = bool(file_path and os.path.isfile(file_path))
+        except OSError:
+            return ""
+        if not is_file:
             return ""
         if os.path.basename(file_path).upper() in {PIANODIR_FILENAME, MUSICDIR_FILENAME}:
             return "pianodir"
@@ -8265,12 +8283,20 @@ class MidiTitleWindow(QMainWindow):
             return file_paths
         for file_name in file_names:
             full_path = os.path.join(directory, file_name)
-            if not os.path.isfile(full_path):
+            try:
+                is_file = os.path.isfile(full_path)
+            except OSError:
+                continue
+            if not is_file:
                 continue
             if file_name.upper() in {PIANODIR_FILENAME, MUSICDIR_FILENAME}:
                 file_paths.append(full_path)
                 continue
-            if self._regular_drop_file_kind(full_path) in {"midi", "eseq"}:
+            try:
+                file_kind = self._regular_drop_file_kind(full_path)
+            except Exception:
+                file_kind = ""
+            if file_kind in {"midi", "eseq"}:
                 file_paths.append(full_path)
         return file_paths
 
@@ -8433,7 +8459,10 @@ class MidiTitleWindow(QMainWindow):
         return self.regularPianodirPopulated
 
     def add_regular_file_from_drop(self, file_path):
-        full_path = os.path.abspath(file_path)
+        try:
+            full_path = os.path.abspath(file_path)
+        except OSError as exc:
+            return {"status": "error", "path": str(file_path or ""), "message": f"Could not read path: {exc}"}
         file_kind = self._regular_drop_file_kind(full_path)
         if file_kind == "pianodir":
             self._load_regular_pianodir_from_path(full_path)
@@ -8593,12 +8622,19 @@ class MidiTitleWindow(QMainWindow):
         self._clear_regular_list_state()
         self._set_regular_mode_context(file_paths=file_paths)
         regular_specs = []
+        probe_errors = []
         loaded_pianodir_metadata = PianodirMetadata()
         music_dir_order_keys = {}
         if any(os.path.basename(path).upper() == MUSICDIR_FILENAME for path in file_paths):
             self.regularEseqVariant = ESEQ_VARIANT_CLAVINOVA
-        elif any(is_clavinova_mda_file(path) for path in file_paths if os.path.isfile(path)):
-            self.regularEseqVariant = ESEQ_VARIANT_CLAVINOVA
+        else:
+            for path in file_paths:
+                try:
+                    if os.path.isfile(path) and is_clavinova_mda_file(path):
+                        self.regularEseqVariant = ESEQ_VARIANT_CLAVINOVA
+                        break
+                except OSError:
+                    continue
         for full_path in sorted(file_paths, key=lambda path: (os.path.basename(path).upper(), path.upper())):
             basename_upper = os.path.basename(full_path).upper()
             if basename_upper in {PIANODIR_FILENAME, MUSICDIR_FILENAME}:
@@ -8629,7 +8665,11 @@ class MidiTitleWindow(QMainWindow):
                 except Exception:
                     loaded_pianodir_metadata = PianodirMetadata()
                 continue
-            title, midi_type, title_mode, _, order_key = self._probe_regular_file(full_path)
+            try:
+                title, midi_type, title_mode, _, order_key = self._probe_regular_file(full_path)
+            except Exception as exc:
+                probe_errors.append(f"{os.path.basename(full_path) or full_path}: {exc}")
+                continue
             if title_mode == "eseq" and os.path.basename(full_path).upper() in music_dir_order_keys:
                 order_key = music_dir_order_keys[os.path.basename(full_path).upper()]
             regular_specs.append(
@@ -8698,6 +8738,14 @@ class MidiTitleWindow(QMainWindow):
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
         self.status_label.setText(status_text)
+        if probe_errors:
+            self._show_error_list(
+                "Some Files Were Not Added",
+                "Some selected files could not be added to the list",
+                probe_errors,
+                warning=True,
+                guidance="Unreadable files were skipped; the files already added remain staged",
+            )
 
     def _refresh_regular_mode_action_state(self):
         if self.is_image_mode():
@@ -12503,11 +12551,32 @@ class MidiTitleWindow(QMainWindow):
                 self._reset_image_state()
                 self._apply_midi_mode_ui()
             self._cleanup_midi_scratch_dir()
-            file_paths = self._regular_folder_file_paths(directory)
-            electone_evt_paths = self._electone_evt_file_paths_in_folder(directory)
-            v50_nseq_paths = self._v50_nseq_all_file_paths_in_folder(directory)
-            v50_nseq_summary = self._v50_nseq_sequence_summary_for_paths(v50_nseq_paths)
-            mpc_seq_paths = self._mpc_seq_file_paths_in_folder(directory)
+            scan_errors = []
+            try:
+                file_paths = self._regular_folder_file_paths(directory)
+            except Exception as exc:
+                file_paths = []
+                scan_errors.append(f"MIDI/E-SEQ scan: {exc}")
+            try:
+                electone_evt_paths = self._electone_evt_file_paths_in_folder(directory)
+            except Exception as exc:
+                electone_evt_paths = []
+                scan_errors.append(f"Electone EVT scan: {exc}")
+            try:
+                v50_nseq_paths = self._v50_nseq_all_file_paths_in_folder(directory)
+            except Exception as exc:
+                v50_nseq_paths = []
+                scan_errors.append(f"V50/SY77 scan: {exc}")
+            try:
+                v50_nseq_summary = self._v50_nseq_sequence_summary_for_paths(v50_nseq_paths)
+            except Exception as exc:
+                v50_nseq_summary = None
+                scan_errors.append(f"V50/SY77 summary: {exc}")
+            try:
+                mpc_seq_paths = self._mpc_seq_file_paths_in_folder(directory)
+            except Exception as exc:
+                mpc_seq_paths = []
+                scan_errors.append(f"MPC sequence scan: {exc}")
             if electone_evt_paths and self._prompt_for_electone_evt_conversion(
                 [os.path.basename(path) for path in electone_evt_paths],
                 os.path.basename(directory) or directory,
@@ -12535,6 +12604,14 @@ class MidiTitleWindow(QMainWindow):
                 )
             else:
                 self._load_regular_files(file_paths, f"Selected Folder: \"{directory}\"")
+            if scan_errors:
+                self._show_error_list(
+                    "Folder Scan Warning",
+                    "Some folder checks could not be completed",
+                    scan_errors,
+                    warning=True,
+                    guidance="The app continued with the files it could read",
+                )
 
     def clear_list(self):
         if not self.choose_button.isEnabled():

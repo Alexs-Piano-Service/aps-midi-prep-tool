@@ -231,8 +231,12 @@ def install_console_capture():
     _original_stderr = sys.stderr
     _flush_stream(_original_stdout)
     _flush_stream(_original_stderr)
-    stdout_captured = _install_fd_capture(1, "stdout", bus, _stream_encoding(_original_stdout))
-    stderr_captured = _install_fd_capture(2, "stderr", bus, _stream_encoding(_original_stderr))
+    if os.name == "nt":
+        stdout_captured = False
+        stderr_captured = False
+    else:
+        stdout_captured = _install_fd_capture(1, "stdout", bus, _stream_encoding(_original_stdout))
+        stderr_captured = _install_fd_capture(2, "stderr", bus, _stream_encoding(_original_stderr))
     _make_stream_realtime(_original_stdout)
     _make_stream_realtime(_original_stderr)
     if not stdout_captured:
