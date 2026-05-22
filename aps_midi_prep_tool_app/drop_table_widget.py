@@ -56,20 +56,23 @@ class DropTableWidget(QTableWidget):
 
         palette = self.palette()
         accent = palette.highlight().color()
+        base_text = QColor(palette.text().color())
+        subtitle_color = QColor(base_text)
+        subtitle_color.setAlpha(230)
         if self._drag_invite_active:
             fill = QColor(accent)
-            fill.setAlpha(34)
+            fill.setAlpha(48)
             border = QColor(accent)
-            border.setAlpha(185)
-            text_color = palette.text().color()
+            border.setAlpha(255)
+            text_color = base_text
             title = self._lt("Drop to import")
             subtitle = self._lt("MIDI, E-SEQ, IMG, HFE, SCP, and other disk images")
         else:
             fill = palette.base().color()
-            fill.setAlpha(214)
-            border = palette.mid().color()
-            border.setAlpha(92)
-            text_color = palette.text().color()
+            fill.setAlpha(238)
+            border = QColor(base_text)
+            border.setAlpha(180)
+            text_color = base_text
             title = self._lt("Drop files or disk images here")
             subtitle = self._lt("MIDI, E-SEQ, IMG, HFE, SCP, and other disk images")
 
@@ -97,7 +100,7 @@ class DropTableWidget(QTableWidget):
         subtitle_font = QFont(self.font())
         subtitle_font.setPointSize(max(8, subtitle_font.pointSize()))
         painter.setFont(subtitle_font)
-        painter.setPen(palette.mid().color() if not self._drag_invite_active else text_color)
+        painter.setPen(text_color if self._drag_invite_active else subtitle_color)
         subtitle_rect = QRect(card.left() + 36, card.top() + 116, card.width() - 72, 42)
         painter.drawText(subtitle_rect, Qt.AlignCenter | Qt.TextWordWrap, subtitle)
 

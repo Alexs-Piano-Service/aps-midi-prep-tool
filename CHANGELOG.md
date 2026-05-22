@@ -57,6 +57,7 @@ with release sections grouped by version and date.
 - Folder/file importing now skips unreadable Windows paths during probing instead of aborting the whole import.
 - Formatting a USB floppy now reuses an already matching IBM FAT format when possible, clearing files and adding an empty `PIANODIR.FIL` for E-SEQ without rewriting the whole disk.
 - The drag-and-drop overlay now keeps the supported-file subtitle consistent while files are being dragged.
+- The drag-and-drop overlay subtitle and dashed outline now use higher-contrast colors for better Windows theme visibility.
 - Blank or unformatted HFE images are now identified after the first matching conversion attempt, with a clear blank-image message instead of trying every disk geometry and offering recovery.
 
 ## [0.6.1] - 2026-05-05
