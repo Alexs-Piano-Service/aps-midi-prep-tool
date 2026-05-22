@@ -25,7 +25,7 @@ with release sections grouped by version and date.
 - Welcome workflows and README guidance now reflect the current menu labels and safety options.
 - Menus were reorganized so File focuses on source/save behavior, Disk focuses on floppy and media operations, and Utilities focuses on inspection and batch conversion tools.
 - Album Title and Catalog Number remain visible by default for Save As album-folder workflows, can be hidden from View, and refresh or blank when a disk is read.
-- `Create Album Subfolder` now stays visible even when Album Title and Catalog Number are hidden, and Save As now states whether it used the album subfolder or saved directly in the selected folder.
+- `Create Album Subfolder` is treated as part of the Album Info panel in the quick panel, and Save As now states whether it used the album subfolder or saved directly in the selected folder.
 - Save As folder-export language now clarifies that album subfolders never affect Save As Image or floppy writes.
 - Image and floppy save confirmation wording now describes renamed files as updates rather than removals.
 - Write-protect wording is consistently hyphenated as `Write-Protect Original`.
@@ -55,6 +55,9 @@ with release sections grouped by version and date.
 - Drag-and-drop now accepts Windows file drags without pre-sniffing paths, contains path/probing failures during drop processing, and closes the Adding Files dialog cleanly instead of hanging.
 - View Logs now uses Python stream capture on Windows instead of descriptor-level capture, improving reliability for PowerShell/Qt error output.
 - Folder/file importing now skips unreadable Windows paths during probing instead of aborting the whole import.
+- Formatting a USB floppy now reuses an already matching IBM FAT format when possible, clearing files and adding an empty `PIANODIR.FIL` for E-SEQ without rewriting the whole disk.
+- The drag-and-drop overlay now keeps the supported-file subtitle consistent while files are being dragged.
+- Blank or unformatted HFE images are now identified after the first matching conversion attempt, with a clear blank-image message instead of trying every disk geometry and offering recovery.
 
 ## [0.6.1] - 2026-05-05
 

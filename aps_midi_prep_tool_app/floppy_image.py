@@ -80,6 +80,16 @@ class GreaseweazleConversionError(FloppyImageError):
         self.details = details or {}
 
 
+class BlankDiskImageError(FloppyImageError):
+    """Raised when a converted image has no usable filesystem or recoverable Yamaha data."""
+
+    def __init__(self, message, *, disk_format=None, sector_map=None, source_path=""):
+        super().__init__(message)
+        self.disk_format = disk_format
+        self.sector_map = sector_map or {}
+        self.source_path = source_path or ""
+
+
 class ConvertedImageFormatMismatchError(FloppyImageError):
     """Raised when a converted image's boot sector points to another disk format."""
 
@@ -1487,11 +1497,135 @@ def create_blank_floppy_image(output_path, disk_format, volume_label="NO NAME", 
     return output_path
 
 
-def _write_empty_pianodir_to_image(target_img, temp_dir, metadata=None):
+def _create_empty_pianodir_file(temp_dir, metadata=None):
     pianodir_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}_{PIANODIR_FILENAME}")
     with open(pianodir_path, "wb") as handle:
         handle.write(build_pianodir_bytes([], metadata=metadata))
-    _copy_host_file_into_image(target_img, pianodir_path, PIANODIR_FILENAME)
+    return pianodir_path
+
+
+def _delete_eseq_directory_entries_from_image(target_img, cancel_callback=None):
+    listing = read_image_listing(target_img)
+    mdel = _require_command("mdel")
+    for entry in listing.entries:
+        _raise_if_cancelled(cancel_callback)
+        if not is_eseq_directory_path(entry.path):
+            continue
+        _run_command(
+            [mdel, "-i", target_img, mtools_path(entry.path)],
+            f"Could not replace existing {entry.path} in image",
+            cancel_callback=cancel_callback,
+        )
+
+
+def _write_empty_pianodir_to_image(target_img, temp_dir, metadata=None, cancel_callback=None):
+    pianodir_path = _create_empty_pianodir_file(temp_dir, metadata=metadata)
+    _delete_eseq_directory_entries_from_image(target_img, cancel_callback=cancel_callback)
+    _copy_host_file_into_image(target_img, pianodir_path, PIANODIR_FILENAME, cancel_callback=cancel_callback)
+
+
+def _delete_image_entries(target_img, entries, *, cancel_callback=None):
+    entries = list(entries or ())
+    if not entries:
+        return
+    mdel = _require_command("mdel")
+    for entry in sorted(entries, key=lambda item: item.path.lower()):
+        _raise_if_cancelled(cancel_callback)
+        _run_command(
+            [mdel, "-i", target_img, mtools_path(entry.path)],
+            f"Could not remove {entry.path} from image",
+            cancel_callback=cancel_callback,
+        )
+
+
+def _prepare_existing_formatted_image(
+    target_img,
+    entries,
+    temp_dir,
+    *,
+    eseq_disk=False,
+    metadata=None,
+    cancel_callback=None,
+):
+    _delete_image_entries(target_img, entries, cancel_callback=cancel_callback)
+    if eseq_disk:
+        pianodir_path = _create_empty_pianodir_file(temp_dir, metadata=metadata)
+        _copy_host_file_into_image(
+            target_img,
+            pianodir_path,
+            PIANODIR_FILENAME,
+            cancel_callback=cancel_callback,
+        )
+
+
+def _prepare_existing_formatted_usb_floppy(
+    drive_path,
+    entries,
+    temp_dir,
+    *,
+    eseq_disk=False,
+    metadata=None,
+    progress_callback=None,
+    cancel_callback=None,
+):
+    entries = sorted(list(entries or ()), key=lambda item: item.path.lower())
+    pianodir_path = _create_empty_pianodir_file(temp_dir, metadata=metadata) if eseq_disk else None
+    total_steps = max(1, len(entries) + (1 if eseq_disk else 0) + 1)
+    step = 0
+    root = _windows_filesystem_root(drive_path) if os.name == "nt" else None
+    permission_hint = (
+        "Close File Explorer windows using the floppy, make sure the disk is not write-protected, "
+        "and try again."
+    )
+
+    if root:
+        for entry in entries:
+            _raise_if_cancelled(cancel_callback)
+            step += 1
+            _notify_progress(progress_callback, step, total_steps, f"Clearing {entry.path} from floppy...")
+            target_path = _windows_drive_file_path(root, entry.path)
+            try:
+                if os.path.isfile(target_path) or os.path.islink(target_path):
+                    os.remove(target_path)
+            except OSError as exc:
+                raise FloppyImageError(
+                    f"Could not remove {entry.path} from the floppy: {exc}\n\n{permission_hint}"
+                ) from exc
+        if pianodir_path:
+            _raise_if_cancelled(cancel_callback)
+            step += 1
+            _notify_progress(progress_callback, step, total_steps, "Adding empty PIANODIR.FIL...")
+            try:
+                shutil.copy2(pianodir_path, _windows_drive_file_path(root, PIANODIR_FILENAME))
+            except OSError as exc:
+                raise FloppyImageError(
+                    f"Could not add PIANODIR.FIL to the floppy: {exc}\n\n{permission_hint}"
+                ) from exc
+    else:
+        mdel = _require_command("mdel") if entries else None
+        for entry in entries:
+            _raise_if_cancelled(cancel_callback)
+            step += 1
+            _notify_progress(progress_callback, step, total_steps, f"Clearing {entry.path} from floppy...")
+            _run_command(
+                [mdel, "-i", drive_path, mtools_path(entry.path)],
+                f"Could not remove {entry.path} from the floppy",
+                cancel_callback=cancel_callback,
+            )
+        if pianodir_path:
+            _raise_if_cancelled(cancel_callback)
+            step += 1
+            _notify_progress(progress_callback, step, total_steps, "Adding empty PIANODIR.FIL...")
+            mcopy = _require_command("mcopy")
+            _run_command(
+                [mcopy, "-i", drive_path, pianodir_path, mtools_path(PIANODIR_FILENAME)],
+                "Could not add PIANODIR.FIL to the floppy",
+                cancel_callback=cancel_callback,
+            )
+
+    _raise_if_cancelled(cancel_callback)
+    _notify_progress(progress_callback, total_steps, total_steps, "Checking floppy directory...")
+    read_image_listing(drive_path)
 
 
 def _copy_host_file_into_image(target_img, host_path, image_path, cancel_callback=None):
@@ -4551,6 +4685,46 @@ def _looks_like_editable_fat_image(img_path):
         return False
 
 
+def _sector_map_has_blank_disk_evidence(sector_map):
+    sector_map = sector_map or {}
+    found = sector_map.get("found")
+    total = sector_map.get("total")
+    try:
+        found = int(found)
+        total = int(total)
+    except (TypeError, ValueError):
+        return False
+    if total <= 0:
+        return False
+    return found == 0 or found == total
+
+
+def _converted_image_appears_blank_or_unformatted(img_path, disk_format, sector_map):
+    if not _sector_map_has_blank_disk_evidence(sector_map):
+        return False
+    try:
+        with open(img_path, "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return False
+    if not data:
+        return False
+    if isinstance(disk_format, DiskFormat) and len(data) != disk_format.size_bytes:
+        return False
+    if _looks_like_valid_yamaha_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR]):
+        return False
+    if _protected_layout_hint_from_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR]) is not None:
+        return False
+    try:
+        recovered = _recover_files_from_raw_image_bytes(
+            data,
+            disk_format_hint=disk_format if isinstance(disk_format, DiskFormat) else None,
+        )
+    except Exception:
+        return False
+    return not recovered
+
+
 def _is_probably_pianodir_bytes(data):
     return len(data) >= len(PIANODIR_HEADER) and data[:len(PIANODIR_HEADER)] == PIANODIR_HEADER
 
@@ -5162,6 +5336,121 @@ class FloppyImageSession:
             raise
 
     @classmethod
+    def _try_prepare_existing_usb_floppy(
+        cls,
+        drive_info,
+        disk_format,
+        *,
+        eseq_disk=False,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        _notify_progress(progress_callback, 0, 100, "Checking existing floppy format...")
+        session = None
+        mutation_started = False
+
+        def read_progress(step, total, message):
+            if total and total > 0:
+                clamped_step = max(0, min(int(step), int(total)))
+                mapped_step = int((clamped_step / int(total)) * 35)
+                _notify_progress(progress_callback, mapped_step, 100, message)
+            else:
+                _notify_progress(progress_callback, 0, 100, message)
+
+        def write_progress(step, total, message):
+            if total and total > 0:
+                clamped_step = max(0, min(int(step), int(total)))
+                mapped_step = 50 + int((clamped_step / int(total)) * 45)
+                _notify_progress(progress_callback, mapped_step, 100, message)
+            else:
+                _notify_progress(progress_callback, 50, 100, message)
+
+        temp_dir = tempfile.mkdtemp(prefix="aps_format_usb_probe_")
+        try:
+            working_img = os.path.join(temp_dir, "working.img")
+            try:
+                repair_result = _read_floppy_device_fast_image(
+                    drive_info.path,
+                    working_img,
+                    drive_info.size_bytes,
+                    progress_callback=read_progress,
+                    cancel_callback=cancel_callback,
+                )
+                detected_format = _disk_format_for_image(working_img)
+                read_image_listing(working_img)
+            except FloppyOperationCancelled:
+                raise
+            except Exception:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return None
+
+            session = cls(
+                drive_info.path,
+                "img",
+                temp_dir,
+                working_img,
+                detected_format,
+                repair_result,
+                source_kind="floppy_usb",
+                source_name=drive_info.display_name,
+                drive_info=drive_info,
+            )
+            temp_dir = None
+            if session.disk_format.size_bytes != disk_format.size_bytes or session.repair_changed:
+                session.cleanup()
+                return None
+
+            listing = session.list_entries()
+            entries = list(listing.entries)
+            if any(entry.directory for entry in entries):
+                session.cleanup()
+                return None
+
+            mode_message = "Preparing existing E-SEQ floppy..." if eseq_disk else "Clearing existing floppy..."
+            _notify_progress(progress_callback, 40, 100, mode_message)
+            _prepare_existing_formatted_image(
+                session.working_img_path,
+                entries,
+                session.temp_dir,
+                eseq_disk=eseq_disk,
+                cancel_callback=cancel_callback,
+            )
+            mutation_started = True
+            _prepare_existing_formatted_usb_floppy(
+                drive_info.path,
+                entries,
+                session.temp_dir,
+                eseq_disk=eseq_disk,
+                progress_callback=write_progress,
+                cancel_callback=cancel_callback,
+            )
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(progress_callback, 100, 100, "Opening prepared floppy...")
+            session.format_applied_lightly = True
+            session.format_cleared_file_count = len(entries)
+            session.repair_changed = False
+            if eseq_disk:
+                session.repair_note = (
+                    "Existing IBM FAT format reused; floppy contents were cleared and an empty PIANODIR.FIL was added."
+                )
+            else:
+                session.repair_note = "Existing IBM FAT format reused; floppy contents were cleared."
+            return session
+        except FloppyOperationCancelled:
+            if session is not None:
+                session.cleanup()
+            raise
+        except Exception:
+            if session is not None:
+                session.cleanup()
+            if mutation_started:
+                raise
+            return None
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @classmethod
     def capture_greaseweazle_archival(cls, gw_source, progress_callback=None, cancel_callback=None):
         if not isinstance(gw_source, GreaseweazleFloppySource):
             raise FloppyImageError("Invalid Greaseweazle source selection.")
@@ -5473,6 +5762,16 @@ class FloppyImageSession:
         if not isinstance(disk_format, DiskFormat):
             raise FloppyImageError("Invalid disk format.")
 
+        existing_session = cls._try_prepare_existing_usb_floppy(
+            drive_info,
+            disk_format,
+            eseq_disk=eseq_disk,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        if existing_session is not None:
+            return existing_session
+
         temp_dir = tempfile.mkdtemp(prefix="aps_format_usb_floppy_")
         try:
             working_img = os.path.join(temp_dir, "working.img")
@@ -5486,7 +5785,7 @@ class FloppyImageSession:
             if eseq_disk:
                 _raise_if_cancelled(cancel_callback)
                 _notify_progress(progress_callback, 10, 100, "Adding empty PIANODIR.FIL...")
-                _write_empty_pianodir_to_image(working_img, temp_dir)
+                _write_empty_pianodir_to_image(working_img, temp_dir, cancel_callback=cancel_callback)
             _notify_progress(progress_callback, 20, 100, f"Writing floppy {drive_info.path}...")
 
             def write_progress(step, total, message):
@@ -5549,7 +5848,7 @@ class FloppyImageSession:
             if eseq_disk:
                 _raise_if_cancelled(cancel_callback)
                 _notify_progress(progress_callback, 1, 5, "Adding empty PIANODIR.FIL...")
-                _write_empty_pianodir_to_image(working_img, temp_dir)
+                _write_empty_pianodir_to_image(working_img, temp_dir, cancel_callback=cancel_callback)
             _notify_progress(progress_callback, 2, 5, f"Writing Greaseweazle drive {gw_source.drive}...")
             write_sector_map = _gw_write_floppy(
                 gw_source,
@@ -5619,7 +5918,12 @@ class FloppyImageSession:
             if eseq_disk:
                 _raise_if_cancelled(cancel_callback)
                 _notify_progress(progress_callback, 1, 4, "Adding empty PIANODIR.FIL...")
-                _write_empty_pianodir_to_image(working_img, temp_dir, metadata=pianodir_metadata)
+                _write_empty_pianodir_to_image(
+                    working_img,
+                    temp_dir,
+                    metadata=pianodir_metadata,
+                    cancel_callback=cancel_callback,
+                )
                 source_name = f"Untitled {disk_format.label} E-SEQ {source_ext.upper()} image"
             _notify_progress(progress_callback, 2, 4, "Verifying blank image...")
             read_image_listing(working_img)
@@ -6112,6 +6416,7 @@ class FloppyImageSession:
             disk_format_hint=disk_format_hint,
         )
         for disk_format in candidate_formats:
+            is_first_candidate = disk_format == candidate_formats[0]
             _raise_if_cancelled(cancel_callback)
             candidate = os.path.join(temp_dir, f"candidate_{disk_format.key.replace('.', '_')}.img")
             prepared = os.path.join(temp_dir, f"prepared_{disk_format.key.replace('.', '_')}.img")
@@ -6148,16 +6453,35 @@ class FloppyImageSession:
                     raise
                 _raise_if_cancelled(cancel_callback)
                 _notify_progress(progress_callback, 2, 4, "Preparing editable floppy image...")
-                repair_result = prepare_yamaha_image(candidate, prepared)
-                _raise_if_cancelled(cancel_callback)
-                _notify_progress(progress_callback, 3, 4, "Scanning floppy contents...")
-                detected_format = _disk_format_for_image(prepared)
-                if detected_format.size_bytes != disk_format.size_bytes:
-                    raise FloppyImageError(
-                        "Converted image did not match the requested disk size. "
-                        f"Requested {disk_format.label}, but the converted image looks like {detected_format.label}."
+                try:
+                    repair_result = prepare_yamaha_image(candidate, prepared)
+                    _raise_if_cancelled(cancel_callback)
+                    _notify_progress(progress_callback, 3, 4, "Scanning floppy contents...")
+                    detected_format = _disk_format_for_image(prepared)
+                    if detected_format.size_bytes != disk_format.size_bytes:
+                        raise FloppyImageError(
+                            "Converted image did not match the requested disk size. "
+                            f"Requested {disk_format.label}, but the converted image looks like {detected_format.label}."
+                        )
+                    read_image_listing(prepared)
+                except FloppyImageError as exc:
+                    can_treat_blank_success_as_final = (
+                        isinstance(disk_format_hint, DiskFormat)
+                        or (str(source_ext or "").lower().lstrip(".") == "hfe" and is_first_candidate)
                     )
-                read_image_listing(prepared)
+                    if (
+                        can_treat_blank_success_as_final
+                        and _converted_image_appears_blank_or_unformatted(candidate, disk_format, conversion_sector_map)
+                    ):
+                        filename = os.path.basename(source_path) or "This image"
+                        raise BlankDiskImageError(
+                            f"{filename} appears to be a blank or unformatted {disk_format.label} disk image. "
+                            "No Yamaha/FAT directory or recoverable MIDI/E-SEQ data was found.",
+                            disk_format=disk_format,
+                            sector_map=conversion_sector_map,
+                            source_path=source_path,
+                        ) from exc
+                    raise
                 working_img = os.path.join(temp_dir, "working.img")
                 shutil.move(prepared, working_img)
                 _raise_if_cancelled(cancel_callback)
@@ -6180,7 +6504,25 @@ class FloppyImageSession:
                 )
             except FloppyOperationCancelled:
                 raise
+            except BlankDiskImageError:
+                raise
             except GreaseweazleConversionError as exc:
+                can_treat_blank_failure_as_final = (
+                    isinstance(disk_format_hint, DiskFormat)
+                    or (str(source_ext or "").lower().lstrip(".") == "hfe" and is_first_candidate)
+                )
+                if (
+                    can_treat_blank_failure_as_final
+                    and _converted_image_appears_blank_or_unformatted(candidate, disk_format, exc.sector_map)
+                ):
+                    filename = os.path.basename(source_path) or "This image"
+                    raise BlankDiskImageError(
+                        f"{filename} appears to be a blank or unformatted {disk_format.label} disk image. "
+                        "No Yamaha/FAT directory or recoverable MIDI/E-SEQ data was found.",
+                        disk_format=disk_format,
+                        sector_map=exc.sector_map,
+                        source_path=source_path,
+                    ) from exc
                 last_error = exc
                 if exc.sector_map:
                     conversion_failure_sector_maps.append(exc.sector_map)

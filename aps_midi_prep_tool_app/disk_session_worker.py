@@ -1,6 +1,7 @@
 from PySide6.QtCore import QThread, Signal
 
 from .floppy_image import (
+    BlankDiskImageError,
     FloppyImageSession,
     FloppyOperationCancelled,
     GreaseweazleConversionError,
@@ -141,6 +142,18 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                 capture.cleanup()
             if self._should_treat_as_cancelled(exc):
                 self._emit_cancelled(exc)
+                return
+            if isinstance(exc, BlankDiskImageError):
+                self.loadFailedWithDetails.emit(
+                    {
+                        "type": "blank_disk_image",
+                        "message": str(exc),
+                        "sector_map": exc.sector_map,
+                        "disk_format": exc.disk_format,
+                        "source_path": exc.source_path,
+                        "source": self.source,
+                    }
+                )
                 return
             if isinstance(exc, GreaseweazleConversionError):
                 details = {

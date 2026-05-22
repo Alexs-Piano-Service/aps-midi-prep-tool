@@ -178,8 +178,9 @@ Tag sidecar files are not written when saving in Image Mode or Floppy Mode.
 `View > Hide Status` is checked by default and hides the status text beneath the
 file list. `View > Hide Quick Panel` hides the Options, Utilities, and File
 Actions panel when you want more table space. `View > Hide Album Info` hides
-the Album Title and Catalog Number fields, which otherwise stay visible so Save
-As and album-folder options can use the current disk metadata.
+the Album Info panel, including Album Title, Catalog Number, and Create Album
+Subfolder. When visible, these fields stay available so Save As and
+album-folder options can use the current disk metadata.
 
 Use `View > View Logs...` to open a live console-output window for the current
 session. It is useful when checking Greaseweazle, mtools, format, or conversion

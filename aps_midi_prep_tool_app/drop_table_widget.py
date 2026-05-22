@@ -63,7 +63,7 @@ class DropTableWidget(QTableWidget):
             border.setAlpha(185)
             text_color = palette.text().color()
             title = self._lt("Drop to import")
-            subtitle = self._lt("MIDI, E-SEQ, or disk image")
+            subtitle = self._lt("MIDI, E-SEQ, IMG, HFE, SCP, and other disk images")
         else:
             fill = palette.base().color()
             fill.setAlpha(214)

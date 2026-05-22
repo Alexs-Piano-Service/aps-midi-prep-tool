@@ -3069,7 +3069,9 @@ class MidiTitleWindow(QMainWindow):
         self.album_subfolder_checkbox.toggled.connect(self.toggle_album_subfolder)
         pianodir_meta_layout.addWidget(self.album_subfolder_checkbox)
 
-        self.imagePianodirMetadataWidget.setVisible(True)
+        self.imagePianodirMetadataWidget.setVisible(
+            not self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
+        )
         main_layout.addWidget(self.imagePianodirMetadataWidget)
         main_layout.addWidget(self.modeBannerLabel)
 
@@ -3235,7 +3237,7 @@ class MidiTitleWindow(QMainWindow):
             self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
         )
         self.viewHideAlbumMetadataAction.setToolTip(
-            self._lt("Hide the Album Title and Catalog Number fields. Create Album Subfolder stays visible.")
+            self._lt("Hide the Album Info panel, including Album Title, Catalog Number, and Create Album Subfolder.")
         )
         self.viewHideAlbumMetadataAction.toggled.connect(self.toggle_hide_album_metadata)
         self.viewMenu.addAction(self.viewHideAlbumMetadataAction)
@@ -5709,6 +5711,9 @@ class MidiTitleWindow(QMainWindow):
         if self._message_indicates_cancelled(message):
             self._on_disk_load_cancelled(message)
             return
+        if details.get("type") == "blank_disk_image":
+            self.pendingGwConversionDetails = details
+            return
         if details.get("type") != "greaseweazle_conversion":
             self._on_disk_load_failure(message)
             return
@@ -5773,9 +5778,38 @@ class MidiTitleWindow(QMainWindow):
             source_name=os.path.basename(capture_path) or "the selected image",
         )
 
+    def _handle_blank_disk_image(self, details):
+        details = dict(details or {})
+        source_path = details.get("source_path") or ""
+        filename = os.path.basename(source_path) if source_path else "The selected image"
+        disk_format = details.get("disk_format")
+        format_note = ""
+        if disk_format is not None:
+            format_note = f"\n\n{self._lt('Detected format:')} {disk_format.label}."
+        self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadTrimTitles = False
+        self.pendingDiskRecoveryRequest = None
+        self.status_label.setText(f"{filename} appears to be blank or unformatted.")
+        QMessageBox.information(
+            self,
+            self._lt("Blank Disk Image"),
+            (
+                f"{filename}\n\n"
+                f"{self._lt('This image appears to be blank or unformatted.')}"
+                f"{format_note}\n\n"
+                + self._lt(
+                    "No Yamaha/FAT directory or recoverable MIDI/E-SEQ data was found, so APS MIDI Prep Tool stopped instead of trying more disk formats."
+                )
+            ),
+        )
+
     def _handle_greaseweazle_conversion_failure(self, details):
         details = dict(details or {})
         message = details.get("message", "")
+
+        if details.get("type") == "blank_disk_image":
+            self._handle_blank_disk_image(details)
+            return
 
         if details.get("reason") == "non_fat_format":
             self._offer_save_non_fat_greaseweazle_image(details)
@@ -7043,7 +7077,9 @@ class MidiTitleWindow(QMainWindow):
         if hasattr(self, "viewHideQuickPanelAction"):
             self.viewHideQuickPanelAction.setStatusTip("Hide or show the Options, Utilities, and File Actions panel.")
         if hasattr(self, "viewHideAlbumMetadataAction"):
-            album_info_tip = self._lt("Hide the Album Title and Catalog Number fields. Create Album Subfolder stays visible.")
+            album_info_tip = self._lt(
+                "Hide the Album Info panel, including Album Title, Catalog Number, and Create Album Subfolder."
+            )
             self.viewHideAlbumMetadataAction.setToolTip(album_info_tip)
             self.viewHideAlbumMetadataAction.setStatusTip(album_info_tip)
         if hasattr(self, "viewLogsAction"):
@@ -7198,8 +7234,8 @@ class MidiTitleWindow(QMainWindow):
     def _update_image_pianodir_metadata_ui(self):
         if not hasattr(self, "imagePianodirMetadataWidget"):
             return
-        album_fields_visible = not self._album_metadata_fields_are_hidden()
-        self.imagePianodirMetadataWidget.setVisible(True)
+        album_info_visible = not self._album_metadata_fields_are_hidden()
+        self.imagePianodirMetadataWidget.setVisible(album_info_visible)
         for widget_name in (
             "albumTitleLabel",
             "imagePianodirTitleEdit",
@@ -7208,7 +7244,7 @@ class MidiTitleWindow(QMainWindow):
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None:
-                widget.setVisible(album_fields_visible)
+                widget.setVisible(True)
         if hasattr(self, "album_subfolder_checkbox"):
             enabled = bool(getattr(self, "choose_button", None) is None or self.choose_button.isEnabled())
             self.album_subfolder_checkbox.setVisible(True)
@@ -10975,15 +11011,45 @@ class MidiTitleWindow(QMainWindow):
         disk_format = context.get("disk_format")
         mode_label = context.get("mode_label", "MIDI")
         format_label = disk_format.label if disk_format is not None else "selected format"
-        self.status_label.setText(
-            f"Formatted {target_name} as {format_label} Yamaha Disklavier {mode_label} floppy."
-        )
+        reused_existing_format = bool(getattr(session, "format_applied_lightly", False))
+        if reused_existing_format:
+            self.status_label.setText(
+                f"Prepared {target_name} as a {format_label} Yamaha Disklavier {mode_label} floppy."
+            )
+        else:
+            self.status_label.setText(
+                f"Formatted {target_name} as {format_label} Yamaha Disklavier {mode_label} floppy."
+            )
         self._show_greaseweazle_sector_reports(getattr(session, "latest_gw_sector_reports", ()))
-        QMessageBox.information(
-            self,
-            "Floppy Formatted",
-            f"The disk was formatted and opened in Floppy Disk ({mode_label}) mode.",
-        )
+        if reused_existing_format:
+            cleared_count = int(getattr(session, "format_cleared_file_count", 0) or 0)
+            if mode_label == "E-SEQ":
+                applied_change = (
+                    f"cleared {cleared_count} existing file(s) and added an empty PIANODIR.FIL"
+                    if cleared_count
+                    else "added an empty PIANODIR.FIL"
+                )
+            else:
+                applied_change = (
+                    f"cleared {cleared_count} existing file(s)"
+                    if cleared_count
+                    else "confirmed it was already empty"
+                )
+            QMessageBox.information(
+                self,
+                "Floppy Prepared",
+                (
+                    "The disk already matched the selected IBM format, so APS MIDI Prep Tool "
+                    f"{applied_change}. "
+                    f"It is open in Floppy Disk ({mode_label}) mode."
+                ),
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Floppy Formatted",
+                f"The disk was formatted and opened in Floppy Disk ({mode_label}) mode.",
+            )
 
     def _on_floppy_format_failure(self, message):
         if self.diskFormatProgressDialog is not None:
