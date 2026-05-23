@@ -32,6 +32,7 @@ with release sections grouped by version and date.
 - Save As folder-export language now clarifies that album subfolders never affect Save As Image or floppy writes.
 - Image and floppy save confirmation wording now describes renamed files as updates rather than removals.
 - Write-protect wording is consistently hyphenated as `Write-Protect Original`.
+- SoundFont dropdowns now use catalog names and clearer format/source labels instead of filename-derived labels when possible.
 
 ### Fixed
 

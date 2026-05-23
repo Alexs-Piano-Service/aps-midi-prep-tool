@@ -1558,6 +1558,26 @@ _SOUNDFONT_ARCHIVE_EXTENSIONS = (
     + _SOUNDFONT_ZIP_ARCHIVE_EXTENSIONS
     + _SOUNDFONT_SEVEN_ZIP_ARCHIVE_EXTENSIONS
 )
+_SOUNDFONT_METADATA_SUFFIX = ".aps.json"
+_SOUNDFONT_KNOWN_DISPLAY_NAMES = {
+    "fluidr3_gm": "FluidR3 GM",
+    "fluidr3-gm": "FluidR3 GM",
+    "fluidr3-gm-sf2": "FluidR3 GM",
+    "generaluser-gs": "GeneralUser GS",
+    "generaluser-gs-2.0.3": "GeneralUser GS",
+    "musescore-general": "MuseScore General",
+    "musescore-general-sf3": "MuseScore General",
+    "musescore-general-sf2": "MuseScore General Lossless",
+    "salamander-grand-piano": "Salamander Grand Piano",
+    "salamander-grand-piano-sf2": "Salamander Grand Piano",
+    "salamandergrandpiano": "Salamander Grand Piano",
+    "timgm6mb": "TimGM6mb",
+    "upright-piano-kw": "Upright Piano KW",
+    "upright-piano-kw-sf2": "Upright Piano KW",
+    "uprightpianokw": "Upright Piano KW",
+    "ydp-grand-piano": "YDP Grand Piano",
+    "ydp-grand-piano-sf2": "YDP Grand Piano",
+}
 
 
 def _safe_soundfont_filename(value, fallback="soundfont.sf2"):
@@ -1611,10 +1631,151 @@ def _soundfont_install_filename(entry, url):
     return _safe_soundfont_filename(f"{base}{extension}")
 
 
-def _soundfont_display_name(path):
+def _soundfont_metadata_path(path):
+    return f"{path}{_SOUNDFONT_METADATA_SUFFIX}"
+
+
+def _read_soundfont_metadata(path):
+    metadata_path = _soundfont_metadata_path(path)
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _write_soundfont_metadata(path, entry):
+    if not path or not entry:
+        return
+    metadata = {
+        key: entry.get(key)
+        for key in (
+            "id",
+            "name",
+            "subtitle",
+            "category",
+            "format",
+            "format_label",
+            "recommended",
+            "default_for",
+            "homepage_url",
+            "license",
+            "license_url",
+            "size",
+            "attribution",
+            "notes",
+            "url",
+        )
+        if entry.get(key) not in (None, "")
+    }
+    metadata["installed_filename"] = os.path.basename(path)
+    metadata_path = _soundfont_metadata_path(path)
+    temp_path = f"{metadata_path}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temp_path, metadata_path)
+    except OSError:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def _soundfont_known_display_name(path):
+    filename = os.path.basename(str(path or ""))
+    stem, ext = os.path.splitext(filename)
+    lookup_keys = [
+        filename.lower(),
+        stem.lower(),
+        re.sub(r"[-_ ]sf[23]$", "", stem, flags=re.IGNORECASE).lower(),
+    ]
+    if stem.lower() == "musescore_general":
+        return "MuseScore General Lossless" if ext.lower() == ".sf2" else "MuseScore General"
+    for key in lookup_keys:
+        if key in _SOUNDFONT_KNOWN_DISPLAY_NAMES:
+            return _SOUNDFONT_KNOWN_DISPLAY_NAMES[key]
+    return ""
+
+
+def _soundfont_display_name(path, metadata=None):
+    metadata = metadata if isinstance(metadata, dict) else _read_soundfont_metadata(path)
+    metadata_name = str(metadata.get("name") or "").strip()
+    if metadata_name:
+        return metadata_name
+    known_name = _soundfont_known_display_name(path)
+    if known_name:
+        return known_name
     filename = os.path.basename(str(path or ""))
     stem, _ext = os.path.splitext(filename)
-    return stem.replace("_", " ").replace("-", " ").strip() or filename or "SoundFont"
+    stem = re.sub(r"[-_ ]sf[23]$", "", stem, flags=re.IGNORECASE)
+    words = [word for word in re.split(r"[-_\s]+", stem) if word]
+    replacements = {
+        "gm": "GM",
+        "gs": "GS",
+        "kw": "KW",
+        "sf2": "SF2",
+        "sf3": "SF3",
+        "ydp": "YDP",
+        "fluidr3": "FluidR3",
+        "generaluser": "GeneralUser",
+        "musescore": "MuseScore",
+        "timgm6mb": "TimGM6mb",
+    }
+    display_words = [replacements.get(word.lower(), word[:1].upper() + word[1:]) for word in words]
+    return " ".join(display_words).strip() or filename or "SoundFont"
+
+
+def _soundfont_format_label(path, metadata=None):
+    metadata = metadata if isinstance(metadata, dict) else {}
+    format_label = str(metadata.get("format_label") or "").strip().upper()
+    if format_label:
+        return format_label
+    file_format = str(metadata.get("format") or "").strip().upper()
+    if file_format in {"SF2", "SF3"}:
+        return file_format
+    extension = os.path.splitext(str(path or ""))[1].lower()
+    return extension.lstrip(".").upper() if extension in _SOUNDFONT_EXTENSIONS else ""
+
+
+def _soundfont_combo_label(soundfont, translate=lambda value: value):
+    name = str(soundfont.get("name") or "").strip() or _soundfont_display_name(soundfont.get("path", ""))
+    parts = []
+    format_label = str(soundfont.get("format_label") or "").strip()
+    source = str(soundfont.get("source") or "").strip()
+    if format_label:
+        parts.append(format_label)
+    if source:
+        display_source = "Installed" if source == "Bundled/System" else source
+        parts.append(translate(display_source))
+    return f"{name} ({', '.join(parts)})" if parts else name
+
+
+def _soundfont_tooltip(soundfont, translate=lambda value: value):
+    rows = [str(soundfont.get("name") or "").strip() or _soundfont_display_name(soundfont.get("path", ""))]
+    source = str(soundfont.get("source") or "").strip()
+    if source:
+        display_source = "Installed" if source == "Bundled/System" else source
+        rows.append(f"{translate('Status')}: {translate(display_source)}")
+    for label, key in (
+        ("Details", "subtitle"),
+        ("Category", "category"),
+        ("Format", "format_label"),
+        ("Size", "size"),
+        ("License", "license"),
+        ("Attribution", "attribution"),
+        ("Notes", "notes"),
+    ):
+        value = str(soundfont.get(key) or "").strip()
+        if value:
+            rows.append(f"{translate(label)}: {value}")
+    path = str(soundfont.get("path") or "").strip()
+    if path:
+        rows.append(path)
+    return "\n".join(row for row in rows if row)
 
 
 def _available_soundfonts():
@@ -1629,12 +1790,20 @@ def _available_soundfonts():
             if os.path.splitext(path)[1].lower() not in {".sf2", ".sf3"}:
                 continue
             seen.add(path)
+            metadata = _read_soundfont_metadata(path)
             source = "Downloaded" if path.startswith(user_dir + os.sep) else "Bundled/System"
             soundfonts.append(
                 {
-                    "name": _soundfont_display_name(path),
+                    "name": _soundfont_display_name(path, metadata),
                     "path": path,
                     "source": source,
+                    "subtitle": str(metadata.get("subtitle") or "").strip(),
+                    "category": str(metadata.get("category") or "").strip(),
+                    "format_label": _soundfont_format_label(path, metadata),
+                    "license": str(metadata.get("license") or "").strip(),
+                    "attribution": str(metadata.get("attribution") or "").strip(),
+                    "notes": str(metadata.get("notes") or "").strip(),
+                    "size": str(metadata.get("size") or "").strip(),
                     "size_bytes": os.path.getsize(path),
                 }
             )
@@ -1989,11 +2158,12 @@ class MidiPreviewRenderWorker(QThread):
         command = _find_fluidsynth_command()
         if not command or not soundfont_path:
             return False, ""
+        soundfont_name = _soundfont_display_name(soundfont_path)
 
         self._emit_progress(
             25,
             0,
-            f"Rendering SoundFont preview with {os.path.basename(soundfont_path)}...",
+            f"Rendering SoundFont preview with {soundfont_name}...",
         )
         args = [
             command,
@@ -2030,7 +2200,7 @@ class MidiPreviewRenderWorker(QThread):
             if detail:
                 detail = f": {detail.splitlines()[-1]}"
             raise RuntimeError(f"FluidSynth could not render the preview{detail}")
-        return True, f"FluidSynth + {os.path.basename(soundfont_path)}"
+        return True, f"FluidSynth + {soundfont_name}"
 
     def run(self):
         midi_path = ""
@@ -2274,6 +2444,7 @@ class SoundFontDownloadWorker(QThread):
             if expected_hash and hasher.hexdigest().lower() != expected_hash:
                 raise RuntimeError("The downloaded SoundFont did not match the expected SHA-256 hash.")
             installed_path = self._install_downloaded_package(temp_path, output_path, package_extension)
+            _write_soundfont_metadata(installed_path, self.entry)
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
@@ -2640,17 +2811,17 @@ class SoundFontManagerDialog(QDialog):
         installed_paths = {soundfont.get("path", "") for soundfont in installed_by_filename.values()}
         for soundfont in _available_soundfonts():
             path = soundfont.get("path", "")
-            extension = os.path.splitext(path)[1].lstrip(".").upper()
             item = QTreeWidgetItem([
                 soundfont.get("name", ""),
                 self.t(soundfont.get("source", "Installed")),
-                extension,
+                soundfont.get("format_label", ""),
                 display_bytes(soundfont.get("size_bytes", 0)),
                 path,
             ])
             item.setData(0, Qt.UserRole, {"type": "local", "path": path})
+            tooltip = _soundfont_tooltip(soundfont, self.t)
             for column in range(self.tree.columnCount()):
-                item.setToolTip(column, path)
+                item.setToolTip(column, tooltip)
             self.tree.addTopLevelItem(item)
 
         for entry in self.catalog_entries:
@@ -2759,7 +2930,7 @@ class SoundFontManagerDialog(QDialog):
             self.status_label.setText(f"{self.t('Downloading')} {filename}: {display_bytes(done)}")
 
     def _on_download_finished(self, path):
-        self.status_label.setText(f"{self.t('Installed SoundFont')}: {os.path.basename(path)}")
+        self.status_label.setText(f"{self.t('Installed SoundFont')}: {_soundfont_display_name(path)}")
         self._populate_tree()
 
     def _on_download_failed(self, message):
@@ -2785,7 +2956,13 @@ class SoundFontManagerDialog(QDialog):
             target = _downloaded_soundfont_path(os.path.basename(path))
             if os.path.abspath(path) != os.path.abspath(target):
                 shutil.copy2(path, target)
-            self.status_label.setText(f"{self.t('Installed SoundFont')}: {os.path.basename(target)}")
+            metadata_path = _soundfont_metadata_path(target)
+            if os.path.exists(metadata_path):
+                try:
+                    os.remove(metadata_path)
+                except OSError:
+                    pass
+            self.status_label.setText(f"{self.t('Installed SoundFont')}: {_soundfont_display_name(target)}")
             self._populate_tree()
         except Exception as exc:
             QMessageBox.warning(
@@ -2881,10 +3058,13 @@ class BatchAudioRenderDialog(QDialog):
         current_path = self.soundfont_combo.currentData()
         self.soundfont_combo.clear()
         for soundfont in _available_soundfonts():
-            label = f"{soundfont.get('name')} ({self.t(soundfont.get('source', 'Installed'))})"
-            self.soundfont_combo.addItem(label, soundfont.get("path", ""))
+            label = _soundfont_combo_label(soundfont, self.t)
+            path = soundfont.get("path", "")
+            self.soundfont_combo.addItem(label, path)
+            item_index = self.soundfont_combo.count() - 1
+            self.soundfont_combo.setItemData(item_index, _soundfont_tooltip(soundfont, self.t), Qt.ToolTipRole)
             if current_path and soundfont.get("path") == current_path:
-                self.soundfont_combo.setCurrentIndex(self.soundfont_combo.count() - 1)
+                self.soundfont_combo.setCurrentIndex(item_index)
         self._refresh_state()
 
     def _log_event(self, action, **details):
@@ -2977,7 +3157,7 @@ class BatchAudioRenderDialog(QDialog):
             "Started",
             files=len(self.items),
             format=output_format,
-            soundfont=os.path.basename(str(self.soundfont_combo.currentData() or "")),
+            soundfont=self.soundfont_combo.currentText(),
             output=self.output_edit.text().strip(),
         )
         worker.start()
@@ -3232,11 +3412,13 @@ class FileInspectionDialog(QDialog):
         self.soundfont_combo.clear()
         selected_index = -1
         for soundfont in _available_soundfonts():
-            label = f"{soundfont.get('name')} ({self.t(soundfont.get('source', 'Installed'))})"
+            label = _soundfont_combo_label(soundfont, self.t)
             path = soundfont.get("path", "")
             self.soundfont_combo.addItem(label, path)
+            item_index = self.soundfont_combo.count() - 1
+            self.soundfont_combo.setItemData(item_index, _soundfont_tooltip(soundfont, self.t), Qt.ToolTipRole)
             if current_path and path == current_path:
-                selected_index = self.soundfont_combo.count() - 1
+                selected_index = item_index
         if self.soundfont_combo.count() == 0:
             self.soundfont_combo.addItem(self.t("Built-in preview"), "")
             self.soundfont_combo.setEnabled(False)
