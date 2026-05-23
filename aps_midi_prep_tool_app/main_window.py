@@ -2754,7 +2754,7 @@ class SoundFontManagerDialog(QDialog):
         self.open_folder_button.clicked.connect(self.open_soundfont_folder)
         close_button.clicked.connect(self.close)
         self.tree.currentItemChanged.connect(lambda _current, _previous: self._refresh_button_state())
-        self.tree.itemDoubleClicked.connect(lambda _item, _column: self.download_selected())
+        self.tree.itemDoubleClicked.connect(lambda item, _column: self.download_selected(item))
 
         self._populate_tree()
         QTimer.singleShot(0, self.refresh_catalog)
@@ -2764,6 +2764,20 @@ class SoundFontManagerDialog(QDialog):
         for soundfont in _available_soundfonts():
             installed[os.path.basename(soundfont.get("path", "")).lower()] = soundfont
         return installed
+
+    def _is_catalog_entry_installed(self, entry, installed_by_filename=None, installed_paths=None):
+        installed_by_filename = (
+            installed_by_filename if installed_by_filename is not None else self._installed_by_filename()
+        )
+        installed_paths = installed_paths if installed_paths is not None else {
+            os.path.abspath(soundfont.get("path", ""))
+            for soundfont in installed_by_filename.values()
+        }
+        target_path = os.path.abspath(_downloaded_soundfont_path(entry.get("filename", "")))
+        return (
+            os.path.basename(target_path).lower() in installed_by_filename
+            or target_path in installed_paths
+        )
 
     def _catalog_details(self, entry):
         parts = []
@@ -2825,14 +2839,9 @@ class SoundFontManagerDialog(QDialog):
             self.tree.addTopLevelItem(item)
 
         for entry in self.catalog_entries:
-            target_path = _downloaded_soundfont_path(entry.get("filename", ""))
-            already_installed = (
-                os.path.basename(target_path).lower() in installed_by_filename
-                or target_path in installed_paths
-            )
-            if already_installed:
-                status = self.t("Installed")
-            elif not entry.get("supported", True):
+            if self._is_catalog_entry_installed(entry, installed_by_filename, installed_paths):
+                continue
+            if not entry.get("supported", True):
                 status = self.t("Manual install")
             else:
                 status = self.t("Available")
@@ -2845,7 +2854,7 @@ class SoundFontManagerDialog(QDialog):
                 entry.get("size", ""),
                 details,
             ])
-            item.setData(0, Qt.UserRole, {"type": "remote", "entry": entry, "installed": already_installed})
+            item.setData(0, Qt.UserRole, {"type": "remote", "entry": entry, "installed": False})
             for column in range(self.tree.columnCount()):
                 item.setToolTip(column, tooltip)
             if not entry.get("supported", True):
@@ -2900,13 +2909,20 @@ class SoundFontManagerDialog(QDialog):
         if worker is not None:
             worker.deleteLater()
 
-    def download_selected(self):
-        item = self.tree.currentItem()
+    def download_selected(self, item=None):
+        if self.download_worker is not None:
+            return
+        item = item or self.tree.currentItem()
         payload = item.data(0, Qt.UserRole) if item is not None else {}
         if not isinstance(payload, dict) or payload.get("type") != "remote":
             return
+        if payload.get("installed"):
+            return
         entry = dict(payload.get("entry") or {})
         if not entry:
+            return
+        if self._is_catalog_entry_installed(entry):
+            self._populate_tree()
             return
         if not entry.get("supported", True):
             self.status_label.setText(self.t(entry.get("unsupported_reason", "")))
