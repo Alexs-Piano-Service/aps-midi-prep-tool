@@ -4,7 +4,7 @@ APS MIDI Prep Tool is a modern Disklavier preservation and preparation
 workstation for MIDI files, Yamaha E-SEQ files, floppy images, and physical
 floppy disks.
 
-Current version: `0.6.4`
+Current version: `0.6.5`
 
 Author: Alexander Peppe
 
@@ -60,16 +60,22 @@ before you write anything back.
 - Protects original images and floppies with
   `File > Write Protection > Write-Protect Original`.
 - Shows song lists, file inspection metadata, piano-roll previews, channels, and
-  playback previews.
+  playback previews, with a SoundFont picker and manager for optional
+  downloadable SoundFonts.
+- Renders all currently listed MIDI or E-SEQ files to WAV or MP3 from
+  `Utilities > Render Audio...` using a selected SoundFont.
 - Provides a `View` menu for title-warning display, Disklavier title formatting,
   status visibility, quick-panel visibility, album-info visibility, and realtime
   console logs.
 - Shows an empty-list drop target and highlights the file list during supported
   file drags so MIDI, E-SEQ, and disk-image files are easier to add.
 - Provides `Help > Report a Bug...` for sending a support report with app
-  details and optional recent console logs.
+  details and optional recent, timestamped console logs.
 - Provides customizable keyboard shortcuts for current File, Disk, View,
   Utilities, Settings, and Help commands.
+- Includes localized UI support for English, Spanish, French, German, Italian,
+  Brazilian Portuguese, Bulgarian, Dutch, Polish, Japanese, Korean, and
+  Simplified Chinese.
 - Optionally writes `.tags.txt` ID3 sidecar files for local folder exports.
 
 ## Common Workflows
@@ -184,7 +190,9 @@ album-folder options can use the current disk metadata.
 
 Use `View > View Logs...` to open a live console-output window for the current
 session. It is useful when checking Greaseweazle, mtools, format, or conversion
-output while the app is still running.
+output while the app is still running. The log now includes readable app events
+for major actions such as opening folders and images, reading floppies,
+saving, drag-and-drop imports, bug reports, warnings, and failures.
 
 Use `Help > Report a Bug...` to send a bug report. The dialog can include a
 recent section of the live console log along with app and operating-system
@@ -195,6 +203,33 @@ in.
 Use `Settings > Keyboard Shortcuts...` to review or customize the default
 hotkeys for all current File, Disk, View, Utilities, Settings, and Help menu
 commands.
+
+### SoundFonts And Audio Rendering
+
+Use `Utilities > File Inspection...` to inspect a file, preview it, choose the
+SoundFont used for FluidSynth previews, and open `Download SoundFonts...` when
+you want additional SoundFonts. Use `Utilities > Render Audio...` to
+batch-render every currently listed MIDI or E-SEQ file through a selected
+SoundFont.
+
+SoundFont preview and WAV rendering require FluidSynth installed on the system
+or supplied through `APS_MIDI_PREP_FLUIDSYNTH`. MP3 rendering first creates a
+temporary WAV and then uses LAME for the final encoded file. Release packages
+bundle LAME when available; source runs can use LAME on `PATH` or a path supplied
+through `APS_MIDI_PREP_LAME`.
+
+The online SoundFont manager reads this JSON manifest by default:
+
+```text
+https://www.alexanderpeppe.com/aps-midi-prep-tool-data/soundfonts.json
+```
+
+The manifest uses `schema_version`, `updated`, and a `soundfonts` list. Entries
+can include `name`, `subtitle`, `category`, `format`, `recommended`,
+`default_for`, `download_url`, `homepage_url`, `license`, `license_url`,
+`approx_size`, `attribution`, and `notes`. Direct `.sf2` and `.sf3` downloads
+install directly; common `zip` and `tar.*` archives are unpacked automatically.
+Set `APS_MIDI_PREP_SOUNDFONT_CATALOG_URL` to test a different manifest.
 
 ## Modes
 
@@ -229,12 +264,15 @@ For normal source runs:
 - PySide6
 - `mtools` for image authoring and FAT image operations
 - Greaseweazle CLI (`gw`) for Greaseweazle reads, writes, and conversions
-- FluidSynth and a redistributable GM/piano SoundFont for File Inspection playback
+- FluidSynth for SoundFont-based File Inspection previews and WAV rendering
+- A redistributable GM/piano SoundFont for SoundFont previews and audio rendering
+- LAME for MP3 audio rendering
 - Device permissions for direct floppy drive reads and writes
 
-Release AppImages bundle the needed `mtools` commands, Greaseweazle CLI,
-FluidSynth, and a SoundFont when available. Physical floppy access still
-depends on operating-system device permissions.
+Release AppImages bundle the needed `mtools` commands, Greaseweazle CLI, 7-Zip,
+and LAME when available, but do not bundle FluidSynth by default. Windows
+release builds bundle LAME for MP3 export. Physical floppy access still depends
+on operating-system device permissions.
 
 ## Run Locally
 

@@ -182,6 +182,7 @@ class DropTableWidget(QTableWidget):
 
     def _show_drop_exception(self, main_window, exc):
         detail = str(exc).strip() or repr(exc)
+        self._log_drop_error(main_window, "Failed", detail=detail)
         show_operation_error = getattr(main_window, "_show_operation_error", None)
         if callable(show_operation_error):
             try:
@@ -199,6 +200,31 @@ class DropTableWidget(QTableWidget):
             self._lt("Drop Failed"),
             self._lt("The dropped files could not be added.") + f"\n\n{detail}",
         )
+
+    def _log_drop_event(self, main_window, action, **details):
+        logger = getattr(main_window, "_log_event", None)
+        if callable(logger):
+            try:
+                logger("Drag and drop", action, **details)
+            except Exception:
+                pass
+
+    def _log_drop_error(self, main_window, action, **details):
+        logger = getattr(main_window, "_log_error_event", None)
+        if callable(logger):
+            try:
+                logger("Drag and drop", action, **details)
+            except Exception:
+                pass
+
+    def _summarize_drop_results(self, results):
+        summary = {}
+        for result in results or ():
+            if not result:
+                continue
+            status = str(result.get("status") or "unknown")
+            summary[status] = summary.get(status, 0) + 1
+        return summary
 
     def _drag_event_has_supported_urls(self, event):
         try:
@@ -249,9 +275,17 @@ class DropTableWidget(QTableWidget):
         if has_urls:
             try:
                 local_paths = self._local_paths_from_urls(mime_data.urls())
+                self._log_drop_event(
+                    main_window,
+                    "Files dropped",
+                    count=len(local_paths),
+                    first=os.path.basename(local_paths[0]) if local_paths else "",
+                    mode="image" if self._safe_main_window_call(main_window, "is_image_mode") else "midi",
+                )
                 image_paths = [path for path in local_paths if self._safe_is_supported_image_path(path)]
 
                 if image_paths and hasattr(main_window, "load_image_file"):
+                    self._log_drop_event(main_window, "Opening disk image", path=image_paths[0])
                     main_window.load_image_file(image_paths[0])
                     self._safe_accept_event(event)
                     return
@@ -319,6 +353,11 @@ class DropTableWidget(QTableWidget):
                 if self._safe_main_window_call(main_window, "is_image_mode"):
                     if hasattr(main_window, "queue_image_additions"):
                         main_window.queue_image_additions(local_paths)
+                    self._log_drop_event(
+                        main_window,
+                        "Queued image additions",
+                        count=len(local_paths),
+                    )
                     self._safe_accept_event(event)
                     return
 
@@ -361,6 +400,17 @@ class DropTableWidget(QTableWidget):
                     progressDialog = None
                 if hasattr(main_window, "finish_regular_file_drop"):
                     main_window.finish_regular_file_drop(results)
+                summary = self._summarize_drop_results(results)
+                self._log_drop_event(
+                    main_window,
+                    "Import finished",
+                    total=len(results),
+                    added=summary.get("added", 0),
+                    converted=summary.get("converted", 0),
+                    skipped=summary.get("skipped", 0),
+                    errors=summary.get("error", 0),
+                    cancelled=summary.get("cancelled", 0),
+                )
                 self._safe_accept_event(event)
             except Exception as exc:
                 if progressDialog:

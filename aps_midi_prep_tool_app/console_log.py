@@ -31,18 +31,93 @@ class ConsoleLogBus(QObject):
         self._lock = threading.RLock()
         self._total_text_chars = 0
 
+    @staticmethod
+    def _stream_label(stream_name):
+        return {
+            "stdout": "OUT",
+            "stderr": "ERR",
+            "event": "APP",
+            "warning": "WARN",
+            "error": "ERROR",
+        }.get(str(stream_name or "").strip().lower(), str(stream_name or "LOG").upper()[:8])
+
+    @staticmethod
+    def _clean_event_piece(value):
+        return " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+
+    @classmethod
+    def _format_event_value(cls, value):
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple, set)):
+            values = [cls._format_event_value(item) for item in value]
+            values = [item for item in values if item]
+            if len(values) > 6:
+                return ", ".join(values[:6]) + f", +{len(values) - 6} more"
+            return ", ".join(values)
+        text = cls._clean_event_piece(value)
+        if len(text) > 240:
+            return text[:237].rstrip() + "..."
+        return text
+
+    @classmethod
+    def _format_event_details(cls, details):
+        if not details:
+            return ""
+        if not isinstance(details, dict):
+            return cls._format_event_value(details)
+        parts = []
+        for key, value in details.items():
+            formatted_value = cls._format_event_value(value)
+            if not formatted_value:
+                continue
+            label = cls._clean_event_piece(str(key).replace("_", " "))
+            parts.append(f"{label}: {formatted_value}")
+        return "; ".join(parts)
+
+    @classmethod
+    def format_chunk_for_text(cls, timestamp, stream_name, text):
+        text = str(text or "")
+        if not text:
+            return ""
+        label = cls._stream_label(stream_name)
+        prefix = f"[{timestamp}] {label:<5} | "
+        pieces = []
+        for line in text.splitlines(True):
+            if line in ("\n", "\r\n"):
+                pieces.append(prefix.rstrip() + line)
+            else:
+                pieces.append(prefix + line)
+        if not pieces:
+            pieces.append(prefix)
+        return "".join(pieces)
+
     def append(self, stream_name, text):
         if not text:
             return
         timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         text = str(text)
+        formatted_text = self.format_chunk_for_text(timestamp, stream_name, text)
         with self._lock:
             self._chunks.append((timestamp, stream_name, text))
-            self._total_text_chars += len(text)
+            self._total_text_chars += len(formatted_text)
         try:
             self.chunk_written.emit(timestamp, stream_name, text)
         except RuntimeError:
             pass
+
+    def append_event(self, category, action="", details=None, *, stream_name="event"):
+        category_text = self._clean_event_piece(category) or "Application"
+        action_text = self._clean_event_piece(action)
+        message = category_text
+        if action_text:
+            message += f": {action_text}"
+        detail_text = self._format_event_details(details)
+        if detail_text:
+            message += f" | {detail_text}"
+        self.append(stream_name, message + "\n")
 
     def chunks(self):
         with self._lock:
@@ -50,7 +125,10 @@ class ConsoleLogBus(QObject):
 
     def plain_text(self):
         with self._lock:
-            return "".join(text for _timestamp, _stream_name, text in self._chunks)
+            return "".join(
+                self.format_chunk_for_text(timestamp, stream_name, text)
+                for timestamp, stream_name, text in self._chunks
+            )
 
     def total_text_chars(self):
         with self._lock:
@@ -65,14 +143,15 @@ class ConsoleLogBus(QObject):
             return ""
         pieces = []
         with self._lock:
-            for _timestamp, _stream_name, text in reversed(self._chunks):
+            for timestamp, stream_name, text in reversed(self._chunks):
                 if remaining <= 0:
                     break
-                if len(text) <= remaining:
-                    pieces.append(text)
-                    remaining -= len(text)
+                formatted_text = self.format_chunk_for_text(timestamp, stream_name, text)
+                if len(formatted_text) <= remaining:
+                    pieces.append(formatted_text)
+                    remaining -= len(formatted_text)
                 else:
-                    pieces.append(text[-remaining:])
+                    pieces.append(formatted_text[-remaining:])
                     remaining = 0
         return "".join(reversed(pieces))
 
@@ -375,8 +454,13 @@ class ConsoleLogDialog(QDialog):
 
     def _stream_format(self, stream_name):
         fmt = QTextCharFormat()
-        if stream_name == "stderr":
+        stream_name = str(stream_name or "").lower()
+        if stream_name in {"stderr", "error"}:
             fmt.setForeground(QColor("#FCA5A5"))
+        elif stream_name == "warning":
+            fmt.setForeground(QColor("#FDE68A"))
+        elif stream_name == "event":
+            fmt.setForeground(QColor("#93C5FD"))
         else:
             fmt.setForeground(QColor("#D1D5DB"))
         return fmt
@@ -392,13 +476,14 @@ class ConsoleLogDialog(QDialog):
         self._update_summary()
 
     def _write_chunk(self, timestamp, stream_name, text):
+        formatted_text = self.bus.format_chunk_for_text(timestamp, stream_name, text)
         cursor = self.log_view.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.setCharFormat(self._stream_format(stream_name))
-        cursor.insertText(text)
+        cursor.insertText(formatted_text)
         self.log_view.setTextCursor(cursor)
-        self._char_count += len(text)
-        self._line_count += text.count("\n")
+        self._char_count += len(formatted_text)
+        self._line_count += formatted_text.count("\n")
 
     def _set_paused(self, paused):
         self._paused = bool(paused)

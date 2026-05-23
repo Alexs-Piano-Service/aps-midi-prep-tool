@@ -23,8 +23,8 @@ pip install PySide6
 python3 aps_midi_prep_tool.py
 ```
 
-Image and floppy workflows may also need `mtools`, the Greaseweazle CLI, and
-FluidSynth with a redistributable SoundFont.
+Image, floppy, and audio workflows may also need `mtools`, the Greaseweazle CLI,
+FluidSynth with a redistributable SoundFont, and LAME.
 
 ## Before Submitting Changes
 

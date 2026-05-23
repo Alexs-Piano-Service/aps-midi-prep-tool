@@ -34,6 +34,13 @@ jobs:
             pip install pyinstaller
           }
 
+      - name: Install LAME
+        shell: pwsh
+        run: |
+          choco install lame -y --no-progress
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+          lame --version
+
       - name: Build Windows EXE
         shell: pwsh
         run: |
@@ -49,6 +56,13 @@ jobs:
           if (Test-Path $gwExe) {
             $pyInstallerArgs += @("--add-binary", "$gwExe;aps_midi_prep_tool_app/bin/greaseweazle")
           }
+          $lameExe = (Get-Command lame.exe -ErrorAction SilentlyContinue).Source
+          if (-not $lameExe) {
+            $lameExe = Get-ChildItem "$env:ChocolateyInstall/lib/lame/tools" -Recurse -Filter lame.exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $lameExe) { throw "LAME was not found after installation." }
+          $pyInstallerArgs += @("--add-binary", "$lameExe;bin")
           pyinstaller @pyInstallerArgs aps_midi_prep_tool.py
 
       - name: Install AzureSignTool

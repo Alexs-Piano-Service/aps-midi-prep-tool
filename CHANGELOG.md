@@ -5,7 +5,7 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [0.6.4] - 2026-05-19
+## [0.6.5] - 2026-05-19
 
 ### Added
 
@@ -19,6 +19,9 @@ with release sections grouped by version and date.
 - `Help > Report a Bug...` action with a support-report dialog that sends app context and optional recent console output.
 - `Report This Bug...` button on unexpected operation-failure dialogs, prefilled with the error message and recent logs enabled.
 - Empty file-list overlay text plus drag-hover highlighting for supported file drops.
+- Bulgarian language support across the language selector, menus, dialogs, common workflows, and fallback catalog coverage.
+- SoundFont picker and manager in File Inspection for choosing local SoundFonts or downloading SoundFonts from the app's online catalog, including recommended/category details and automatic unpacking for common archives.
+- `Utilities > Render Audio...` batch renderer for exporting all listed MIDI or E-SEQ files as WAV or MP3 using a selected SoundFont.
 
 ### Changed
 
@@ -59,6 +62,8 @@ with release sections grouped by version and date.
 - The drag-and-drop overlay now keeps the supported-file subtitle consistent while files are being dragged.
 - The drag-and-drop overlay subtitle and dashed outline now use higher-contrast colors for better Windows theme visibility.
 - Blank or unformatted HFE images are now identified after the first matching conversion attempt, with a clear blank-image message instead of trying every disk geometry and offering recovery.
+- Logs now use consistent timestamped, human-readable entries and include high-level app events for folder/image/floppy reads, saves, conversions, drag/drop, bug reports, settings changes, warnings, and failures.
+- Release bundles no longer include FluidSynth by default, while AppImage and Windows release builds include LAME for MP3 export when available.
 
 ## [0.6.1] - 2026-05-05
 

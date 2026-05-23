@@ -11,19 +11,22 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import wave
+import zipfile
 import glob
 from array import array
 from math import exp, pi, sin
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QThread, QTimer, QUrl, Signal, qVersion
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
+from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -179,6 +182,7 @@ from .app_info import (
     BUG_REPORT_URL,
     SETTINGS_APP as APP_SETTINGS_APP,
     SETTINGS_ORG as APP_SETTINGS_ORG,
+    SOUNDFONT_CATALOG_URL,
     UPDATE_CHECK_URL,
 )
 from .subprocess_utils import windows_subprocess_kwargs
@@ -1498,6 +1502,14 @@ def _resource_roots():
 
 def _preview_soundfont_candidates():
     candidates = []
+    user_soundfont_dir = _user_soundfont_dir(create=False)
+    if user_soundfont_dir:
+        candidates.extend(
+            [
+                os.path.join(user_soundfont_dir, "*.sf2"),
+                os.path.join(user_soundfont_dir, "*.sf3"),
+            ]
+        )
     for root in _resource_roots():
         candidates.extend(
             [
@@ -1527,16 +1539,114 @@ def _preview_soundfont_candidates():
     return candidates
 
 
-def _find_preview_soundfont():
+def _user_soundfont_dir(create=True):
+    base_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+    if not base_dir:
+        base_dir = os.path.join(os.path.expanduser("~"), ".local", "share", "aps-midi-prep-tool")
+    directory = os.path.join(base_dir, "soundfonts")
+    if create:
+        os.makedirs(directory, exist_ok=True)
+    return directory
+
+
+_SOUNDFONT_EXTENSIONS = {".sf2", ".sf3"}
+_SOUNDFONT_TAR_ARCHIVE_EXTENSIONS = (".tar.xz", ".tar.bz2", ".tar.gz", ".txz", ".tbz2", ".tgz", ".tar")
+_SOUNDFONT_ZIP_ARCHIVE_EXTENSIONS = (".zip",)
+_SOUNDFONT_SEVEN_ZIP_ARCHIVE_EXTENSIONS = (".7z",)
+_SOUNDFONT_ARCHIVE_EXTENSIONS = (
+    _SOUNDFONT_TAR_ARCHIVE_EXTENSIONS
+    + _SOUNDFONT_ZIP_ARCHIVE_EXTENSIONS
+    + _SOUNDFONT_SEVEN_ZIP_ARCHIVE_EXTENSIONS
+)
+
+
+def _safe_soundfont_filename(value, fallback="soundfont.sf2"):
+    name = os.path.basename(str(value or "").split("?", 1)[0].split("#", 1)[0]).strip()
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name)
+    name = name.strip(" ._-")
+    if not name:
+        name = fallback
+    stem, ext = os.path.splitext(name)
+    ext = ext.lower()
+    if ext not in _SOUNDFONT_EXTENSIONS:
+        ext = ".sf2"
+    stem = stem[:80].strip(" ._-") or "soundfont"
+    return f"{stem}{ext}"
+
+
+def _soundfont_package_extension(value):
+    parsed = urllib.parse.urlparse(str(value or ""))
+    path = parsed.path or str(value or "")
+    lower_path = path.lower()
+    for extension in sorted(_SOUNDFONT_ARCHIVE_EXTENSIONS, key=len, reverse=True):
+        if lower_path.endswith(extension):
+            return extension
+    extension = os.path.splitext(lower_path)[1]
+    if extension in _SOUNDFONT_EXTENSIONS:
+        return extension
+    return extension
+
+
+def _soundfont_format_from_entry(entry, filename=""):
+    file_format = str(entry.get("format") or "").strip().lower().lstrip(".")
+    if file_format in {"sf2", "sf3"}:
+        return file_format
+    extension = os.path.splitext(str(filename or ""))[1].lower()
+    if extension in _SOUNDFONT_EXTENSIONS:
+        return extension.lstrip(".")
+    return ""
+
+
+def _soundfont_install_filename(entry, url):
+    explicit_filename = str(entry.get("filename") or "").strip()
+    if explicit_filename:
+        return _safe_soundfont_filename(explicit_filename)
+    url_path = urllib.parse.urlparse(str(url or "")).path
+    if _soundfont_package_extension(url_path) in _SOUNDFONT_EXTENSIONS:
+        return _safe_soundfont_filename(url_path)
+    file_format = _soundfont_format_from_entry(entry)
+    extension = f".{file_format}" if file_format in {"sf2", "sf3"} else ".sf2"
+    base = str(entry.get("id") or entry.get("name") or "soundfont").strip()
+    base = re.sub(r"[^A-Za-z0-9._ -]+", "_", base).strip(" ._-") or "soundfont"
+    return _safe_soundfont_filename(f"{base}{extension}")
+
+
+def _soundfont_display_name(path):
+    filename = os.path.basename(str(path or ""))
+    stem, _ext = os.path.splitext(filename)
+    return stem.replace("_", " ").replace("-", " ").strip() or filename or "SoundFont"
+
+
+def _available_soundfonts():
+    soundfonts = []
     seen = set()
+    user_dir = os.path.abspath(_user_soundfont_dir(create=False))
     for candidate in _preview_soundfont_candidates():
         for expanded in glob.glob(os.path.expanduser(candidate)):
-            normalized = os.path.abspath(os.path.expanduser(expanded))
-            if normalized in seen:
+            path = os.path.abspath(os.path.expanduser(expanded))
+            if path in seen or not os.path.isfile(path):
                 continue
-            seen.add(normalized)
-            if os.path.isfile(normalized):
-                return normalized
+            if os.path.splitext(path)[1].lower() not in {".sf2", ".sf3"}:
+                continue
+            seen.add(path)
+            source = "Downloaded" if path.startswith(user_dir + os.sep) else "Bundled/System"
+            soundfonts.append(
+                {
+                    "name": _soundfont_display_name(path),
+                    "path": path,
+                    "source": source,
+                    "size_bytes": os.path.getsize(path),
+                }
+            )
+    soundfonts.sort(key=lambda item: (0 if item.get("source") == "Downloaded" else 1, item.get("name", "").lower()))
+    return soundfonts
+
+
+def _find_preview_soundfont():
+    for soundfont in _available_soundfonts():
+        path = soundfont.get("path", "")
+        if path:
+            return path
     return ""
 
 
@@ -1558,6 +1668,236 @@ def _find_fluidsynth_command():
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return shutil.which("fluidsynth") or shutil.which("fluidsynth.exe") or ""
+
+
+def _find_lame_command():
+    env_path = os.environ.get("APS_MIDI_PREP_LAME", "").strip()
+    candidates = [env_path] if env_path else []
+    for root in _resource_roots():
+        candidates.extend(
+            [
+                os.path.join(root, "bin", "lame.exe"),
+                os.path.join(root, "bin", "lame"),
+                os.path.join(root, "lame.exe"),
+                os.path.join(root, "lame"),
+                os.path.join(root, "usr", "bin", "lame.exe"),
+                os.path.join(root, "usr", "bin", "lame"),
+            ]
+        )
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("lame") or shutil.which("lame.exe") or ""
+
+
+def _find_7zip_command():
+    env_path = os.environ.get("APS_MIDI_PREP_7ZIP", "").strip()
+    candidates = [env_path] if env_path else []
+    for root in _resource_roots():
+        candidates.extend(
+            [
+                os.path.join(root, "bin", "7z.exe"),
+                os.path.join(root, "bin", "7z"),
+                os.path.join(root, "bin", "7za.exe"),
+                os.path.join(root, "bin", "7za"),
+                os.path.join(root, "7z.exe"),
+                os.path.join(root, "7z"),
+                os.path.join(root, "7za.exe"),
+                os.path.join(root, "7za"),
+                os.path.join(root, "usr", "bin", "7z.exe"),
+                os.path.join(root, "usr", "bin", "7z"),
+                os.path.join(root, "usr", "bin", "7za.exe"),
+                os.path.join(root, "usr", "bin", "7za"),
+            ]
+        )
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("7z") or shutil.which("7z.exe") or shutil.which("7za") or shutil.which("7za.exe") or ""
+
+
+def _soundfont_catalog_url():
+    return (
+        os.environ.get("APS_MIDI_PREP_SOUNDFONT_CATALOG_URL", "").strip()
+        or SOUNDFONT_CATALOG_URL
+    )
+
+
+def _normalize_soundfont_catalog(data, manifest_url=""):
+    if isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict):
+        entries = data.get("soundfonts") or data.get("items") or data.get("files") or []
+    else:
+        entries = []
+    normalized = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("download_url") or entry.get("url") or "").strip()
+        if not url:
+            continue
+        url = urllib.parse.urljoin(manifest_url, url)
+        filename = _soundfont_install_filename(entry, url)
+        name = str(entry.get("name") or _soundfont_display_name(filename)).strip()
+        file_format = _soundfont_format_from_entry(entry, filename)
+        package_extension = _soundfont_package_extension(url)
+        is_direct_soundfont = package_extension in _SOUNDFONT_EXTENSIONS
+        is_archive = package_extension in _SOUNDFONT_ARCHIVE_EXTENSIONS
+        unsupported_reason = ""
+        if package_extension in _SOUNDFONT_SEVEN_ZIP_ARCHIVE_EXTENSIONS and not _find_7zip_command():
+            unsupported_reason = "7-Zip is required to unpack this SoundFont. Install 7-Zip or add the SoundFont manually."
+        elif not is_direct_soundfont and not is_archive:
+            unsupported_reason = "This download is not a direct SF2/SF3 SoundFont or a supported archive."
+        default_for = entry.get("default_for") or []
+        if not isinstance(default_for, (list, tuple)):
+            default_for = [default_for]
+        normalized.append(
+            {
+                "id": str(entry.get("id") or "").strip(),
+                "name": name,
+                "subtitle": str(entry.get("subtitle") or "").strip(),
+                "category": str(entry.get("category") or "").strip(),
+                "format": file_format,
+                "format_label": file_format.upper() if file_format else "",
+                "recommended": bool(entry.get("recommended")),
+                "default_for": [str(value) for value in default_for if str(value).strip()],
+                "url": url,
+                "homepage_url": str(entry.get("homepage_url") or "").strip(),
+                "license_url": str(entry.get("license_url") or "").strip(),
+                "filename": filename,
+                "description": str(entry.get("description") or entry.get("subtitle") or "").strip(),
+                "license": str(entry.get("license") or "").strip(),
+                "size": str(entry.get("approx_size") or entry.get("size") or entry.get("size_label") or "").strip(),
+                "sha256": str(entry.get("sha256") or "").strip().lower(),
+                "attribution": str(entry.get("attribution") or "").strip(),
+                "notes": str(entry.get("notes") or "").strip(),
+                "package_extension": package_extension,
+                "archive": is_archive,
+                "supported": not unsupported_reason,
+                "unsupported_reason": unsupported_reason,
+            }
+        )
+    return normalized
+
+
+def _downloaded_soundfont_path(filename):
+    return os.path.join(_user_soundfont_dir(create=True), _safe_soundfont_filename(filename))
+
+
+def _replace_soundfont_extension(path, extension):
+    extension = extension.lower()
+    if extension not in _SOUNDFONT_EXTENSIONS:
+        return path
+    stem, _old_extension = os.path.splitext(path)
+    return f"{stem}{extension}"
+
+
+def _find_soundfont_file_in_directory(directory):
+    candidates = []
+    for root, _dirs, files in os.walk(directory):
+        for filename in files:
+            path = os.path.join(root, filename)
+            extension = os.path.splitext(filename)[1].lower()
+            if extension in _SOUNDFONT_EXTENSIONS and os.path.isfile(path):
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+                candidates.append((size, path))
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def _render_midi_file_to_wav(midi_path, soundfont_path, output_path, cancel_callback=None):
+    command = _find_fluidsynth_command()
+    if not command:
+        raise RuntimeError("FluidSynth is required to render MIDI with a SoundFont.")
+    if not soundfont_path or not os.path.isfile(soundfont_path):
+        raise RuntimeError("Select a SoundFont before rendering.")
+    args = [
+        command,
+        "-ni",
+        "-q",
+        "-g",
+        "0.8",
+        "-F",
+        output_path,
+        "-T",
+        "wav",
+        "-r",
+        "44100",
+        soundfont_path,
+        midi_path,
+    ]
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **windows_subprocess_kwargs(),
+    )
+    while process.poll() is None:
+        if cancel_callback is not None and cancel_callback():
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            raise RuntimeError("Audio rendering cancelled.")
+        time.sleep(0.075)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        detail = (stderr or stdout or "").strip()
+        if detail:
+            detail = f": {detail.splitlines()[-1]}"
+        raise RuntimeError(f"FluidSynth could not render audio{detail}")
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+        raise RuntimeError("FluidSynth did not create an audio file.")
+
+
+def _convert_wav_for_audio_export(wav_path, output_path, output_format, cancel_callback=None):
+    output_format = str(output_format or "wav").lower()
+    if output_format == "wav":
+        if os.path.abspath(wav_path) != os.path.abspath(output_path):
+            shutil.copy2(wav_path, output_path)
+        return
+    if output_format != "mp3":
+        raise RuntimeError(f"Unsupported audio format: {output_format}")
+    command = _find_lame_command()
+    if not command:
+        raise RuntimeError("LAME is required to export MP3 audio.")
+    args = [
+        command,
+        "--silent",
+        "-V2",
+        wav_path,
+        output_path,
+    ]
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **windows_subprocess_kwargs(),
+    )
+    while process.poll() is None:
+        if cancel_callback is not None and cancel_callback():
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            raise RuntimeError("Audio rendering cancelled.")
+        time.sleep(0.075)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        detail = (stderr or stdout or "").strip()
+        if detail:
+            detail = f": {detail.splitlines()[-1]}"
+        raise RuntimeError(f"LAME could not create MP3 audio{detail}")
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+        raise RuntimeError("MP3 file was not created.")
 
 
 def _write_preview_wav(notes, output_path, duration, progress_callback=None, cancel_callback=None):
@@ -1617,12 +1957,13 @@ class MidiPreviewRenderWorker(QThread):
     previewReady = Signal(str, str)
     previewFailed = Signal(str)
 
-    def __init__(self, midi_bytes, notes, duration, output_path, parent=None):
+    def __init__(self, midi_bytes, notes, duration, output_path, soundfont_path="", parent=None):
         super().__init__(parent)
         self.midi_bytes = bytes(midi_bytes or b"")
         self.notes = list(notes or [])
         self.duration = float(duration or 0.0)
         self.output_path = output_path
+        self.soundfont_path = str(soundfont_path or "")
         self._process = None
 
     def cancel(self):
@@ -1699,7 +2040,7 @@ class MidiPreviewRenderWorker(QThread):
             with os.fdopen(midi_handle, "wb") as handle:
                 handle.write(self.midi_bytes)
 
-            soundfont_path = _find_preview_soundfont()
+            soundfont_path = self.soundfont_path or _find_preview_soundfont()
             rendered = False
             engine_label = ""
             try:
@@ -1745,6 +2086,307 @@ class MidiPreviewRenderWorker(QThread):
                     os.remove(midi_path)
                 except OSError:
                     pass
+
+
+class SoundFontCatalogWorker(QThread):
+    catalogLoaded = Signal(object)
+    catalogFailed = Signal(str)
+
+    def __init__(self, url, parent=None):
+        super().__init__(parent)
+        self.url = str(url or "")
+
+    def run(self):
+        try:
+            if not self.url:
+                raise RuntimeError("No SoundFont catalog URL is configured.")
+            request = urllib.request.Request(
+                self.url,
+                headers={
+                    "Accept": "application/json, */*;q=0.5",
+                    "User-Agent": "APS MIDI Prep Tool SoundFont Manager",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = response.read(512 * 1024)
+            data = json.loads(payload.decode("utf-8", errors="replace"))
+            self.catalogLoaded.emit(_normalize_soundfont_catalog(data, self.url))
+        except Exception as exc:
+            self.catalogFailed.emit(str(exc))
+
+
+class SoundFontDownloadWorker(QThread):
+    downloadProgress = Signal(int, int, str)
+    downloadFinished = Signal(str)
+    downloadFailed = Signal(str)
+
+    def __init__(self, entry, parent=None):
+        super().__init__(parent)
+        self.entry = dict(entry or {})
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _cancel_requested(self):
+        return self._cancelled or self.isInterruptionRequested()
+
+    def _write_stream_to_soundfont(self, source, output_path, extension=""):
+        if self._cancel_requested():
+            raise RuntimeError("SoundFont download cancelled.")
+        output_path = _replace_soundfont_extension(output_path, extension)
+        temp_output_path = output_path + ".extract"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        try:
+            with open(temp_output_path, "wb") as handle:
+                while True:
+                    if self._cancel_requested():
+                        raise RuntimeError("SoundFont download cancelled.")
+                    chunk = source.read(1024 * 256)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+            os.replace(temp_output_path, output_path)
+            return output_path
+        except Exception:
+            if os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except OSError:
+                    pass
+            raise
+
+    def _install_from_zip(self, package_path, output_path):
+        with zipfile.ZipFile(package_path) as archive:
+            candidates = [
+                info
+                for info in archive.infolist()
+                if not info.is_dir()
+                and os.path.splitext(info.filename)[1].lower() in _SOUNDFONT_EXTENSIONS
+            ]
+            if not candidates:
+                raise RuntimeError("No SF2 or SF3 SoundFont was found in the downloaded archive.")
+            candidates.sort(key=lambda info: info.file_size, reverse=True)
+            info = candidates[0]
+            with archive.open(info) as source:
+                return self._write_stream_to_soundfont(
+                    source,
+                    output_path,
+                    os.path.splitext(info.filename)[1],
+                )
+
+    def _install_from_tar(self, package_path, output_path):
+        with tarfile.open(package_path) as archive:
+            candidates = [
+                member
+                for member in archive.getmembers()
+                if member.isfile()
+                and os.path.splitext(member.name)[1].lower() in _SOUNDFONT_EXTENSIONS
+            ]
+            if not candidates:
+                raise RuntimeError("No SF2 or SF3 SoundFont was found in the downloaded archive.")
+            candidates.sort(key=lambda member: member.size, reverse=True)
+            member = candidates[0]
+            source = archive.extractfile(member)
+            if source is None:
+                raise RuntimeError("The SoundFont archive could not be unpacked.")
+            with source:
+                return self._write_stream_to_soundfont(
+                    source,
+                    output_path,
+                    os.path.splitext(member.name)[1],
+                )
+
+    def _install_from_7zip(self, package_path, output_path):
+        command = _find_7zip_command()
+        if not command:
+            raise RuntimeError("7-Zip is required to unpack this SoundFont. Install 7-Zip or add the SoundFont manually.")
+        extract_dir = tempfile.mkdtemp(prefix="aps-soundfont-", dir=_user_soundfont_dir(create=True))
+        try:
+            result = subprocess.run(
+                [command, "x", "-y", f"-o{extract_dir}", package_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **windows_subprocess_kwargs(),
+            )
+            if result.returncode != 0:
+                message = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(message or "The SoundFont archive could not be unpacked.")
+            extracted_path = _find_soundfont_file_in_directory(extract_dir)
+            if not extracted_path:
+                raise RuntimeError("No SF2 or SF3 SoundFont was found in the downloaded archive.")
+            output_path = _replace_soundfont_extension(output_path, os.path.splitext(extracted_path)[1])
+            shutil.copy2(extracted_path, output_path)
+            return output_path
+        finally:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+
+    def _install_downloaded_package(self, package_path, output_path, package_extension):
+        if package_extension in _SOUNDFONT_EXTENSIONS:
+            os.replace(package_path, output_path)
+            return output_path
+        if package_extension in _SOUNDFONT_ZIP_ARCHIVE_EXTENSIONS:
+            return self._install_from_zip(package_path, output_path)
+        if package_extension in _SOUNDFONT_TAR_ARCHIVE_EXTENSIONS:
+            return self._install_from_tar(package_path, output_path)
+        if package_extension in _SOUNDFONT_SEVEN_ZIP_ARCHIVE_EXTENSIONS:
+            return self._install_from_7zip(package_path, output_path)
+        raise RuntimeError("This download is not a direct SF2/SF3 SoundFont or a supported archive.")
+
+    def run(self):
+        temp_path = ""
+        try:
+            if not self.entry.get("supported", True):
+                raise RuntimeError(
+                    self.entry.get("unsupported_reason")
+                    or "This download is not a direct SF2/SF3 SoundFont or a supported archive."
+                )
+            url = self.entry.get("url", "")
+            filename = self.entry.get("filename") or urllib.parse.urlparse(url).path
+            output_path = _downloaded_soundfont_path(filename)
+            temp_path = output_path + ".download"
+            package_extension = self.entry.get("package_extension") or _soundfont_package_extension(url)
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "APS MIDI Prep Tool SoundFont Manager"},
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                total = int(response.headers.get("Content-Length") or 0)
+                done = 0
+                hasher = hashlib.sha256()
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                with open(temp_path, "wb") as handle:
+                    while True:
+                        if self._cancel_requested():
+                            raise RuntimeError("SoundFont download cancelled.")
+                        chunk = response.read(1024 * 128)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        hasher.update(chunk)
+                        done += len(chunk)
+                        self.downloadProgress.emit(done, total, os.path.basename(output_path))
+            expected_hash = str(self.entry.get("sha256") or "").strip().lower()
+            if expected_hash and hasher.hexdigest().lower() != expected_hash:
+                raise RuntimeError("The downloaded SoundFont did not match the expected SHA-256 hash.")
+            installed_path = self._install_downloaded_package(temp_path, output_path, package_extension)
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            temp_path = ""
+            self.downloadFinished.emit(installed_path)
+        except Exception as exc:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            self.downloadFailed.emit(str(exc))
+
+
+class BatchAudioRenderWorker(QThread):
+    renderProgress = Signal(int, int, str)
+    renderFinished = Signal(int, object)
+    renderFailed = Signal(str)
+
+    def __init__(self, items, soundfont_path, output_dir, output_format, parent=None):
+        super().__init__(parent)
+        self.items = list(items or [])
+        self.soundfont_path = str(soundfont_path or "")
+        self.output_dir = str(output_dir or "")
+        self.output_format = str(output_format or "wav").lower()
+
+    def cancel(self):
+        self.requestInterruption()
+
+    def _cancel_requested(self):
+        return self.isInterruptionRequested()
+
+    def _safe_output_stem(self, item, index):
+        label = str(item.get("label") or os.path.basename(item.get("path", "")) or f"track_{index + 1}")
+        label = os.path.splitext(label)[0]
+        stem = re.sub(r"[^A-Za-z0-9._ -]+", "_", label).strip(" ._-")
+        return stem[:90] or f"track_{index + 1}"
+
+    def _unique_output_path(self, item, index):
+        stem = self._safe_output_stem(item, index)
+        ext = self.output_format
+        path = os.path.join(self.output_dir, f"{stem}.{ext}")
+        counter = 2
+        while os.path.exists(path):
+            path = os.path.join(self.output_dir, f"{stem}_{counter}.{ext}")
+            counter += 1
+        return path
+
+    def _midi_bytes_for_item(self, item):
+        path = item.get("path", "")
+        with open(path, "rb") as handle:
+            payload = handle.read()
+        if is_eseq_file(path):
+            payload = convert_eseq_bytes_to_midi_bytes(payload)
+        return payload
+
+    def run(self):
+        midi_path = ""
+        wav_path = ""
+        rendered_count = 0
+        failures = []
+        try:
+            if not self.items:
+                raise RuntimeError("No files are available to render.")
+            if not self.output_dir:
+                raise RuntimeError("Choose an output folder before rendering.")
+            os.makedirs(self.output_dir, exist_ok=True)
+            total = len(self.items)
+            for index, item in enumerate(self.items):
+                if self._cancel_requested():
+                    raise RuntimeError("Audio rendering cancelled.")
+                label = str(item.get("label") or os.path.basename(item.get("path", "")) or f"File {index + 1}")
+                self.renderProgress.emit(index, total, f"Rendering {label}...")
+                output_path = self._unique_output_path(item, index)
+                try:
+                    midi_bytes = self._midi_bytes_for_item(item)
+                    midi_handle, midi_path = tempfile.mkstemp(prefix="aps_render_", suffix=".mid")
+                    with os.fdopen(midi_handle, "wb") as handle:
+                        handle.write(midi_bytes)
+                    wav_handle, wav_path = tempfile.mkstemp(prefix="aps_render_", suffix=".wav")
+                    os.close(wav_handle)
+                    _render_midi_file_to_wav(
+                        midi_path,
+                        self.soundfont_path,
+                        wav_path,
+                        cancel_callback=self._cancel_requested,
+                    )
+                    _convert_wav_for_audio_export(
+                        wav_path,
+                        output_path,
+                        self.output_format,
+                        cancel_callback=self._cancel_requested,
+                    )
+                    rendered_count += 1
+                except Exception as exc:
+                    if "cancelled" in str(exc).lower():
+                        raise
+                    failures.append(f"{label}: {exc}")
+                finally:
+                    for path in (midi_path, wav_path):
+                        if path and os.path.exists(path):
+                            try:
+                                os.remove(path)
+                            except OSError:
+                                pass
+                    midi_path = ""
+                    wav_path = ""
+                self.renderProgress.emit(index + 1, total, f"Rendered {rendered_count} of {total} file(s).")
+            self.renderFinished.emit(rendered_count, failures)
+        except Exception as exc:
+            self.renderFailed.emit(str(exc))
 
 
 class PianoRollWidget(QWidget):
@@ -1882,6 +2524,531 @@ class PianoRollWidget(QWidget):
         )
 
 
+class SoundFontManagerDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.catalog_worker = None
+        self.download_worker = None
+        self.catalog_entries = []
+        self.language = _message_parent_language(parent)
+        self.t = lambda text: translate_text(text, self.language)
+
+        apply_window_icon(self)
+        self.setWindowTitle(self.t("SoundFonts"))
+        self.resize(760, 460)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            self.t(
+                "Download additional SoundFonts for MIDI preview and audio rendering. APS MIDI Prep Tool will use installed SoundFonts automatically."
+            ),
+            self,
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.tree = QTreeWidget(self)
+        self.tree.setColumnCount(5)
+        self.tree.setHeaderLabels([
+            self.t("SoundFont"),
+            self.t("Status"),
+            self.t("Format"),
+            self.t("Size"),
+            self.t("Details"),
+        ])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setUniformRowHeights(True)
+        layout.addWidget(self.tree, stretch=1)
+
+        self.status_label = QLabel("", self)
+        layout.addWidget(self.status_label)
+
+        buttons = QHBoxLayout()
+        self.refresh_button = QPushButton(self.t("Refresh Online List"), self)
+        self.download_button = QPushButton(self.t("Download Selected"), self)
+        self.add_local_button = QPushButton(self.t("Add Local SoundFont..."), self)
+        self.open_folder_button = QPushButton(self.t("Open SoundFont Folder"), self)
+        close_button = QPushButton(self.t("Close"), self)
+        buttons.addWidget(self.refresh_button)
+        buttons.addWidget(self.download_button)
+        buttons.addWidget(self.add_local_button)
+        buttons.addWidget(self.open_folder_button)
+        buttons.addStretch()
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        self.refresh_button.clicked.connect(self.refresh_catalog)
+        self.download_button.clicked.connect(self.download_selected)
+        self.add_local_button.clicked.connect(self.add_local_soundfont)
+        self.open_folder_button.clicked.connect(self.open_soundfont_folder)
+        close_button.clicked.connect(self.close)
+        self.tree.currentItemChanged.connect(lambda _current, _previous: self._refresh_button_state())
+        self.tree.itemDoubleClicked.connect(lambda _item, _column: self.download_selected())
+
+        self._populate_tree()
+        QTimer.singleShot(0, self.refresh_catalog)
+
+    def _installed_by_filename(self):
+        installed = {}
+        for soundfont in _available_soundfonts():
+            installed[os.path.basename(soundfont.get("path", "")).lower()] = soundfont
+        return installed
+
+    def _catalog_details(self, entry):
+        parts = []
+        if entry.get("recommended"):
+            parts.append(self.t("Recommended"))
+        for key in ("subtitle", "category", "license"):
+            value = str(entry.get(key) or "").strip()
+            if value:
+                parts.append(value)
+        if entry.get("archive") and entry.get("supported"):
+            parts.append(self.t("Archive will be unpacked automatically."))
+        if not entry.get("supported", True):
+            parts.append(self.t(entry.get("unsupported_reason", "")))
+        return " | ".join(part for part in parts if part)
+
+    def _catalog_tooltip(self, entry):
+        rows = []
+        label_map = [
+            ("name", "SoundFont"),
+            ("subtitle", "Details"),
+            ("category", "Category"),
+            ("format_label", "Format"),
+            ("size", "Size"),
+            ("license", "License"),
+            ("attribution", "Attribution"),
+            ("notes", "Notes"),
+            ("homepage_url", "Homepage"),
+            ("license_url", "License"),
+            ("url", "Download URL"),
+        ]
+        for key, label in label_map:
+            value = str(entry.get(key) or "").strip()
+            if value:
+                rows.append(f"{self.t(label)}: {value}")
+        default_for = entry.get("default_for") or []
+        if default_for:
+            rows.append(f"{self.t('Use')}: {', '.join(default_for)}")
+        if entry.get("archive"):
+            rows.append(self.t("Archive will be unpacked automatically.") if entry.get("supported") else self.t(entry.get("unsupported_reason", "")))
+        return "\n".join(row for row in rows if row)
+
+    def _populate_tree(self):
+        self.tree.clear()
+        installed_by_filename = self._installed_by_filename()
+        installed_paths = {soundfont.get("path", "") for soundfont in installed_by_filename.values()}
+        for soundfont in _available_soundfonts():
+            path = soundfont.get("path", "")
+            extension = os.path.splitext(path)[1].lstrip(".").upper()
+            item = QTreeWidgetItem([
+                soundfont.get("name", ""),
+                self.t(soundfont.get("source", "Installed")),
+                extension,
+                display_bytes(soundfont.get("size_bytes", 0)),
+                path,
+            ])
+            item.setData(0, Qt.UserRole, {"type": "local", "path": path})
+            for column in range(self.tree.columnCount()):
+                item.setToolTip(column, path)
+            self.tree.addTopLevelItem(item)
+
+        for entry in self.catalog_entries:
+            target_path = _downloaded_soundfont_path(entry.get("filename", ""))
+            already_installed = (
+                os.path.basename(target_path).lower() in installed_by_filename
+                or target_path in installed_paths
+            )
+            if already_installed:
+                status = self.t("Installed")
+            elif not entry.get("supported", True):
+                status = self.t("Manual install")
+            else:
+                status = self.t("Available")
+            details = self._catalog_details(entry)
+            tooltip = self._catalog_tooltip(entry)
+            item = QTreeWidgetItem([
+                entry.get("name", ""),
+                status,
+                entry.get("format_label", ""),
+                entry.get("size", ""),
+                details,
+            ])
+            item.setData(0, Qt.UserRole, {"type": "remote", "entry": entry, "installed": already_installed})
+            for column in range(self.tree.columnCount()):
+                item.setToolTip(column, tooltip)
+            if not entry.get("supported", True):
+                disabled_color = QBrush(QColor("#9099A3"))
+                for column in range(self.tree.columnCount()):
+                    item.setForeground(column, disabled_color)
+            self.tree.addTopLevelItem(item)
+
+        for column in range(self.tree.columnCount()):
+            self.tree.resizeColumnToContents(column)
+        self._refresh_button_state()
+
+    def _refresh_button_state(self):
+        item = self.tree.currentItem()
+        payload = item.data(0, Qt.UserRole) if item is not None else {}
+        can_download = (
+            isinstance(payload, dict)
+            and payload.get("type") == "remote"
+            and not payload.get("installed")
+            and bool((payload.get("entry") or {}).get("supported", True))
+            and self.download_worker is None
+        )
+        self.download_button.setEnabled(can_download)
+
+    def refresh_catalog(self):
+        if self.catalog_worker is not None:
+            return
+        url = _soundfont_catalog_url()
+        self.status_label.setText(self.t("Checking online SoundFont list..."))
+        worker = SoundFontCatalogWorker(url, self)
+        worker.catalogLoaded.connect(self._on_catalog_loaded)
+        worker.catalogFailed.connect(self._on_catalog_failed)
+        worker.finished.connect(self._on_catalog_finished)
+        self.catalog_worker = worker
+        worker.start()
+
+    def _on_catalog_loaded(self, entries):
+        self.catalog_entries = list(entries or [])
+        self.status_label.setText(
+            self.t("Online SoundFont list loaded.") if self.catalog_entries
+            else self.t("No online SoundFonts are listed yet.")
+        )
+        self._populate_tree()
+
+    def _on_catalog_failed(self, message):
+        self.status_label.setText(f"{self.t('Could not load the online SoundFont list.')} {message}")
+        self._populate_tree()
+
+    def _on_catalog_finished(self):
+        worker = self.catalog_worker
+        self.catalog_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def download_selected(self):
+        item = self.tree.currentItem()
+        payload = item.data(0, Qt.UserRole) if item is not None else {}
+        if not isinstance(payload, dict) or payload.get("type") != "remote":
+            return
+        entry = dict(payload.get("entry") or {})
+        if not entry:
+            return
+        if not entry.get("supported", True):
+            self.status_label.setText(self.t(entry.get("unsupported_reason", "")))
+            return
+        self.download_button.setEnabled(False)
+        self.status_label.setText(f"{self.t('Downloading')} {entry.get('name', self.t('SoundFont'))}...")
+        worker = SoundFontDownloadWorker(entry, self)
+        worker.downloadProgress.connect(self._on_download_progress)
+        worker.downloadFinished.connect(self._on_download_finished)
+        worker.downloadFailed.connect(self._on_download_failed)
+        worker.finished.connect(self._on_download_worker_finished)
+        self.download_worker = worker
+        worker.start()
+
+    def _on_download_progress(self, done, total, filename):
+        if total:
+            self.status_label.setText(
+                f"{self.t('Downloading')} {filename}: {display_bytes(done)} / {display_bytes(total)}"
+            )
+        else:
+            self.status_label.setText(f"{self.t('Downloading')} {filename}: {display_bytes(done)}")
+
+    def _on_download_finished(self, path):
+        self.status_label.setText(f"{self.t('Installed SoundFont')}: {os.path.basename(path)}")
+        self._populate_tree()
+
+    def _on_download_failed(self, message):
+        self.status_label.setText(f"{self.t('SoundFont download failed.')} {self.t(message)}")
+
+    def _on_download_worker_finished(self):
+        worker = self.download_worker
+        self.download_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._refresh_button_state()
+
+    def add_local_soundfont(self):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            self.t("Add Local SoundFont"),
+            os.path.expanduser("~"),
+            f"{self.t('SoundFont Files')} (*.sf2 *.sf3);;{self.t('All Files')} (*)",
+        )
+        if not path:
+            return
+        try:
+            target = _downloaded_soundfont_path(os.path.basename(path))
+            if os.path.abspath(path) != os.path.abspath(target):
+                shutil.copy2(path, target)
+            self.status_label.setText(f"{self.t('Installed SoundFont')}: {os.path.basename(target)}")
+            self._populate_tree()
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                self.t("SoundFont Install Failed"),
+                f"{self.t('The SoundFont could not be installed.')}\n\n{exc}",
+            )
+
+    def open_soundfont_folder(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(_user_soundfont_dir(create=True)))
+
+    def closeEvent(self, event):
+        if self.catalog_worker is not None:
+            self.catalog_worker.requestInterruption()
+            self.catalog_worker.wait(12000)
+        if self.download_worker is not None:
+            self.download_worker.cancel()
+            self.download_worker.wait(3000)
+        super().closeEvent(event)
+
+
+class BatchAudioRenderDialog(QDialog):
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self.items = list(items or [])
+        self.render_worker = None
+        self.language = _message_parent_language(parent)
+        self.t = lambda text: translate_text(text, self.language)
+
+        apply_window_icon(self)
+        self.setWindowTitle(self.t("Render Audio"))
+        self.resize(640, 320)
+        layout = QVBoxLayout(self)
+
+        summary = QLabel(
+            self.t("Render all currently listed MIDI or E-SEQ files through a selected SoundFont."),
+            self,
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        form = QGridLayout()
+        form.addWidget(QLabel(self.t("SoundFont:"), self), 0, 0)
+        self.soundfont_combo = QComboBox(self)
+        form.addWidget(self.soundfont_combo, 0, 1)
+        self.manage_button = QPushButton(self.t("Download SoundFonts..."), self)
+        form.addWidget(self.manage_button, 0, 2)
+
+        form.addWidget(QLabel(self.t("Output format:"), self), 1, 0)
+        self.format_combo = QComboBox(self)
+        self.format_combo.addItem("WAV", "wav")
+        self.format_combo.addItem("MP3", "mp3")
+        self.format_combo.currentIndexChanged.connect(self._refresh_state)
+        form.addWidget(self.format_combo, 1, 1)
+
+        form.addWidget(QLabel(self.t("Output folder:"), self), 2, 0)
+        self.output_edit = QLineEdit(self)
+        self.output_edit.setText(os.path.expanduser("~"))
+        form.addWidget(self.output_edit, 2, 1)
+        self.browse_button = QPushButton(self.t("Browse..."), self)
+        form.addWidget(self.browse_button, 2, 2)
+        layout.addLayout(form)
+
+        self.status_label = QLabel("", self)
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        buttons = QHBoxLayout()
+        self.render_button = QPushButton(self.t("Render"), self)
+        self.cancel_button = QPushButton(self.t("Cancel"), self)
+        self.close_button = QPushButton(self.t("Close"), self)
+        buttons.addStretch()
+        buttons.addWidget(self.render_button)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.close_button)
+        layout.addLayout(buttons)
+
+        self.manage_button.clicked.connect(self.manage_soundfonts)
+        self.browse_button.clicked.connect(self.choose_output_folder)
+        self.output_edit.textChanged.connect(self._refresh_state)
+        self.soundfont_combo.currentIndexChanged.connect(self._refresh_state)
+        self.render_button.clicked.connect(self.start_render)
+        self.cancel_button.clicked.connect(self.cancel_render)
+        self.close_button.clicked.connect(self.close)
+
+        self.cancel_button.setVisible(False)
+        self.refresh_soundfonts()
+
+    def refresh_soundfonts(self):
+        current_path = self.soundfont_combo.currentData()
+        self.soundfont_combo.clear()
+        for soundfont in _available_soundfonts():
+            label = f"{soundfont.get('name')} ({self.t(soundfont.get('source', 'Installed'))})"
+            self.soundfont_combo.addItem(label, soundfont.get("path", ""))
+            if current_path and soundfont.get("path") == current_path:
+                self.soundfont_combo.setCurrentIndex(self.soundfont_combo.count() - 1)
+        self._refresh_state()
+
+    def _log_event(self, action, **details):
+        parent = self.parent()
+        logger = getattr(parent, "_log_event", None)
+        if callable(logger):
+            try:
+                logger("Audio render", action, **details)
+            except Exception:
+                pass
+
+    def _refresh_state(self):
+        has_soundfont = bool(self.soundfont_combo.currentData())
+        output_dir = self.output_edit.text().strip()
+        has_fluidsynth = bool(_find_fluidsynth_command())
+        needs_lame = self.format_combo.currentData() == "mp3"
+        has_required_encoder = (not needs_lame) or bool(_find_lame_command())
+        can_render = bool(
+            self.items
+            and has_soundfont
+            and output_dir
+            and has_fluidsynth
+            and has_required_encoder
+            and self.render_worker is None
+        )
+        self.render_button.setEnabled(can_render)
+        if not self.items:
+            self.status_label.setText(self.t("No loaded MIDI or E-SEQ files are available to render."))
+        elif not has_soundfont:
+            self.status_label.setText(self.t("Install or select a SoundFont before rendering."))
+        elif not has_fluidsynth:
+            self.status_label.setText(self.t("FluidSynth is required for SoundFont rendering."))
+        elif needs_lame and not has_required_encoder:
+            self.status_label.setText(self.t("MP3 export requires LAME. WAV export is still available."))
+        elif self.render_worker is None:
+            self.status_label.setText(
+                self.t("{count} file(s) ready to render.").format(count=len(self.items))
+            )
+
+    def manage_soundfonts(self):
+        dialog = SoundFontManagerDialog(self)
+        dialog.exec()
+        self.refresh_soundfonts()
+
+    def choose_output_folder(self):
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            self.t("Select Output Folder"),
+            self.output_edit.text().strip() or os.path.expanduser("~"),
+        )
+        if directory:
+            self.output_edit.setText(directory)
+
+    def start_render(self):
+        output_format = self.format_combo.currentData() or "wav"
+        if not _find_fluidsynth_command():
+            QMessageBox.warning(
+                self,
+                self.t("FluidSynth Required"),
+                self.t("Install FluidSynth before rendering audio with a SoundFont."),
+            )
+            return
+        if output_format == "mp3" and not _find_lame_command():
+            QMessageBox.warning(
+                self,
+                self.t("LAME Required"),
+                self.t("MP3 export requires LAME. Choose WAV or install LAME and try again."),
+            )
+            return
+        worker = BatchAudioRenderWorker(
+            self.items,
+            self.soundfont_combo.currentData(),
+            self.output_edit.text().strip(),
+            output_format,
+            self,
+        )
+        worker.renderProgress.connect(self._on_render_progress)
+        worker.renderFinished.connect(self._on_render_finished)
+        worker.renderFailed.connect(self._on_render_failed)
+        worker.finished.connect(self._on_render_worker_finished)
+        self.render_worker = worker
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, max(1, len(self.items)))
+        self.progress_bar.setValue(0)
+        self.render_button.setVisible(False)
+        self.cancel_button.setVisible(True)
+        self.close_button.setEnabled(False)
+        self.status_label.setText(self.t("Preparing audio render..."))
+        self._log_event(
+            "Started",
+            files=len(self.items),
+            format=output_format,
+            soundfont=os.path.basename(str(self.soundfont_combo.currentData() or "")),
+            output=self.output_edit.text().strip(),
+        )
+        worker.start()
+
+    def _on_render_progress(self, step, total, message):
+        self.progress_bar.setRange(0, max(1, int(total or 1)))
+        self.progress_bar.setValue(max(0, min(int(step or 0), self.progress_bar.maximum())))
+        self.status_label.setText(message or self.t("Rendering audio..."))
+
+    def _on_render_finished(self, rendered_count, failures):
+        failures = list(failures or [])
+        if failures:
+            detail = "\n".join(failures[:12])
+            if len(failures) > 12:
+                detail += f"\n{catalog_tr('error.more_count', self.language, count=len(failures) - 12)}"
+            QMessageBox.warning(
+                self,
+                self.t("Audio Render Complete"),
+                (
+                    self.t("Rendered {count} file(s), with {failed} issue(s).").format(
+                        count=rendered_count,
+                        failed=len(failures),
+                    )
+                    + f"\n\n{detail}"
+                ),
+            )
+        else:
+            QMessageBox.information(
+                self,
+                self.t("Audio Render Complete"),
+                self.t("Rendered {count} file(s).").format(count=rendered_count),
+            )
+        self.status_label.setText(self.t("Audio render complete."))
+        self._log_event("Completed", rendered=rendered_count, failures=len(failures))
+
+    def _on_render_failed(self, message):
+        if "cancelled" in str(message or "").lower():
+            self.status_label.setText(self.t("Audio render cancelled."))
+            self._log_event("Cancelled")
+            return
+        QMessageBox.warning(
+            self,
+            self.t("Audio Render Failed"),
+            f"{self.t('The files could not be rendered.')}\n\n{message}",
+        )
+        self.status_label.setText(self.t("Audio render failed."))
+        self._log_event("Failed", message=message)
+
+    def _on_render_worker_finished(self):
+        worker = self.render_worker
+        self.render_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.progress_bar.setVisible(False)
+        self.render_button.setVisible(True)
+        self.cancel_button.setVisible(False)
+        self.close_button.setEnabled(True)
+        self._refresh_state()
+
+    def cancel_render(self):
+        if self.render_worker is not None:
+            self.render_worker.cancel()
+            self.status_label.setText(self.t("Cancelling audio render..."))
+
+    def closeEvent(self, event):
+        if self.render_worker is not None:
+            self.render_worker.cancel()
+            self.render_worker.wait(3000)
+        super().closeEvent(event)
+
+
 class FileInspectionDialog(QDialog):
     def __init__(self, items, parent=None, initial_row=None):
         super().__init__(parent)
@@ -1905,7 +3072,9 @@ class FileInspectionDialog(QDialog):
 
         apply_window_icon(self)
         language = _message_parent_language(parent)
-        t = lambda text: translate_text(text, language)
+        self.language = language
+        self.t = lambda text: translate_text(text, language)
+        t = self.t
         self.setWindowTitle(t("File Inspection"))
         self.resize(940, 640)
         layout = QVBoxLayout(self)
@@ -1965,6 +3134,18 @@ class FileInspectionDialog(QDialog):
         position_row.addWidget(self.duration_label)
         right_layout.addLayout(position_row)
 
+        soundfont_row = QHBoxLayout()
+        self.soundfont_label = QLabel(t("SoundFont:"), self)
+        self.soundfont_combo = QComboBox(self)
+        self.soundfont_combo.setMinimumWidth(240)
+        self.soundfont_combo.setToolTip(t("Choose the SoundFont used for FluidSynth preview rendering."))
+        self.soundfont_button = QPushButton(t("Download SoundFonts..."), self)
+        self.soundfont_button.setToolTip(t("Download additional SoundFonts for MIDI preview and audio rendering. APS MIDI Prep Tool will use installed SoundFonts automatically."))
+        soundfont_row.addWidget(self.soundfont_label)
+        soundfont_row.addWidget(self.soundfont_combo, stretch=1)
+        soundfont_row.addWidget(self.soundfont_button)
+        right_layout.addLayout(soundfont_row)
+
         controls = QHBoxLayout()
         self.play_button = QPushButton(t("Play"), self)
         self.stop_button = QPushButton(t("Stop"), self)
@@ -2012,6 +3193,8 @@ class FileInspectionDialog(QDialog):
         self.file_tree.currentItemChanged.connect(lambda _current, _previous: self._load_current_file())
         self.play_button.clicked.connect(self._play_current_file)
         self.stop_button.clicked.connect(self._stop_playback)
+        self.soundfont_button.clicked.connect(self.show_soundfont_manager)
+        self.soundfont_combo.currentIndexChanged.connect(self._on_soundfont_changed)
         self.player.positionChanged.connect(self._on_player_position_changed)
         self.player.durationChanged.connect(self._on_player_duration_changed)
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
@@ -2021,6 +3204,7 @@ class FileInspectionDialog(QDialog):
         self.position_slider.valueChanged.connect(self._on_position_slider_changed)
         self.piano_roll.seekRequested.connect(self._seek_to_seconds)
         close_button.clicked.connect(self.close)
+        self.refresh_soundfonts()
         if self.file_tree.topLevelItemCount():
             self.file_tree.setCurrentItem(initial_tree_item or self.file_tree.topLevelItem(0))
         self._load_current_file()
@@ -2031,6 +3215,41 @@ class FileInspectionDialog(QDialog):
             return {}
         item = current.data(0, Qt.UserRole)
         return item if isinstance(item, dict) else {}
+
+    def show_soundfont_manager(self):
+        previous_path = self.soundfont_combo.currentData()
+        dialog = SoundFontManagerDialog(self)
+        dialog.exec()
+        self.refresh_soundfonts()
+        if self.preview_engine_label or self.preview_audio_path or previous_path != self.soundfont_combo.currentData():
+            self._clear_preview_audio()
+            self.preview_progress_label.setVisible(False)
+            self.preview_progress_bar.setVisible(False)
+
+    def refresh_soundfonts(self):
+        current_path = self.soundfont_combo.currentData()
+        self.soundfont_combo.blockSignals(True)
+        self.soundfont_combo.clear()
+        selected_index = -1
+        for soundfont in _available_soundfonts():
+            label = f"{soundfont.get('name')} ({self.t(soundfont.get('source', 'Installed'))})"
+            path = soundfont.get("path", "")
+            self.soundfont_combo.addItem(label, path)
+            if current_path and path == current_path:
+                selected_index = self.soundfont_combo.count() - 1
+        if self.soundfont_combo.count() == 0:
+            self.soundfont_combo.addItem(self.t("Built-in preview"), "")
+            self.soundfont_combo.setEnabled(False)
+        else:
+            self.soundfont_combo.setEnabled(True)
+            if selected_index >= 0:
+                self.soundfont_combo.setCurrentIndex(selected_index)
+        self.soundfont_combo.blockSignals(False)
+
+    def _on_soundfont_changed(self, _index=None):
+        self._clear_preview_audio()
+        self.preview_progress_label.setVisible(False)
+        self.preview_progress_bar.setVisible(False)
 
     def _clear_preview_audio(self):
         self.player.stop()
@@ -2045,6 +3264,8 @@ class FileInspectionDialog(QDialog):
     def _set_preview_rendering(self, rendering):
         self.file_tree.setEnabled(not rendering)
         self.channel_group.setEnabled(not rendering)
+        self.soundfont_combo.setEnabled((not rendering) and self.soundfont_combo.count() > 0 and bool(self.soundfont_combo.currentData()))
+        self.soundfont_button.setEnabled(not rendering)
         self.play_button.setEnabled((not rendering) and bool(self.current_notes))
         self.stop_button.setEnabled(not rendering)
         if not rendering:
@@ -2186,6 +3407,7 @@ class FileInspectionDialog(QDialog):
             self.visible_notes,
             self.current_duration,
             path,
+            soundfont_path=self.soundfont_combo.currentData() or "",
             parent=self,
         )
         worker.progressChanged.connect(self._on_preview_render_progress)
@@ -3257,6 +4479,13 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesFileInspectionAction.triggered.connect(lambda _checked=False: self.show_file_inspection_tool())
         self.utilitiesMenu.addAction(self.utilitiesFileInspectionAction)
 
+        self.utilitiesRenderAudioAction = QAction("Render Audio...", self)
+        self.utilitiesRenderAudioAction.setToolTip(
+            "Render all currently listed MIDI or E-SEQ files to WAV or MP3 using a selected SoundFont."
+        )
+        self.utilitiesRenderAudioAction.triggered.connect(self.show_audio_render_tool)
+        self.utilitiesMenu.addAction(self.utilitiesRenderAudioAction)
+
         self.utilitiesMenu.addSeparator()
 
         self.utilitiesRecoverImageAction = QAction("Recover Damaged Image...", self)
@@ -3394,6 +4623,14 @@ class MidiTitleWindow(QMainWindow):
         self._update_floppy_save_option_ui()
         self._update_menu_actions()
         self._refresh_translated_ui()
+        self._log_event(
+            "Application",
+            "Started",
+            version=APP_VERSION,
+            language=self._language_code(),
+            appearance=self._appearance_mode(),
+            platform=platform.platform(),
+        )
 
     def _normalized_appearance_mode(self, mode):
         mode = str(mode or "system").strip().lower()
@@ -3427,6 +4664,7 @@ class MidiTitleWindow(QMainWindow):
 
     def _set_appearance_mode(self, mode):
         self._apply_appearance_mode(mode, persist=True, refresh=True)
+        self._log_event("Settings", "Appearance changed", mode=self._appearance_mode())
 
     def _refresh_theme_sensitive_widgets(self):
         for widget_name in (
@@ -3451,6 +4689,65 @@ class MidiTitleWindow(QMainWindow):
 
     def _lt(self, text, **kwargs):
         return translate_text(text, self._language_code(), **kwargs)
+
+    def _log_event(self, category, action, **details):
+        try:
+            get_console_log_bus().append_event(category, action, details)
+        except Exception:
+            pass
+
+    def _log_warning_event(self, category, action, **details):
+        try:
+            get_console_log_bus().append_event(category, action, details, stream_name="warning")
+        except Exception:
+            pass
+
+    def _log_error_event(self, category, action, **details):
+        try:
+            get_console_log_bus().append_event(category, action, details, stream_name="error")
+        except Exception:
+            pass
+
+    def _log_source_label(self, source):
+        if source is None:
+            return ""
+        if isinstance(source, str):
+            return source
+        if isinstance(source, dict):
+            for key in ("capture_path", "output_path", "source_name", "target_name", "path"):
+                value = source.get(key)
+                if value:
+                    return str(value)
+            nested = source.get("source") or source.get("gw_source") or source.get("target")
+            if nested is not source:
+                return self._log_source_label(nested)
+            return ""
+        for attr in ("path", "device", "name", "display_name", "source_name"):
+            value = getattr(source, attr, None)
+            if value:
+                return str(value)
+        return type(source).__name__
+
+    def _log_disk_format_label(self, disk_format):
+        return str(getattr(disk_format, "label", "") or "")
+
+    def _log_listing_counts(self, listing):
+        entries = getattr(listing, "entries", ()) or ()
+        return {
+            "files": len(entries),
+            "songs": sum(1 for entry in entries if not is_pianodir_path(getattr(entry, "path", ""))),
+        }
+
+    def _log_operation_count(self, operations):
+        if not isinstance(operations, dict):
+            return 0
+        count = 0
+        for value in operations.values():
+            if isinstance(value, (dict, list, tuple, set)):
+                count += len(value)
+            elif isinstance(value, bool):
+                count += int(value)
+        return count
 
     def _language_menu_label(self, language):
         if language.native_name == language.english_name:
@@ -3497,6 +4794,7 @@ class MidiTitleWindow(QMainWindow):
         self._refresh_translated_ui()
         language = next((option for option in language_options() if option.code == language_code), None)
         language_name = self._language_menu_label(language) if language is not None else language_code
+        self._log_event("Settings", "Language changed", language=language_name, code=language_code)
         QMessageBox.information(
             self,
             self._t("settings.language_updated.title"),
@@ -3533,6 +4831,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "view.logs", "category": "View", "label": "View Logs...", "action": "viewLogsAction", "default": "F8"},
             {"id": "utilities.song_list", "category": "Utilities", "label": "Song List...", "action": "utilitiesSongListAction", "default": "F3"},
             {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
+            {"id": "utilities.render_audio", "category": "Utilities", "label": "Render Audio...", "action": "utilitiesRenderAudioAction", "default": "F5"},
             {"id": "utilities.rename", "category": "Utilities", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
             {"id": "utilities.trim_title_spaces", "category": "Utilities", "label": "Trim Title Spaces", "action": "utilitiesTrimTitleSpacesAction", "default": "Ctrl+Shift+Space"},
             {"id": "utilities.smf0", "category": "Utilities", "label": "Convert All SMF1 to SMF0", "action": "utilitiesSmfAction", "default": "Ctrl+Shift+0"},
@@ -3717,6 +5016,7 @@ class MidiTitleWindow(QMainWindow):
             dialog.destroyed.connect(lambda _obj=None: setattr(self, "consoleLogDialog", None))
             self.consoleLogDialog = dialog
             self._center_child_dialog(dialog)
+        self._log_event("Logs", "Opened live log window")
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -3817,6 +5117,7 @@ class MidiTitleWindow(QMainWindow):
             ("viewLogsAction", "View Logs...", "V"),
             ("utilitiesSongListAction", "Song List...", "S"),
             ("utilitiesFileInspectionAction", "File Inspection...", "I"),
+            ("utilitiesRenderAudioAction", "Render Audio...", "A"),
             ("utilitiesRecoverImageAction", "Recover Damaged Image...", "D"),
             ("utilitiesRenameAction", "Rename All to DOS 8.3", "R"),
             ("utilitiesTrimTitleSpacesAction", "Trim Title Spaces", "T"),
@@ -4047,6 +5348,12 @@ class MidiTitleWindow(QMainWindow):
         guidance_text = self._lt(guidance) if guidance is not None else self._guidance_for_error_detail(detail_text)
         if guidance_text:
             message += f"\n\n{self._ensure_sentence(guidance_text)}"
+        self._log_error_event(
+            "Error",
+            str(title or "Operation failed"),
+            summary=summary,
+            detail=detail_text,
+        )
         self._show_reportable_error_message(QMessageBox.Critical, title, message)
 
     def _limited_message_list(self, messages, *, max_rows=10):
@@ -4061,6 +5368,14 @@ class MidiTitleWindow(QMainWindow):
         message = f"{self._ensure_sentence(self._lt(summary))}\n\n{details}"
         if guidance:
             message += f"\n\n{self._ensure_sentence(self._lt(guidance))}"
+        logger = self._log_warning_event if warning else self._log_error_event
+        logger(
+            "Warning" if warning else "Error",
+            str(title or "Operation issue"),
+            summary=summary,
+            count=len(errors or ()),
+            detail=details,
+        )
         if warning:
             QMessageBox.warning(self, self._lt(title), message)
         else:
@@ -4200,6 +5515,13 @@ class MidiTitleWindow(QMainWindow):
         self.pendingGwCapture = None
         self.pendingDiskRecoveryRequest = None
         self._set_disk_load_busy(True)
+        self._log_event(
+            "Disk",
+            "Read started",
+            kind=load_kind,
+            source=self._log_source_label(source),
+            title=progress_title,
+        )
         worker.start()
         return True
 
@@ -4232,6 +5554,16 @@ class MidiTitleWindow(QMainWindow):
             return
 
         self._apply_pending_floppy_read_title_trim()
+        counts = self._log_listing_counts(listing)
+        self._log_event(
+            "Disk",
+            "Read completed",
+            source=getattr(session, "source_name", "") or self._log_source_label(getattr(session, "source_path", "")),
+            source_kind=getattr(session, "source_kind", ""),
+            format=self._log_disk_format_label(getattr(session, "disk_format", None)),
+            files=counts["files"],
+            songs=counts["songs"],
+        )
 
         if should_offer_capture:
             self._offer_save_greaseweazle_capture()
@@ -5580,6 +6912,12 @@ class MidiTitleWindow(QMainWindow):
         if self._message_indicates_cancelled(message):
             self._on_disk_load_cancelled(message)
             return
+        self._log_error_event(
+            "Disk",
+            "Read failed",
+            source=self._log_source_label(self.diskLoadContext.get("source")),
+            message=message,
+        )
         recovery_request = dict(self.diskLoadContext)
         source = recovery_request.get("source")
         source_path = getattr(source, "path", source if isinstance(source, str) else "")
@@ -5711,6 +7049,14 @@ class MidiTitleWindow(QMainWindow):
         if self._message_indicates_cancelled(message):
             self._on_disk_load_cancelled(message)
             return
+        self._log_error_event(
+            "Disk",
+            "Read failed with details",
+            type=details.get("type"),
+            reason=details.get("reason"),
+            source=self._log_source_label(details.get("source") or self.diskLoadContext.get("source")),
+            message=message,
+        )
         if details.get("type") == "blank_disk_image":
             self.pendingGwConversionDetails = details
             return
@@ -5863,6 +7209,11 @@ class MidiTitleWindow(QMainWindow):
         if self.diskLoadProgressDialog is not None:
             self.diskLoadProgressDialog.close()
             self.diskLoadProgressDialog = None
+        self._log_warning_event(
+            "Disk",
+            "Read cancelled",
+            source=self._log_source_label(self.diskLoadContext.get("source")),
+        )
         self.status_label.setText("Disk operation cancelled.")
         self.pendingFloppyReadConvertToMidi = False
         self.pendingFloppyReadTrimTitles = False
@@ -5979,6 +7330,13 @@ class MidiTitleWindow(QMainWindow):
         self.diskRecoveryProgressDialog = progress_dialog
         self.diskRecoveryContext = dict(request)
         self._set_disk_load_busy(True)
+        self._log_event(
+            "Recovery",
+            "Started",
+            kind=request.get("load_kind"),
+            source=self._log_source_label(request.get("source")),
+            title=progress_text,
+        )
         worker.start()
         return True
 
@@ -6005,6 +7363,13 @@ class MidiTitleWindow(QMainWindow):
         self._apply_pending_floppy_read_title_trim()
 
         song_count = sum(1 for entry in listing.entries if not is_pianodir_path(entry.path))
+        self._log_event(
+            "Recovery",
+            "Completed",
+            source=getattr(session, "source_name", "") or self._log_source_label(getattr(session, "source_path", "")),
+            files=len(listing.entries),
+            songs=song_count,
+        )
         self._information_with_optional_hide(
             setting_key=self.SETTING_HIDE_RECOVERY_COMPLETE_DIALOG,
             title="Recovery Complete",
@@ -6024,6 +7389,12 @@ class MidiTitleWindow(QMainWindow):
         if self._message_indicates_cancelled(message):
             self._on_disk_recovery_cancelled(message)
             return
+        self._log_error_event(
+            "Recovery",
+            "Failed",
+            source=self._log_source_label(self.diskRecoveryContext.get("source")),
+            message=message,
+        )
         original_message = self.diskRecoveryContext.get("message", "")
         if original_message:
             detail = f"Original read error: {original_message}\n\nRecovery error: {message}"
@@ -6042,6 +7413,11 @@ class MidiTitleWindow(QMainWindow):
         if self.diskRecoveryProgressDialog is not None:
             self.diskRecoveryProgressDialog.close()
             self.diskRecoveryProgressDialog = None
+        self._log_warning_event(
+            "Recovery",
+            "Cancelled",
+            source=self._log_source_label(self.diskRecoveryContext.get("source")),
+        )
         self.status_label.setText("Disk recovery cancelled.")
         self.pendingFloppyReadConvertToMidi = False
         self.pendingFloppyReadTrimTitles = False
@@ -7094,6 +8470,8 @@ class MidiTitleWindow(QMainWindow):
             self.utilitiesSongListAction.setEnabled(has_listed_files)
         if hasattr(self, "utilitiesFileInspectionAction"):
             self.utilitiesFileInspectionAction.setEnabled(has_listed_files)
+        if hasattr(self, "utilitiesRenderAudioAction"):
+            self.utilitiesRenderAudioAction.setEnabled(has_listed_files)
 
     def _set_loaded_image_pianodir_metadata(self, metadata=None):
         metadata = metadata or PianodirMetadata()
@@ -7882,6 +9260,17 @@ class MidiTitleWindow(QMainWindow):
             initial_row = selected_row
         dialog = FileInspectionDialog(items, parent=self, initial_row=initial_row)
         self.fileInspectionDialog = dialog
+        self._center_child_dialog(dialog)
+        dialog.show()
+
+    def show_audio_render_tool(self):
+        items = self._inspection_items()
+        if not items:
+            QMessageBox.information(self, "No Files", "No loaded MIDI or E-SEQ files are available to render.")
+            return
+        self._log_event("Audio render", "Opened render utility", files=len(items))
+        dialog = BatchAudioRenderDialog(items, parent=self)
+        self.audioRenderDialog = dialog
         self._center_child_dialog(dialog)
         dialog.show()
 
@@ -8774,6 +10163,14 @@ class MidiTitleWindow(QMainWindow):
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
         self.status_label.setText(status_text)
+        self._log_event(
+            "Folder",
+            "Loaded files",
+            count=len(regular_specs),
+            source_count=len(file_paths),
+            mode="E-SEQ" if self.regularEseqMode else "MIDI",
+            errors=len(probe_errors),
+        )
         if probe_errors:
             self._show_error_list(
                 "Some Files Were Not Added",
@@ -10984,6 +12381,14 @@ class MidiTitleWindow(QMainWindow):
             "mode_label": mode_label,
         }
         self._set_disk_write_busy(True)
+        self._log_event(
+            "Floppy",
+            "Format started",
+            target=target_name,
+            format=self._log_disk_format_label(disk_format),
+            mode=mode_label,
+            source_kind=source_kind,
+        )
         worker.start()
 
     def _on_floppy_format_success(self, session, listing):
@@ -11012,6 +12417,15 @@ class MidiTitleWindow(QMainWindow):
         mode_label = context.get("mode_label", "MIDI")
         format_label = disk_format.label if disk_format is not None else "selected format"
         reused_existing_format = bool(getattr(session, "format_applied_lightly", False))
+        self._log_event(
+            "Floppy",
+            "Format completed",
+            target=target_name,
+            format=format_label,
+            mode=mode_label,
+            reused_existing_format=reused_existing_format,
+            files=len(getattr(listing, "entries", ()) or ()),
+        )
         if reused_existing_format:
             self.status_label.setText(
                 f"Prepared {target_name} as a {format_label} Yamaha Disklavier {mode_label} floppy."
@@ -11056,6 +12470,7 @@ class MidiTitleWindow(QMainWindow):
             self.diskFormatProgressDialog.close()
             self.diskFormatProgressDialog = None
         target_name = self.diskFormatContext.get("target_name", "the selected drive")
+        self._log_error_event("Floppy", "Format failed", target=target_name, message=message)
         self._show_operation_error(
             "Format Failed",
             f"The floppy in {target_name} was not formatted",
@@ -11067,6 +12482,11 @@ class MidiTitleWindow(QMainWindow):
         if self.diskFormatProgressDialog is not None:
             self.diskFormatProgressDialog.close()
             self.diskFormatProgressDialog = None
+        self._log_warning_event(
+            "Floppy",
+            "Format cancelled",
+            target=self.diskFormatContext.get("target_name", "the selected drive"),
+        )
         QMessageBox.warning(
             self,
             "Format Cancelled",
@@ -11468,6 +12888,14 @@ class MidiTitleWindow(QMainWindow):
         self.diskWriteTargetWorker = worker
         self.diskWriteTargetProgressDialog = progress_dialog
         self._set_disk_write_busy(True)
+        self._log_event(
+            "Floppy",
+            "Write started",
+            target=target_name,
+            target_kind=target_kind,
+            file_level=file_level,
+            operations=self._log_operation_count(operations),
+        )
         worker.start()
 
     def _on_write_image_to_floppy_success(self, target_name, *, file_level=False):
@@ -11478,6 +12906,7 @@ class MidiTitleWindow(QMainWindow):
             self._show_greaseweazle_sector_reports(
                 getattr(self.image_session, "latest_gw_sector_reports", ())
             )
+        self._log_event("Floppy", "Write completed", target=target_name, file_level=file_level)
         if file_level:
             QMessageBox.information(self, "Floppy Saved", f"The current files were saved to {target_name}.")
             self.status_label.setText(f"Saved current files to {target_name}.")
@@ -11489,6 +12918,7 @@ class MidiTitleWindow(QMainWindow):
         if self.diskWriteTargetProgressDialog is not None:
             self.diskWriteTargetProgressDialog.close()
             self.diskWriteTargetProgressDialog = None
+        self._log_error_event("Floppy", "Write failed", file_level=file_level, message=message)
         if file_level:
             self._show_operation_error(
                 "Save To Floppy Failed",
@@ -11508,6 +12938,7 @@ class MidiTitleWindow(QMainWindow):
         if self.diskWriteTargetProgressDialog is not None:
             self.diskWriteTargetProgressDialog.close()
             self.diskWriteTargetProgressDialog = None
+        self._log_warning_event("Floppy", "Write cancelled", file_level=file_level)
         if file_level:
             QMessageBox.warning(
                 self,
@@ -11915,6 +13346,12 @@ class MidiTitleWindow(QMainWindow):
         self.load_floppy_drive(default_recovery=True)
 
     def load_image_file(self, image_path, prevalidated=False):
+        self._log_event(
+            "Image",
+            "Open requested",
+            path=image_path,
+            prevalidated=prevalidated,
+        )
         if self._is_electone_evt_path(image_path):
             if not prevalidated and not self._prepare_for_disk_load("this Electone EVT file"):
                 return
@@ -11989,10 +13426,20 @@ class MidiTitleWindow(QMainWindow):
 
         options = self._choose_floppy_read_options(default_recovery=default_recovery)
         if not options:
+            self._log_event("Floppy", "Read options cancelled", default_recovery=default_recovery)
             return
 
         self.pendingFloppyReadConvertToMidi = bool(options.get("convert_to_midi"))
         self.pendingFloppyReadTrimTitles = bool(options.get("trim_titles"))
+        self._log_event(
+            "Floppy",
+            "Read options selected",
+            kind=options.get("load_kind"),
+            source=options.get("source_label") or self._log_source_label(options.get("source")),
+            recover=options.get("recover"),
+            convert_to_midi=self.pendingFloppyReadConvertToMidi,
+            trim_titles=self.pendingFloppyReadTrimTitles,
+        )
         if options.get("recover"):
             self._start_disk_recovery_worker(
                 {
@@ -12071,6 +13518,13 @@ class MidiTitleWindow(QMainWindow):
             "source_kind": source_kind,
         }
         self._set_disk_load_busy(True)
+        self._log_event(
+            "Image",
+            "Capture started" if not is_image_conversion else "Conversion started",
+            source=self._log_source_label(source),
+            output=output_path,
+            format=self._log_disk_format_label(disk_format),
+        )
         worker.start()
 
     def _on_floppy_image_capture_success(self, payload):
@@ -12084,6 +13538,13 @@ class MidiTitleWindow(QMainWindow):
         is_image_conversion = source_kind == "image_convert"
         filename = os.path.basename(output_path) if output_path else "the selected image file"
         action = "Converted" if is_image_conversion else "Imaged"
+        self._log_event(
+            "Image",
+            "Conversion completed" if is_image_conversion else "Capture completed",
+            source=source_name,
+            output=output_path,
+            filename=filename,
+        )
         self.status_label.setText(
             f"{action} {source_name} to {filename}. The image was saved but not opened or scanned."
         )
@@ -12132,6 +13593,12 @@ class MidiTitleWindow(QMainWindow):
             self.diskImageCaptureProgressDialog = None
         source_name = self.diskImageCaptureContext.get("source_name", "the selected floppy")
         is_image_conversion = self.diskImageCaptureContext.get("source_kind") == "image_convert"
+        self._log_error_event(
+            "Image",
+            "Conversion failed" if is_image_conversion else "Capture failed",
+            source=source_name,
+            message=message,
+        )
         guidance = (
             "Check the source image, selected format, and output location before trying again"
             if is_image_conversion
@@ -12148,6 +13615,11 @@ class MidiTitleWindow(QMainWindow):
         if self.diskImageCaptureProgressDialog is not None:
             self.diskImageCaptureProgressDialog.close()
             self.diskImageCaptureProgressDialog = None
+        self._log_warning_event(
+            "Image",
+            "Conversion cancelled" if self.diskImageCaptureContext.get("source_kind") == "image_convert" else "Capture cancelled",
+            source=self.diskImageCaptureContext.get("source_name", "the selected floppy"),
+        )
         if self.diskImageCaptureContext.get("source_kind") == "image_convert":
             self.status_label.setText("Image conversion cancelled. No image was saved.")
         else:
@@ -12613,6 +14085,7 @@ class MidiTitleWindow(QMainWindow):
 
         directory = QFileDialog.getExistingDirectory(self, self._lt("Open MIDI Folder"))
         if directory:
+            self._log_event("Folder", "Open requested", path=directory)
             if leaving_image_mode:
                 self._reset_image_state()
                 self._apply_midi_mode_ui()
@@ -12671,6 +14144,12 @@ class MidiTitleWindow(QMainWindow):
             else:
                 self._load_regular_files(file_paths, f"Selected Folder: \"{directory}\"")
             if scan_errors:
+                self._log_warning_event(
+                    "Folder",
+                    "Scan completed with warnings",
+                    path=directory,
+                    warnings=len(scan_errors),
+                )
                 self._show_error_list(
                     "Folder Scan Warning",
                     "Some folder checks could not be completed",
@@ -15438,6 +16917,13 @@ class MidiTitleWindow(QMainWindow):
         progress_callback = self._make_stage_progress_callback(progressDialog)
         progress_callback(0, 5, progress_text)
         QApplication.processEvents()
+        self._log_event(
+            "Image",
+            "Save started",
+            source=getattr(self.image_session, "source_name", ""),
+            path=getattr(self.image_session, "source_path", ""),
+            operations=self._log_operation_count(operations),
+        )
         try:
             self.image_session.commit_to_source(
                 renames=renames,
@@ -15471,6 +16957,12 @@ class MidiTitleWindow(QMainWindow):
             else:
                 QMessageBox.information(self, "Image Saved", "Floppy image changes have been saved.")
             self.status_label.setText(self._image_mode_summary())
+            self._log_event(
+                "Image",
+                "Save completed",
+                source=getattr(self.image_session, "source_name", ""),
+                path=getattr(self.image_session, "source_path", ""),
+            )
         except Exception as exc:
             progressDialog.close()
             if self.image_session.source_kind.startswith("floppy"):
@@ -15520,6 +17012,13 @@ class MidiTitleWindow(QMainWindow):
         self.diskCommitWorker = worker
         self.diskCommitProgressDialog = progress_dialog
         self._set_disk_write_busy(True)
+        self._log_event(
+            "Disk",
+            "Save started",
+            source=getattr(self.image_session, "source_name", ""),
+            progress=progress_text,
+            operations=self._log_operation_count(operations),
+        )
         worker.start()
 
     def _clear_pending_image_changes_after_commit(self):
@@ -15543,6 +17042,14 @@ class MidiTitleWindow(QMainWindow):
         self._show_greaseweazle_sector_reports(
             getattr(self.image_session, "latest_gw_sector_reports", ())
         )
+        counts = self._log_listing_counts(listing)
+        self._log_event(
+            "Disk",
+            "Save completed",
+            source=getattr(self.image_session, "source_name", ""),
+            files=counts["files"],
+            songs=counts["songs"],
+        )
         QMessageBox.information(self, "Floppy Saved", "Floppy changes have been saved back to the disk.")
         self.status_label.setText(self._image_mode_summary())
 
@@ -15550,6 +17057,7 @@ class MidiTitleWindow(QMainWindow):
         if self.diskCommitProgressDialog is not None:
             self.diskCommitProgressDialog.close()
             self.diskCommitProgressDialog = None
+        self._log_error_event("Disk", "Save failed", message=message)
         self._show_operation_error(
             "Floppy Save Failed",
             "The app could not finish writing changes back to the floppy disk",
@@ -15561,6 +17069,7 @@ class MidiTitleWindow(QMainWindow):
         if self.diskCommitProgressDialog is not None:
             self.diskCommitProgressDialog.close()
             self.diskCommitProgressDialog = None
+        self._log_warning_event("Disk", "Save cancelled")
         QMessageBox.warning(
             self,
             "Floppy Write Cancelled",
@@ -15820,14 +17329,23 @@ class MidiTitleWindow(QMainWindow):
         endpoint = self._bug_report_url()
         if not endpoint:
             self._set_bug_report_feedback(self._lt("No bug report endpoint is configured for this build."))
+            self._log_warning_event("Bug report", "No endpoint configured")
             return
         if self.bugReportWorker is not None:
             self._set_bug_report_feedback(self._lt("Please wait for the current bug report to finish sending."))
+            self._log_warning_event("Bug report", "Submit ignored because another report is in progress")
             return
 
         if hasattr(self, "helpReportBugAction"):
             self.helpReportBugAction.setEnabled(False)
         self._set_bug_report_feedback(self._lt("Sending bug report..."))
+        self._log_event(
+            "Bug report",
+            "Sending",
+            report_id=payload.get("report_id") if isinstance(payload, dict) else "",
+            endpoint=endpoint,
+            includes_logs=bool((payload.get("logs") or {}).get("included")) if isinstance(payload, dict) else False,
+        )
 
         worker = BugReportSubmitWorker(endpoint, payload, self._bug_report_secret(), timeout_seconds=20)
         worker.finished.connect(self._on_bug_report_finished)
@@ -15884,7 +17402,13 @@ class MidiTitleWindow(QMainWindow):
         message = self._lt("Bug report sent.")
         if reference:
             message += f" {self._lt('Reference')}: {reference}"
-        self._set_bug_report_feedback(message, stream_name="stdout")
+        self._set_bug_report_feedback(message)
+        self._log_event(
+            "Bug report",
+            "Sent",
+            reference=reference,
+            status=response.get("status"),
+        )
         informative_text = ""
         if reference:
             informative_text = f"{self._lt('Reference')}: {reference}"
@@ -15898,13 +17422,9 @@ class MidiTitleWindow(QMainWindow):
     def _show_bug_report_failure(self, message):
         short_message = self._short_bug_report_error(message)
         self._set_bug_report_feedback(
-            f"{self._lt('Bug report failed. See View > View Logs for details.')} ({short_message})",
-            stream_name="stderr",
+            f"{self._lt('Bug report failed. See View > View Logs for details.')} ({short_message})"
         )
-        try:
-            get_console_log_bus().append("stderr", f"Bug report failed detail: {message}\n")
-        except Exception:
-            pass
+        self._log_error_event("Bug report", "Failed", summary=short_message, detail=message)
         self._show_bug_report_message(
             QMessageBox.Critical,
             "Bug Report Failed",
@@ -16116,6 +17636,13 @@ class MidiTitleWindow(QMainWindow):
         progress_callback = self._make_stage_progress_callback(progressDialog)
         progress_callback(0, 5, "Preparing floppy export...")
         QApplication.processEvents()
+        self._log_event(
+            "Image",
+            "Save As Image started",
+            source=getattr(self.image_session, "source_name", ""),
+            output=output_path,
+            format=selected_ext,
+        )
         try:
             self.image_session.export_to(
                 output_path,
@@ -16152,6 +17679,13 @@ class MidiTitleWindow(QMainWindow):
                 filename=os.path.basename(output_path),
             )
             self.status_label.setText(self._image_mode_summary())
+            self._log_event(
+                "Image",
+                "Save As Image completed",
+                output=output_path,
+                format=selected_ext,
+                files=len(getattr(listing, "entries", ()) or ()),
+            )
         except Exception as exc:
             progressDialog.close()
             self._show_operation_error(
@@ -16401,6 +17935,14 @@ class MidiTitleWindow(QMainWindow):
         progressDialog.setAutoClose(False)
         progressDialog.setCancelButton(None)
         progress_callback = self._make_stage_progress_callback(progressDialog)
+        self._log_event(
+            "Image",
+            "Create image started",
+            output=output_path,
+            format=output_ext,
+            disk_format=self._log_disk_format_label(disk_format),
+            files=self._regular_file_count(),
+        )
 
         try:
             file_specs = self._stage_files_for_image_export(staging_dir, progress_callback=progress_callback)
@@ -16433,6 +17975,13 @@ class MidiTitleWindow(QMainWindow):
                     filename=os.path.basename(output_paths[0]),
                 )
                 self.status_label.setText(self._image_mode_summary())
+                self._log_event(
+                    "Image",
+                    "Create image completed",
+                    output=output_paths[0],
+                    images=1,
+                    files=len(getattr(listing, "entries", ()) or ()),
+                )
                 return
 
             progressDialog.close()
@@ -16454,6 +18003,13 @@ class MidiTitleWindow(QMainWindow):
                 preview=preview,
             )
             self._show_greaseweazle_sector_reports(sector_reports)
+            self._log_event(
+                "Image",
+                "Create image completed",
+                output=output_path,
+                images=len(output_paths),
+                files=len(file_specs),
+            )
         except Exception as exc:
             progressDialog.close()
             self._show_operation_error(
@@ -16844,6 +18400,13 @@ class MidiTitleWindow(QMainWindow):
                 return
             export_dir = self._destination_with_album_subfolder(dest_dir)
             album_subfolder_note = self._save_as_album_subfolder_note(dest_dir, export_dir)
+            self._log_event(
+                "Files",
+                "Save As started",
+                mode="image",
+                destination=export_dir,
+                files=self._image_song_file_count(),
+            )
 
             progressDialog = QProgressDialog(self._lt("Saving files to new folder..."), None, 0, max(1, self.table.rowCount()), self)
             self._prepare_progress_dialog(progressDialog)
@@ -16880,6 +18443,13 @@ class MidiTitleWindow(QMainWindow):
                     )
                 self._remember_save_as_location(dest_dir)
                 QMessageBox.information(self, self._lt("Save As Complete"), message)
+                self._log_event(
+                    "Files",
+                    "Save As completed",
+                    mode="image",
+                    destination=export_dir,
+                    files=len(output_paths),
+                )
             except Exception as exc:
                 progressDialog.close()
                 self._show_operation_error(
@@ -16907,6 +18477,13 @@ class MidiTitleWindow(QMainWindow):
         export_dir = self._destination_with_album_subfolder(dest_dir)
         album_subfolder_note = self._save_as_album_subfolder_note(dest_dir, export_dir)
         os.makedirs(export_dir, exist_ok=True)
+        self._log_event(
+            "Files",
+            "Save As started",
+            mode="regular",
+            destination=export_dir,
+            files=self._regular_file_count(),
+        )
 
         progressDialog = QProgressDialog(self._lt("Saving files to new folder..."), self._lt("Cancel"), 0, max(1, self._regular_file_count()), self)
         self._prepare_progress_dialog(progressDialog)
@@ -16984,3 +18561,10 @@ class MidiTitleWindow(QMainWindow):
                 )
             self._remember_save_as_location(dest_dir)
             QMessageBox.information(self, self._lt("Save As Complete"), message)
+            self._log_event(
+                "Files",
+                "Save As completed",
+                mode="regular",
+                destination=export_dir,
+                files=len(output_paths),
+            )
