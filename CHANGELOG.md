@@ -5,6 +5,24 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
+## [0.6.6] - 2026-05-27
+
+### Added
+
+- Help menu feedback submission through the same signed support-report channel, using the `feedback.php` endpoint.
+- Settings menu font-size choices for regular, small, and compact UI text.
+
+### Changed
+
+- Portuguese locale aliases such as `pt-PT` now use the included Brazilian Portuguese translation set instead of falling back to English.
+
+### Fixed
+
+- Catalog numbers can now fall back to catalog-shaped HFE filenames when `PIANODIR.FIL` contains only album-title metadata.
+- The immediate post-read Greaseweazle image-save flow now fills a blank Catalog Number field from the saved HFE filename.
+- Linux builds now prefer the PNG application icon, avoiding a brief low-quality icon flash during startup.
+- Drag-and-drop import highlighting now fills most of the file list, and font-size changes also scale the main window spacing, margins, row heights, and fixed controls.
+
 ## [0.6.5] - 2026-05-19
 
 ### Added

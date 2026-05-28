@@ -4,7 +4,7 @@ APS MIDI Prep Tool is a modern Disklavier preservation and preparation
 workstation for MIDI files, Yamaha E-SEQ files, floppy images, and physical
 floppy disks.
 
-Current version: `0.6.5`
+Current version: `0.6.6`
 
 Author: Alexander Peppe
 
@@ -69,8 +69,11 @@ before you write anything back.
   console logs.
 - Shows an empty-list drop target and highlights the file list during supported
   file drags so MIDI, E-SEQ, and disk-image files are easier to add.
-- Provides `Help > Report a Bug...` for sending a support report with app
-  details and optional recent, timestamped console logs.
+- Provides `Help > Send Feedback...` and `Help > Report a Bug...` for sending
+  feedback or support reports with app details and optional recent, timestamped
+  console logs.
+- Provides `Settings > Font Size` choices for regular, small, and compact UI
+  text.
 - Provides customizable keyboard shortcuts for current File, Disk, View,
   Utilities, Settings, and Help commands.
 - Includes localized UI support for English, Spanish, French, German, Italian,
@@ -192,13 +195,16 @@ Use `View > View Logs...` to open a live console-output window for the current
 session. It is useful when checking Greaseweazle, mtools, format, or conversion
 output while the app is still running. The log now includes readable app events
 for major actions such as opening folders and images, reading floppies,
-saving, drag-and-drop imports, bug reports, warnings, and failures.
+saving, drag-and-drop imports, feedback, bug reports, warnings, and failures.
 
 Use `Help > Report a Bug...` to send a bug report. The dialog can include a
 recent section of the live console log along with app and operating-system
 details. Unexpected operation-failure dialogs may also offer `Report This
 Bug...`, which opens the same report form with the error details already filled
 in.
+
+Use `Help > Send Feedback...` to send suggestions, workflow notes, or other
+general feedback through the same signed support channel.
 
 Use `Settings > Keyboard Shortcuts...` to review or customize the default
 hotkeys for all current File, Disk, View, Utilities, Settings, and Help menu

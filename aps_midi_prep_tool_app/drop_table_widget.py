@@ -31,6 +31,45 @@ class DropTableWidget(QTableWidget):
         self._drag_invite_active = active
         self.viewport().update()
 
+    def _scale_factor(self):
+        window = self.window()
+        scale_getter = getattr(window, "_layout_scale_factor", None)
+        if callable(scale_getter):
+            try:
+                return max(0.5, float(scale_getter()))
+            except Exception:
+                pass
+        return self._font_scale_factor()
+
+    def _font_scale_factor(self):
+        window = self.window()
+        scale_getter = getattr(window, "_font_scale_factor", None)
+        if callable(scale_getter):
+            try:
+                return max(0.5, float(scale_getter()))
+            except Exception:
+                pass
+        return 1.0
+
+    def _scaled_int(self, value, *, minimum=0):
+        try:
+            scaled = int(round(float(value) * self._scale_factor()))
+        except (TypeError, ValueError):
+            scaled = int(minimum)
+        return max(int(minimum), scaled)
+
+    def _scaled_font(self, *, bold=False, extra_points=0, minimum=8):
+        font = QFont(self.font())
+        point_size = font.pointSizeF()
+        if point_size <= 0:
+            point_size = QApplication.font().pointSizeF()
+        if point_size <= 0:
+            point_size = float(minimum)
+        point_size += float(extra_points) * self._font_scale_factor()
+        font.setPointSizeF(max(float(minimum), point_size))
+        font.setBold(bool(bold))
+        return font
+
     def setRowCount(self, rows):
         super().setRowCount(rows)
         self.viewport().update()
@@ -50,7 +89,8 @@ class DropTableWidget(QTableWidget):
 
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = self.viewport().rect().adjusted(18, 18, -18, -18)
+        margin = self._scaled_int(18, minimum=8)
+        rect = self.viewport().rect().adjusted(margin, margin, -margin, -margin)
         if rect.width() <= 0 or rect.height() <= 0:
             return
 
@@ -61,7 +101,7 @@ class DropTableWidget(QTableWidget):
         subtitle_color.setAlpha(230)
         if self._drag_invite_active:
             fill = QColor(accent)
-            fill.setAlpha(48)
+            fill.setAlpha(176)
             border = QColor(accent)
             border.setAlpha(255)
             text_color = base_text
@@ -76,32 +116,40 @@ class DropTableWidget(QTableWidget):
             title = self._lt("Drop files or disk images here")
             subtitle = self._lt("MIDI, E-SEQ, IMG, HFE, SCP, and other disk images")
 
-        card_width = min(rect.width(), 680)
-        card_height = min(rect.height(), 210)
-        card = QRect(0, 0, card_width, card_height)
-        card.moveCenter(rect.center())
+        card = QRect(rect)
 
         painter.setBrush(fill)
-        border_pen = QPen(border, 2 if self._drag_invite_active else 1.5)
-        border_pen.setStyle(Qt.DashLine)
-        border_pen.setDashPattern([6, 5])
+        border_pen = QPen(border, max(1.0, 2.0 * self._scale_factor()) if self._drag_invite_active else max(1.0, 1.5 * self._scale_factor()))
+        border_pen.setStyle(Qt.CustomDashLine)
+        border_pen.setDashPattern([1, max(3, self._scaled_int(5, minimum=3))])
         border_pen.setCapStyle(Qt.RoundCap)
         painter.setPen(border_pen)
-        painter.drawRoundedRect(card, 8, 8)
+        radius = self._scaled_int(8, minimum=5)
+        painter.drawRoundedRect(card, radius, radius)
 
-        title_font = QFont(self.font())
-        title_font.setBold(True)
-        title_font.setPointSize(title_font.pointSize() + 3)
+        title_font = self._scaled_font(bold=True, extra_points=3, minimum=10)
         painter.setFont(title_font)
         painter.setPen(text_color)
-        title_rect = QRect(card.left() + 36, card.top() + 58, card.width() - 72, 50)
+        content_padding = self._scaled_int(36, minimum=16)
+        text_gap = self._scaled_int(12, minimum=6)
+        title_height = self._scaled_int(54, minimum=36)
+        subtitle_height = self._scaled_int(44, minimum=30)
+        combined_height = title_height + text_gap + subtitle_height
+        content = card.adjusted(content_padding, content_padding, -content_padding, -content_padding)
+        top = content.center().y() - combined_height // 2
+        top = max(content.top(), min(top, content.bottom() - combined_height + 1))
+        title_rect = QRect(content.left(), top, content.width(), title_height)
         painter.drawText(title_rect, Qt.AlignCenter | Qt.TextWordWrap, title)
 
-        subtitle_font = QFont(self.font())
-        subtitle_font.setPointSize(max(8, subtitle_font.pointSize()))
+        subtitle_font = self._scaled_font(minimum=8)
         painter.setFont(subtitle_font)
         painter.setPen(text_color if self._drag_invite_active else subtitle_color)
-        subtitle_rect = QRect(card.left() + 36, card.top() + 116, card.width() - 72, 42)
+        subtitle_rect = QRect(
+            content.left(),
+            title_rect.bottom() + 1 + text_gap,
+            content.width(),
+            subtitle_height,
+        )
         painter.drawText(subtitle_rect, Qt.AlignCenter | Qt.TextWordWrap, subtitle)
 
     def file_exists(self, file_path):

@@ -150,6 +150,7 @@ from .eseq_pianodir import (
     build_music_dir_bytes,
     build_pianodir_bytes,
     clavinova_music_order_key,
+    derive_catalog_number_from_image_filename,
     eseq_type_display_label,
     is_clavinova_mda_file,
     is_eseq_directory_path,
@@ -180,6 +181,7 @@ from .app_info import (
     APP_WEBSITE,
     BUG_REPORT_SECRET,
     BUG_REPORT_URL,
+    FEEDBACK_URL,
     SETTINGS_APP as APP_SETTINGS_APP,
     SETTINGS_ORG as APP_SETTINGS_ORG,
     SOUNDFONT_CATALOG_URL,
@@ -3886,7 +3888,7 @@ class BugReportSubmitWorker(QThread):
             "Content-Type": "application/json",
             "X-APS-Timestamp": timestamp,
             "X-APS-Signature": signature,
-            "User-Agent": "APS MIDI Prep Tool Bug Reporter",
+            "User-Agent": "APS MIDI Prep Tool Reporter",
         }
 
     def run(self):
@@ -3908,7 +3910,7 @@ class BugReportSubmitWorker(QThread):
                 return
             text = response_body.decode("utf-8", errors="replace").strip()
             if status not in (200, 202):
-                raise RuntimeError(f"Bug report failed: {status} {text}")
+                raise RuntimeError(f"Submission failed: {status} {text}")
             data = {}
             if text and "json" in content_type.lower():
                 try:
@@ -3986,6 +3988,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_WRITE_METADATA_SUMMARY = "write_metadata_summary"
     SETTING_LANGUAGE = "language"
     SETTING_APPEARANCE_MODE = "appearance_mode"
+    SETTING_FONT_SCALE = "font_scale"
     SETTING_KEYBOARD_SHORTCUT_PREFIX = "keyboard_shortcuts"
     SETTING_HIDE_CHOICES_RESET_VERSION = "hide_choices_reset_version"
     HIDE_CHOICES_RESET_VERSION = 1
@@ -4012,23 +4015,35 @@ class MidiTitleWindow(QMainWindow):
     CONTROL_PANEL_SPACING = 6
     CONTROL_PANEL_MARGINS = (10, 14, 10, 10)
     BUG_REPORT_LOG_TAIL_CHARS = 256 * 1024
+    FONT_SCALE_OPTIONS = (
+        ("regular", "font_size.regular", 1.0),
+        ("small", "font_size.small", 0.92),
+        ("compact", "font_size.compact", 0.84),
+    )
+    LAYOUT_SCALE_FACTORS = {
+        "regular": 1.0,
+        "small": 0.9,
+        "compact": 0.74,
+    }
 
     def _build_control_panel_grid(self, group):
         panel_layout = QVBoxLayout(group)
-        panel_layout.setContentsMargins(*self.CONTROL_PANEL_MARGINS)
-        panel_layout.setSpacing(self.CONTROL_PANEL_SPACING)
+        panel_layout.setContentsMargins(*self._scaled_margins(self.CONTROL_PANEL_MARGINS))
+        panel_layout.setSpacing(self._scaled_int(self.CONTROL_PANEL_SPACING, minimum=2))
 
         grid_layout = QGridLayout()
         grid_layout.setContentsMargins(0, 0, 0, 0)
-        grid_layout.setHorizontalSpacing(self.CONTROL_PANEL_SPACING)
-        grid_layout.setVerticalSpacing(self.CONTROL_PANEL_SPACING)
+        grid_layout.setHorizontalSpacing(self._scaled_int(self.CONTROL_PANEL_SPACING, minimum=2))
+        grid_layout.setVerticalSpacing(self._scaled_int(self.CONTROL_PANEL_SPACING, minimum=2))
         for row in range(self.CONTROL_PANEL_CONTENT_ROWS):
-            grid_layout.setRowMinimumHeight(row, self.CONTROL_PANEL_ROW_HEIGHT)
+            grid_layout.setRowMinimumHeight(row, self._scaled_int(self.CONTROL_PANEL_ROW_HEIGHT, minimum=28))
         grid_layout.setColumnStretch(0, 1)
         grid_layout.setColumnStretch(1, 1)
 
         panel_layout.addLayout(grid_layout)
         panel_layout.addStretch()
+        if hasattr(self, "_controlPanelLayoutPairs"):
+            self._controlPanelLayoutPairs.append((panel_layout, grid_layout))
         return grid_layout
 
     def __init__(self):
@@ -4102,39 +4117,47 @@ class MidiTitleWindow(QMainWindow):
         self.updateCheckManual = False
         self.updateCheckStartupScheduled = False
         self.bugReportWorker = None
+        self.feedbackWorker = None
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         self.currentLanguage = normalize_language_code(
             self.settings.value(self.SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
         )
         self.systemPalette = QApplication.palette()
+        self.baseApplicationFont = QFont(QApplication.font())
         self.currentAppearanceMode = self._normalized_appearance_mode(
             self.settings.value(self.SETTING_APPEARANCE_MODE, "system") or "system"
         )
         self._apply_appearance_mode(self.currentAppearanceMode, persist=False, refresh=False)
+        self.currentFontScale = self._normalized_font_scale(
+            self.settings.value(self.SETTING_FONT_SCALE, "regular") or "regular"
+        )
+        self._apply_font_scale(self.currentFontScale, persist=False, refresh=False)
         self._reset_user_hide_choices_if_needed()
         self._reset_gw_sector_report_hide_choices_if_needed()
         self._shownGwSectorReportFingerprints = set()
         self._did_apply_initial_column_sizing = False
         self._is_adjusting_columns = False
         self._manual_column_widths = {}
-        self.title_monospace_font = QFont("Courier New")
-        self.title_monospace_font.setStyleHint(QFont.Monospace)
+        self._controlPanelLayoutPairs = []
+        self._set_title_monospace_font()
 
         # Main widget and layout
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        self.mainLayout = main_layout
+        main_layout.setSpacing(self._scaled_int(10, minimum=4))
+        main_layout.setContentsMargins(*self._scaled_margins((10, 10, 10, 10)))
         self.setCentralWidget(main_widget)
 
         # Top: source buttons
         source_layout = QHBoxLayout()
+        self.sourceLayout = source_layout
         source_layout.setContentsMargins(0, 0, 0, 0)
-        source_layout.setSpacing(10)
+        source_layout.setSpacing(self._scaled_int(10, minimum=4))
 
         self.choose_button = QPushButton(self._lt("Open MIDI Folder"))
         self.choose_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.choose_button.setFont(QFont("Helvetica", 18, QFont.Bold))
+        self.choose_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.choose_button.setToolTip(
             "Select a folder to scan for .mid and .midi files."
         )
@@ -4143,7 +4166,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.open_image_button = QPushButton(self._lt("Open Image"))
         self.open_image_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.open_image_button.setFont(QFont("Helvetica", 18, QFont.Bold))
+        self.open_image_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.open_image_button.setToolTip(
             "Open a floppy image file for editing in Image Mode."
         )
@@ -4152,7 +4175,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.read_floppy_button = QPushButton(self._lt("Read Floppy"))
         self.read_floppy_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.read_floppy_button.setFont(QFont("Helvetica", 18, QFont.Bold))
+        self.read_floppy_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.read_floppy_button.setToolTip(
             "Read a floppy from a floppy drive or from a Greaseweazle-connected drive."
         )
@@ -4172,15 +4195,15 @@ class MidiTitleWindow(QMainWindow):
         )
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setMinimumSectionSize(40)
+        header.setMinimumSectionSize(self._scaled_int(40, minimum=32))
         self._is_adjusting_columns = True
         try:
-            self.table.setColumnWidth(0, 50)
-            self.table.setColumnWidth(2, 50)
+            self.table.setColumnWidth(0, self._scaled_int(50, minimum=36))
+            self.table.setColumnWidth(2, self._scaled_int(50, minimum=36))
             self.table.setColumnWidth(3, self._default_filename_column_width())
-            self.table.setColumnWidth(4, 260)
-            self.table.setColumnWidth(5, 65)
-            self.table.setColumnWidth(6, self.TYPE_COLUMN_MIN_WIDTH)
+            self.table.setColumnWidth(4, self._scaled_int(260, minimum=180))
+            self.table.setColumnWidth(5, self._scaled_int(65, minimum=48))
+            self.table.setColumnWidth(6, self._scaled_int(self.TYPE_COLUMN_MIN_WIDTH, minimum=54))
         finally:
             self._is_adjusting_columns = False
         header.sectionResized.connect(self._handle_section_resized)
@@ -4206,14 +4229,16 @@ class MidiTitleWindow(QMainWindow):
                 item.setToolTip(tooltip)
 
         file_list_layout = QHBoxLayout()
+        self.fileListLayout = file_list_layout
         file_list_layout.setContentsMargins(0, 0, 0, 0)
-        file_list_layout.setSpacing(6)
+        file_list_layout.setSpacing(self._scaled_int(6, minimum=2))
         file_list_layout.addWidget(self.table, stretch=1)
 
         self.diskUsageBarsWidget = QWidget()
         usage_bars_layout = QHBoxLayout(self.diskUsageBarsWidget)
+        self.usageBarsLayout = usage_bars_layout
         usage_bars_layout.setContentsMargins(0, 0, 0, 0)
-        usage_bars_layout.setSpacing(3)
+        usage_bars_layout.setSpacing(self._scaled_int(3, minimum=1))
         self.diskUsageBar = VerticalUsageBar(self.diskUsageBarsWidget)
         self.eseqCountBar = SegmentedEseqCountBar(self.ESEQ_FILE_LIMIT, self.diskUsageBarsWidget)
         self.diskUsageBar.setToolTip("Floppy image space used.")
@@ -4226,21 +4251,22 @@ class MidiTitleWindow(QMainWindow):
 
         self.eseqReorderWidget = QWidget()
         reorder_layout = QHBoxLayout(self.eseqReorderWidget)
+        self.reorderLayout = reorder_layout
         reorder_layout.setContentsMargins(0, 0, 0, 0)
-        reorder_layout.setSpacing(8)
+        reorder_layout.setSpacing(self._scaled_int(8, minimum=3))
         reorder_layout.addStretch()
 
         self.moveEseqUpButton = QToolButton()
         self.moveEseqUpButton.setArrowType(Qt.UpArrow)
         self.moveEseqUpButton.setToolTip("Move the selected Yamaha E-SEQ file earlier in the directory order.")
-        self.moveEseqUpButton.setFixedSize(34, 28)
+        self.moveEseqUpButton.setFixedSize(self._scaled_size(34, 28, minimum_width=28, minimum_height=24))
         self.moveEseqUpButton.clicked.connect(lambda: self.move_selected_eseq_row(-1))
         reorder_layout.addWidget(self.moveEseqUpButton)
 
         self.moveEseqDownButton = QToolButton()
         self.moveEseqDownButton.setArrowType(Qt.DownArrow)
         self.moveEseqDownButton.setToolTip("Move the selected Yamaha E-SEQ file later in the directory order.")
-        self.moveEseqDownButton.setFixedSize(34, 28)
+        self.moveEseqDownButton.setFixedSize(self._scaled_size(34, 28, minimum_width=28, minimum_height=24))
         self.moveEseqDownButton.clicked.connect(lambda: self.move_selected_eseq_row(1))
         reorder_layout.addWidget(self.moveEseqDownButton)
         reorder_layout.addStretch()
@@ -4250,23 +4276,24 @@ class MidiTitleWindow(QMainWindow):
         # Status label
         self.statusWidget = QWidget()
         status_layout = QGridLayout(self.statusWidget)
+        self.statusLayout = status_layout
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(0)
 
         self.status_label = ClearableStatusLabel("", self.statusWidget)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setWordWrap(True)
-        self.status_label.setMinimumHeight(42)
-        self.status_label.setContentsMargins(24, 0, 24, 0)
+        self.status_label.setMinimumHeight(self._scaled_int(42, minimum=32))
+        self.status_label.setContentsMargins(*self._scaled_margins((24, 0, 24, 0)))
         self.status_label.setToolTip("Operation status, warnings, and progress messages.")
         status_layout.addWidget(self.status_label, 0, 0)
 
         self.statusClearButton = QToolButton(self.statusWidget)
         self.statusClearButton.setAutoRaise(True)
         self.statusClearButton.setFocusPolicy(Qt.NoFocus)
-        self.statusClearButton.setFixedSize(18, 18)
+        self.statusClearButton.setFixedSize(self._scaled_size(18, 18, minimum_width=16, minimum_height=16))
         self.statusClearButton.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
-        self.statusClearButton.setIconSize(QSize(10, 10))
+        self.statusClearButton.setIconSize(self._scaled_size(10, 10, minimum_width=8, minimum_height=8))
         self.statusClearButton.setToolTip("Clear status message.")
         self.statusClearButton.clicked.connect(self.status_label.clear)
         status_layout.addWidget(self.statusClearButton, 0, 0, Qt.AlignRight | Qt.AlignVCenter)
@@ -4279,8 +4306,9 @@ class MidiTitleWindow(QMainWindow):
         # Controls area: grouped into equally spaced sections for clarity.
         self.quickPanelWidget = QWidget()
         controls_layout = QHBoxLayout(self.quickPanelWidget)
+        self.controlsLayout = controls_layout
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(10)
+        controls_layout.setSpacing(self._scaled_int(10, minimum=4))
 
         options_group = QGroupBox("Options")
         self.optionsGroup = options_group
@@ -4319,7 +4347,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.modeBannerLabel = QLabel("MIDI MODE")
         self.modeBannerLabel.setAlignment(Qt.AlignCenter)
-        mode_font = QFont("Helvetica", 14, QFont.Bold)
+        mode_font = self._make_scaled_font("Helvetica", 14, QFont.Bold)
         self.modeBannerLabel.setFont(mode_font)
         self.modeBannerLabel.setWordWrap(True)
         self.modeBannerLabel.setToolTip("Shows the current editing mode and active source.")
@@ -4337,7 +4365,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.renameAllButton = QPushButton("Rename 8.3")
         self.renameAllButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.renameAllButton.setMinimumHeight(36)
+        self.renameAllButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.renameAllButton.setToolTip(
             "Utility: rename every listed file to DOS 8.3 format (00.MID, 01.MID, ...)."
         )
@@ -4345,7 +4373,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.convertType0Button = QPushButton("SMF1 -> SMF0")
         self.convertType0Button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.convertType0Button.setMinimumHeight(36)
+        self.convertType0Button.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.convertType0Button.setToolTip(
             "Utility: convert every listed file to MIDI Type 0 (single-track)."
         )
@@ -4353,7 +4381,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.convertEseqToMidiButton = QPushButton("E-SEQ -> MIDI")
         self.convertEseqToMidiButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.convertEseqToMidiButton.setMinimumHeight(36)
+        self.convertEseqToMidiButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.convertEseqToMidiButton.setToolTip(
             "Image/Floppy Mode utility: queue conversion of listed E-SEQ files to SMF MIDI."
         )
@@ -4361,7 +4389,7 @@ class MidiTitleWindow(QMainWindow):
 
         self.convertMidiToEseqButton = QPushButton("MIDI -> E-SEQ")
         self.convertMidiToEseqButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.convertMidiToEseqButton.setMinimumHeight(36)
+        self.convertMidiToEseqButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.convertMidiToEseqButton.setToolTip(
             "Image/Floppy Mode utility: queue conversion of listed MIDI files to Yamaha E-SEQ."
         )
@@ -4381,40 +4409,41 @@ class MidiTitleWindow(QMainWindow):
         # Clear button (styled to match Save button)
         self.clearButton = QToolButton()
         self.clearButton.setText(self._lt("Clear"))
-        self.clearButton.setFont(QFont("Helvetica", 18, QFont.Bold))
+        self.clearButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.clearButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.clearButton.setMinimumHeight(36)
+        self.clearButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.clearButton.setToolTip("Remove all files from the current list.")
         self.clearButton.clicked.connect(self.clear_list)
 
         self.saveButton = QToolButton()
         self.saveButton.setText(self._lt("Save"))
-        self.saveButton.setFont(QFont("Helvetica", 18, QFont.Bold))
+        self.saveButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.saveButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.saveButton.setMinimumHeight(36)
+        self.saveButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.saveButton.clicked.connect(self.save_pending_changes)
 
         self.saveAsButton = QToolButton()
         self.saveAsButton.setText(self._lt("Save As"))
-        self.saveAsButton.setFont(QFont("Helvetica", 18, QFont.Bold))
+        self.saveAsButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.saveAsButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.saveAsButton.setMinimumHeight(36)
+        self.saveAsButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.saveAsButton.setToolTip("Save copies with current titles to a selected destination folder.")
         self.saveAsButton.clicked.connect(self.save_as_changes)
 
         self.saveAsImageButton = QToolButton()
         self.saveAsImageButton.setText(self._lt("Save As Image"))
-        self.saveAsImageButton.setFont(QFont("Helvetica", 18, QFont.Bold))
+        self.saveAsImageButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.saveAsImageButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.saveAsImageButton.setMinimumHeight(36)
+        self.saveAsImageButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.saveAsImageButton.setToolTip("Create one or more floppy images from the currently listed files.")
         self.saveAsImageButton.clicked.connect(self.save_as_image)
         self._apply_compact_button_labels()
 
         save_with_toggle_widget = QWidget(actions_group)
         save_with_toggle_layout = QHBoxLayout(save_with_toggle_widget)
+        self.saveWithToggleLayout = save_with_toggle_layout
         save_with_toggle_layout.setContentsMargins(0, 0, 0, 0)
-        save_with_toggle_layout.setSpacing(6)
+        save_with_toggle_layout.setSpacing(self._scaled_int(6, minimum=2))
         save_with_toggle_layout.addWidget(self.saveButton, stretch=1)
         self.writeProtectToggle = WriteProtectToggle(actions_group)
         self.writeProtectToggle.toggled.connect(self.toggle_original_write)
@@ -4442,8 +4471,9 @@ class MidiTitleWindow(QMainWindow):
             "Album title and catalog number stored in the Yamaha E-SEQ directory file."
         )
         pianodir_meta_layout = QHBoxLayout(self.imagePianodirMetadataWidget)
+        self.pianodirMetaLayout = pianodir_meta_layout
         pianodir_meta_layout.setContentsMargins(0, 0, 0, 0)
-        pianodir_meta_layout.setSpacing(8)
+        pianodir_meta_layout.setSpacing(self._scaled_int(8, minimum=3))
 
         album_title_label = QLabel("Album Title")
         self.albumTitleLabel = album_title_label
@@ -4752,6 +4782,19 @@ class MidiTitleWindow(QMainWindow):
             self.appearanceActionGroup.addAction(action)
             self.appearanceMenu.addAction(action)
             self.appearanceActions[mode] = action
+        self.fontSizeMenu = self.settingsMenu.addMenu(self._t("menu.font_size"))
+        self.fontSizeActionGroup = QActionGroup(self)
+        self.fontSizeActionGroup.setExclusive(True)
+        self.fontSizeActions = {}
+        for mode, message_id, _factor in self.FONT_SCALE_OPTIONS:
+            action = QAction(self._t(message_id), self)
+            action.setCheckable(True)
+            action.setChecked(mode == self._font_scale())
+            action.setData(mode)
+            action.triggered.connect(lambda _checked=False, font_scale=mode: self._set_font_scale(font_scale))
+            self.fontSizeActionGroup.addAction(action)
+            self.fontSizeMenu.addAction(action)
+            self.fontSizeActions[mode] = action
         self.settingsMenu.addSeparator()
         self.languageMenu = self.settingsMenu.addMenu(self._t("menu.language"))
         self.languageActionGroup = QActionGroup(self)
@@ -4798,6 +4841,13 @@ class MidiTitleWindow(QMainWindow):
         )
         self.helpReportBugAction.triggered.connect(self.show_bug_report_dialog)
         help_menu.addAction(self.helpReportBugAction)
+
+        self.helpFeedbackAction = QAction("Send Feedback...", self)
+        self.helpFeedbackAction.setToolTip(
+            "Send feedback with app details and optional recent console logs."
+        )
+        self.helpFeedbackAction.triggered.connect(self.show_feedback_dialog)
+        help_menu.addAction(self.helpFeedbackAction)
         help_menu.addSeparator()
 
         self.helpWelcomeAction = QAction("Show Welcome Screen", self)
@@ -4818,6 +4868,7 @@ class MidiTitleWindow(QMainWindow):
         # Set mouse tracking and install an event filter on the table viewport.
         self.table.viewport().setMouseTracking(True)
         self.table.viewport().installEventFilter(self)
+        self._apply_scaled_layout_metrics()
         self._update_floppy_save_option_ui()
         self._update_menu_actions()
         self._refresh_translated_ui()
@@ -4833,6 +4884,239 @@ class MidiTitleWindow(QMainWindow):
     def _normalized_appearance_mode(self, mode):
         mode = str(mode or "system").strip().lower()
         return mode if mode in {"system", "light", "dark"} else "system"
+
+    def _normalized_font_scale(self, mode):
+        mode = str(mode or "regular").strip().lower()
+        valid_modes = {option_mode for option_mode, _message_id, _factor in self.FONT_SCALE_OPTIONS}
+        return mode if mode in valid_modes else "regular"
+
+    def _font_scale(self):
+        return self._normalized_font_scale(getattr(self, "currentFontScale", "regular"))
+
+    def _font_scale_factor(self, mode=None):
+        mode = self._normalized_font_scale(mode if mode is not None else self._font_scale())
+        for option_mode, _message_id, factor in self.FONT_SCALE_OPTIONS:
+            if option_mode == mode:
+                return factor
+        return 1.0
+
+    def _layout_scale_factor(self, mode=None):
+        mode = self._normalized_font_scale(mode if mode is not None else self._font_scale())
+        return float(self.LAYOUT_SCALE_FACTORS.get(mode, self._font_scale_factor(mode)))
+
+    def _scaled_int(self, value, *, minimum=0):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 0
+        return max(int(minimum), int(round(value * self._layout_scale_factor())))
+
+    def _scaled_size(self, width, height, *, minimum_width=1, minimum_height=1):
+        return QSize(
+            self._scaled_int(width, minimum=minimum_width),
+            self._scaled_int(height, minimum=minimum_height),
+        )
+
+    def _scaled_margins(self, margins):
+        left, top, right, bottom = margins
+        return (
+            self._scaled_int(left, minimum=0),
+            self._scaled_int(top, minimum=0),
+            self._scaled_int(right, minimum=0),
+            self._scaled_int(bottom, minimum=0),
+        )
+
+    def _scaled_point_size(self, point_size, *, minimum=6):
+        try:
+            point_size = float(point_size)
+        except (TypeError, ValueError):
+            point_size = 0
+        if point_size <= 0:
+            return minimum
+        return max(minimum, int(round(point_size * self._font_scale_factor())))
+
+    def _make_scaled_font(self, family=None, point_size=None, weight=None, style_hint=None):
+        base_font = QFont(getattr(self, "baseApplicationFont", QApplication.font()))
+        font = QFont(base_font)
+        if family:
+            font.setFamily(family)
+        if weight is not None:
+            font.setWeight(weight)
+
+        if point_size is None:
+            base_point_size = base_font.pointSizeF()
+            if base_point_size > 0:
+                font.setPointSizeF(max(6.0, base_point_size * self._font_scale_factor()))
+            else:
+                pixel_size = base_font.pixelSize()
+                if pixel_size > 0:
+                    font.setPixelSize(max(8, int(round(pixel_size * self._font_scale_factor()))))
+        else:
+            font.setPointSizeF(max(6.0, float(point_size) * self._font_scale_factor()))
+
+        if style_hint is not None:
+            font.setStyleHint(style_hint)
+        return font
+
+    def _set_title_monospace_font(self):
+        self.title_monospace_font = self._make_scaled_font(
+            "Courier New",
+            style_hint=QFont.Monospace,
+        )
+
+    def _refresh_title_column_fonts(self):
+        table = getattr(self, "table", None)
+        if table is None:
+            return
+        for row in range(table.rowCount()):
+            title_item = table.item(row, 4)
+            if title_item is not None:
+                title_item.setFont(self.title_monospace_font)
+
+    def _table_default_row_height(self):
+        metrics = QFontMetrics(QApplication.font())
+        return max(
+            self._scaled_int(24, minimum=20),
+            metrics.height() + self._scaled_int(8, minimum=4),
+        )
+
+    def _set_fixed_columns_for_scale(self):
+        table = getattr(self, "table", None)
+        if table is None:
+            return
+        self._is_adjusting_columns = True
+        try:
+            table.setColumnWidth(0, self._scaled_int(50, minimum=36))
+            table.setColumnWidth(2, self._scaled_int(50, minimum=36))
+            if 5 not in self._manual_column_widths:
+                table.setColumnWidth(5, self._scaled_int(65, minimum=48))
+        finally:
+            self._is_adjusting_columns = False
+
+    def _apply_scaled_layout_metrics(self):
+        main_layout = getattr(self, "mainLayout", None)
+        if main_layout is not None:
+            main_layout.setSpacing(self._scaled_int(10, minimum=4))
+            main_layout.setContentsMargins(*self._scaled_margins((10, 10, 10, 10)))
+
+        for layout_name, spacing, minimum in (
+            ("sourceLayout", 10, 4),
+            ("fileListLayout", 6, 2),
+            ("usageBarsLayout", 3, 1),
+            ("reorderLayout", 8, 3),
+            ("controlsLayout", 10, 4),
+            ("saveWithToggleLayout", 6, 2),
+            ("pianodirMetaLayout", 8, 3),
+        ):
+            layout = getattr(self, layout_name, None)
+            if layout is not None:
+                layout.setSpacing(self._scaled_int(spacing, minimum=minimum))
+
+        for panel_layout, grid_layout in getattr(self, "_controlPanelLayoutPairs", ()):
+            panel_layout.setContentsMargins(*self._scaled_margins(self.CONTROL_PANEL_MARGINS))
+            panel_layout.setSpacing(self._scaled_int(self.CONTROL_PANEL_SPACING, minimum=2))
+            grid_layout.setHorizontalSpacing(self._scaled_int(self.CONTROL_PANEL_SPACING, minimum=2))
+            grid_layout.setVerticalSpacing(self._scaled_int(self.CONTROL_PANEL_SPACING, minimum=2))
+            for row in range(self.CONTROL_PANEL_CONTENT_ROWS):
+                grid_layout.setRowMinimumHeight(row, self._scaled_int(self.CONTROL_PANEL_ROW_HEIGHT, minimum=28))
+
+        for widget_name in (
+            "renameAllButton",
+            "convertType0Button",
+            "convertEseqToMidiButton",
+            "convertMidiToEseqButton",
+            "clearButton",
+            "saveButton",
+            "saveAsButton",
+            "saveAsImageButton",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setMinimumHeight(self._scaled_int(36, minimum=28))
+
+        for widget_name in ("diskUsageBar", "eseqCountBar"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setFixedWidth(self._scaled_int(14, minimum=10))
+                widget.setMinimumHeight(self._scaled_int(120, minimum=80))
+
+        if hasattr(self, "moveEseqUpButton"):
+            self.moveEseqUpButton.setFixedSize(self._scaled_size(34, 28, minimum_width=28, minimum_height=24))
+        if hasattr(self, "moveEseqDownButton"):
+            self.moveEseqDownButton.setFixedSize(self._scaled_size(34, 28, minimum_width=28, minimum_height=24))
+        if hasattr(self, "status_label"):
+            self.status_label.setMinimumHeight(self._scaled_int(42, minimum=32))
+            self.status_label.setContentsMargins(*self._scaled_margins((24, 0, 24, 0)))
+        if hasattr(self, "statusClearButton"):
+            self.statusClearButton.setFixedSize(self._scaled_size(18, 18, minimum_width=16, minimum_height=16))
+            self.statusClearButton.setIconSize(self._scaled_size(10, 10, minimum_width=8, minimum_height=8))
+        if hasattr(self, "writeProtectToggle"):
+            self.writeProtectToggle.setFixedSize(self._scaled_size(30, 50, minimum_width=24, minimum_height=38))
+
+        table = getattr(self, "table", None)
+        if table is not None:
+            table.horizontalHeader().setMinimumSectionSize(self._scaled_int(40, minimum=32))
+            table.verticalHeader().setDefaultSectionSize(self._table_default_row_height())
+            for row in range(table.rowCount()):
+                table.setRowHeight(row, self._table_default_row_height())
+            self._set_fixed_columns_for_scale()
+            table.viewport().update()
+
+    def _refresh_scaled_widget_fonts(self):
+        app_font = QApplication.font()
+        self.setFont(app_font)
+        menu_bar = self.menuBar()
+        if menu_bar is not None:
+            menu_bar.setFont(app_font)
+
+        self._apply_scaled_layout_metrics()
+
+        for widget_name, point_size in (
+            ("choose_button", 18),
+            ("open_image_button", 18),
+            ("read_floppy_button", 18),
+            ("clearButton", 18),
+            ("saveButton", 18),
+            ("saveAsButton", 18),
+            ("saveAsImageButton", 18),
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setFont(self._make_scaled_font("Helvetica", point_size, QFont.Bold))
+
+        mode_banner = getattr(self, "modeBannerLabel", None)
+        if mode_banner is not None:
+            mode_banner.setFont(self._make_scaled_font("Helvetica", 14, QFont.Bold))
+
+        table = getattr(self, "table", None)
+        if table is not None:
+            table.setFont(app_font)
+            table.horizontalHeader().setFont(app_font)
+            table.verticalHeader().setFont(app_font)
+            self._refresh_title_column_fonts()
+            self._resize_table_columns_to_fill()
+
+    def _apply_font_scale(self, mode, *, persist=True, refresh=True):
+        mode = self._normalized_font_scale(mode)
+        self.currentFontScale = mode
+        if persist:
+            self.settings.setValue(self.SETTING_FONT_SCALE, mode)
+            self.settings.sync()
+
+        app = QApplication.instance()
+        if app is not None:
+            app.setFont(self._make_scaled_font())
+
+        self._set_title_monospace_font()
+        if hasattr(self, "fontSizeActions"):
+            for action_mode, action in self.fontSizeActions.items():
+                action.setChecked(action_mode == mode)
+        if refresh:
+            self._refresh_scaled_widget_fonts()
+
+    def _set_font_scale(self, mode):
+        self._apply_font_scale(mode, persist=True, refresh=True)
+        self._log_event("Settings", "Font size changed", size=self._font_scale())
 
     def _appearance_mode(self):
         return self._normalized_appearance_mode(getattr(self, "currentAppearanceMode", "system"))
@@ -4948,9 +5232,7 @@ class MidiTitleWindow(QMainWindow):
         return count
 
     def _language_menu_label(self, language):
-        if language.native_name == language.english_name:
-            return language.native_name
-        return f"{language.native_name} ({language.english_name})"
+        return language.native_name
 
     def _refresh_settings_menu_text(self):
         if hasattr(self, "settingsMenu"):
@@ -4966,6 +5248,13 @@ class MidiTitleWindow(QMainWindow):
             if action is not None:
                 action.setText(self._menu_action_text(self._t(message_id), message_id.split(".")[-1][:1]))
                 action.setChecked(mode == self._appearance_mode())
+        if hasattr(self, "fontSizeMenu"):
+            self.fontSizeMenu.setTitle(self._t("menu.font_size"))
+        for mode, message_id, _factor in self.FONT_SCALE_OPTIONS:
+            action = getattr(self, "fontSizeActions", {}).get(mode)
+            if action is not None:
+                action.setText(self._menu_action_text(self._t(message_id), message_id.split(".")[-1][:1]))
+                action.setChecked(mode == self._font_scale())
         if hasattr(self, "languageMenu"):
             self.languageMenu.setTitle(self._t("menu.language"))
         if hasattr(self, "settingsKeyboardShortcutsAction"):
@@ -5041,6 +5330,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
             {"id": "help.check_updates", "category": "Help", "label": "Check for Updates...", "action": "helpCheckUpdatesAction", "default": "F9"},
             {"id": "help.report_bug", "category": "Help", "label": "Report a Bug...", "action": "helpReportBugAction", "default": "F10"},
+            {"id": "help.feedback", "category": "Help", "label": "Send Feedback...", "action": "helpFeedbackAction", "default": "F11"},
             {"id": "help.welcome", "category": "Help", "label": "Show Welcome Screen", "action": "helpWelcomeAction", "default": "F1"},
             {"id": "help.about", "category": "Help", "label": "About APS MIDI Prep Tool", "action": "helpAboutAction", "default": "Ctrl+F1"},
         )
@@ -5327,6 +5617,7 @@ class MidiTitleWindow(QMainWindow):
             ("helpCheckUpdatesAction", "Check for Updates...", "C"),
             ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup", "S"),
             ("helpReportBugAction", "Report a Bug...", "B"),
+            ("helpFeedbackAction", "Send Feedback...", "F"),
             ("helpWelcomeAction", "Show Welcome Screen", "W"),
             ("helpDisclaimerAction", "Disclaimer", "D"),
             ("helpAboutAction", "About APS MIDI Prep Tool", "A"),
@@ -8029,6 +8320,8 @@ class MidiTitleWindow(QMainWindow):
             return
         if self.bugReportWorker is not None:
             self.bugReportWorker.requestInterruption()
+        if self.feedbackWorker is not None:
+            self.feedbackWorker.requestInterruption()
         self._reset_image_state()
         self._cleanup_midi_scratch_dir()
         super().closeEvent(event)
@@ -8060,7 +8353,7 @@ class MidiTitleWindow(QMainWindow):
 
     def _preferred_type_column_width(self):
         if self.table.isColumnHidden(6):
-            return self.TYPE_COLUMN_MIN_WIDTH
+            return self._scaled_int(self.TYPE_COLUMN_MIN_WIDTH, minimum=54)
 
         header_item = self.table.horizontalHeaderItem(6)
         header_text = header_item.text() if header_item is not None else "Type"
@@ -8082,8 +8375,11 @@ class MidiTitleWindow(QMainWindow):
 
         preferred += 30
         if has_eseq_detail:
-            preferred = max(preferred, self.TYPE_COLUMN_ESEQ_DETAIL_MIN_WIDTH)
-        return max(self.TYPE_COLUMN_MIN_WIDTH, min(preferred, self.TYPE_COLUMN_MAX_WIDTH))
+            preferred = max(preferred, self._scaled_int(self.TYPE_COLUMN_ESEQ_DETAIL_MIN_WIDTH, minimum=180))
+        return max(
+            self._scaled_int(self.TYPE_COLUMN_MIN_WIDTH, minimum=54),
+            min(preferred, self._scaled_int(self.TYPE_COLUMN_MAX_WIDTH, minimum=320)),
+        )
 
     def _resize_table_columns_to_fill(self, preferred_column=None):
         if self._is_adjusting_columns:
@@ -8684,6 +8980,51 @@ class MidiTitleWindow(QMainWindow):
         self.imagePianodirTitleEdit.setText(metadata.disk_title)
         self.imagePianodirCatalogEdit.setText(metadata.catalog_number)
         self._update_image_pianodir_metadata_ui()
+
+    def _image_pianodir_metadata_with_source_catalog(self, metadata=None, source_path=""):
+        metadata = metadata or PianodirMetadata()
+        if str(metadata.catalog_number or "").strip():
+            return metadata
+
+        candidate_paths = []
+        if source_path:
+            candidate_paths.append(source_path)
+        if self.image_session is not None:
+            if self.image_session.source_kind == "image":
+                candidate_paths.append(self.image_session.source_path)
+            elif self.image_session.source_kind == "floppy_gw":
+                candidate_paths.append(getattr(self.image_session, "capture_path", "") or "")
+                gw_source = getattr(self.image_session, "gw_source", None)
+                candidate_paths.append(getattr(gw_source, "capture_save_path", "") or "")
+
+        catalog_number = ""
+        for candidate_path in candidate_paths:
+            catalog_number = derive_catalog_number_from_image_filename(candidate_path)
+            if catalog_number:
+                break
+        if not catalog_number:
+            return metadata
+        return PianodirMetadata(
+            catalog_number=catalog_number,
+            disk_title=metadata.disk_title,
+            raw_label_bytes=metadata.raw_label_bytes,
+        )
+
+    def _fill_blank_image_catalog_from_source(self, source_path=""):
+        if self.image_session is None:
+            return False
+        if str(self._current_image_pianodir_metadata().catalog_number or "").strip():
+            return False
+        metadata = self._image_pianodir_metadata_with_source_catalog(
+            self.loadedImagePianodirMetadata,
+            source_path=source_path,
+        )
+        if metadata == self.loadedImagePianodirMetadata or not metadata.catalog_number:
+            return False
+        self.loadedImagePianodirMetadata = metadata
+        self.imagePianodirCatalogEdit.setText(metadata.catalog_number)
+        self._update_image_pianodir_metadata_ui()
+        return True
 
     def _current_image_pianodir_metadata(self):
         return PianodirMetadata(
@@ -13258,6 +13599,7 @@ class MidiTitleWindow(QMainWindow):
                 output_path = f"{output_path}.scp"
             try:
                 shutil.copy2(capture_path, output_path)
+                self._fill_blank_image_catalog_from_source(output_path)
                 QMessageBox.information(
                     self,
                     "SCP Capture Saved",
@@ -13321,6 +13663,9 @@ class MidiTitleWindow(QMainWindow):
             progress_callback(5, 5, "Finalizing floppy export...")
             progressDialog.close()
             self._remember_save_as_location(output_path)
+            catalog_filled = self._fill_blank_image_catalog_from_source(output_path)
+            if catalog_filled:
+                self._refresh_pianodir_row()
             self._show_save_as_image_complete(
                 "save_as_image.complete.saved_as",
                 filename=os.path.basename(output_path),
@@ -13938,6 +14283,7 @@ class MidiTitleWindow(QMainWindow):
                 is_pending_addition=False,
             )
 
+        loaded_pianodir_metadata = self._image_pianodir_metadata_with_source_catalog(loaded_pianodir_metadata)
         self._set_loaded_image_pianodir_metadata(loaded_pianodir_metadata)
         self._refresh_pianodir_row()
         self._resize_table_columns_to_fill()
@@ -16731,14 +17077,13 @@ class MidiTitleWindow(QMainWindow):
 
         prompt = self._make_dialog_form_label("Song title:")
 
-        title_field_font = QFont("Courier New")
-        title_field_font.setStyleHint(QFont.Monospace)
+        title_field_font = self._make_scaled_font("Courier New", style_hint=QFont.Monospace)
         screen_title_font = QFont(title_field_font)
         if use_screen_format:
             point_size = screen_title_font.pointSize()
             if point_size <= 0:
                 point_size = QApplication.font().pointSize()
-            screen_title_font.setPointSize(max(point_size + 5, 15))
+            screen_title_font.setPointSize(max(point_size + self._scaled_point_size(5, minimum=4), self._scaled_point_size(15)))
         title_font_metrics = QFontMetrics(title_field_font)
         title_field_width = title_font_metrics.horizontalAdvance("M" * 32) + 28
         centered_field_font = screen_title_font if use_screen_format else title_field_font
@@ -17327,7 +17672,7 @@ class MidiTitleWindow(QMainWindow):
 
         title_label = QLabel(APP_TITLE_WITH_VERSION, dialog)
         title_label.setAlignment(Qt.AlignCenter)
-        title_label.setFont(QFont("Helvetica", 13, QFont.Bold))
+        title_label.setFont(self._make_scaled_font("Helvetica", 13, QFont.Bold))
         layout.addWidget(title_label)
 
         website_label = QLabel(f'<a href="{APP_WEBSITE}">{APP_WEBSITE}</a>', dialog)
@@ -17372,6 +17717,21 @@ class MidiTitleWindow(QMainWindow):
     def _bug_report_secret(self):
         return str(
             os.environ.get("APS_MIDI_PREP_TOOL_BUG_REPORT_SECRET")
+            or BUG_REPORT_SECRET
+            or ""
+        )
+
+    def _feedback_url(self):
+        return str(
+            os.environ.get("APS_MIDI_PREP_TOOL_FEEDBACK_URL")
+            or FEEDBACK_URL
+            or ""
+        ).strip()
+
+    def _feedback_secret(self):
+        return str(
+            os.environ.get("APS_MIDI_PREP_TOOL_FEEDBACK_SECRET")
+            or os.environ.get("APS_MIDI_PREP_TOOL_BUG_REPORT_SECRET")
             or BUG_REPORT_SECRET
             or ""
         )
@@ -17437,6 +17797,17 @@ class MidiTitleWindow(QMainWindow):
                 "text": log_tail,
             },
         }
+
+    def _build_feedback_payload(self, *, summary, description, contact, include_logs):
+        payload = self._build_bug_report_payload(
+            summary=summary,
+            description=description,
+            contact=contact,
+            include_logs=include_logs,
+        )
+        payload["kind"] = "feedback"
+        payload["feedback_id"] = payload.get("report_id", "")
+        return payload
 
     def show_bug_report_dialog(self, _checked=False, *, summary="", description="", contact="", include_logs=True):
         dialog = QDialog(self)
@@ -17523,6 +17894,91 @@ class MidiTitleWindow(QMainWindow):
         )
         self._submit_bug_report(payload)
 
+    def show_feedback_dialog(self, _checked=False, *, summary="", description="", contact="", include_logs=False):
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._lt("Send Feedback"))
+        dialog.setModal(True)
+        dialog.setMinimumWidth(620)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            self._lt("Tell us what would make APS MIDI Prep Tool better, or what is working well.")
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        privacy = QLabel(
+            self._lt("Feedback includes app details. Logs are optional and may include recent console output and file paths.")
+        )
+        privacy.setWordWrap(True)
+        privacy.setStyleSheet("QLabel { color: palette(mid); }")
+        layout.addWidget(privacy)
+
+        summary_edit = QLineEdit(dialog)
+        summary_edit.setPlaceholderText(self._lt("Short summary"))
+        if summary:
+            summary_edit.setText(str(summary))
+        description_edit = QPlainTextEdit(dialog)
+        description_edit.setPlaceholderText(self._lt("What would you like to share?"))
+        description_edit.setMinimumHeight(150)
+        if description:
+            description_edit.setPlainText(str(description))
+        contact_edit = QLineEdit(dialog)
+        contact_edit.setPlaceholderText(self._lt("Optional email or contact info"))
+        if contact:
+            contact_edit.setText(str(contact))
+
+        form_grid = self._make_dialog_form_grid()
+        labels = [
+            self._add_dialog_form_row(form_grid, 0, "Summary:", summary_edit),
+            self._add_dialog_form_row(form_grid, 1, "Details:", description_edit),
+            self._add_dialog_form_row(form_grid, 2, "Contact:", contact_edit),
+        ]
+        self._align_dialog_form_labels(labels)
+        layout.addLayout(form_grid)
+
+        include_logs_checkbox = QCheckBox(self._lt("Include recent console logs"), dialog)
+        include_logs_checkbox.setChecked(bool(include_logs))
+        layout.addWidget(include_logs_checkbox)
+
+        log_note = QLabel(self._lt("Adds recent console output if it helps explain your feedback."))
+        log_note.setWordWrap(True)
+        log_note.setStyleSheet("QLabel { color: palette(mid); }")
+        layout.addWidget(log_note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel, parent=dialog)
+        send_button = buttons.addButton(self._lt("Send Feedback"), QDialogButtonBox.AcceptRole)
+        send_button.setDefault(True)
+        buttons.rejected.connect(dialog.reject)
+
+        def accept_if_valid():
+            if not summary_edit.text().strip() and not description_edit.toPlainText().strip():
+                QMessageBox.warning(
+                    dialog,
+                    self._lt("Feedback Needs Detail"),
+                    self._lt("Add a short summary or feedback details before sending."),
+                )
+                return
+            dialog.accept()
+
+        send_button.clicked.connect(accept_if_valid)
+        layout.addWidget(buttons)
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return
+
+        payload = self._build_feedback_payload(
+            summary=summary_edit.text(),
+            description=description_edit.toPlainText(),
+            contact=contact_edit.text(),
+            include_logs=include_logs_checkbox.isChecked(),
+        )
+        self._submit_feedback(payload)
+
     def _submit_bug_report(self, payload):
         endpoint = self._bug_report_url()
         if not endpoint:
@@ -17550,6 +18006,33 @@ class MidiTitleWindow(QMainWindow):
         self.bugReportWorker = worker
         worker.start()
 
+    def _submit_feedback(self, payload):
+        endpoint = self._feedback_url()
+        if not endpoint:
+            self._set_bug_report_feedback(self._lt("No feedback endpoint is configured for this build."))
+            self._log_warning_event("Feedback", "No endpoint configured")
+            return
+        if self.feedbackWorker is not None:
+            self._set_bug_report_feedback(self._lt("Please wait for the current feedback to finish sending."))
+            self._log_warning_event("Feedback", "Submit ignored because another feedback submission is in progress")
+            return
+
+        if hasattr(self, "helpFeedbackAction"):
+            self.helpFeedbackAction.setEnabled(False)
+        self._set_bug_report_feedback(self._lt("Sending feedback..."))
+        self._log_event(
+            "Feedback",
+            "Sending",
+            feedback_id=payload.get("feedback_id") if isinstance(payload, dict) else "",
+            endpoint=endpoint,
+            includes_logs=bool((payload.get("logs") or {}).get("included")) if isinstance(payload, dict) else False,
+        )
+
+        worker = BugReportSubmitWorker(endpoint, payload, self._feedback_secret(), timeout_seconds=20)
+        worker.finished.connect(self._on_feedback_finished)
+        self.feedbackWorker = worker
+        worker.start()
+
     def _set_bug_report_feedback(self, message, *, stream_name=None):
         text = str(message or "").strip()
         if not text:
@@ -17566,6 +18049,17 @@ class MidiTitleWindow(QMainWindow):
         text = re.sub(r"\s+", " ", str(message or "")).strip()
         if not text:
             return self._lt("The app could not send the bug report")
+        http_match = re.match(r"^(HTTP\s+\d+)", text, flags=re.IGNORECASE)
+        if http_match:
+            return http_match.group(1).upper()
+        if len(text) > 180:
+            return text[:177].rstrip() + "..."
+        return text
+
+    def _short_feedback_error(self, message):
+        text = re.sub(r"\s+", " ", str(message or "")).strip()
+        if not text:
+            return self._lt("The app could not send feedback")
         http_match = re.match(r"^(HTTP\s+\d+)", text, flags=re.IGNORECASE)
         if http_match:
             return http_match.group(1).upper()
@@ -17631,6 +18125,49 @@ class MidiTitleWindow(QMainWindow):
             message,
         )
 
+    def _show_feedback_success(self, response, feedback_id=""):
+        server_id = str(
+            response.get("feedback_id")
+            or response.get("report_id")
+            or response.get("id")
+            or response.get("ticket")
+            or ""
+        ).strip()
+        reference = server_id or feedback_id
+        message = self._lt("Feedback sent.")
+        if reference:
+            message += f" {self._lt('Reference')}: {reference}"
+        self._set_bug_report_feedback(message)
+        self._log_event(
+            "Feedback",
+            "Sent",
+            reference=reference,
+            status=response.get("status"),
+        )
+        informative_text = ""
+        if reference:
+            informative_text = f"{self._lt('Reference')}: {reference}"
+        self._show_bug_report_message(
+            QMessageBox.Information,
+            "Feedback Sent",
+            "Feedback sent.",
+            informative_text,
+        )
+
+    def _show_feedback_failure(self, message):
+        short_message = self._short_feedback_error(message)
+        self._set_bug_report_feedback(
+            f"{self._lt('Feedback failed. See View > View Logs for details.')} ({short_message})"
+        )
+        self._log_error_event("Feedback", "Failed", summary=short_message, detail=message)
+        self._show_bug_report_message(
+            QMessageBox.Critical,
+            "Feedback Failed",
+            "The app could not send feedback",
+            f"{short_message}\n\n{self._lt('Feedback failed. See View > View Logs for details.')}",
+            message,
+        )
+
     def _on_bug_report_finished(self):
         worker = self.bugReportWorker
         self.bugReportWorker = None
@@ -17648,6 +18185,24 @@ class MidiTitleWindow(QMainWindow):
             QTimer.singleShot(0, lambda message=error_message: self._show_bug_report_failure(message))
         else:
             QTimer.singleShot(0, lambda data=response, rid=report_id: self._show_bug_report_success(data, rid))
+
+    def _on_feedback_finished(self):
+        worker = self.feedbackWorker
+        self.feedbackWorker = None
+        if hasattr(self, "helpFeedbackAction"):
+            self.helpFeedbackAction.setEnabled(True)
+        if worker is None:
+            return
+        response = dict(getattr(worker, "result", {}) or {})
+        error_message = str(getattr(worker, "error_message", "") or "")
+        feedback_id = ""
+        if isinstance(getattr(worker, "payload", None), dict):
+            feedback_id = str(worker.payload.get("feedback_id") or worker.payload.get("report_id") or "")
+        worker.deleteLater()
+        if error_message:
+            QTimer.singleShot(0, lambda message=error_message: self._show_feedback_failure(message))
+        else:
+            QTimer.singleShot(0, lambda data=response, fid=feedback_id: self._show_feedback_success(data, fid))
 
     def toggle_update_checks_at_startup(self, enabled):
         enabled = bool(enabled)

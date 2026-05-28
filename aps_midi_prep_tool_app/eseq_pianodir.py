@@ -197,14 +197,34 @@ def _normalize_catalog_number(catalog_text):
 
     clean_text = re.sub(r"\s*-\s*", "-", clean_text)
     clean_text = re.sub(r"\s+", "-", clean_text)
-    match = re.fullmatch(r"(?P<prefix>[A-Z]{2,5})\s*(?P<number>\d{3,5})(?P<suffix>[A-Z]?)", clean_text)
-    if match and "-" not in clean_text:
-        return f"{match.group('prefix')}-{match.group('number')}{match.group('suffix')}"
+    match = re.fullmatch(
+        r"(?P<prefix>[A-Z]{2,5})[\s-]*(?P<number>\d{3,6})(?P<suffix>[A-Z]?)",
+        clean_text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return f"{match.group('prefix').upper()}-{match.group('number')}{match.group('suffix').upper()}"
     return clean_text
 
 
 def normalize_pianodir_catalog_number(catalog_text):
     return _normalize_catalog_number(catalog_text)
+
+
+def derive_catalog_number_from_image_filename(path):
+    stem = os.path.splitext(os.path.basename(str(path or "")))[0]
+    stem = _ascii_text(stem).strip()
+    if not stem:
+        return ""
+
+    match = re.match(
+        r"^\s*(?P<catalog>[A-Z]{2,5}[\s_-]*\d{3,6}[A-Z]?)(?:$|[\s._-]+)",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return _normalize_catalog_number(match.group("catalog").replace("_", ""))
 
 
 def _decode_disk_label(data):

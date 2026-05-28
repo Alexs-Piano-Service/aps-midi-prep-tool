@@ -11,7 +11,7 @@ def _icon_file_names() -> tuple[str, ...]:
         return ("aps.ico", "aps.png")
     if sys.platform == "darwin":
         return ("aps.icns", "aps.ico", "aps.png")
-    return ("aps.ico", "aps.png")
+    return ("aps.png", "aps.ico")
 
 
 def _icon_roots() -> list[Path]:
