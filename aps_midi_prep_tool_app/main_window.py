@@ -9,6 +9,8 @@ import os
 import platform
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -3860,6 +3862,7 @@ class UpdateCheckWorker(QThread):
 class BugReportSubmitWorker(QThread):
     reportSubmitted = Signal(dict)
     reportFailed = Signal(str)
+    CONNECTION_ERROR_MESSAGE = "Can't connect to Alex's Piano Service. Please check your internet connection."
 
     def __init__(self, url, payload, secret="", timeout_seconds=20, parent=None):
         super().__init__(parent)
@@ -3869,6 +3872,28 @@ class BugReportSubmitWorker(QThread):
         self.timeout_seconds = max(1, int(timeout_seconds or 20))
         self.result = {}
         self.error_message = ""
+        self.error_detail = ""
+
+    @classmethod
+    def _is_connectivity_exception(cls, exc):
+        return isinstance(
+            exc,
+            (
+                urllib.error.URLError,
+                TimeoutError,
+                socket.timeout,
+                socket.gaierror,
+                ConnectionError,
+                ssl.SSLError,
+            ),
+        )
+
+    @staticmethod
+    def _exception_detail(exc):
+        reason = getattr(exc, "reason", None)
+        if reason is not None and reason is not exc:
+            return str(reason)
+        return str(exc)
 
     def _request_body_and_headers(self):
         body = json.dumps(
@@ -3931,14 +3956,19 @@ class BugReportSubmitWorker(QThread):
             if detail:
                 message += f": {detail}"
             self.error_message = message
+            self.error_detail = message
             self.reportFailed.emit(message)
         except urllib.error.URLError as exc:
-            message = str(getattr(exc, "reason", exc))
+            detail = self._exception_detail(exc)
+            message = self.CONNECTION_ERROR_MESSAGE
             self.error_message = message
+            self.error_detail = detail
             self.reportFailed.emit(message)
         except Exception as exc:
-            message = str(exc)
+            detail = self._exception_detail(exc)
+            message = self.CONNECTION_ERROR_MESSAGE if self._is_connectivity_exception(exc) else detail
             self.error_message = message
+            self.error_detail = detail
             self.reportFailed.emit(message)
 
 
@@ -4825,7 +4855,6 @@ class MidiTitleWindow(QMainWindow):
         self.helpMenu = help_menu
         self.helpCheckUpdatesAction = QAction("Check for Updates...", self)
         self.helpCheckUpdatesAction.triggered.connect(lambda: self.check_for_updates(manual=True))
-        help_menu.addAction(self.helpCheckUpdatesAction)
 
         self.helpCheckUpdatesAtStartupAction = QAction("Check for Updates at Startup", self)
         self.helpCheckUpdatesAtStartupAction.setCheckable(True)
@@ -4833,33 +4862,37 @@ class MidiTitleWindow(QMainWindow):
             self.settings.value(self.SETTING_CHECK_UPDATES_AT_STARTUP, True, type=bool)
         )
         self.helpCheckUpdatesAtStartupAction.toggled.connect(self.toggle_update_checks_at_startup)
-        help_menu.addAction(self.helpCheckUpdatesAtStartupAction)
 
         self.helpReportBugAction = QAction("Report a Bug...", self)
         self.helpReportBugAction.setToolTip(
             "Send a bug report with app details and optional recent console logs."
         )
         self.helpReportBugAction.triggered.connect(self.show_bug_report_dialog)
-        help_menu.addAction(self.helpReportBugAction)
 
         self.helpFeedbackAction = QAction("Send Feedback...", self)
         self.helpFeedbackAction.setToolTip(
             "Send feedback with app details and optional recent console logs."
         )
         self.helpFeedbackAction.triggered.connect(self.show_feedback_dialog)
-        help_menu.addAction(self.helpFeedbackAction)
-        help_menu.addSeparator()
 
         self.helpWelcomeAction = QAction("Show Welcome Screen", self)
         self.helpWelcomeAction.triggered.connect(self.show_welcome_dialog)
-        help_menu.addAction(self.helpWelcomeAction)
 
         self.helpDisclaimerAction = QAction("Disclaimer", self)
         self.helpDisclaimerAction.triggered.connect(self.show_disclaimer_dialog)
-        help_menu.addAction(self.helpDisclaimerAction)
 
         self.helpAboutAction = QAction("About APS MIDI Prep Tool", self)
         self.helpAboutAction.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(self.helpWelcomeAction)
+        help_menu.addSeparator()
+        help_menu.addAction(self.helpCheckUpdatesAction)
+        help_menu.addAction(self.helpCheckUpdatesAtStartupAction)
+        help_menu.addSeparator()
+        help_menu.addAction(self.helpFeedbackAction)
+        help_menu.addAction(self.helpReportBugAction)
+        help_menu.addSeparator()
+        help_menu.addAction(self.helpDisclaimerAction)
+        help_menu.addSeparator()
         help_menu.addAction(self.helpAboutAction)
         self._setup_keyboard_shortcuts()
         self._update_compat_warning_ui()
@@ -5328,10 +5361,10 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.format_floppy", "category": "Disk", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
             {"id": "utilities.format_usb", "category": "Disk", "label": "Format USB Stick...", "action": "utilitiesFormatUsbAction", "default": "F7"},
             {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
-            {"id": "help.check_updates", "category": "Help", "label": "Check for Updates...", "action": "helpCheckUpdatesAction", "default": "F9"},
-            {"id": "help.report_bug", "category": "Help", "label": "Report a Bug...", "action": "helpReportBugAction", "default": "F10"},
-            {"id": "help.feedback", "category": "Help", "label": "Send Feedback...", "action": "helpFeedbackAction", "default": "F11"},
             {"id": "help.welcome", "category": "Help", "label": "Show Welcome Screen", "action": "helpWelcomeAction", "default": "F1"},
+            {"id": "help.check_updates", "category": "Help", "label": "Check for Updates...", "action": "helpCheckUpdatesAction", "default": "F9"},
+            {"id": "help.feedback", "category": "Help", "label": "Send Feedback...", "action": "helpFeedbackAction", "default": "F11"},
+            {"id": "help.report_bug", "category": "Help", "label": "Report a Bug...", "action": "helpReportBugAction", "default": "F10"},
             {"id": "help.about", "category": "Help", "label": "About APS MIDI Prep Tool", "action": "helpAboutAction", "default": "Ctrl+F1"},
         )
 
@@ -18049,6 +18082,8 @@ class MidiTitleWindow(QMainWindow):
         text = re.sub(r"\s+", " ", str(message or "")).strip()
         if not text:
             return self._lt("The app could not send the bug report")
+        if text == BugReportSubmitWorker.CONNECTION_ERROR_MESSAGE:
+            return self._lt(text)
         http_match = re.match(r"^(HTTP\s+\d+)", text, flags=re.IGNORECASE)
         if http_match:
             return http_match.group(1).upper()
@@ -18060,6 +18095,8 @@ class MidiTitleWindow(QMainWindow):
         text = re.sub(r"\s+", " ", str(message or "")).strip()
         if not text:
             return self._lt("The app could not send feedback")
+        if text == BugReportSubmitWorker.CONNECTION_ERROR_MESSAGE:
+            return self._lt(text)
         http_match = re.match(r"^(HTTP\s+\d+)", text, flags=re.IGNORECASE)
         if http_match:
             return http_match.group(1).upper()
@@ -18111,18 +18148,19 @@ class MidiTitleWindow(QMainWindow):
             informative_text,
         )
 
-    def _show_bug_report_failure(self, message):
+    def _show_bug_report_failure(self, message, detail=""):
         short_message = self._short_bug_report_error(message)
+        detail = str(detail or message or "")
         self._set_bug_report_feedback(
             f"{self._lt('Bug report failed. See View > View Logs for details.')} ({short_message})"
         )
-        self._log_error_event("Bug report", "Failed", summary=short_message, detail=message)
+        self._log_error_event("Bug report", "Failed", summary=short_message, detail=detail)
         self._show_bug_report_message(
             QMessageBox.Critical,
             "Bug Report Failed",
             "The app could not send the bug report",
             f"{short_message}\n\n{self._lt('Bug report failed. See View > View Logs for details.')}",
-            message,
+            detail,
         )
 
     def _show_feedback_success(self, response, feedback_id=""):
@@ -18154,18 +18192,19 @@ class MidiTitleWindow(QMainWindow):
             informative_text,
         )
 
-    def _show_feedback_failure(self, message):
+    def _show_feedback_failure(self, message, detail=""):
         short_message = self._short_feedback_error(message)
+        detail = str(detail or message or "")
         self._set_bug_report_feedback(
             f"{self._lt('Feedback failed. See View > View Logs for details.')} ({short_message})"
         )
-        self._log_error_event("Feedback", "Failed", summary=short_message, detail=message)
+        self._log_error_event("Feedback", "Failed", summary=short_message, detail=detail)
         self._show_bug_report_message(
             QMessageBox.Critical,
             "Feedback Failed",
             "The app could not send feedback",
             f"{short_message}\n\n{self._lt('Feedback failed. See View > View Logs for details.')}",
-            message,
+            detail,
         )
 
     def _on_bug_report_finished(self):
@@ -18177,12 +18216,13 @@ class MidiTitleWindow(QMainWindow):
             return
         response = dict(getattr(worker, "result", {}) or {})
         error_message = str(getattr(worker, "error_message", "") or "")
+        error_detail = str(getattr(worker, "error_detail", "") or "")
         report_id = ""
         if isinstance(getattr(worker, "payload", None), dict):
             report_id = str(worker.payload.get("report_id") or "")
         worker.deleteLater()
         if error_message:
-            QTimer.singleShot(0, lambda message=error_message: self._show_bug_report_failure(message))
+            QTimer.singleShot(0, lambda message=error_message, detail=error_detail: self._show_bug_report_failure(message, detail))
         else:
             QTimer.singleShot(0, lambda data=response, rid=report_id: self._show_bug_report_success(data, rid))
 
@@ -18195,12 +18235,13 @@ class MidiTitleWindow(QMainWindow):
             return
         response = dict(getattr(worker, "result", {}) or {})
         error_message = str(getattr(worker, "error_message", "") or "")
+        error_detail = str(getattr(worker, "error_detail", "") or "")
         feedback_id = ""
         if isinstance(getattr(worker, "payload", None), dict):
             feedback_id = str(worker.payload.get("feedback_id") or worker.payload.get("report_id") or "")
         worker.deleteLater()
         if error_message:
-            QTimer.singleShot(0, lambda message=error_message: self._show_feedback_failure(message))
+            QTimer.singleShot(0, lambda message=error_message, detail=error_detail: self._show_feedback_failure(message, detail))
         else:
             QTimer.singleShot(0, lambda data=response, fid=feedback_id: self._show_feedback_success(data, fid))
 
