@@ -112,7 +112,6 @@ from .disk_session_worker import (
 )
 from .icon_utils import apply_window_icon
 from .onboarding_dialog import show_first_time_dialog
-from .usb_format_dialog import UsbFormatDialog
 from .console_log import ConsoleLogDialog, get_console_log_bus
 from .additional_formats import electone_mdr_to_midi, mpc_seq_to_midi, v50_nseq_to_midi
 from .floppy_image import (
@@ -4787,13 +4786,6 @@ class MidiTitleWindow(QMainWindow):
         self.diskMenu.addSeparator()
         self.diskMenu.addAction(self.utilitiesFormatFloppyAction)
 
-        self.utilitiesFormatUsbAction = QAction("Format USB Stick...", self)
-        self.utilitiesFormatUsbAction.setToolTip(
-            "Format a removable USB stick as FAT32 for Disklavier or PianoForce use."
-        )
-        self.utilitiesFormatUsbAction.triggered.connect(self.format_disklavier_usb_stick)
-        self.diskMenu.addAction(self.utilitiesFormatUsbAction)
-
         self.settingsMenu = self.menuBar().addMenu(self._t("menu.settings"))
         self.appearanceMenu = self.settingsMenu.addMenu(self._t("menu.appearance"))
         self.appearanceActionGroup = QActionGroup(self)
@@ -5359,7 +5351,6 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.midi_to_eseq", "category": "Utilities", "label": "Convert All MIDI to E-SEQ", "action": "utilitiesMidiToEseqAction", "default": "Ctrl+Shift+E"},
             {"id": "utilities.recover_image", "category": "Disk", "label": "Recover Damaged Image...", "action": "utilitiesRecoverImageAction", "default": "Ctrl+Shift+D"},
             {"id": "utilities.format_floppy", "category": "Disk", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
-            {"id": "utilities.format_usb", "category": "Disk", "label": "Format USB Stick...", "action": "utilitiesFormatUsbAction", "default": "F7"},
             {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
             {"id": "help.welcome", "category": "Help", "label": "Show Welcome Screen", "action": "helpWelcomeAction", "default": "F1"},
             {"id": "help.check_updates", "category": "Help", "label": "Check for Updates...", "action": "helpCheckUpdatesAction", "default": "F9"},
@@ -5646,7 +5637,6 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
             ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ", "M"),
             ("utilitiesFormatFloppyAction", "Format Floppy Disk...", "F"),
-            ("utilitiesFormatUsbAction", "Format USB Stick...", "U"),
             ("helpCheckUpdatesAction", "Check for Updates...", "C"),
             ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup", "S"),
             ("helpReportBugAction", "Report a Bug...", "B"),
@@ -8900,14 +8890,6 @@ class MidiTitleWindow(QMainWindow):
                 "Format a physical floppy disk for Yamaha Disklavier use."
                 if enabled else
                 "Please wait for the current operation to finish before formatting a floppy disk."
-            )
-        if hasattr(self, "utilitiesFormatUsbAction"):
-            enabled = self.choose_button.isEnabled()
-            self.utilitiesFormatUsbAction.setEnabled(enabled)
-            self.utilitiesFormatUsbAction.setStatusTip(
-                "Format a removable USB stick as FAT32 for Disklavier or PianoForce use."
-                if enabled else
-                "Please wait for the current operation to finish before formatting a USB stick."
             )
         if hasattr(self, "utilitiesRecoverImageAction"):
             enabled = self.choose_button.isEnabled()
@@ -12895,19 +12877,6 @@ class MidiTitleWindow(QMainWindow):
             eseq_disk=eseq_disk,
             target_name=target_name,
         )
-
-    def format_disklavier_usb_stick(self):
-        if self._disk_worker_busy():
-            QMessageBox.information(self, "Busy", "Please wait for disk processing to finish.")
-            return
-
-        dialog = UsbFormatDialog(self)
-        self._exec_child_dialog(dialog)
-        if dialog.was_formatted:
-            result = dialog.format_result or {}
-            layout = result.get("layout", "FAT32")
-            device = result.get("device", "the selected USB stick")
-            self.status_label.setText(f"Formatted {device} as {layout}.")
 
     def _start_floppy_format_worker(self, source_kind, selected_source, disk_format, *, eseq_disk, target_name):
         if self._disk_worker_busy():

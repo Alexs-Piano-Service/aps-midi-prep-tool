@@ -16,6 +16,10 @@ with release sections grouped by version and date.
 
 - Portuguese locale aliases such as `pt-PT` now use the included Brazilian Portuguese translation set instead of falling back to English.
 
+### Removed
+
+- Removed the removable USB-stick formatting utility. USB floppy emulator media preparation is vendor- and firmware-specific, and APS MIDI Prep Tool no longer tries to choose or write a USB-stick layout.
+
 ### Fixed
 
 - Catalog numbers can now fall back to catalog-shaped HFE filenames when `PIANODIR.FIL` contains only album-title metadata.

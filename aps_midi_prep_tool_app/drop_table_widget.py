@@ -117,8 +117,11 @@ class DropTableWidget(QTableWidget):
             subtitle = self._lt("MIDI, E-SEQ, IMG, HFE, SCP, and other disk images")
 
         card = QRect(rect)
-
-        painter.setBrush(fill)
+        if self._drag_invite_active:
+            painter.fillRect(self.viewport().rect(), fill)
+            painter.setBrush(Qt.NoBrush)
+        else:
+            painter.setBrush(fill)
         border_pen = QPen(border, max(1.0, 2.0 * self._scale_factor()) if self._drag_invite_active else max(1.0, 1.5 * self._scale_factor()))
         border_pen.setStyle(Qt.CustomDashLine)
         border_pen.setDashPattern([1, max(3, self._scaled_int(5, minimum=3))])

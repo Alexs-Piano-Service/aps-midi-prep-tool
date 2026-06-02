@@ -33,8 +33,6 @@ before you write anything back.
   disks and can save decoded IMG copies without opening them for editing.
 - Creates fresh floppy images, including default PianoSoft-style 720K E-SEQ images.
 - Formats Yamaha Disklavier floppies as MIDI or E-SEQ disks.
-- Formats removable USB sticks as FAT32 superfloppies for E3/ENSPIRE Disklaviers
-  or as MBR single-partition FAT32 disks for PianoForce.
 - Recovers damaged floppy images and physical floppies with repair and raw-carving paths.
 - Edits MIDI titles, E-SEQ titles, image filenames, and Disklavier album metadata.
 - Trims Disklavier-spaced title text into regular MIDI titles during floppy reads
@@ -128,14 +126,6 @@ does not affect `File > Save As Image...` or floppy writes.
 4. In E-SEQ image mode, dropped MIDI files are staged as E-SEQ conversions.
 5. Edit titles and order as needed.
 6. Use `File > Save As Image...` and choose HFE output.
-
-### Format A Removable USB Stick
-
-Use `Disk > Format USB Stick...` to prepare a removable USB stick as FAT32.
-Choose the superfloppy layout for Disklavier and floppy-emulator workflows, or
-the single-partition MBR layout for PianoForce and devices that expect a normal
-partitioned USB stick. The dialog previews the selected device and current
-contents before formatting.
 
 ### Convert MIDI Type 1 To Type 0
 

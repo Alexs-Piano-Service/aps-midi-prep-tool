@@ -101,7 +101,6 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>Edit MIDI and E-SEQ title metadata.</li>
                   <li>Copy or back up Yamaha floppies and floppy images.</li>
                   <li>Prepare HFE images for Nalbantov emulators.</li>
-                  <li>Format removable USB sticks for Disklavier and PianoForce workflows.</li>
                   <li>Convert E-SEQ to MIDI, MIDI to E-SEQ, and SMF1 to SMF0.</li>
                   <li>Use <strong>File</strong> for sources and save behavior, <strong>Disk</strong> for floppy/media operations, and <strong>Utilities</strong> for batch tools.</li>
                   <li>Use <strong>View &gt; View Logs...</strong> for live console output and <strong>Help &gt; Report a Bug...</strong> when you need to send a support report.</li>
@@ -149,14 +148,13 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 <p>Use <strong>File &gt; Save As Image...</strong> and choose <strong>HFE (Nalbantov)</strong>
                 when preparing a USB stick for a Nalbantov floppy disk emulator.</p>
                 <ul>
-                  <li>Copy the finished HFE file to a USB stick formatted for the emulator.</li>
-                  <li>Use <strong>Disk &gt; Format USB Stick...</strong> when you need to prepare a removable USB stick as FAT32.</li>
+                  <li>Copy the finished HFE file to the USB stick prepared for the emulator.</li>
+                  <li>For Nalbantov emulators, keep the setup/configuration files from the original Nalbantov USB stick and use Nalbantov's instructions or software when preparing replacement media.</li>
                   <li>To replace a virtual disk slot, rename or copy the output over one of the existing <strong>DSKA####.hfe</strong> files on the Nalbantov USB stick.</li>
                   <li>For older E-SEQ-only Disklaviers, convert MIDI to E-SEQ and let the tool generate PIANODIR.FIL.</li>
                   <li>Do not mix MIDI files with E-SEQ files and PIANODIR.FIL on the same disk image.</li>
                 </ul>
-                <p>Related articles: <a href="https://www.alexanderpeppe.com/why-your-usb-stick-doesnt-show-on-a-nalbantov-and-how-to-format-it-fat32/">Nalbantov USB formatting</a>
-                and <a href="https://www.alexanderpeppe.com/eseq-and-pianodir-fil/">Converting MIDI Files and Creating PIANODIR.FIL</a>.</p>
+                <p>Related article: <a href="https://www.alexanderpeppe.com/eseq-and-pianodir-fil/">Converting MIDI Files and Creating PIANODIR.FIL</a>.</p>
                 """,
             ),
             (
