@@ -25,7 +25,7 @@ with release sections grouped by version and date.
 - Catalog numbers can now fall back to catalog-shaped HFE filenames when `PIANODIR.FIL` contains only album-title metadata.
 - The immediate post-read Greaseweazle image-save flow now fills a blank Catalog Number field from the saved HFE filename.
 - Linux builds now prefer the PNG application icon, avoiding a brief low-quality icon flash during startup.
-- Drag-and-drop import highlighting now fills most of the file list, and font-size changes also scale the main window spacing, margins, row heights, and fixed controls.
+- Drag-and-drop import highlighting now fills the entire file list, and font-size changes also scale the main window spacing, margins, row heights, and fixed controls.
 
 ## [0.6.5] - 2026-05-19
 

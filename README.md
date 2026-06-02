@@ -127,6 +127,11 @@ does not affect `File > Save As Image...` or floppy writes.
 5. Edit titles and order as needed.
 6. Use `File > Save As Image...` and choose HFE output.
 
+Copy the finished HFE file to the USB stick prepared for the Nalbantov
+emulator. If you are preparing replacement USB media, keep the setup and
+configuration files from the original Nalbantov USB stick and use Nalbantov's
+instructions or software; formatting a blank stick by itself is not enough.
+
 ### Convert MIDI Type 1 To Type 0
 
 1. Open a MIDI folder or drag MIDI files into the window.

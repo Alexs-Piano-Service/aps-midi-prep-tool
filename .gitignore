@@ -10,7 +10,6 @@ __pycache__/
 build/
 !build/
 build/*
-!build/build_windows_helper.ps1
 !build/build_windows_main.ps1
 dist/
 release/
