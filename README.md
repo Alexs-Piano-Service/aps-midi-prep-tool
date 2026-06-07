@@ -4,7 +4,7 @@ APS MIDI Prep Tool is a modern Disklavier preservation and preparation
 workstation for MIDI files, Yamaha E-SEQ files, floppy images, and physical
 floppy disks.
 
-Current version: `0.6.8`
+Current version: `0.6.9`
 
 Author: Alexander Peppe
 

@@ -11137,7 +11137,7 @@ class MidiTitleWindow(QMainWindow):
             if source_abs == dest_abs:
                 temp_path = os.path.join(
                     os.path.dirname(dest_abs),
-                    f".{os.path.basename(dest_abs)}.aps_{uuid.uuid4().hex}",
+                    f".aps_eseq_{uuid.uuid4().hex}",
                 )
                 if title is not None:
                     error_msg = update_eseq_title_to_path(source_path, title, temp_path)
@@ -11423,7 +11423,7 @@ class MidiTitleWindow(QMainWindow):
         os.makedirs(output_dir, exist_ok=True)
         temp_zip = os.path.join(
             output_dir,
-            f".{os.path.basename(zip_path)}.aps_{uuid.uuid4().hex}.zip",
+            f".aps_zip_{uuid.uuid4().hex}.zip",
         )
         try:
             with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
@@ -16714,23 +16714,23 @@ class MidiTitleWindow(QMainWindow):
             raise FloppyImageError("No image or floppy is currently loaded.")
         if not os.path.isfile(host_path):
             raise FloppyImageError(f"File to add no longer exists: {host_path}")
+        staging_name = target_name or self._build_image_addition_filename(host_path, set(), conversion_kind)
 
         if conversion_kind:
-            output_name = target_name or os.path.basename(host_path)
             staged_path = os.path.join(
                 self.image_session.patched_dir,
-                f"{uuid.uuid4().hex}_{output_name}",
+                f"{uuid.uuid4().hex}_{staging_name}",
             )
             if conversion_kind == "eseq":
                 source_path = self._type0_midi_source_for_eseq_conversion(
                     host_path,
                     self.image_session.patched_dir,
-                    output_name,
+                    staging_name,
                 )
                 convert_midi_file_to_eseq_path(
                     source_path,
                     staged_path,
-                    filename_hint=os.path.basename(output_name),
+                    filename_hint=os.path.basename(staging_name),
                     container_variant=self._eseq_converter_container(self.imageEseqVariant),
                 )
             elif conversion_kind == "midi":
@@ -16741,7 +16741,7 @@ class MidiTitleWindow(QMainWindow):
 
         staged_path = os.path.join(
             self.image_session.patched_dir,
-            f"{uuid.uuid4().hex}_{os.path.basename(host_path)}",
+            f"{uuid.uuid4().hex}_{staging_name}",
         )
         shutil.copy2(host_path, staged_path)
         return staged_path

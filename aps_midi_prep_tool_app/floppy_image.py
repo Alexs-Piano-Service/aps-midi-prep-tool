@@ -1,4 +1,5 @@
 import datetime
+import errno
 import json
 import math
 import ntpath
@@ -1463,6 +1464,17 @@ def _write_image_direct(source_img, output_path, output_ext, disk_format):
     )
 
 
+def _finish_temp_output(temp_path, output_path):
+    try:
+        os.replace(temp_path, output_path)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        shutil.copy2(temp_path, output_path)
+        os.remove(temp_path)
+    return output_path
+
+
 def create_blank_floppy_image(output_path, disk_format, volume_label="NO NAME", cancel_callback=None):
     output_path = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -1616,9 +1628,11 @@ def _prepare_existing_formatted_usb_floppy(
             _raise_if_cancelled(cancel_callback)
             step += 1
             _notify_progress(progress_callback, step, total_steps, "Adding empty PIANODIR.FIL...")
-            mcopy = _require_command("mcopy")
-            _run_command(
-                [mcopy, "-i", drive_path, pianodir_path, mtools_path(PIANODIR_FILENAME)],
+            _run_mcopy_host_to_image(
+                _run_command,
+                drive_path,
+                pianodir_path,
+                PIANODIR_FILENAME,
                 "Could not add PIANODIR.FIL to the floppy",
                 cancel_callback=cancel_callback,
             )
@@ -1628,12 +1642,62 @@ def _prepare_existing_formatted_usb_floppy(
     read_image_listing(drive_path)
 
 
+def _clean_ascii_temp_filename(filename, fallback="FILE"):
+    cleaned = "".join(
+        ch if ch.isascii() and (ch.isalnum() or ch in "._-") else "_"
+        for ch in str(filename or "")
+    ).strip("._")
+    return cleaned or fallback
+
+
+def _mtools_host_source_path(host_path, image_path):
+    host_path = os.fsdecode(host_path)
+    if host_path.isascii():
+        return host_path, ""
+    temp_dir = tempfile.mkdtemp(prefix="aps_mtools_host_")
+    alias_name = _clean_ascii_temp_filename(
+        os.path.basename(_normalize_image_path(image_path)) or os.path.basename(host_path),
+        fallback="FILE",
+    )
+    alias_path = os.path.join(temp_dir, alias_name)
+    shutil.copy2(host_path, alias_path)
+    return alias_path, temp_dir
+
+
+def _mtools_host_destination_path(dest_path, image_path):
+    dest_path = os.fsdecode(dest_path)
+    if dest_path.isascii():
+        return dest_path, ""
+    temp_dir = tempfile.mkdtemp(prefix="aps_mtools_dest_")
+    alias_name = _clean_ascii_temp_filename(
+        os.path.basename(_normalize_image_path(image_path)) or os.path.basename(dest_path),
+        fallback="FILE",
+    )
+    return os.path.join(temp_dir, alias_name), temp_dir
+
+
+def _run_mcopy_host_to_image(command_runner, target_img, host_path, image_path, error_message, cancel_callback=None):
+    mcopy = _require_command("mcopy")
+    mcopy_host_path, cleanup_dir = _mtools_host_source_path(host_path, image_path)
+    try:
+        command_runner(
+            [mcopy, "-i", target_img, mcopy_host_path, mtools_path(image_path)],
+            error_message,
+            cancel_callback=cancel_callback,
+        )
+    finally:
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+
 def _copy_host_file_into_image(target_img, host_path, image_path, cancel_callback=None):
     if not os.path.isfile(host_path):
         raise FloppyImageError(f"File to add no longer exists: {host_path}")
-    mcopy = _require_command("mcopy")
-    _run_command(
-        [mcopy, "-i", target_img, host_path, mtools_path(image_path)],
+    _run_mcopy_host_to_image(
+        _run_command,
+        target_img,
+        host_path,
+        image_path,
         f"Could not add {os.path.basename(host_path)} to image",
         cancel_callback=cancel_callback,
     )
@@ -1747,12 +1811,12 @@ def create_floppy_images_from_files(
             )
 
             temp_output = os.path.join(
-                output_dir,
-                f".{os.path.basename(final_path)}.aps_{uuid.uuid4().hex}.{output_ext.lower().lstrip('.')}",
+                temp_dir,
+                f".aps_image_{uuid.uuid4().hex}.{output_ext.lower().lstrip('.')}",
             )
             try:
                 report = _write_image_direct(raw_img, temp_output, output_ext, disk_format)
-                os.replace(temp_output, final_path)
+                _finish_temp_output(temp_output, final_path)
                 if report is not None and sector_report_callback is not None:
                     sector_report_callback(report)
             finally:
@@ -2755,9 +2819,8 @@ def _capture_temp_output_path(output_path, *, suffix=None):
     output_name = os.path.basename(output_path) or "floppy_image"
     temp_suffix = suffix if suffix is not None else os.path.splitext(output_name)[1]
     fd, temp_path = tempfile.mkstemp(
-        prefix=f".{output_name}.",
+        prefix=f".aps_capture_{uuid.uuid4().hex}.",
         suffix=temp_suffix or ".tmp",
-        dir=output_dir,
     )
     os.close(fd)
     os.remove(temp_path)
@@ -2766,8 +2829,7 @@ def _capture_temp_output_path(output_path, *, suffix=None):
 
 def _finish_capture_output(temp_path, output_path):
     output_path = os.path.abspath(output_path)
-    os.replace(temp_path, output_path)
-    return output_path
+    return _finish_temp_output(temp_path, output_path)
 
 
 def capture_floppy_drive_image(
@@ -6594,11 +6656,18 @@ class FloppyImageSession:
             mcopy = shutil.which("mcopy")
             if not mcopy:
                 raise fat_exc
-            self._run_mtools(
-                [mcopy, "-i", source_img, mtools_path(image_path), dest_path],
-                f"Could not extract {image_path} from image",
-                cancel_callback=cancel_callback,
-            )
+            mcopy_dest_path, cleanup_dir = _mtools_host_destination_path(dest_path, image_path)
+            try:
+                self._run_mtools(
+                    [mcopy, "-i", source_img, mtools_path(image_path), mcopy_dest_path],
+                    f"Could not extract {image_path} from image",
+                    cancel_callback=cancel_callback,
+                )
+                if mcopy_dest_path != dest_path:
+                    shutil.copy2(mcopy_dest_path, dest_path)
+            finally:
+                if cleanup_dir:
+                    shutil.rmtree(cleanup_dir, ignore_errors=True)
             return
 
         with open(dest_path, "wb") as handle:
@@ -6715,7 +6784,6 @@ class FloppyImageSession:
             handle.write(directory_bytes)
 
         mdel = _require_command("mdel")
-        mcopy = _require_command("mcopy")
         for entry in listing.entries:
             _raise_if_cancelled(cancel_callback)
             if not is_eseq_directory_path(entry.path):
@@ -6726,8 +6794,11 @@ class FloppyImageSession:
                 cancel_callback=cancel_callback,
             )
 
-        self._run_mtools(
-            [mcopy, "-i", target_img, generated_path, mtools_path(directory_filename)],
+        _run_mcopy_host_to_image(
+            self._run_mtools,
+            target_img,
+            generated_path,
+            directory_filename,
             f"Could not write {directory_filename} into image",
             cancel_callback=cancel_callback,
         )
@@ -6772,7 +6843,6 @@ class FloppyImageSession:
 
         mdel = _require_command("mdel")
         mren = _require_command("mren")
-        mcopy = _require_command("mcopy")
 
         try:
             _raise_if_cancelled(cancel_callback)
@@ -6814,8 +6884,11 @@ class FloppyImageSession:
                     f"Could not replace {image_path} in image",
                     cancel_callback=cancel_callback,
                 )
-                self._run_mtools(
-                    [mcopy, "-i", target_img, patched_path, mtools_path(image_path)],
+                _run_mcopy_host_to_image(
+                    self._run_mtools,
+                    target_img,
+                    patched_path,
+                    image_path,
                     f"Could not write updated title for {image_path} into image",
                     cancel_callback=cancel_callback,
                 )
@@ -6839,8 +6912,11 @@ class FloppyImageSession:
                     f"Could not replace {image_path} in image",
                     cancel_callback=cancel_callback,
                 )
-                self._run_mtools(
-                    [mcopy, "-i", target_img, source_path, mtools_path(image_path)],
+                _run_mcopy_host_to_image(
+                    self._run_mtools,
+                    target_img,
+                    source_path,
+                    image_path,
                     f"Could not write converted data for {image_path} into image",
                     cancel_callback=cancel_callback,
                 )
@@ -6869,8 +6945,11 @@ class FloppyImageSession:
                         new_title=title_edits.get(image_path),
                         order_key=order_key_edits.get(image_path),
                     )
-                self._run_mtools(
-                    [mcopy, "-i", target_img, source_path, mtools_path(image_path)],
+                _run_mcopy_host_to_image(
+                    self._run_mtools,
+                    target_img,
+                    source_path,
+                    image_path,
                     f"Could not add {os.path.basename(host_path)} to image",
                     cancel_callback=cancel_callback,
                 )
@@ -6899,8 +6978,11 @@ class FloppyImageSession:
                     f"Could not replace {image_path} in image",
                     cancel_callback=cancel_callback,
                 )
-                self._run_mtools(
-                    [mcopy, "-i", target_img, patched_path, mtools_path(image_path)],
+                _run_mcopy_host_to_image(
+                    self._run_mtools,
+                    target_img,
+                    patched_path,
+                    image_path,
                     f"Could not write updated order for {image_path} into image",
                     cancel_callback=cancel_callback,
                 )
@@ -6950,8 +7032,8 @@ class FloppyImageSession:
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
         temp_output = os.path.join(
-            output_dir,
-            f".{os.path.basename(output_path)}.aps_{uuid.uuid4().hex}.{output_ext.lower().lstrip('.')}",
+            self.temp_dir,
+            f".aps_image_{uuid.uuid4().hex}.{output_ext.lower().lstrip('.')}",
         )
         try:
             if output_ext.lower().lstrip(".") in RAW_IMAGE_EXTENSIONS:
@@ -6960,7 +7042,7 @@ class FloppyImageSession:
                 _notify_progress(progress_callback, 4, 5, f"Converting floppy image to {output_ext.upper()}...")
             report = self._write_image_direct(source_img, temp_output, output_ext, cancel_callback=cancel_callback)
             _raise_if_cancelled(cancel_callback)
-            os.replace(temp_output, output_path)
+            _finish_temp_output(temp_output, output_path)
             self.latest_gw_sector_reports = _gw_sector_reports(report)
         finally:
             if os.path.exists(temp_output):
@@ -7119,7 +7201,6 @@ class FloppyImageSession:
             )
 
         mdel = _require_command("mdel")
-        mcopy = _require_command("mcopy")
         source_listing = read_image_listing(modified_img)
         target_listing = read_image_listing(drive_path)
 
@@ -7242,8 +7323,11 @@ class FloppyImageSession:
                         extracted_path,
                         cancel_callback=cancel_callback,
                     )
-                self._run_mtools(
-                    [mcopy, "-i", drive_path, extracted_path, mtools_path(entry.path)],
+                _run_mcopy_host_to_image(
+                    self._run_mtools,
+                    drive_path,
+                    extracted_path,
+                    entry.path,
                     f"Could not copy {entry.path} to the floppy",
                     cancel_callback=cancel_callback,
                 )
@@ -7360,10 +7444,9 @@ class FloppyImageSession:
                 )
             else:
                 output_ext = self.source_ext if self.source_ext else "img"
-                source_dir = os.path.dirname(self.source_path)
                 temp_output = os.path.join(
-                    source_dir,
-                    f".{os.path.basename(self.source_path)}.aps_{uuid.uuid4().hex}.{output_ext}",
+                    self.temp_dir,
+                    f".aps_image_{uuid.uuid4().hex}.{output_ext}",
                 )
                 if output_ext.lower().lstrip(".") in RAW_IMAGE_EXTENSIONS:
                     _notify_progress(progress_callback, 4, 5, "Saving raw floppy image...")
@@ -7372,7 +7455,7 @@ class FloppyImageSession:
                 report = self._write_image_direct(modified_img, temp_output, output_ext, cancel_callback=cancel_callback)
                 reports = _gw_sector_reports(report)
                 _raise_if_cancelled(cancel_callback)
-                os.replace(temp_output, self.source_path)
+                _finish_temp_output(temp_output, self.source_path)
             if not self.source_kind.startswith("floppy"):
                 _raise_if_cancelled(cancel_callback)
             os.replace(modified_img, self.working_img_path)
