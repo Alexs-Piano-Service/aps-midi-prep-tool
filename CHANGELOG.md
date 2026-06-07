@@ -29,6 +29,7 @@ with release sections grouped by version and date.
 - Linux builds now prefer the PNG application icon, avoiding a brief low-quality icon flash during startup.
 - Drag-and-drop import highlighting now fills the entire file list, and font-size changes also scale the main window spacing, margins, row heights, and fixed controls.
 - Save As ZIP dialog, progress, success, and failure text now has shared translation coverage for the supported UI languages.
+- Save As Image now stages files with ASCII-safe temporary names so Windows mtools can pack source filenames containing accents such as `Für`, `Pathétique`, and `Träumerei`.
 
 ## [0.6.5] - 2026-05-19
 

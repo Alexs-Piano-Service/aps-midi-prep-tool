@@ -18787,9 +18787,11 @@ class MidiTitleWindow(QMainWindow):
             if _notify is not None:
                 _notify(index - 1, max(1, row_count), f"Preparing {display_name} for image export...")
 
+            image_name = self._build_dos_image_filename(display_name, used_names)
+            used_names.add(image_name.upper())
             staged_path = os.path.join(
                 temp_dir,
-                f"{index:04d}_{os.path.basename(full_path)}",
+                f"{index:04d}_{image_name}",
             )
             error_msg = self._write_listed_file_to_path(
                 full_path,
@@ -18800,8 +18802,6 @@ class MidiTitleWindow(QMainWindow):
             if error_msg:
                 raise FloppyImageError(error_msg)
 
-            image_name = self._build_dos_image_filename(display_name, used_names)
-            used_names.add(image_name.upper())
             file_specs.append(
                 {
                     "host_path": staged_path,
