@@ -4579,6 +4579,9 @@ class MidiTitleWindow(QMainWindow):
         self.fileSaveAsAction = QAction("Save As...", self)
         self.fileSaveAsAction.triggered.connect(self.save_as_changes)
 
+        self.fileSaveAsZipAction = QAction("Save As ZIP...", self)
+        self.fileSaveAsZipAction.triggered.connect(self.save_as_zip)
+
         self.fileClearListAction = QAction("Clear List", self)
         self.fileClearListAction.triggered.connect(self.clear_list)
 
@@ -4650,6 +4653,7 @@ class MidiTitleWindow(QMainWindow):
         self.fileMenu.addSeparator()
         self.fileMenu.addAction(self.fileSaveAction)
         self.fileMenu.addAction(self.fileSaveAsAction)
+        self.fileMenu.addAction(self.fileSaveAsZipAction)
         self.fileMenu.addAction(self.fileSaveAsImageAction)
         self.fileMenu.addSeparator()
         self.fileMenu.addAction(self.fileClearListAction)
@@ -5325,6 +5329,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "file.image_floppy", "category": "Disk", "label": "Image Floppy...", "action": "fileImageFloppyAction", "default": "Ctrl+I"},
             {"id": "file.save", "category": "File", "label": "Save", "action": "fileSaveAction", "default": "Ctrl+S"},
             {"id": "file.save_as", "category": "File", "label": "Save As...", "action": "fileSaveAsAction", "default": "Ctrl+Shift+S"},
+            {"id": "file.save_as_zip", "category": "File", "label": "Save As ZIP...", "action": "fileSaveAsZipAction", "default": ""},
             {"id": "file.save_as_image", "category": "File", "label": "Save As Image...", "action": "fileSaveAsImageAction", "default": "Ctrl+Shift+I"},
             {"id": "file.clear_list", "category": "File", "label": "Clear List", "action": "fileClearListAction", "default": "Ctrl+Shift+Delete"},
             {"id": "file.save_to_floppy", "category": "Disk", "label": "Save To Floppy...", "action": "fileSaveToFloppyAction", "default": "Ctrl+F"},
@@ -5613,6 +5618,7 @@ class MidiTitleWindow(QMainWindow):
             ("fileReadFloppyAction", "Read Floppy...", "R"),
             ("fileImageFloppyAction", "Image Floppy...", "I"),
             ("fileClearListAction", "Clear List", "C"),
+            ("fileSaveAsZipAction", "Save As ZIP...", "Z"),
             ("fileCreateAlbumSubfolderAction", "Create Album Subfolder", "A"),
             ("fileBackUpBeforeSavingAction", "Back up before Saving", "B"),
             ("fileCreateTagSidecarsAction", "Create Tag Sidecars When Saving", "G"),
@@ -8110,6 +8116,30 @@ class MidiTitleWindow(QMainWindow):
         )
         return legend
 
+    def _gw_read_sector_map_is_full_success(self, sector_map):
+        sector_map = sector_map or {}
+        if sector_map.get("has_failures") or int(sector_map.get("bad") or 0) > 0:
+            return False
+        if int(sector_map.get("expected_yamaha_protection") or 0) > 0:
+            return False
+
+        found = sector_map.get("found")
+        total = sector_map.get("total")
+        if found is not None and total is not None:
+            try:
+                return int(total) > 0 and int(found) >= int(total)
+            except (TypeError, ValueError):
+                return False
+
+        rows = sector_map.get("rows") or []
+        if not rows:
+            return False
+        for row in rows:
+            statuses = str(row.get("statuses") or "")
+            if not statuses or any(char != "." for char in statuses):
+                return False
+        return True
+
     def _show_greaseweazle_sector_report(self, report):
         report = dict(report or {})
         report_type = str(report.get("type") or "convert").lower()
@@ -8118,6 +8148,8 @@ class MidiTitleWindow(QMainWindow):
         if self._gw_sector_report_hidden(report_type):
             return False
         if not rows and not report.get("allow_empty_rows"):
+            return False
+        if report_type == "read" and self._gw_read_sector_map_is_full_success(sector_map):
             return False
         fingerprint = self._gw_sector_report_fingerprint(report)
         if fingerprint in self._shownGwSectorReportFingerprints:
@@ -8832,6 +8864,13 @@ class MidiTitleWindow(QMainWindow):
         self.fileSaveAsAction.setToolTip(self.saveAsButton.toolTip())
         self.fileSaveAsAction.setStatusTip(self.saveAsButton.toolTip())
 
+        if hasattr(self, "fileSaveAsZipAction"):
+            zip_tooltip = self._lt("Save copies with current titles into a ZIP archive.")
+            self.fileSaveAsZipAction.setText(self._menu_action_text("Save As ZIP...", "Z"))
+            self.fileSaveAsZipAction.setEnabled(self.saveAsButton.isEnabled())
+            self.fileSaveAsZipAction.setToolTip(zip_tooltip)
+            self.fileSaveAsZipAction.setStatusTip(zip_tooltip)
+
         image_action_text = self._menu_action_text("Save As Image...", "M")
         if self.is_image_mode():
             image_action_text = self._menu_action_text("Save As Image...", "M")
@@ -9291,6 +9330,31 @@ class MidiTitleWindow(QMainWindow):
         raw_name = " ".join(part for part in parts if part)
         return self._sanitize_export_folder_name(raw_name or "Yamaha E-SEQ Disk")
 
+    def _default_zip_filename_stem(self):
+        metadata = self._current_visible_pianodir_metadata()
+        album_title = self._song_list_display_text(getattr(metadata, "disk_title", ""))
+        if album_title:
+            return self._sanitize_export_folder_name(album_title)
+
+        catalog_stem = self._catalog_filename_stem(metadata)
+        if catalog_stem:
+            return catalog_stem
+
+        source_stem = ""
+        if self.is_image_mode() and self.image_session is not None:
+            source_path = getattr(self.image_session, "source_path", "") or ""
+            source_stem = os.path.splitext(os.path.basename(source_path))[0]
+            if not source_stem:
+                source_stem = getattr(self.image_session, "source_name", "") or ""
+        else:
+            context_path = getattr(self, "regularModeContextPath", "") or ""
+            source_stem = os.path.basename(os.path.normpath(context_path)) if context_path else ""
+
+        return self._sanitize_export_folder_name(source_stem or "midi_export")
+
+    def _default_save_as_zip_path(self):
+        return self._default_save_as_path(f"{self._default_zip_filename_stem()}.zip")
+
     def _album_subfolder_option_applies(self):
         checkbox = getattr(self, "album_subfolder_checkbox", None)
         return bool(
@@ -9629,7 +9693,8 @@ class MidiTitleWindow(QMainWindow):
         entries.sort(key=lambda entry: (os.path.basename(entry["path"]).upper(), entry["path"].upper()))
         return entries
 
-    def _metadata_summary_text(self, entries):
+    def _metadata_summary_text(self, entries, path_labels=None):
+        path_labels = path_labels or {}
         lines = [
             "MIDI Metadata Summary",
             f"Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -9639,7 +9704,7 @@ class MidiTitleWindow(QMainWindow):
         for index, entry in enumerate(entries, start=1):
             path = entry["path"]
             lines.append(f"{index}. {os.path.basename(path)}")
-            lines.append(f"Path: {path}")
+            lines.append(f"Path: {path_labels.get(path, path)}")
             title = entry.get("title", "")
             if title:
                 lines.append(f"Title: {title}")
@@ -9665,7 +9730,13 @@ class MidiTitleWindow(QMainWindow):
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
 
-    def _write_metadata_summary_for_regular_rows(self, path_remap=None, only_paths=None, base_dir=None):
+    def _write_metadata_summary_for_regular_rows(
+        self,
+        path_remap=None,
+        only_paths=None,
+        base_dir=None,
+        path_label_base_dir=None,
+    ):
         if not self._metadata_summary_enabled() or self.is_image_mode():
             return [], ""
         entries = self._metadata_summary_entries_for_regular_rows(path_remap=path_remap, only_paths=only_paths)
@@ -9680,8 +9751,17 @@ class MidiTitleWindow(QMainWindow):
         summary_path = self._metadata_summary_path_for_directory(output_dir)
         try:
             os.makedirs(output_dir, exist_ok=True)
+            path_labels = {}
+            if path_label_base_dir:
+                label_base = os.path.abspath(path_label_base_dir)
+                for entry in entries:
+                    try:
+                        label = os.path.relpath(os.path.abspath(entry["path"]), label_base)
+                    except ValueError:
+                        label = os.path.basename(entry["path"])
+                    path_labels[entry["path"]] = label.replace(os.sep, "/")
             with open(summary_path, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(self._metadata_summary_text(entries))
+                handle.write(self._metadata_summary_text(entries, path_labels=path_labels))
             return [], summary_path
         except Exception as exc:
             return [f"Could not write metadata_summary.txt: {exc}"], ""
@@ -11244,6 +11324,123 @@ class MidiTitleWindow(QMainWindow):
             progress_callback(total_steps, total_steps, "Finalizing exported files...")
 
         return output_paths
+
+    def _export_regular_files_to_folder(
+        self,
+        export_dir,
+        progress_callback=None,
+        *,
+        metadata_summary_path_label_base_dir=None,
+    ):
+        os.makedirs(export_dir, exist_ok=True)
+        row_count = self._regular_file_count()
+        total_steps = max(1, row_count + 3)
+        regular_order_key_edits = self._regular_eseq_order_key_edits() if self.is_local_eseq_mode() else {}
+        errors = []
+        output_paths = []
+        output_path_map = {}
+
+        for index, row in enumerate(self._regular_file_rows(), start=1):
+            full_path_item = self.table.item(row, 1)
+            if full_path_item is None:
+                continue
+            full_path = full_path_item.text()
+            output_name = self._regular_row_output_filename(row)
+            if progress_callback is not None:
+                progress_callback(index - 1, total_steps, f"Saving {output_name}...")
+
+            title = self._row_raw_title(row)
+            dest_path = os.path.join(export_dir, output_name)
+            error_msg = self._write_listed_file_to_path(
+                full_path,
+                title,
+                dest_path,
+                order_key=regular_order_key_edits.get(full_path),
+            )
+            if error_msg:
+                errors.append(error_msg)
+            else:
+                output_paths.append(dest_path)
+                output_path_map[full_path] = dest_path
+            QApplication.processEvents()
+
+        if not errors and self.is_local_eseq_mode() and self._should_generate_pianodir(for_export=True):
+            if progress_callback is not None:
+                progress_callback(row_count, total_steps, f"Generating {self._eseq_directory_filename(self.regularEseqVariant)}...")
+            try:
+                output_paths.append(self._write_regular_pianodir(base_dir=export_dir, path_remap=output_path_map))
+            except Exception as exc:
+                errors.append(f"Could not write {self._eseq_directory_filename(self.regularEseqVariant)}: {exc}")
+        elif not errors and self.is_local_eseq_mode() and self.regularHasPianodir:
+            existing_pianodir = self._existing_regular_pianodir_path()
+            if existing_pianodir and os.path.isfile(existing_pianodir):
+                copied_pianodir = os.path.join(export_dir, self._eseq_directory_filename(self.regularEseqVariant))
+                shutil.copy2(existing_pianodir, copied_pianodir)
+                output_paths.append(copied_pianodir)
+
+        if not errors:
+            if progress_callback is not None:
+                progress_callback(row_count + 1, total_steps, "Writing sidecar files...")
+            errors.extend(
+                self._write_tag_sidecars_for_regular_rows(
+                    path_remap=output_path_map,
+                    only_paths=output_path_map.keys(),
+                )
+            )
+
+        summary_path = ""
+        if not errors:
+            if progress_callback is not None:
+                progress_callback(row_count + 2, total_steps, "Writing metadata summary...")
+            summary_errors, summary_path = self._write_metadata_summary_for_regular_rows(
+                path_remap=output_path_map,
+                only_paths=output_path_map.keys(),
+                base_dir=export_dir,
+                path_label_base_dir=metadata_summary_path_label_base_dir,
+            )
+            errors.extend(summary_errors)
+
+        if progress_callback is not None:
+            progress_callback(total_steps, total_steps, "Finalizing exported files...")
+
+        return errors, output_paths, output_path_map, summary_path
+
+    def _archive_directory_to_zip(self, source_dir, zip_path, progress_callback=None):
+        archive_sources = []
+        source_dir = os.path.abspath(source_dir)
+        for root, dirnames, filenames in os.walk(source_dir):
+            dirnames.sort()
+            for filename in sorted(filenames):
+                file_path = os.path.join(root, filename)
+                if os.path.isfile(file_path):
+                    archive_sources.append(file_path)
+
+        if not archive_sources:
+            raise FloppyImageError("No files were available to add to the ZIP archive.")
+
+        zip_path = os.path.abspath(zip_path)
+        output_dir = os.path.dirname(zip_path)
+        os.makedirs(output_dir, exist_ok=True)
+        temp_zip = os.path.join(
+            output_dir,
+            f".{os.path.basename(zip_path)}.aps_{uuid.uuid4().hex}.zip",
+        )
+        try:
+            with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+                total = max(1, len(archive_sources))
+                for index, file_path in enumerate(archive_sources, start=1):
+                    arcname = os.path.relpath(file_path, source_dir).replace(os.sep, "/")
+                    if progress_callback is not None:
+                        progress_callback(index - 1, total, f"Adding {arcname}...")
+                    archive.write(file_path, arcname)
+            os.replace(temp_zip, zip_path)
+            if progress_callback is not None:
+                progress_callback(len(archive_sources), max(1, len(archive_sources)), "ZIP archive complete.")
+        finally:
+            if os.path.exists(temp_zip):
+                os.remove(temp_zip)
+
+        return archive_sources
 
     def _apply_midi_mode_ui(self):
         self._apply_compact_button_labels()
@@ -19143,6 +19340,123 @@ class MidiTitleWindow(QMainWindow):
             if summary_path:
                 message += f"\n\nMetadata summary written to {os.path.basename(summary_path)}."
             QMessageBox.information(self, "Save Complete", message)
+
+    def save_as_zip(self):
+        if self.is_image_mode():
+            if self.image_session is None:
+                return
+            if self.imageEseqMode and not self._ensure_eseq_file_limit(
+                self._image_song_file_count(),
+                action_text="Exporting this E-SEQ floppy set to a ZIP archive",
+            ):
+                return
+            if not self._ensure_pianodir_generation_for_save():
+                return
+        else:
+            if not self.choose_button.isEnabled():
+                QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+                return
+            if self._regular_file_count() == 0:
+                QMessageBox.information(self, "No Files", "Add one or more files first.")
+                return
+            if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
+                self._regular_file_count(),
+                action_text="Exporting this E-SEQ set to a ZIP archive",
+            ):
+                return
+            if self.is_local_eseq_mode() and not self._ensure_pianodir_generation_for_save():
+                return
+
+        output_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            self._lt("Save As ZIP"),
+            self._default_save_as_zip_path(),
+            self._lt("ZIP archive (*.zip)"),
+        )
+        if not output_path:
+            return
+        if os.path.splitext(output_path)[1].lower() != ".zip":
+            output_path = f"{output_path}.zip"
+
+        staging_dir = tempfile.mkdtemp(prefix="aps_save_zip_")
+        progressDialog = QProgressDialog(self._lt("Saving ZIP archive..."), None, 0, 1, self)
+        self._prepare_progress_dialog(progressDialog)
+        progressDialog.setAutoClose(False)
+        progressDialog.setCancelButton(None)
+        progress_callback = self._make_stage_progress_callback(progressDialog)
+        progress_callback(0, 1, "Preparing ZIP export...")
+        QApplication.processEvents()
+
+        self._log_event(
+            "Files",
+            "Save As ZIP started",
+            mode="image" if self.is_image_mode() else "regular",
+            output=output_path,
+            files=self._image_song_file_count() if self.is_image_mode() else self._regular_file_count(),
+        )
+
+        try:
+            if self.is_image_mode():
+                output_paths = self._export_image_session_files_to_folder(staging_dir, progress_callback=progress_callback)
+                summary_path = ""
+            else:
+                errors, output_paths, _output_path_map, summary_path = self._export_regular_files_to_folder(
+                    staging_dir,
+                    progress_callback=progress_callback,
+                    metadata_summary_path_label_base_dir=staging_dir,
+                )
+                if errors:
+                    progressDialog.close()
+                    self._show_error_list(
+                        "Save As ZIP Failed",
+                        f"Some files could not be prepared for {os.path.basename(output_path)}",
+                        errors,
+                        guidance="The original files were not modified; fix the listed files and try Save As ZIP again",
+                    )
+                    return
+
+            if not output_paths:
+                progressDialog.close()
+                QMessageBox.information(self, "No Files", "No valid files were available to export.")
+                return
+
+            archive_sources = self._archive_directory_to_zip(
+                staging_dir,
+                output_path,
+                progress_callback=progress_callback,
+            )
+            progressDialog.close()
+            self._remember_save_as_location(output_path)
+
+            message = self._lt("Files have been saved to {filename}.").format(
+                filename=os.path.basename(output_path)
+            )
+            if not self.is_image_mode() and self._tag_sidecars_enabled():
+                message += "\n\n" + self._lt(".tags.txt sidecar file(s) were included in the ZIP archive.")
+            if summary_path:
+                message += "\n\n" + self._lt("Metadata summary included as {filename}.").format(
+                    filename=os.path.basename(summary_path)
+                )
+            QMessageBox.information(self, self._lt("Save As ZIP Complete"), message)
+            self.status_label.setText(
+                f"Saved {len(archive_sources)} file(s) to ZIP archive: {os.path.basename(output_path)}"
+            )
+            self._log_event(
+                "Files",
+                "Save As ZIP completed",
+                output=output_path,
+                files=len(archive_sources),
+            )
+        except Exception as exc:
+            progressDialog.close()
+            self._show_operation_error(
+                "Save As ZIP Failed",
+                f"Could not create {os.path.basename(output_path)}",
+                exc,
+                guidance="Check that the destination folder is writable and try again",
+            )
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def save_as_changes(self):
         if self.is_image_mode():

@@ -34,6 +34,9 @@ CC7_POLICY_DROP_EARLY_ZERO = "drop_early_cc7_zero"
 DEFAULT_CC7_POLICY = CC7_POLICY_PLAYBACK_FIX_100
 ESEQ_CONTAINER_DISKLAVIER = "disklavier"
 ESEQ_CONTAINER_CLAVINOVA_MDA = "clavinova_mda"
+MIDI_METADATA_POLICY_CLEAN = "clean"
+MIDI_METADATA_POLICY_ARCHIVAL = "archival"
+DEFAULT_MIDI_METADATA_POLICY = MIDI_METADATA_POLICY_CLEAN
 _ESEQ_PADDING_BYTE = 0xF6
 _ESEQ_TIMING_META_PREFIX = "APS-ESEQ-TIMING"
 _ESEQ_HEADER_META_PREFIX = "APS-ESEQ-HEADER"
@@ -449,6 +452,20 @@ def _apply_cc7_policy(raw, should_adjust, cc7_policy):
     raise EseqConversionError(f"Unsupported CC7 policy '{cc7_policy}'.")
 
 
+def _normalize_midi_metadata_policy(midi_metadata_policy):
+    policy = str(midi_metadata_policy or DEFAULT_MIDI_METADATA_POLICY).strip().lower()
+    policy_aliases = {
+        "clean_canonical": MIDI_METADATA_POLICY_CLEAN,
+        "minimal_exe": MIDI_METADATA_POLICY_CLEAN,
+        "archival_verbose": MIDI_METADATA_POLICY_ARCHIVAL,
+        "reference_pairs": MIDI_METADATA_POLICY_ARCHIVAL,
+    }
+    policy = policy_aliases.get(policy, policy)
+    if policy in {MIDI_METADATA_POLICY_CLEAN, MIDI_METADATA_POLICY_ARCHIVAL}:
+        return policy
+    raise EseqConversionError(f"Unsupported MIDI metadata policy '{midi_metadata_policy}'.")
+
+
 def _event_class_flags(events):
     has_notes = False
     has_controllers = False
@@ -659,11 +676,15 @@ def refresh_eseq_timing_fields_in_bytes(eseq_bytes):
     return bytes(data)
 
 
-def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None, cc7_policy=DEFAULT_CC7_POLICY):
+def convert_eseq_bytes_to_midi_bytes(
+    eseq_bytes,
+    *,
+    title_override=None,
+    cc7_policy=DEFAULT_CC7_POLICY,
+    midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
+):
+    midi_metadata_policy = _normalize_midi_metadata_policy(midi_metadata_policy)
     parsed = parse_eseq_bytes(eseq_bytes)
-    timing = derive_eseq_timing_fields(eseq_bytes)
-    visible_before_ticks = _explorer_visible_delay_ticks(eseq_bytes, "before")
-    visible_after_ticks = _explorer_visible_delay_ticks(eseq_bytes, "after")
     track_events = []
     event_sequence = 0
     title_candidate = title_override if title_override is not None else parsed.title
@@ -683,24 +704,29 @@ def convert_eseq_bytes_to_midi_bytes(eseq_bytes, *, title_override=None, cc7_pol
         numerator, denominator_power = DEFAULT_TIME_SIGNATURE
     add_track_event(0, _write_midi_key_signature(*DEFAULT_KEY_SIGNATURE))
     add_track_event(0, _write_midi_track_name(title))
-    add_track_event(
-        0,
-        _write_midi_text(
-            f"{_ESEQ_TIMING_META_PREFIX} before={timing.delay_before_ticks} "
-            f"after={timing.delay_after_ticks} duration={timing.duration_ticks} "
-            f"visible_before={visible_before_ticks} visible_after={visible_after_ticks} "
-            f"source_title_blank={1 if not parsed.title.strip() else 0}"
-        ),
-    )
-    add_track_event(
-        0,
-        _write_midi_text(
-            f"{_ESEQ_HEADER_META_PREFIX} slice27_77="
-            f"{bytes(eseq_bytes[ESEQ_ORDER_KEY_START:ESEQ_TITLE_END + 1]).hex()} "
-            f"prefix00_stream="
-            f"{bytes(eseq_bytes[:_eseq_event_stream_start(eseq_bytes)]).hex()}"
-        ),
-    )
+
+    if midi_metadata_policy == MIDI_METADATA_POLICY_ARCHIVAL:
+        timing = derive_eseq_timing_fields(eseq_bytes)
+        visible_before_ticks = _explorer_visible_delay_ticks(eseq_bytes, "before")
+        visible_after_ticks = _explorer_visible_delay_ticks(eseq_bytes, "after")
+        add_track_event(
+            0,
+            _write_midi_text(
+                f"{_ESEQ_TIMING_META_PREFIX} before={timing.delay_before_ticks} "
+                f"after={timing.delay_after_ticks} duration={timing.duration_ticks} "
+                f"visible_before={visible_before_ticks} visible_after={visible_after_ticks} "
+                f"source_title_blank={1 if not parsed.title.strip() else 0}"
+            ),
+        )
+        add_track_event(
+            0,
+            _write_midi_text(
+                f"{_ESEQ_HEADER_META_PREFIX} slice27_77="
+                f"{bytes(eseq_bytes[ESEQ_ORDER_KEY_START:ESEQ_TITLE_END + 1]).hex()} "
+                f"prefix00_stream="
+                f"{bytes(eseq_bytes[:_eseq_event_stream_start(eseq_bytes)]).hex()}"
+            ),
+        )
 
     seen_tempos = set()
     for tick, mpqn in parsed.tempo_events:
@@ -1291,6 +1317,7 @@ def convert_eseq_file_to_midi_path(
     *,
     title_override=None,
     cc7_policy=DEFAULT_CC7_POLICY,
+    midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
 ):
     with open(source_path, "rb") as handle:
         eseq_bytes = handle.read()
@@ -1298,6 +1325,7 @@ def convert_eseq_file_to_midi_path(
         eseq_bytes,
         title_override=title_override,
         cc7_policy=cc7_policy,
+        midi_metadata_policy=midi_metadata_policy,
     )
     _write_destination_bytes(dest_path, payload)
 
