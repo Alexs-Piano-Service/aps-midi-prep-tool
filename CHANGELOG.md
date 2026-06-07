@@ -5,15 +5,17 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [0.6.6] - 2026-05-27
+## [0.6.8] - 2026-06-07
 
 ### Added
 
+- `File > Save As ZIP...` for exporting the current listed files as a single ZIP archive while leaving originals untouched.
 - Help menu feedback submission through the same signed support-report channel, using the `feedback.php` endpoint.
 - Settings menu font-size choices for regular, small, and compact UI text.
 
 ### Changed
 
+- E-SEQ to MIDI exports now omit APS archival round-trip metadata by default, producing cleaner Standard MIDI files for Yamaha hardware while still accepting older metadata when present.
 - Portuguese locale aliases such as `pt-PT` now use the included Brazilian Portuguese translation set instead of falling back to English.
 
 ### Removed
@@ -26,6 +28,7 @@ with release sections grouped by version and date.
 - The immediate post-read Greaseweazle image-save flow now fills a blank Catalog Number field from the saved HFE filename.
 - Linux builds now prefer the PNG application icon, avoiding a brief low-quality icon flash during startup.
 - Drag-and-drop import highlighting now fills the entire file list, and font-size changes also scale the main window spacing, margins, row heights, and fixed controls.
+- Save As ZIP dialog, progress, success, and failure text now has shared translation coverage for the supported UI languages.
 
 ## [0.6.5] - 2026-05-19
 

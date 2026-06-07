@@ -4,7 +4,7 @@ APS MIDI Prep Tool is a modern Disklavier preservation and preparation
 workstation for MIDI files, Yamaha E-SEQ files, floppy images, and physical
 floppy disks.
 
-Current version: `0.6.6`
+Current version: `0.6.8`
 
 Author: Alexander Peppe
 
@@ -49,7 +49,7 @@ before you write anything back.
 - Converts MIDI to Yamaha E-SEQ, converting Type 1 MIDI to Type 0 first when needed.
 - Generates and refreshes `PIANODIR.FIL` for Yamaha E-SEQ disks and folders.
 - Stages destructive or format-changing work until you choose `File > Save`,
-  `File > Save As...`, `File > Save As Image...`, or
+  `File > Save As...`, `File > Save As ZIP...`, `File > Save As Image...`, or
   `Disk > Write Current Image to Floppy...`.
 - Can write a `metadata_summary.txt` file on save with each saved MIDI file and
   its detected MIDI metadata.
@@ -106,7 +106,8 @@ capture.
 `File > Write Protection > Write-Protect Original` keeps `File > Save` from
 overwriting the current image or floppy until you explicitly turn that
 protection off. `File > Save As...` and `File > Save As Image...` remain
-available for copy-based work.
+available for copy-based work. Use `File > Save As ZIP...` when you want the
+current listed files packaged into one archive without overwriting originals.
 
 Enable `File > Save Options > Back up before Saving` when you want APS MIDI
 Prep Tool to create a backup before overwriting local files or disk images.
@@ -148,6 +149,9 @@ The conversion is staged first. Original files are not modified until you save.
 - In E-SEQ mode, dropped MIDI files are staged as E-SEQ conversions.
 - In E-SEQ image or floppy modes, dropped MIDI files are staged as E-SEQ and
   converted through Type 0 first when necessary.
+- E-SEQ to MIDI exports omit APS archival round-trip metadata by default so the
+  Standard MIDI files stay clean for Yamaha hardware. The converter still reads
+  older APS metadata when present.
 - `PIANODIR.FIL` is generated or refreshed on save when needed.
 - `File > Save Options > Create Album Subfolder` controls whether folder
   exports use the current album title and catalog number for a subfolder.

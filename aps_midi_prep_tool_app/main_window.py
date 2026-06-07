@@ -11416,7 +11416,7 @@ class MidiTitleWindow(QMainWindow):
                     archive_sources.append(file_path)
 
         if not archive_sources:
-            raise FloppyImageError("No files were available to add to the ZIP archive.")
+            raise FloppyImageError(self._lt("No files were available to add to the ZIP archive."))
 
         zip_path = os.path.abspath(zip_path)
         output_dir = os.path.dirname(zip_path)
@@ -11431,11 +11431,19 @@ class MidiTitleWindow(QMainWindow):
                 for index, file_path in enumerate(archive_sources, start=1):
                     arcname = os.path.relpath(file_path, source_dir).replace(os.sep, "/")
                     if progress_callback is not None:
-                        progress_callback(index - 1, total, f"Adding {arcname}...")
+                        progress_callback(
+                            index - 1,
+                            total,
+                            self._lt("Adding {filename}...").format(filename=arcname),
+                        )
                     archive.write(file_path, arcname)
             os.replace(temp_zip, zip_path)
             if progress_callback is not None:
-                progress_callback(len(archive_sources), max(1, len(archive_sources)), "ZIP archive complete.")
+                progress_callback(
+                    len(archive_sources),
+                    max(1, len(archive_sources)),
+                    self._lt("ZIP archive complete."),
+                )
         finally:
             if os.path.exists(temp_zip):
                 os.remove(temp_zip)
@@ -19354,10 +19362,18 @@ class MidiTitleWindow(QMainWindow):
                 return
         else:
             if not self.choose_button.isEnabled():
-                QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+                QMessageBox.information(
+                    self,
+                    self._lt("Busy"),
+                    self._lt("Please wait for MIDI processing to finish."),
+                )
                 return
             if self._regular_file_count() == 0:
-                QMessageBox.information(self, "No Files", "Add one or more files first.")
+                QMessageBox.information(
+                    self,
+                    self._lt("No Files"),
+                    self._lt("Add one or more files first."),
+                )
                 return
             if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
                 self._regular_file_count(),
@@ -19384,7 +19400,7 @@ class MidiTitleWindow(QMainWindow):
         progressDialog.setAutoClose(False)
         progressDialog.setCancelButton(None)
         progress_callback = self._make_stage_progress_callback(progressDialog)
-        progress_callback(0, 1, "Preparing ZIP export...")
+        progress_callback(0, 1, self._lt("Preparing ZIP export..."))
         QApplication.processEvents()
 
         self._log_event(
@@ -19409,7 +19425,9 @@ class MidiTitleWindow(QMainWindow):
                     progressDialog.close()
                     self._show_error_list(
                         "Save As ZIP Failed",
-                        f"Some files could not be prepared for {os.path.basename(output_path)}",
+                        self._lt("Some files could not be prepared for {filename}").format(
+                            filename=os.path.basename(output_path)
+                        ),
                         errors,
                         guidance="The original files were not modified; fix the listed files and try Save As ZIP again",
                     )
@@ -19417,7 +19435,11 @@ class MidiTitleWindow(QMainWindow):
 
             if not output_paths:
                 progressDialog.close()
-                QMessageBox.information(self, "No Files", "No valid files were available to export.")
+                QMessageBox.information(
+                    self,
+                    self._lt("No Files"),
+                    self._lt("No valid files were available to export."),
+                )
                 return
 
             archive_sources = self._archive_directory_to_zip(
@@ -19451,7 +19473,7 @@ class MidiTitleWindow(QMainWindow):
             progressDialog.close()
             self._show_operation_error(
                 "Save As ZIP Failed",
-                f"Could not create {os.path.basename(output_path)}",
+                self._lt("Could not create {filename}").format(filename=os.path.basename(output_path)),
                 exc,
                 guidance="Check that the destination folder is writable and try again",
             )
