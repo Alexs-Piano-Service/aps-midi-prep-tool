@@ -2,7 +2,16 @@ import os
 import struct
 from dataclasses import dataclass
 
-from .midi_type0_converter import _parse_midi_chunks, _parse_track_events
+from .midi_type0_converter import (
+    DISKLAVIER_ACOUSTIC_GRAND_PROGRAM,
+    DISKLAVIER_LEGACY_PEDAL_CHANNEL,
+    DISKLAVIER_PIANO_CHANNEL,
+    _disklavier_normalized_event_dedupe_key,
+    _parse_midi_chunks,
+    _parse_track_events,
+    is_disklavier_channel_note_event,
+    normalize_disklavier_raw_midi_event,
+)
 
 
 ESEQ_SIGNATURE = b"COM-ESEQ"
@@ -489,6 +498,68 @@ def _effective_initial_mpqn(tempo_events):
     return initial_mpqn
 
 
+def _is_disklavier_channel1_note_on(raw):
+    return (
+        len(raw) >= 3
+        and (raw[0] & 0xF0) == 0x90
+        and (raw[0] & 0x0F) == DISKLAVIER_PIANO_CHANNEL
+        and raw[2] > 0
+    )
+
+
+def _is_disklavier_channel1_program_change(raw):
+    return (
+        len(raw) >= 2
+        and (raw[0] & 0xF0) == 0xC0
+        and (raw[0] & 0x0F) == DISKLAVIER_PIANO_CHANNEL
+    )
+
+
+def _write_disklavier_acoustic_grand_program_change():
+    return bytes([0xC0 | DISKLAVIER_PIANO_CHANNEL, DISKLAVIER_ACOUSTIC_GRAND_PROGRAM])
+
+
+def _normalize_disklavier_midi_track_events(track_events, event_sequence):
+    normalized = []
+    first_channel1_note_tick = None
+    legacy_pedal_channel_has_notes = False
+
+    for abs_tick, sequence, raw in track_events:
+        if _is_disklavier_channel1_note_on(raw):
+            if first_channel1_note_tick is None or abs_tick < first_channel1_note_tick:
+                first_channel1_note_tick = abs_tick
+        if is_disklavier_channel_note_event(raw, DISKLAVIER_LEGACY_PEDAL_CHANNEL):
+            legacy_pedal_channel_has_notes = True
+
+    should_remap_legacy_pedal = first_channel1_note_tick is not None and not legacy_pedal_channel_has_notes
+    for abs_tick, sequence, raw in track_events:
+        if should_remap_legacy_pedal:
+            normalized_raw, _ = normalize_disklavier_raw_midi_event(raw)
+        else:
+            normalized_raw = raw
+        normalized.append((abs_tick, sequence, normalized_raw))
+
+    if first_channel1_note_tick is not None:
+        has_channel1_program_before_notes = any(
+            abs_tick <= first_channel1_note_tick and _is_disklavier_channel1_program_change(raw)
+            for abs_tick, _, raw in normalized
+        )
+        if not has_channel1_program_before_notes:
+            normalized.append((0, event_sequence, _write_disklavier_acoustic_grand_program_change()))
+
+    deduped = []
+    seen_channel_events = set()
+    for event in sorted(normalized, key=lambda item: (item[0], item[1])):
+        abs_tick, _, raw = event
+        key = _disklavier_normalized_event_dedupe_key(abs_tick, raw)
+        if key is not None:
+            if key in seen_channel_events:
+                continue
+            seen_channel_events.add(key)
+        deduped.append(event)
+    return deduped
+
+
 def parse_eseq_bytes(eseq_bytes):
     if len(eseq_bytes) < CLAVINOVA_MDA_HEADER_SIZE:
         raise EseqConversionError("File is too small to be a valid Yamaha E-SEQ file.")
@@ -682,6 +753,7 @@ def convert_eseq_bytes_to_midi_bytes(
     title_override=None,
     cc7_policy=DEFAULT_CC7_POLICY,
     midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
+    normalize_disklavier=True,
 ):
     midi_metadata_policy = _normalize_midi_metadata_policy(midi_metadata_policy)
     parsed = parse_eseq_bytes(eseq_bytes)
@@ -752,6 +824,8 @@ def convert_eseq_bytes_to_midi_bytes(
             raw = _encode_midi_sysex_event(raw)
         add_track_event(abs_tick, raw)
 
+    if normalize_disklavier:
+        track_events = _normalize_disklavier_midi_track_events(track_events, event_sequence)
     track_events.sort(key=lambda item: (item[0], item[1]))
     track_bytes = _build_midi_track(
         ((abs_tick, raw) for abs_tick, _, raw in track_events),
@@ -1318,6 +1392,7 @@ def convert_eseq_file_to_midi_path(
     title_override=None,
     cc7_policy=DEFAULT_CC7_POLICY,
     midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
+    normalize_disklavier=True,
 ):
     with open(source_path, "rb") as handle:
         eseq_bytes = handle.read()
@@ -1326,6 +1401,7 @@ def convert_eseq_file_to_midi_path(
         title_override=title_override,
         cc7_policy=cc7_policy,
         midi_metadata_policy=midi_metadata_policy,
+        normalize_disklavier=normalize_disklavier,
     )
     _write_destination_bytes(dest_path, payload)
 

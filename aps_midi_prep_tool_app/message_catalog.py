@@ -307,6 +307,48 @@ MESSAGES = {
         "ko": "세부 정보",
         "zh-Hans": "详细信息",
     },
+    "error.source_files_missing.summary": {
+        "en": "Some source files could not be found.",
+        "es": "No se pudieron encontrar algunos archivos de origen.",
+        "fr": "Certains fichiers source sont introuvables.",
+        "de": "Einige Quelldateien konnten nicht gefunden werden.",
+        "it": "Alcuni file di origine non sono stati trovati.",
+        "pt-BR": "Alguns arquivos de origem não foram encontrados.",
+        "bg": "Някои изходни файлове не бяха намерени.",
+        "nl": "Sommige bronbestanden zijn niet gevonden.",
+        "pl": "Nie znaleziono niektórych plików źródłowych.",
+        "ja": "一部の元ファイルが見つかりませんでした。",
+        "ko": "일부 원본 파일을 찾을 수 없습니다.",
+        "zh-Hans": "找不到某些源文件。",
+    },
+    "error.source_files_missing.details_label": {
+        "en": "Missing file information",
+        "es": "Información del archivo faltante",
+        "fr": "Informations sur le fichier manquant",
+        "de": "Informationen zur fehlenden Datei",
+        "it": "Informazioni sul file mancante",
+        "pt-BR": "Informações do arquivo ausente",
+        "bg": "Информация за липсващия файл",
+        "nl": "Informatie over ontbrekend bestand",
+        "pl": "Informacje o brakującym pliku",
+        "ja": "見つからないファイルの情報",
+        "ko": "누락된 파일 정보",
+        "zh-Hans": "缺失文件信息",
+    },
+    "error.source_files_missing.guidance": {
+        "en": "Check that the files still exist, that external drives or cloud-synced folders are available, and then try again. If the files were moved or renamed, reopen the folder or image before saving.",
+        "es": "Comprueba que los archivos todavía existen, que las unidades externas o carpetas sincronizadas en la nube estén disponibles, y vuelve a intentarlo. Si los archivos se movieron o cambiaron de nombre, vuelve a abrir la carpeta o la imagen antes de guardar.",
+        "fr": "Vérifiez que les fichiers existent toujours, que les lecteurs externes ou dossiers synchronisés dans le cloud sont disponibles, puis réessayez. Si les fichiers ont été déplacés ou renommés, rouvrez le dossier ou l'image avant d'enregistrer.",
+        "de": "Prüfen Sie, ob die Dateien noch vorhanden sind und ob externe Laufwerke oder Cloud-Sync-Ordner verfügbar sind, und versuchen Sie es erneut. Wenn Dateien verschoben oder umbenannt wurden, öffnen Sie den Ordner oder das Image vor dem Speichern erneut.",
+        "it": "Controlla che i file esistano ancora, che le unità esterne o le cartelle sincronizzate nel cloud siano disponibili, quindi riprova. Se i file sono stati spostati o rinominati, riapri la cartella o l'immagine prima di salvare.",
+        "pt-BR": "Verifique se os arquivos ainda existem, se unidades externas ou pastas sincronizadas na nuvem estão disponíveis, e tente novamente. Se os arquivos foram movidos ou renomeados, reabra a pasta ou a imagem antes de salvar.",
+        "bg": "Проверете дали файловете все още съществуват, дали външните устройства или папките за облачна синхронизация са достъпни, и опитайте отново. Ако файловете са преместени или преименувани, отворете папката или образа отново преди запис.",
+        "nl": "Controleer of de bestanden nog bestaan en of externe stations of cloudgesynchroniseerde mappen beschikbaar zijn, en probeer het opnieuw. Als bestanden zijn verplaatst of hernoemd, open de map of image opnieuw voordat je opslaat.",
+        "pl": "Sprawdź, czy pliki nadal istnieją oraz czy dyski zewnętrzne lub foldery synchronizowane z chmurą są dostępne, a następnie spróbuj ponownie. Jeśli pliki przeniesiono lub zmieniono ich nazwy, otwórz ponownie folder albo obraz przed zapisem.",
+        "ja": "ファイルがまだ存在すること、外部ドライブやクラウド同期フォルダーが利用できることを確認してから、もう一度お試しください。ファイルを移動または名前変更した場合は、保存する前にフォルダーまたはイメージを開き直してください。",
+        "ko": "파일이 여전히 존재하는지, 외장 드라이브나 클라우드 동기화 폴더를 사용할 수 있는지 확인한 뒤 다시 시도하세요. 파일을 이동했거나 이름을 바꾼 경우 저장하기 전에 폴더나 이미지를 다시 여세요.",
+        "zh-Hans": "请检查文件是否仍然存在，外部驱动器或云同步文件夹是否可用，然后重试。如果文件已移动或重命名，请在保存前重新打开文件夹或映像。",
+    },
     "error.no_detail": {
         "en": "No detailed error message was provided.",
         "es": "No se proporcionó un mensaje de error detallado.",
@@ -967,6 +1009,9 @@ TEXT_TO_MESSAGE_ID = {
     "Install mtools, or use an AppImage build that bundles mtools. Then try the operation again.": "guidance.mtools_missing",
     "Install the Greaseweazle CLI, or use an AppImage build that bundles it. The command should be available as 'gw' or 'greaseweazle'.": "guidance.greaseweazle_missing",
     "Install the Greaseweazle CLI, or use a build that bundles it. The command should be available as 'gw' or 'greaseweazle'.": "guidance.greaseweazle_missing",
+    "Some source files could not be found.": "error.source_files_missing.summary",
+    "Missing file information": "error.source_files_missing.details_label",
+    "Check that the files still exist, that external drives or cloud-synced folders are available, and then try again. If the files were moved or renamed, reopen the folder or image before saving.": "error.source_files_missing.guidance",
     "Check that the file or floppy device is writable by your user. On Linux, unmount the disk before direct floppy writes and make sure your user has device access.": "guidance.permission_denied",
     "Close file managers or other programs using the disk, unmount it if needed, and try again.": "guidance.device_busy",
     "Remove files, choose a larger disk format, or split the set across multiple images.": "guidance.disk_full",
@@ -1187,6 +1232,8 @@ COMMON_TEXT_TRANSLATIONS = {
     "Convert All SMF1 to SMF0": {"es": "Convertir todo SMF1 a SMF0", "fr": "Tout convertir de SMF1 en SMF0", "de": "Alle SMF1 in SMF0 konvertieren", "it": "Converti tutti SMF1 in SMF0", "pt-BR": "Converter todos SMF1 para SMF0", "nl": "Alle SMF1 naar SMF0 converteren", "pl": "Konwertuj wszystkie SMF1 do SMF0", "ja": "すべての SMF1 を SMF0 に変換", "ko": "모든 SMF1을 SMF0으로 변환", "zh-Hans": "全部 SMF1 转为 SMF0"},
     "Convert All E-SEQ to MIDI": {"es": "Convertir todo E-SEQ a MIDI", "fr": "Tout convertir de E-SEQ en MIDI", "de": "Alle E-SEQ in MIDI konvertieren", "it": "Converti tutti E-SEQ in MIDI", "pt-BR": "Converter todos E-SEQ para MIDI", "nl": "Alle E-SEQ naar MIDI converteren", "pl": "Konwertuj wszystkie E-SEQ do MIDI", "ja": "すべての E-SEQ を MIDI に変換", "ko": "모든 E-SEQ를 MIDI로 변환", "zh-Hans": "全部 E-SEQ 转为 MIDI"},
     "Convert All MIDI to E-SEQ": {"es": "Convertir todo MIDI a E-SEQ", "fr": "Tout convertir de MIDI en E-SEQ", "de": "Alle MIDI in E-SEQ konvertieren", "it": "Converti tutti MIDI in E-SEQ", "pt-BR": "Converter todos MIDI para E-SEQ", "nl": "Alle MIDI naar E-SEQ converteren", "pl": "Konwertuj wszystkie MIDI do E-SEQ", "ja": "すべての MIDI を E-SEQ に変換", "ko": "모든 MIDI를 E-SEQ로 변환", "zh-Hans": "全部 MIDI 转为 E-SEQ"},
+    "Normalize Disklavier MIDI on Conversion": {"es": "Normalizar MIDI Disklavier al convertir", "fr": "Normaliser le MIDI Disklavier à la conversion", "de": "Disklavier-MIDI beim Konvertieren normalisieren", "it": "Normalizza MIDI Disklavier alla conversione", "pt-BR": "Normalizar MIDI Disklavier na conversão", "bg": "Нормализиране на Disklavier MIDI при конвертиране", "nl": "Disklavier-MIDI normaliseren bij conversie", "pl": "Normalizuj MIDI Disklavier przy konwersji", "ja": "変換時に Disklavier MIDI を正規化", "ko": "변환 시 Disklavier MIDI 정규화", "zh-Hans": "转换时规范化 Disklavier MIDI"},
+    "When converting E-SEQ to MIDI or SMF1 to SMF0, move Disklavier pedal controllers from channel 3 to channel 1 and add Acoustic Grand Piano on channel 1 when needed.": {"es": "Al convertir E-SEQ a MIDI o SMF1 a SMF0, mueve los controladores de pedal Disklavier del canal 3 al canal 1 y añade Piano de cola acústico en el canal 1 cuando sea necesario.", "fr": "Lors de la conversion E-SEQ vers MIDI ou SMF1 vers SMF0, déplace les contrôleurs de pédale Disklavier du canal 3 vers le canal 1 et ajoute Acoustic Grand Piano sur le canal 1 si nécessaire.", "de": "Verschiebt bei der Konvertierung von E-SEQ zu MIDI oder SMF1 zu SMF0 Disklavier-Pedalcontroller von Kanal 3 auf Kanal 1 und fügt bei Bedarf Acoustic Grand Piano auf Kanal 1 hinzu.", "it": "Quando converti da E-SEQ a MIDI o da SMF1 a SMF0, sposta i controller pedale Disklavier dal canale 3 al canale 1 e aggiunge Acoustic Grand Piano sul canale 1 quando serve.", "pt-BR": "Ao converter E-SEQ para MIDI ou SMF1 para SMF0, move controladores de pedal Disklavier do canal 3 para o canal 1 e adiciona Acoustic Grand Piano no canal 1 quando necessário.", "bg": "При конвертиране от E-SEQ към MIDI или от SMF1 към SMF0 премества педалните контролери на Disklavier от канал 3 към канал 1 и добавя Acoustic Grand Piano на канал 1 при нужда.", "nl": "Bij conversie van E-SEQ naar MIDI of SMF1 naar SMF0 worden Disklavier-pedaalcontrollers van kanaal 3 naar kanaal 1 verplaatst en wordt zo nodig Acoustic Grand Piano op kanaal 1 toegevoegd.", "pl": "Podczas konwersji E-SEQ do MIDI lub SMF1 do SMF0 przenosi kontrolery pedałów Disklavier z kanału 3 na kanał 1 i w razie potrzeby dodaje Acoustic Grand Piano na kanale 1.", "ja": "E-SEQ から MIDI、または SMF1 から SMF0 へ変換するとき、Disklavier のペダルコントローラーをチャンネル 3 からチャンネル 1 へ移動し、必要に応じてチャンネル 1 に Acoustic Grand Piano を追加します。", "ko": "E-SEQ를 MIDI로 또는 SMF1을 SMF0으로 변환할 때 Disklavier 페달 컨트롤러를 채널 3에서 채널 1로 옮기고 필요하면 채널 1에 Acoustic Grand Piano를 추가합니다.", "zh-Hans": "将 E-SEQ 转为 MIDI 或将 SMF1 转为 SMF0 时，把 Disklavier 踏板控制器从通道 3 移到通道 1，并在需要时为通道 1 添加 Acoustic Grand Piano。"},
     "Format Floppy Disk": {"es": "Formatear disquete", "fr": "Formater une disquette", "de": "Diskette formatieren", "it": "Formatta floppy", "pt-BR": "Formatar disquete", "nl": "Floppy formatteren", "pl": "Formatuj dyskietkę", "ja": "フロッピーをフォーマット", "ko": "플로피 디스크 포맷", "zh-Hans": "格式化软盘"},
     "Check for Updates": {"es": "Buscar actualizaciones", "fr": "Rechercher des mises à jour", "de": "Nach Updates suchen", "it": "Controlla aggiornamenti", "pt-BR": "Verificar atualizações", "nl": "Controleren op updates", "pl": "Sprawdź aktualizacje", "ja": "更新を確認", "ko": "업데이트 확인", "zh-Hans": "检查更新"},
     "Check for Updates at Startup": {"es": "Buscar actualizaciones al iniciar", "fr": "Rechercher au démarrage", "de": "Beim Start nach Updates suchen", "it": "Controlla aggiornamenti all'avvio", "pt-BR": "Verificar atualizações ao iniciar", "nl": "Bij opstarten controleren op updates", "pl": "Sprawdzaj aktualizacje przy starcie", "ja": "起動時に更新を確認", "ko": "시작 시 업데이트 확인", "zh-Hans": "启动时检查更新"},
@@ -1816,6 +1863,81 @@ def translate_text(text, language_code=None, **kwargs):
     return source
 
 
+def _looks_like_missing_command_error(lower):
+    return any(
+        marker in lower
+        for marker in (
+            "required mtools command",
+            "required 7-zip command",
+            "required system command",
+            "required command",
+            "not recognized as an internal or external command",
+            "command not found",
+            "greaseweazle cli was not found",
+        )
+    )
+
+
+def _looks_like_file_path_or_media_name(lower):
+    if "/" in lower or "\\" in lower:
+        return True
+    media_extensions = (
+        ".mid",
+        ".midi",
+        ".fil",
+        ".mda",
+        ".img",
+        ".ima",
+        ".bin",
+        ".hfe",
+        ".scp",
+        ".zip",
+        ".all",
+        ".evt",
+        ".vfd",
+        ".b00",
+        ".r00",
+        ".syx",
+        ".wav",
+        ".mp3",
+        ".sf2",
+        ".sf3",
+    )
+    return any(extension in lower for extension in media_extensions)
+
+
+def is_missing_source_file_error(detail):
+    text = str(detail or "").strip()
+    lower = text.lower()
+    if not lower or _looks_like_missing_command_error(lower):
+        return False
+    source_markers = (
+        "file to add no longer exists",
+        "replacement file no longer exists",
+        "selected files no longer exist",
+        "source file is no longer available",
+        "source file could not be found",
+        "source files could not be found",
+        "source image was not found",
+        "saved greaseweazle capture was not found",
+    )
+    if any(marker in lower for marker in source_markers):
+        return True
+    if "could not prepare" in lower and any(
+        context in lower for context in (" for export", " for conversion", " for midi export")
+    ):
+        return True
+    missing_markers = (
+        "no such file or directory",
+        "errno 2",
+        "winerror 2",
+        "file not found",
+    )
+    if any(marker in lower for marker in missing_markers):
+        return _looks_like_file_path_or_media_name(lower)
+    return False
+
+
 def guidance_for_error_detail(detail, language_code=None):
     text = str(detail or "")
     lower = text.lower()
@@ -1823,13 +1945,16 @@ def guidance_for_error_detail(detail, language_code=None):
         return ""
     if "cancelled" in lower or "canceled" in lower:
         return tr("guidance.cancelled", language_code)
+    if is_missing_source_file_error(text):
+        return tr("error.source_files_missing.guidance", language_code)
     if "mtools" in lower or any(command in lower for command in ("mformat", "mcopy", "mdir", "mdel", "mren")):
         return tr("guidance.mtools_missing", language_code)
     if "greaseweazle cli" in lower or ("greaseweazle" in lower and "not found" in lower):
         return tr("guidance.greaseweazle_missing", language_code)
     if (
-        "not recognized as an internal or external command" in lower
-        or "no such file or directory" in lower
+        _looks_like_missing_command_error(lower)
+        or "not recognized as an internal or external command" in lower
+        or ("no such file or directory" in lower and "command" in lower)
         or "command not found" in lower
     ):
         return tr("guidance.command_missing", language_code)

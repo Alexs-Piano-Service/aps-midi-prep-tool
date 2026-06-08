@@ -142,6 +142,11 @@ instructions or software; formatting a blank stick by itself is not enough.
 5. Use `Save` to overwrite originals, or `Save As` to write copies.
 
 The conversion is staged first. Original files are not modified until you save.
+By default, SMF1 to SMF0 conversion also normalizes Disklavier piano playback
+data by moving controller-only legacy pedal events from MIDI channel 3 to
+channel 1 and adding Acoustic Grand Piano on channel 1 when needed. Turn off
+`Utilities > Convert > Normalize Disklavier MIDI on Conversion` to leave MIDI
+channel events exactly as they are.
 
 ### Convert Between MIDI And E-SEQ
 
@@ -152,6 +157,9 @@ The conversion is staged first. Original files are not modified until you save.
 - E-SEQ to MIDI exports omit APS archival round-trip metadata by default so the
   Standard MIDI files stay clean for Yamaha hardware. The converter still reads
   older APS metadata when present.
+- E-SEQ to MIDI exports also apply Disklavier MIDI normalization by default,
+  with the same `Utilities > Convert > Normalize Disklavier MIDI on Conversion`
+  option available when an archival channel-for-channel export is needed.
 - `PIANODIR.FIL` is generated or refreshed on save when needed.
 - `File > Save Options > Create Album Subfolder` controls whether folder
   exports use the current album title and catalog number for a subfolder.

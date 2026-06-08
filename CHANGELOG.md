@@ -16,6 +16,7 @@ with release sections grouped by version and date.
 ### Changed
 
 - E-SEQ to MIDI exports now omit APS archival round-trip metadata by default, producing cleaner Standard MIDI files for Yamaha hardware while still accepting older metadata when present.
+- E-SEQ to MIDI and SMF1 to SMF0 conversions now normalize Disklavier playback data by default, moving controller-only legacy pedal events from channel 3 to channel 1 and adding Acoustic Grand Piano on channel 1 when needed. `Utilities > Convert > Normalize Disklavier MIDI on Conversion` can turn this off.
 - Portuguese locale aliases such as `pt-PT` now use the included Brazilian Portuguese translation set instead of falling back to English.
 
 ### Removed
@@ -30,6 +31,7 @@ with release sections grouped by version and date.
 - Drag-and-drop import highlighting now fills the entire file list, and font-size changes also scale the main window spacing, margins, row heights, and fixed controls.
 - Save As ZIP dialog, progress, success, and failure text now has shared translation coverage for the supported UI languages.
 - Image creation, image edits, floppy writes, and ZIP/Image temporary outputs now use ASCII-safe transient filenames so mtools and conversion tools can handle source or destination names containing accents, emoji, CJK text, and shell-sensitive punctuation.
+- Missing source-file errors now show a localized, user-friendly message that asks users to confirm files still exist, external drives or cloud-synced folders are available, and moved or renamed sources have been reopened.
 
 ## [0.6.5] - 2026-05-19
 

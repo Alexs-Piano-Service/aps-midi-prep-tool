@@ -174,6 +174,8 @@ MIDI channel control-change messages have status bytes `0xB0..0xBF`, followed by
 
 This matters because Disklavier piano playback often uses dense note and pedal data, and because un-restored `CC7 = 0` can make a generic MIDI synthesizer produce no audible piano despite valid note events.
 
+APS MIDI Prep Tool's compatibility-oriented E-SEQ-to-MIDI and SMF1-to-SMF0 conversions normalize controller-only legacy Disklavier pedal lanes by moving pedal controllers from MIDI channel 3 to MIDI channel 1 when channel 1 contains piano notes and channel 3 does not contain notes. The user-facing conversion option can disable this for archival channel-for-channel exports.
+
 ---
 
 ## 5. Normal E-SEQ `.FIL` file structure

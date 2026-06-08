@@ -16,6 +16,11 @@ _SYSTEM_MESSAGE_DATA_LENGTHS = {
     0xFE: 0,
 }
 
+DISKLAVIER_PIANO_CHANNEL = 0
+DISKLAVIER_LEGACY_PEDAL_CHANNEL = 2
+DISKLAVIER_ACOUSTIC_GRAND_PROGRAM = 0
+DISKLAVIER_PEDAL_CONTROLLERS = {64, 66, 67}
+
 
 @dataclass(frozen=True)
 class Type0ConversionResult:
@@ -184,11 +189,115 @@ def _parse_track_events(track_data):
     return events, abs_tick
 
 
-def _convert_midi_bytes_to_type0(midi_bytes):
+def normalize_disklavier_raw_midi_event(raw):
+    if (
+        len(raw) >= 3
+        and (raw[0] & 0xF0) == 0xB0
+        and (raw[0] & 0x0F) == DISKLAVIER_LEGACY_PEDAL_CHANNEL
+        and raw[1] in DISKLAVIER_PEDAL_CONTROLLERS
+    ):
+        return bytes([(raw[0] & 0xF0) | DISKLAVIER_PIANO_CHANNEL]) + raw[1:], True
+    return raw, False
+
+
+def is_disklavier_channel_note_event(raw, channel):
+    return (
+        len(raw) >= 3
+        and (raw[0] & 0x0F) == channel
+        and (raw[0] & 0xF0) in (0x80, 0x90)
+    )
+
+
+def _is_channel1_note_on(raw):
+    return (
+        len(raw) >= 3
+        and (raw[0] & 0xF0) == 0x90
+        and (raw[0] & 0x0F) == DISKLAVIER_PIANO_CHANNEL
+        and raw[2] > 0
+    )
+
+
+def _is_channel1_program_change(raw):
+    return (
+        len(raw) >= 2
+        and (raw[0] & 0xF0) == 0xC0
+        and (raw[0] & 0x0F) == DISKLAVIER_PIANO_CHANNEL
+    )
+
+
+def _channel1_acoustic_grand_event():
+    return bytes([0xC0 | DISKLAVIER_PIANO_CHANNEL, DISKLAVIER_ACOUSTIC_GRAND_PROGRAM])
+
+
+def _disklavier_normalized_event_dedupe_key(abs_tick, raw):
+    if not raw or not (0x80 <= raw[0] <= 0xEF):
+        return None
+    status = raw[0] & 0xF0
+    channel = raw[0] & 0x0F
+    if (
+        len(raw) >= 3
+        and status == 0xB0
+        and channel == DISKLAVIER_PIANO_CHANNEL
+        and raw[1] in DISKLAVIER_PEDAL_CONTROLLERS
+    ):
+        return abs_tick, raw
+    if status == 0xC0 and channel == DISKLAVIER_PIANO_CHANNEL:
+        return abs_tick, raw
+    return None
+
+
+def _normalize_disklavier_merged_events(merged_events):
+    normalized = []
+    changed = False
+    first_channel1_note_tick = None
+    has_channel1_program_before_notes = False
+    legacy_pedal_channel_has_notes = False
+
+    for abs_tick, track_index, order, raw in merged_events:
+        if _is_channel1_note_on(raw):
+            if first_channel1_note_tick is None or abs_tick < first_channel1_note_tick:
+                first_channel1_note_tick = abs_tick
+        if is_disklavier_channel_note_event(raw, DISKLAVIER_LEGACY_PEDAL_CHANNEL):
+            legacy_pedal_channel_has_notes = True
+
+    should_remap_legacy_pedal = first_channel1_note_tick is not None and not legacy_pedal_channel_has_notes
+    for abs_tick, track_index, order, raw in merged_events:
+        if should_remap_legacy_pedal:
+            normalized_raw, event_changed = normalize_disklavier_raw_midi_event(raw)
+            changed = changed or event_changed
+        else:
+            normalized_raw = raw
+        normalized.append((abs_tick, track_index, order, normalized_raw))
+
+    if first_channel1_note_tick is not None:
+        for abs_tick, _, _, raw in normalized:
+            if abs_tick <= first_channel1_note_tick and _is_channel1_program_change(raw):
+                has_channel1_program_before_notes = True
+                break
+        if not has_channel1_program_before_notes:
+            normalized.append((0, -1, -1, _channel1_acoustic_grand_event()))
+            changed = True
+
+    deduped = []
+    seen_channel_events = set()
+    for event in sorted(normalized, key=lambda item: (item[0], item[1], item[2])):
+        abs_tick, _, _, raw = event
+        key = _disklavier_normalized_event_dedupe_key(abs_tick, raw)
+        if key is not None:
+            if key in seen_channel_events:
+                changed = True
+                continue
+            seen_channel_events.add(key)
+        deduped.append(event)
+
+    return deduped, changed
+
+
+def _convert_midi_bytes_to_type0(midi_bytes, *, normalize_disklavier=True):
     header_end, format_type, _, chunks = _parse_midi_chunks(midi_bytes)
     track_chunks = [chunk for chunk in chunks if chunk["id"] == b"MTrk"]
 
-    if format_type == 0:
+    if format_type == 0 and not normalize_disklavier:
         return midi_bytes, False
     if format_type == 2:
         raise ValueError("MIDI format 2 files are not supported for Type 0 conversion.")
@@ -206,6 +315,13 @@ def _convert_midi_bytes_to_type0(midi_bytes):
             merged_events.append((abs_tick, track_index, order, raw))
 
     merged_events.sort(key=lambda item: (item[0], item[1], item[2]))
+    changed = format_type != 0
+    if normalize_disklavier:
+        merged_events, normalization_changed = _normalize_disklavier_merged_events(merged_events)
+        changed = changed or normalization_changed
+
+    if not changed:
+        return midi_bytes, False
 
     merged_track = bytearray()
     prev_tick = 0
@@ -254,14 +370,17 @@ def _default_backup_path(file_path):
     return f"{stem}_backup{ext}"
 
 
-def convert_midi_file_to_type0_path(source_path, dest_path):
+def convert_midi_file_to_type0_path(source_path, dest_path, *, normalize_disklavier=True):
     if not os.path.isfile(source_path):
         raise ValueError("File does not exist.")
 
     with open(source_path, "rb") as handle:
         midi_bytes = handle.read()
 
-    converted_bytes, changed = _convert_midi_bytes_to_type0(midi_bytes)
+    converted_bytes, changed = _convert_midi_bytes_to_type0(
+        midi_bytes,
+        normalize_disklavier=normalize_disklavier,
+    )
     if not changed:
         return False
 
@@ -277,7 +396,13 @@ def convert_midi_file_to_type0_path(source_path, dest_path):
     return True
 
 
-def convert_midi_files_to_type0(file_paths, create_backups=False, backup_path_builder=None):
+def convert_midi_files_to_type0(
+    file_paths,
+    create_backups=False,
+    backup_path_builder=None,
+    *,
+    normalize_disklavier=True,
+):
     unique_paths = _unique_abs_paths(file_paths)
     backup_path_builder = backup_path_builder or _default_backup_path
 
@@ -295,7 +420,10 @@ def convert_midi_files_to_type0(file_paths, create_backups=False, backup_path_bu
             with open(file_path, "rb") as handle:
                 midi_bytes = handle.read()
 
-            converted_bytes, changed = _convert_midi_bytes_to_type0(midi_bytes)
+            converted_bytes, changed = _convert_midi_bytes_to_type0(
+                midi_bytes,
+                normalize_disklavier=normalize_disklavier,
+            )
             if not changed:
                 unchanged.append(file_path)
                 continue

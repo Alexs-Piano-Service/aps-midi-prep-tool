@@ -192,6 +192,7 @@ from .subprocess_utils import windows_subprocess_kwargs
 from .message_catalog import (
     DEFAULT_LANGUAGE,
     guidance_for_error_detail,
+    is_missing_source_file_error,
     language_options,
     normalize_language_code,
     tr as catalog_tr,
@@ -3980,6 +3981,7 @@ class MidiTitleWindow(QMainWindow):
     SETTINGS_APP = APP_SETTINGS_APP
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
+    SETTING_NORMALIZE_DISKLAVIER_MIDI = "normalize_disklavier_midi"
     SETTING_HIDE_STATUS = "hide_status"
     SETTING_HIDE_QUICK_PANEL = "hide_quick_panel"
     SETTING_HIDE_ALBUM_METADATA = "hide_album_metadata"
@@ -4776,11 +4778,23 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesMidiToEseqAction = QAction("Convert All MIDI to E-SEQ", self)
         self.utilitiesMidiToEseqAction.triggered.connect(self.convert_all_midi_to_eseq)
 
+        self.utilitiesNormalizeDisklavierMidiAction = QAction("Normalize Disklavier MIDI on Conversion", self)
+        self.utilitiesNormalizeDisklavierMidiAction.setCheckable(True)
+        self.utilitiesNormalizeDisklavierMidiAction.setChecked(self._normalize_disklavier_midi_on_conversion())
+        self.utilitiesNormalizeDisklavierMidiAction.setToolTip(
+            self._lt(
+                "When converting E-SEQ to MIDI or SMF1 to SMF0, move Disklavier pedal controllers from channel 3 to channel 1 and add Acoustic Grand Piano on channel 1 when needed."
+            )
+        )
+        self.utilitiesNormalizeDisklavierMidiAction.toggled.connect(self.toggle_normalize_disklavier_midi)
+
         self.utilitiesMenu.addSeparator()
         self.utilitiesConvertMenu = self.utilitiesMenu.addMenu(self._lt("Convert"))
         self.utilitiesConvertMenu.addAction(self.utilitiesSmfAction)
         self.utilitiesConvertMenu.addAction(self.utilitiesEseqToMidiAction)
         self.utilitiesConvertMenu.addAction(self.utilitiesMidiToEseqAction)
+        self.utilitiesConvertMenu.addSeparator()
+        self.utilitiesConvertMenu.addAction(self.utilitiesNormalizeDisklavierMidiAction)
 
         self.utilitiesFormatFloppyAction = QAction("Format Floppy Disk...", self)
         self.utilitiesFormatFloppyAction.setToolTip(
@@ -5642,6 +5656,7 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesSmfAction", "Convert All SMF1 to SMF0", "0"),
             ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
             ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ", "M"),
+            ("utilitiesNormalizeDisklavierMidiAction", "Normalize Disklavier MIDI on Conversion", "N"),
             ("utilitiesFormatFloppyAction", "Format Floppy Disk...", "F"),
             ("helpCheckUpdatesAction", "Check for Updates...", "C"),
             ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup", "S"),
@@ -5655,6 +5670,13 @@ class MidiTitleWindow(QMainWindow):
             action = getattr(self, action_name, None)
             if action is not None:
                 action.setText(self._menu_action_text(text, mnemonic))
+        normalize_action = getattr(self, "utilitiesNormalizeDisklavierMidiAction", None)
+        if normalize_action is not None:
+            normalize_action.setToolTip(
+                self._lt(
+                    "When converting E-SEQ to MIDI or SMF1 to SMF0, move Disklavier pedal controllers from channel 3 to channel 1 and add Acoustic Grand Piano on channel 1 when needed."
+                )
+            )
 
     def eventFilter(self, obj, event):
         if isinstance(obj, QDialog) and bool(obj.property("_aps_center_on_parent")):
@@ -5827,6 +5849,23 @@ class MidiTitleWindow(QMainWindow):
     def _guidance_for_error_detail(self, detail):
         return guidance_for_error_detail(detail, self._language_code())
 
+    def _source_files_missing_error_message(self, detail_text, *, guidance=None):
+        message = self._ensure_sentence(self._t("error.source_files_missing.summary"))
+        if detail_text:
+            details_separator = "\n" if "\n" in str(detail_text) else " "
+            message += (
+                f"\n\n{self._t('error.source_files_missing.details_label')}:"
+                f"{details_separator}{detail_text}"
+            )
+        guidance_texts = [self._t("error.source_files_missing.guidance")]
+        if guidance is not None:
+            extra_guidance = self._lt(guidance)
+            if extra_guidance and extra_guidance not in guidance_texts:
+                guidance_texts.append(extra_guidance)
+        for guidance_text in guidance_texts:
+            message += f"\n\n{self._ensure_sentence(guidance_text)}"
+        return message
+
     def _ensure_sentence(self, text):
         text = str(text or "").strip()
         if not text or text[-1:] in ".!?。！？":
@@ -5860,12 +5899,15 @@ class MidiTitleWindow(QMainWindow):
 
     def _show_operation_error(self, title, summary, detail=None, *, guidance=None):
         detail_text = self._clean_error_detail(detail)
-        message = self._ensure_sentence(self._lt(summary))
-        if detail_text:
-            message += f"\n\n{self._t('error.details_label')}: {detail_text}"
-        guidance_text = self._lt(guidance) if guidance is not None else self._guidance_for_error_detail(detail_text)
-        if guidance_text:
-            message += f"\n\n{self._ensure_sentence(guidance_text)}"
+        if is_missing_source_file_error(detail_text):
+            message = self._source_files_missing_error_message(detail_text, guidance=guidance)
+        else:
+            message = self._ensure_sentence(self._lt(summary))
+            if detail_text:
+                message += f"\n\n{self._t('error.details_label')}: {detail_text}"
+            guidance_text = self._lt(guidance) if guidance is not None else self._guidance_for_error_detail(detail_text)
+            if guidance_text:
+                message += f"\n\n{self._ensure_sentence(guidance_text)}"
         self._log_error_event(
             "Error",
             str(title or "Operation failed"),
@@ -5883,9 +5925,12 @@ class MidiTitleWindow(QMainWindow):
 
     def _show_error_list(self, title, summary, errors, *, max_rows=10, warning=False, guidance=""):
         details = self._limited_message_list(errors, max_rows=max_rows)
-        message = f"{self._ensure_sentence(self._lt(summary))}\n\n{details}"
-        if guidance:
-            message += f"\n\n{self._ensure_sentence(self._lt(guidance))}"
+        if any(is_missing_source_file_error(error) for error in errors or ()):
+            message = self._source_files_missing_error_message(details, guidance=guidance or None)
+        else:
+            message = f"{self._ensure_sentence(self._lt(summary))}\n\n{details}"
+            if guidance:
+                message += f"\n\n{self._ensure_sentence(self._lt(guidance))}"
         logger = self._log_warning_event if warning else self._log_error_event
         logger(
             "Warning" if warning else "Error",
@@ -8565,6 +8610,16 @@ class MidiTitleWindow(QMainWindow):
     def _auto_write_protect_on_load(self):
         return self.settings.value(self.SETTING_AUTO_WRITE_PROTECT_ON_LOAD, True, type=bool)
 
+    def _normalize_disklavier_midi_on_conversion(self):
+        return self.settings.value(self.SETTING_NORMALIZE_DISKLAVIER_MIDI, True, type=bool)
+
+    def toggle_normalize_disklavier_midi(self, enabled):
+        enabled = bool(enabled)
+        self.settings.setValue(self.SETTING_NORMALIZE_DISKLAVIER_MIDI, enabled)
+        action = getattr(self, "utilitiesNormalizeDisklavierMidiAction", None)
+        if action is not None and action.isChecked() != enabled:
+            action.setChecked(enabled)
+
     def toggle_auto_write_protect_on_load(self, enabled):
         self.settings.setValue(self.SETTING_AUTO_WRITE_PROTECT_ON_LOAD, bool(enabled))
 
@@ -9525,7 +9580,11 @@ class MidiTitleWindow(QMainWindow):
         os.makedirs(scratch_dir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(target_filename or source_path))[0] or "midi"
         type0_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{stem}_type0.mid")
-        changed = convert_midi_file_to_type0_path(source_path, type0_path)
+        changed = convert_midi_file_to_type0_path(
+            source_path,
+            type0_path,
+            normalize_disklavier=False,
+        )
         if changed:
             return type0_path
         if os.path.exists(type0_path):
@@ -10467,6 +10526,7 @@ class MidiTitleWindow(QMainWindow):
                 source_material_path,
                 output_temp_path,
                 title_override=title_override,
+                normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
             )
         else:
             source_material_path = self._type0_midi_source_for_eseq_conversion(
@@ -11181,7 +11241,7 @@ class MidiTitleWindow(QMainWindow):
         source_host_path = self._pending_or_extracted_image_path(source_path)
         final_name = os.path.basename(self._final_image_path(source_path)) or os.path.basename(dest_path)
         if not source_host_path or not os.path.isfile(source_host_path):
-            raise FloppyImageError(f"Could not prepare '{final_name}' for export.")
+            raise FloppyImageError(f"Source file could not be found for export: {final_name}")
 
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         pending_title = self.pendingImageTitleEdits.get(source_path)
@@ -15211,7 +15271,11 @@ class MidiTitleWindow(QMainWindow):
             output_temp_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
             source_material_path = self._regular_source_material_path(full_path)
             try:
-                changed = convert_midi_file_to_type0_path(source_material_path, output_temp_path)
+                changed = convert_midi_file_to_type0_path(
+                    source_material_path,
+                    output_temp_path,
+                    normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
+                )
                 if not changed:
                     unchanged_count += 1
                     continue
@@ -15378,7 +15442,7 @@ class MidiTitleWindow(QMainWindow):
 
         source_host_path = self._pending_or_extracted_image_path(source_path)
         if not source_host_path or not os.path.isfile(source_host_path):
-            raise EseqConversionError(f"Could not prepare '{os.path.basename(current_path)}' for conversion.")
+            raise EseqConversionError(f"Source file could not be found for conversion: {os.path.basename(current_path)}")
 
         output_host_path = os.path.join(
             self.image_session.patched_dir,
@@ -15386,7 +15450,12 @@ class MidiTitleWindow(QMainWindow):
         )
         title_override = current_title or None
         if target_kind == "midi":
-            convert_eseq_file_to_midi_path(source_host_path, output_host_path, title_override=title_override)
+            convert_eseq_file_to_midi_path(
+                source_host_path,
+                output_host_path,
+                title_override=title_override,
+                normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
+            )
         else:
             source_host_path = self._type0_midi_source_for_eseq_conversion(
                 source_host_path,
@@ -15502,7 +15571,7 @@ class MidiTitleWindow(QMainWindow):
             source_host_path = self._pending_or_extracted_image_path(source_path)
             if not source_host_path or not os.path.isfile(source_host_path):
                 raise EseqConversionError(
-                    f"Could not prepare '{os.path.basename(final_image_path)}' for MIDI export."
+                    f"Source file could not be found for MIDI export: {os.path.basename(final_image_path)}"
                 )
 
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
@@ -15510,7 +15579,12 @@ class MidiTitleWindow(QMainWindow):
             title_override = current_title or None
 
             if should_convert:
-                convert_eseq_file_to_midi_path(source_host_path, dest_path, title_override=title_override)
+                convert_eseq_file_to_midi_path(
+                    source_host_path,
+                    dest_path,
+                    title_override=title_override,
+                    normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
+                )
             else:
                 self._write_image_row_to_destination(source_path, dest_path)
 
@@ -15841,6 +15915,7 @@ class MidiTitleWindow(QMainWindow):
                         source_material_path,
                         output_temp_path,
                         title_override=title_override,
+                        normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
                     )
                 else:
                     source_material_path = self._type0_midi_source_for_eseq_conversion(
@@ -16734,7 +16809,11 @@ class MidiTitleWindow(QMainWindow):
                     container_variant=self._eseq_converter_container(self.imageEseqVariant),
                 )
             elif conversion_kind == "midi":
-                convert_eseq_file_to_midi_path(host_path, staged_path)
+                convert_eseq_file_to_midi_path(
+                    host_path,
+                    staged_path,
+                    normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
+                )
             else:
                 raise FloppyImageError(f"Unsupported automatic conversion kind: {conversion_kind}")
             return staged_path
