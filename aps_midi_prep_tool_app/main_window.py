@@ -1177,15 +1177,94 @@ def _channel_event_channel(raw):
     return 0
 
 
-def _filter_midi_bytes_to_channels(midi_bytes, channels):
+def _clamped_percent(value, default=100):
+    try:
+        return max(0, min(int(round(float(value))), 100))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _normalized_channel_levels(channel_levels):
+    if not isinstance(channel_levels, dict):
+        return {}
+    levels = {}
+    for channel, value in channel_levels.items():
+        try:
+            channel_int = int(channel)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= channel_int <= 16:
+            levels[channel_int] = _clamped_percent(value, default=100)
+    return levels
+
+
+def _scaled_midi_value(value, percent):
+    value = max(0, min(int(value or 0), 127))
+    percent = _clamped_percent(percent, default=100)
+    return max(0, min(int(round(value * (percent / 100.0))), 127))
+
+
+def _scale_channel_volume_event(raw, channel_levels):
+    if len(raw) >= 3 and (raw[0] & 0xF0) == 0xB0 and raw[1] == 7:
+        channel = _channel_event_channel(raw)
+        level = channel_levels.get(channel)
+        if level is not None:
+            return bytes([raw[0], raw[1], _scaled_midi_value(raw[2], level)])
+    return raw
+
+
+def _channel_level_events(channel_levels):
+    events = []
+    for channel, level in sorted(channel_levels.items()):
+        if level == 100:
+            continue
+        events.append(
+            (
+                0,
+                -1000 + channel,
+                bytes([0xB0 | (channel - 1), 7, _scaled_midi_value(127, level)]),
+            )
+        )
+    return events
+
+
+def _notes_with_channel_levels(notes, channel_levels):
+    levels = _normalized_channel_levels(channel_levels)
+    if not levels or all(level == 100 for level in levels.values()):
+        return list(notes or [])
+
+    adjusted = []
+    for note in notes or []:
+        try:
+            channel = int(note.get("channel", 0))
+        except (TypeError, ValueError):
+            channel = 0
+        level = levels.get(channel, 100)
+        if level == 100:
+            adjusted.append(note)
+            continue
+        copy = dict(note)
+        copy["preview_gain"] = float(copy.get("preview_gain", 1.0)) * (level / 100.0)
+        adjusted.append(copy)
+    return adjusted
+
+
+def _filter_midi_bytes_to_channels(midi_bytes, channels, channel_levels=None):
     allowed = {int(channel) for channel in (channels or []) if 1 <= int(channel) <= 16}
     if not allowed:
         raise ValueError("No MIDI channels are selected for preview.")
-    if len(allowed) == 16:
+
+    levels = {
+        channel: level
+        for channel, level in _normalized_channel_levels(channel_levels).items()
+        if channel in allowed and level != 100
+    }
+    if len(allowed) == 16 and not levels:
         return midi_bytes
 
     header_end, _format_type, _declared_tracks, chunks = _parse_midi_chunks(midi_bytes)
     rebuilt = bytearray(midi_bytes[:header_end])
+    inserted_channel_levels = False
     for chunk in chunks:
         if chunk["id"] != b"MTrk":
             rebuilt.extend(midi_bytes[chunk["start"]:chunk["data_end"]])
@@ -1193,12 +1272,21 @@ def _filter_midi_bytes_to_channels(midi_bytes, channels):
 
         track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
         events, end_tick = _parse_track_events(track_data)
-        filtered_track = bytearray()
-        prev_tick = 0
-        for tick, _order, raw in events:
+        level_events = []
+        if levels and not inserted_channel_levels:
+            level_events = _channel_level_events(levels)
+            inserted_channel_levels = True
+
+        events_to_write = []
+        for tick, order, raw in events:
             channel = _channel_event_channel(raw)
             if channel and channel not in allowed:
                 continue
+            events_to_write.append((tick, order, _scale_channel_volume_event(raw, levels)))
+
+        filtered_track = bytearray()
+        prev_tick = 0
+        for tick, _order, raw in sorted(level_events + events_to_write, key=lambda item: (item[0], item[1])):
             filtered_track.extend(_encode_vlq(tick - prev_tick))
             filtered_track.extend(raw)
             prev_tick = tick
@@ -2097,9 +2185,12 @@ def _write_preview_wav(notes, output_path, duration, progress_callback=None, can
             continue
 
         pitch = int(note.get("pitch", 60))
-        velocity = max(1, min(int(note.get("velocity", 64)), 127))
+        velocity = max(0, min(int(note.get("velocity", 64)), 127))
+        gain = max(0.0, min(float(note.get("preview_gain", 1.0)), 1.0))
         frequency = 440.0 * (2.0 ** ((pitch - 69) / 12.0))
-        amplitude = 2100.0 * (velocity / 127.0)
+        amplitude = 2100.0 * (velocity / 127.0) * gain
+        if amplitude <= 0:
+            continue
         for index in range(start, end):
             local = index - start
             t = local / sample_rate
@@ -2504,7 +2595,7 @@ class BatchAudioRenderWorker(QThread):
         with open(path, "rb") as handle:
             payload = handle.read()
         if is_eseq_file(path):
-            payload = convert_eseq_bytes_to_midi_bytes(payload)
+            payload = convert_eseq_bytes_to_midi_bytes(payload, include_conversion_text=False)
         return payload
 
     def run(self):
@@ -3260,6 +3351,7 @@ class FileInspectionDialog(QDialog):
         self.current_midi_bytes = b""
         self.current_channel_info = {}
         self.current_piano_channels = set()
+        self.channel_levels = {channel: 100 for channel in range(1, 17)}
         self.preview_audio_path = ""
         self.preview_render_worker = None
         self.preview_engine_label = ""
@@ -3305,16 +3397,47 @@ class FileInspectionDialog(QDialog):
         self.show_piano_only_checkbox = QCheckBox(t("Show Piano Channels Only"), self)
         self.show_piano_only_checkbox.setToolTip(t("Limit the piano roll and preview to channels that look like piano parts."))
         channel_layout.addWidget(self.show_piano_only_checkbox)
+        self.tie_channel_levels_checkbox = QCheckBox(t("Tie channel levels to preview volume"), self)
+        self.tie_channel_levels_checkbox.setChecked(True)
+        self.tie_channel_levels_checkbox.setToolTip(
+            t("Keep every channel level tied to the main preview volume. Turn this off to set channel levels independently.")
+        )
+        channel_layout.addWidget(self.tie_channel_levels_checkbox)
         channel_grid = QGridLayout()
+        channel_grid.setColumnStretch(1, 1)
+        channel_grid.setColumnStretch(4, 1)
         self.channel_checkboxes = {}
+        self.channel_level_sliders = {}
+        self.channel_level_labels = {}
         for channel in range(1, 17):
             checkbox = QCheckBox(str(channel), self)
             checkbox.setChecked(True)
             checkbox.setVisible(False)
-            checkbox.setToolTip(f"Show and preview MIDI channel {channel}.")
+            checkbox.setToolTip(f"Show and preview MIDI channel {channel}. Uncheck to mute it in the preview.")
             checkbox.toggled.connect(self._update_visible_channels)
             self.channel_checkboxes[channel] = checkbox
-            channel_grid.addWidget(checkbox, (channel - 1) // 8, (channel - 1) % 8)
+            level_slider = QSlider(Qt.Horizontal, self)
+            level_slider.setRange(0, 100)
+            level_slider.setValue(100)
+            level_slider.setSingleStep(5)
+            level_slider.setPageStep(10)
+            level_slider.setFixedWidth(92)
+            level_slider.setVisible(False)
+            level_slider.setToolTip(f"Preview level for MIDI channel {channel}.")
+            level_slider.valueChanged.connect(
+                lambda value, channel=channel: self._on_channel_level_changed(channel, value)
+            )
+            self.channel_level_sliders[channel] = level_slider
+            level_label = QLabel("100%", self)
+            level_label.setMinimumWidth(38)
+            level_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            level_label.setVisible(False)
+            self.channel_level_labels[channel] = level_label
+            row = (channel - 1) % 8
+            column = 0 if channel <= 8 else 3
+            channel_grid.addWidget(checkbox, row, column)
+            channel_grid.addWidget(level_slider, row, column + 1)
+            channel_grid.addWidget(level_label, row, column + 2)
         channel_layout.addLayout(channel_grid)
         right_layout.addWidget(self.channel_group)
 
@@ -3399,6 +3522,7 @@ class FileInspectionDialog(QDialog):
         self.player.durationChanged.connect(self._on_player_duration_changed)
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
         self.show_piano_only_checkbox.toggled.connect(self._update_visible_channels)
+        self.tie_channel_levels_checkbox.toggled.connect(self._on_tie_channel_levels_toggled)
         self.position_slider.sliderPressed.connect(self._on_position_slider_pressed)
         self.position_slider.sliderReleased.connect(self._on_position_slider_released)
         self.position_slider.valueChanged.connect(self._on_position_slider_changed)
@@ -3408,6 +3532,71 @@ class FileInspectionDialog(QDialog):
         if self.file_tree.topLevelItemCount():
             self.file_tree.setCurrentItem(initial_tree_item or self.file_tree.topLevelItem(0))
         self._load_current_file()
+
+    def _channel_levels_tied(self):
+        checkbox = getattr(self, "tie_channel_levels_checkbox", None)
+        return bool(checkbox is not None and checkbox.isChecked())
+
+    def _preview_volume_percent(self):
+        slider = getattr(self, "volume_slider", None)
+        if slider is None:
+            return 35
+        return _clamped_percent(slider.value(), default=35)
+
+    def _set_channel_level_display(self, channel, percent):
+        percent = _clamped_percent(percent, default=100)
+        slider = self.channel_level_sliders.get(channel)
+        if slider is not None:
+            slider.blockSignals(True)
+            slider.setValue(percent)
+            slider.blockSignals(False)
+        label = self.channel_level_labels.get(channel)
+        if label is not None:
+            label.setText(f"{percent}%")
+
+    def _refresh_channel_level_controls(self):
+        tied = self._channel_levels_tied()
+        main_percent = self._preview_volume_percent()
+        for channel, slider in self.channel_level_sliders.items():
+            percent = main_percent if tied else self.channel_levels.get(channel, 100)
+            self._set_channel_level_display(channel, percent)
+            slider.setEnabled((not tied) and not slider.isHidden())
+
+    def _reset_channel_levels(self):
+        for channel in range(1, 17):
+            self.channel_levels[channel] = 100
+        self._refresh_channel_level_controls()
+
+    def _on_tie_channel_levels_toggled(self, _checked):
+        self._refresh_channel_level_controls()
+        self._reset_preview_for_filter_change()
+        self.play_button.setEnabled(bool(self.visible_notes) and self.preview_render_worker is None)
+
+    def _on_channel_level_changed(self, channel, value):
+        if self._channel_levels_tied():
+            return
+        channel = int(channel)
+        percent = _clamped_percent(value, default=100)
+        if self.channel_levels.get(channel, 100) == percent:
+            return
+        self.channel_levels[channel] = percent
+        label = self.channel_level_labels.get(channel)
+        if label is not None:
+            label.setText(f"{percent}%")
+        self._reset_preview_for_filter_change()
+        self.play_button.setEnabled(bool(self.visible_notes) and self.preview_render_worker is None)
+
+    def _effective_channel_levels(self):
+        if self._channel_levels_tied():
+            return {}
+        channels = self._preview_channels()
+        return {
+            channel: self.channel_levels.get(channel, 100)
+            for channel in channels
+        }
+
+    def _notes_for_preview_render(self):
+        return _notes_with_channel_levels(self.visible_notes, self._effective_channel_levels())
 
     def _current_item(self):
         current = self.file_tree.currentItem()
@@ -3468,7 +3657,7 @@ class FileInspectionDialog(QDialog):
         self.channel_group.setEnabled(not rendering)
         self.soundfont_combo.setEnabled((not rendering) and self.soundfont_combo.count() > 0 and bool(self.soundfont_combo.currentData()))
         self.soundfont_button.setEnabled(not rendering)
-        self.play_button.setEnabled((not rendering) and bool(self.current_notes))
+        self.play_button.setEnabled((not rendering) and bool(self.visible_notes))
         self.stop_button.setEnabled(not rendering)
         if not rendering:
             self.preview_progress_bar.setVisible(False)
@@ -3487,7 +3676,7 @@ class FileInspectionDialog(QDialog):
             with open(path, "rb") as handle:
                 payload = handle.read()
             if is_eseq_file(path):
-                payload = convert_eseq_bytes_to_midi_bytes(payload)
+                payload = convert_eseq_bytes_to_midi_bytes(payload, include_conversion_text=False)
             inspection = _inspect_midi_bytes(payload, source_label=label)
             self.current_midi_bytes = bytes(payload)
             self.all_notes = inspection["notes"]
@@ -3500,6 +3689,7 @@ class FileInspectionDialog(QDialog):
             self.elapsed_label.setText("0:00")
             self.duration_label.setText(_format_duration(self.current_duration))
             self.details_box.setPlainText(inspection["metadata_text"])
+            self._reset_channel_levels()
             self._update_channel_controls()
             self._update_visible_channels(reset_preview=False)
             self.play_button.setEnabled(bool(self.visible_notes))
@@ -3519,6 +3709,8 @@ class FileInspectionDialog(QDialog):
             self.elapsed_label.setText("0:00")
             self.duration_label.setText("0:00")
             self.details_box.setPlainText(f"Could not inspect {label}.\n\nDetails: {exc}")
+            self._reset_channel_levels()
+            self._update_channel_controls()
             self.play_button.setEnabled(False)
 
     def _update_channel_controls(self):
@@ -3531,6 +3723,9 @@ class FileInspectionDialog(QDialog):
         self.show_piano_only_checkbox.setEnabled(bool(self.current_piano_channels))
         self.show_piano_only_checkbox.setChecked(False)
         self.show_piano_only_checkbox.blockSignals(False)
+        self.tie_channel_levels_checkbox.setEnabled(bool(used_channels))
+        tied_levels = self._channel_levels_tied()
+        tied_percent = self._preview_volume_percent()
         for channel, checkbox in self.channel_checkboxes.items():
             info = self.current_channel_info.get(channel, {})
             checkbox.blockSignals(True)
@@ -3555,6 +3750,17 @@ class FileInspectionDialog(QDialog):
                 label_parts.append(mute_note)
             checkbox.setToolTip(". ".join(label_parts))
             checkbox.blockSignals(False)
+            slider = self.channel_level_sliders.get(channel)
+            value_label = self.channel_level_labels.get(channel)
+            channel_used = channel in used_channels
+            if slider is not None:
+                slider.setVisible(channel_used)
+                slider.setEnabled(channel_used and not tied_levels)
+                slider.setToolTip(f"Preview level for MIDI channel {channel}.")
+            if value_label is not None:
+                value_label.setVisible(channel_used)
+            level_percent = tied_percent if tied_levels else self.channel_levels.get(channel, 100)
+            self._set_channel_level_display(channel, level_percent)
 
     def _selected_channels(self):
         return {
@@ -3592,7 +3798,11 @@ class FileInspectionDialog(QDialog):
         self.play_button.setEnabled(bool(self.visible_notes) and self.preview_render_worker is None)
 
     def _filtered_midi_bytes_for_preview(self):
-        return _filter_midi_bytes_to_channels(self.current_midi_bytes, self._preview_channels())
+        return _filter_midi_bytes_to_channels(
+            self.current_midi_bytes,
+            self._preview_channels(),
+            self._effective_channel_levels(),
+        )
 
     def _play_current_file(self):
         if not self.visible_notes or self.preview_render_worker is not None:
@@ -3606,7 +3816,7 @@ class FileInspectionDialog(QDialog):
         self.preview_audio_path = path
         worker = MidiPreviewRenderWorker(
             self._filtered_midi_bytes_for_preview(),
-            self.visible_notes,
+            self._notes_for_preview_render(),
             self.current_duration,
             path,
             soundfont_path=self.soundfont_combo.currentData() or "",
@@ -3726,6 +3936,8 @@ class FileInspectionDialog(QDialog):
         percent = max(0, min(int(value or 0), 100))
         self.audio_output.setVolume(percent / 100.0)
         self.volume_value_label.setText(f"{percent}%")
+        if self._channel_levels_tied():
+            self._refresh_channel_level_controls()
 
     def _stop_playback(self):
         self.player.stop()

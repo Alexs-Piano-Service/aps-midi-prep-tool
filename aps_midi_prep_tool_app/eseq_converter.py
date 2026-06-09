@@ -49,6 +49,7 @@ DEFAULT_MIDI_METADATA_POLICY = MIDI_METADATA_POLICY_CLEAN
 _ESEQ_PADDING_BYTE = 0xF6
 _ESEQ_TIMING_META_PREFIX = "APS-ESEQ-TIMING"
 _ESEQ_HEADER_META_PREFIX = "APS-ESEQ-HEADER"
+ESEQ_TO_MIDI_CONVERSION_TEXT = "Converted from E-SEQ by APS MIDI Prep Tool"
 _LEGACY_ESEQ_TEMPLATE = bytes(
     [
         0xFE,
@@ -754,6 +755,7 @@ def convert_eseq_bytes_to_midi_bytes(
     cc7_policy=DEFAULT_CC7_POLICY,
     midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
     normalize_disklavier=True,
+    include_conversion_text=True,
 ):
     midi_metadata_policy = _normalize_midi_metadata_policy(midi_metadata_policy)
     parsed = parse_eseq_bytes(eseq_bytes)
@@ -776,6 +778,8 @@ def convert_eseq_bytes_to_midi_bytes(
         numerator, denominator_power = DEFAULT_TIME_SIGNATURE
     add_track_event(0, _write_midi_key_signature(*DEFAULT_KEY_SIGNATURE))
     add_track_event(0, _write_midi_track_name(title))
+    if include_conversion_text:
+        add_track_event(0, _write_midi_text(ESEQ_TO_MIDI_CONVERSION_TEXT))
 
     if midi_metadata_policy == MIDI_METADATA_POLICY_ARCHIVAL:
         timing = derive_eseq_timing_fields(eseq_bytes)
@@ -1393,6 +1397,7 @@ def convert_eseq_file_to_midi_path(
     cc7_policy=DEFAULT_CC7_POLICY,
     midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
     normalize_disklavier=True,
+    include_conversion_text=True,
 ):
     with open(source_path, "rb") as handle:
         eseq_bytes = handle.read()
@@ -1402,6 +1407,7 @@ def convert_eseq_file_to_midi_path(
         cc7_policy=cc7_policy,
         midi_metadata_policy=midi_metadata_policy,
         normalize_disklavier=normalize_disklavier,
+        include_conversion_text=include_conversion_text,
     )
     _write_destination_bytes(dest_path, payload)
 

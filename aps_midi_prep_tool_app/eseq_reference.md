@@ -758,7 +758,7 @@ def eseq_to_midi(data, options):
 |---|---|
 | `minimal_exe` | Tempo and optional track name only; closest to the old E-SEQ-to-MIDI converter. |
 | `reference_pairs` | Tempo, time signature 4/4, key C, text `Converted from Disklavier floppy`, instrument name `Piano`, optional tick-0 `C0 00`. |
-| `clean_canonical` | Tempo, time signature, track name/title, end-of-track; minimal but friendly. |
+| `clean_canonical` | Tempo, time signature, track name/title, a short APS conversion text note, end-of-track; minimal but friendly. |
 | `archival_verbose` | Include source text, conversion diagnostics, and preserve sysex/channel-prefix events. |
 
 ### 10.3 MIDI running status
@@ -1531,7 +1531,7 @@ class PianoDirEntry:
 
 | Option | Values |
 |---|---|
-| MIDI output metadata | `clean_canonical` default for hardware playback; `archival_verbose` only when embedding `APS-ESEQ-TIMING` / `APS-ESEQ-HEADER` round-trip metadata |
+| MIDI output metadata | `clean_canonical` default for hardware playback with a short APS conversion text note; `archival_verbose` only when embedding `APS-ESEQ-TIMING` / `APS-ESEQ-HEADER` round-trip metadata |
 | End tick policy | `trim`, `preserve_eseq_end`, `next_bar`, `midi_eot` |
 | Note-off policy | `preserve`, `normalize_to_note_on_zero`, `normalize_to_8n` |
 | CC7 zero policy | `preserve`, `warn_only`, `playback_fix_100`, `playback_fix_127`, `drop_early_cc7_zero` |
