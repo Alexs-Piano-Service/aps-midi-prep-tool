@@ -15,6 +15,8 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- About, welcome, Help disclaimer, and project documentation now include clearer
+  lawful-use, non-affiliation, and third-party trademark notices.
 - E-SEQ to MIDI exports now omit APS archival round-trip metadata by default, producing cleaner Standard MIDI files for Yamaha hardware while still accepting older metadata when present.
 - E-SEQ to MIDI and SMF1 to SMF0 conversions now normalize Disklavier playback data by default, moving controller-only legacy pedal events from channel 3 to channel 1 and adding Acoustic Grand Piano on channel 1 when needed. `Utilities > Convert > Normalize Disklavier MIDI on Conversion` can turn this off.
 - Portuguese locale aliases such as `pt-PT` now use the included Brazilian Portuguese translation set instead of falling back to English.

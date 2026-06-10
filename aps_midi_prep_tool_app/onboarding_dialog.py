@@ -1,3 +1,4 @@
+import html
 import sys
 
 from PySide6.QtCore import Qt, QSettings
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -17,6 +19,8 @@ from PySide6.QtWidgets import (
 from .message_catalog import DEFAULT_LANGUAGE, normalize_language_code, translate_text
 from .ui_utils import center_dialog_on_parent
 from .app_info import (
+    APP_COMPACT_LEGAL_NOTICE,
+    APP_COMPANY,
     APP_TITLE_WITH_VERSION,
     APP_WEBSITE,
     COPYRIGHT_HOLDER,
@@ -33,7 +37,7 @@ def _settings_language_code(settings):
     return normalize_language_code(settings.value(SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE)
 
 
-def _workflow_page(title, body_html, body_font_stack):
+def _workflow_page(title, body_html, body_font_stack, notice_text=""):
     page = QWidget()
     layout = QVBoxLayout(page)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -45,6 +49,10 @@ def _workflow_page(title, body_html, body_font_stack):
     title_label.setStyleSheet("font-size: 18px; font-weight: 700;")
     layout.addWidget(title_label)
 
+    notice_html = ""
+    if notice_text:
+        notice_html = f'<p class="notice">{html.escape(str(notice_text))}</p>'
+
     body_label = QLabel(f"""<html>
       <head>
         <style type="text/css">
@@ -52,17 +60,18 @@ def _workflow_page(title, body_html, body_font_stack):
           p {{ margin: 8px 0; }}
           ul {{ margin: 6px 20px 10px 20px; }}
           li {{ margin-bottom: 6px; }}
+          .notice {{ margin-top: 12px; font-size: 11px; }}
           a {{ text-decoration: none; }}
           a:hover {{ text-decoration: underline; }}
         </style>
       </head>
-      <body>{body_html}</body>
+      <body>{body_html}{notice_html}</body>
     </html>""")
     body_label.setTextFormat(Qt.RichText)
     body_label.setWordWrap(True)
     body_label.setOpenExternalLinks(True)
     body_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-    layout.addWidget(body_label, stretch=1)
+    layout.addWidget(body_label)
     return page
 
 
@@ -87,7 +96,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             dialog.setWindowIcon(app_icon)
         dialog.setWindowTitle(f"{t('Welcome to')} {APP_TITLE_WITH_VERSION}")
         dialog.setModal(True)
-        dialog.setMinimumSize(560, 390)
+        dialog.setMinimumWidth(560)
 
         pages = [
             (
@@ -105,7 +114,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>Use <strong>File</strong> for sources and save behavior, <strong>Disk</strong> for floppy/media operations, and <strong>Utilities</strong> for batch tools.</li>
                   <li>Use <strong>View &gt; View Logs...</strong> for live console output and <strong>Help &gt; Report a Bug...</strong> when you need to send a support report.</li>
                 </ul>
-                <p><a href="{APP_WEBSITE}">alexanderpeppe.com</a></p>
+                <p><a href="{APP_WEBSITE}">{html.escape(APP_COMPANY)}</a></p>
                 """,
             ),
             (
@@ -248,9 +257,17 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
         layout.addLayout(selector_layout)
 
         page_stack = QStackedWidget(dialog)
+        page_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         for page_title, page_html in pages:
-            page_stack.addWidget(_workflow_page(t(page_title), page_html, body_font_stack))
-        layout.addWidget(page_stack, stretch=1)
+            page_stack.addWidget(
+                _workflow_page(
+                    t(page_title),
+                    page_html,
+                    body_font_stack,
+                    notice_text=APP_COMPACT_LEGAL_NOTICE,
+                )
+            )
+        layout.addWidget(page_stack)
 
         dont_show_checkbox = QCheckBox(t("Do not show this dialog again"))
         layout.addWidget(dont_show_checkbox)
@@ -271,11 +288,16 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
         def set_page(index):
             index = max(0, min(index, len(pages) - 1))
             page_stack.setCurrentIndex(index)
+            current_page = page_stack.currentWidget()
+            if current_page is not None:
+                page_stack.setFixedHeight(current_page.sizeHint().height())
             if workflow_selector.currentIndex() != index:
                 workflow_selector.setCurrentIndex(index)
             back_button.setEnabled(index > 0)
             next_button.setEnabled(index < len(pages) - 1)
             page_count_label.setText(f"{index + 1} {t('of')} {len(pages)}")
+            dialog.adjustSize()
+            center_dialog_on_parent(dialog, parent)
 
         workflow_selector.currentIndexChanged.connect(set_page)
         back_button.clicked.connect(lambda: set_page(page_stack.currentIndex() - 1))

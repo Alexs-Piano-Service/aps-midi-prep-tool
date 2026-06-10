@@ -11,7 +11,7 @@
 
 **Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, `floppy_image.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.6.9 development.
 
-> This document is intentionally written as an engineering reference. It distinguishes proven behavior from inferred or compatibility-oriented behavior. It does not contain proprietary Yamaha source code or third-party program code; it specifies file behavior derived from personal recordings, supplied disk images, static binary inspection, and public format references.
+> This document is intentionally written as an engineering reference. It distinguishes proven behavior from inferred or compatibility-oriented behavior. It does not contain proprietary Yamaha source code or third-party program code; it specifies file behavior derived from personal recordings, supplied disk images, static binary inspection, and public format references. Third-party names are used only to identify compatibility targets; APS MIDI Prep Tool is independent and is not affiliated with, sponsored by, or endorsed by Yamaha or other product owners mentioned here.
 
 Review notes for v0.6.9 development:
 

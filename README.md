@@ -336,8 +336,12 @@ convert, or modify. Do not use it to distribute copyrighted music, commercial
 player-piano libraries, proprietary software, or other material you do not have
 the right to share.
 
-This project is not affiliated with Yamaha, PianoDisc, Nalbantov, Greaseweazle,
-or other companies mentioned. Trademarks belong to their respective owners.
+This project is not affiliated with, sponsored by, or endorsed by Yamaha,
+Disklavier, PianoSoft, Electone, Clavinova, PianoDisc, Nalbantov,
+Greaseweazle, Akai, MPC, or other companies and products mentioned.
+Third-party names are used only to identify compatible formats, media,
+instruments, and workflows. Trademarks and product names belong to their
+respective owners.
 
 Related Alex's Piano Service LLC policies:
 

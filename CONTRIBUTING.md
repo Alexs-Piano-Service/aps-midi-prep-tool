@@ -13,6 +13,9 @@ Thanks for helping improve APS MIDI Prep Tool.
   use a public-domain or self-created file, or coordinate privately first.
 - Be careful with physical floppy operations. Formatting and writing can destroy
   data on the selected disk.
+- Refer to third-party products, formats, and trademarks only for compatibility
+  or preservation context. Do not imply endorsement or affiliation with their
+  owners.
 
 ## Development Setup
 

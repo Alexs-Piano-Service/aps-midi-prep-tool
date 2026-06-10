@@ -1,6 +1,10 @@
 import os
 
-from .eseq_converter import is_clavinova_mda_eseq_bytes, refresh_eseq_timing_fields_in_bytes
+from .eseq_converter import (
+    is_clavinova_mda_eseq_bytes,
+    is_eseq_file,
+    refresh_eseq_timing_fields_in_bytes,
+)
 
 _SYSTEM_MESSAGE_DATA_LENGTHS = {
     0xF1: 1,
@@ -61,6 +65,11 @@ def is_midi_file(midi_path):
 
 def has_eseq_title_metadata(file_path):
     try:
+        if (
+            os.path.splitext(file_path or "")[1].lower() == ".evt"
+            and not is_eseq_file(file_path)
+        ):
+            return False
         with open(file_path, "rb") as handle:
             header = handle.read(_ESEQ_TITLE_END + 1)
         if is_clavinova_mda_eseq_bytes(header, filename=os.path.basename(file_path)):

@@ -4723,18 +4723,27 @@ def _conversion_candidate_formats(source_path, source_ext, disk_format_hint=None
     if isinstance(disk_format_hint, DiskFormat):
         return [disk_format_hint]
 
+    source_ext = str(source_ext or "").lower().lstrip(".")
     preferred = []
-    if str(source_ext or "").lower().lstrip(".") == "hfe":
+
+    def add_preferred(disk_format):
+        if disk_format not in preferred:
+            preferred.append(disk_format)
+
+    if source_ext == "hfe":
         try:
             size = os.path.getsize(source_path)
         except OSError:
             size = 0
         if 0 < size < 3 * 1024 * 1024:
-            preferred.append(DISK_FORMAT_BY_KEY["ibm.720"])
+            add_preferred(DISK_FORMAT_BY_KEY["ibm.720"])
         elif 0 < size < 6 * 1024 * 1024:
-            preferred.append(DISK_FORMAT_BY_KEY["ibm.1440"])
+            add_preferred(DISK_FORMAT_BY_KEY["ibm.1440"])
         elif 0 < size < 10 * 1024 * 1024:
-            preferred.append(DISK_FORMAT_BY_KEY["ibm.2880"])
+            add_preferred(DISK_FORMAT_BY_KEY["ibm.2880"])
+
+    if source_ext in {"scp", "hfe"}:
+        add_preferred(DISK_FORMAT_BY_KEY["ibm.720"])
 
     return preferred + [disk_format for disk_format in DISK_FORMATS if disk_format not in preferred]
 
@@ -6489,7 +6498,13 @@ class FloppyImageSession:
                     4,
                     f"Converting image to editable {disk_format.label}...",
                 )
-                conversion_output = _gw_convert(source_path, candidate, disk_format.key, cancel_callback=cancel_callback)
+                conversion_output = _gw_convert(
+                    source_path,
+                    candidate,
+                    disk_format.key,
+                    cancel_callback=cancel_callback,
+                    allow_sector_failures=True,
+                )
                 conversion_sector_map = _parse_gw_sector_map(conversion_output, disk_format)
                 try:
                     _validate_converted_image_matches_boot_hint(candidate, disk_format)

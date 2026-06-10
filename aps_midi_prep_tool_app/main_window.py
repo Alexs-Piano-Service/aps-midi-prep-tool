@@ -172,8 +172,10 @@ from .eseq_pianodir import (
 )
 from .app_info import (
     APP_AUTHOR,
+    APP_LAWFUL_USE_NOTICE,
     APP_COMPANY,
     APP_COMPANY_ADDRESS,
+    APP_THIRD_PARTY_NOTICE,
     APP_COPYRIGHT_NOTICE,
     APP_LICENSE,
     APP_NAME,
@@ -4339,6 +4341,7 @@ class MidiTitleWindow(QMainWindow):
         self.pendingFloppyReadTrimTitles = False
         self.v50NseqPromptedSessionPath = ""
         self.electoneMdrPromptedSessionPath = ""
+        self.electoneApproximateInstruments = True
         self.mpcSeqPromptedSessionPath = ""
         self.pendingGwConversionDetails = None
         self.pendingGwCapture = None
@@ -6099,7 +6102,7 @@ class MidiTitleWindow(QMainWindow):
         ok_button = box.addButton(QMessageBox.Ok)
         report_button = None
         if offer_report:
-            report_button = box.addButton(self._lt("Report This Bug..."), QMessageBox.ActionRole)
+            report_button = box.addButton(self._lt("Report A Bug..."), QMessageBox.ActionRole)
         box.setDefaultButton(ok_button)
         self._exec_child_dialog(box)
         if report_button is not None and box.clickedButton() is report_button:
@@ -6790,32 +6793,67 @@ class MidiTitleWindow(QMainWindow):
                 path = item.get("path", "")
                 output_stem = item.get("output_stem")
                 label = item.get("label") or path
+                registration_path = item.get("registration_path")
             else:
                 path = item
                 output_stem = None
                 label = path
+                registration_path = None
             if not self._is_electone_evt_path(path):
                 continue
-            inputs.append(
-                {
-                    "path": os.path.abspath(path),
-                    "output_stem": output_stem,
-                    "label": label,
-                }
-            )
+            spec = {
+                "path": os.path.abspath(path),
+                "output_stem": output_stem,
+                "label": label,
+            }
+            if registration_path and os.path.isfile(registration_path):
+                spec["registration_path"] = os.path.abspath(registration_path)
+            inputs.append(spec)
         return inputs
+
+    def _matching_electone_registration_entry(self, evt_entry, entries):
+        stem = os.path.splitext(getattr(evt_entry, "name", "") or "")[0].upper()
+        if not stem:
+            return None
+        evt_dir = os.path.dirname((getattr(evt_entry, "path", "") or "").replace("\\", "/")).upper()
+        for entry in entries or []:
+            name = (getattr(entry, "name", "") or "").upper()
+            if name not in {f"{stem}.R00", f"{stem}.B00"}:
+                continue
+            entry_dir = os.path.dirname((getattr(entry, "path", "") or "").replace("\\", "/")).upper()
+            if entry_dir == evt_dir:
+                return entry
+        return None
 
     def _extract_image_electone_evt_entries(self, entries, session=None):
         session = session or self.image_session
         if session is None:
             return [], ["No disk or image is currently open."]
+        try:
+            listing = session.list_entries()
+            listing_entries = list(getattr(listing, "entries", []) or [])
+        except Exception:
+            listing_entries = []
         evt_inputs = []
         failures = []
         for entry in entries:
             try:
                 extracted_path = session.extract_file(entry.path)
                 if not self._is_electone_evt_path(extracted_path):
-                    failures.append(f"{entry.path}: the extracted file did not look like an Electone EVT file")
+                    failure_message = f"{entry.path}: the extracted file did not look like an Electone EVT file"
+                    try:
+                        with open(extracted_path, "rb") as extracted_handle:
+                            bad_offset = electone_mdr_to_midi.bad_sector_marker_offset(
+                                extracted_handle.read()
+                            )
+                        if bad_offset is not None:
+                            failure_message = (
+                                f"{entry.path}: unreadable sector data starts at offset 0x{bad_offset:X}; "
+                                "the EVT header could not be recovered"
+                            )
+                    except OSError:
+                        pass
+                    failures.append(failure_message)
                     continue
                 evt_inputs.append(
                     {
@@ -6824,6 +6862,14 @@ class MidiTitleWindow(QMainWindow):
                         "label": entry.path,
                     }
                 )
+                registration_entry = self._matching_electone_registration_entry(entry, listing_entries)
+                if registration_entry is not None:
+                    try:
+                        registration_path = session.extract_file(registration_entry.path)
+                        if os.path.isfile(registration_path):
+                            evt_inputs[-1]["registration_path"] = registration_path
+                    except Exception as exc:
+                        failures.append(f"{registration_entry.path}: {exc}")
             except Exception as exc:
                 failures.append(f"{entry.path}: {exc}")
         return evt_inputs, failures
@@ -6837,8 +6883,9 @@ class MidiTitleWindow(QMainWindow):
             f"Found {count} Electone MDR EVT performance file(s)"
             + (f" in {source_label}" if source_label else "")
             + ".\n\nConvert the EVT performances to Standard MIDI files and open the MIDI files in the list?\n\n"
-            "The matching B00/R00 registration files are not decoded yet, so the MIDI files preserve "
-            "timing, notes, controllers, and SysEx events, but may not sound identical on a generic synth."
+            "The MIDI files preserve timing, notes, controllers, and Electone SysEx events. "
+            "When matching B00/R00 registration files are available, the app can also add "
+            "approximate General MIDI instrument choices for generic synth playback."
         )
         preview = labels[:8]
         if preview:
@@ -6856,7 +6903,15 @@ class MidiTitleWindow(QMainWindow):
         prompt.setDefaultButton(QMessageBox.Yes)
         prompt.button(QMessageBox.Yes).setText(self._lt("Convert to MIDI"))
         prompt.button(QMessageBox.No).setText(self._lt("Not Now"))
-        return self._exec_child_dialog(prompt) == QMessageBox.Yes
+        instrument_checkbox = QCheckBox(self._lt("Approximate instruments from B00/R00 registrations"), prompt)
+        instrument_checkbox.setChecked(bool(getattr(self, "electoneApproximateInstruments", True)))
+        instrument_checkbox.setToolTip(
+            self._lt("Adds conservative General MIDI program changes while preserving the original Electone SysEx.")
+        )
+        prompt.setCheckBox(instrument_checkbox)
+        accepted = self._exec_child_dialog(prompt) == QMessageBox.Yes
+        self.electoneApproximateInstruments = accepted and instrument_checkbox.isChecked()
+        return accepted
 
     def _convert_electone_evt_paths_to_midi_paths(self, evt_paths):
         evt_inputs = self._electone_evt_input_specs(evt_paths)
@@ -6899,6 +6954,8 @@ class MidiTitleWindow(QMainWindow):
                         Path(evt_path),
                         per_file_dir,
                         output_stem=evt_input.get("output_stem"),
+                        registration_path=evt_input.get("registration_path"),
+                        approximate_instruments=bool(getattr(self, "electoneApproximateInstruments", False)),
                     )
                     source_output = Path(report.output)
                     if not source_output.is_file():
@@ -6966,11 +7023,17 @@ class MidiTitleWindow(QMainWindow):
 
         converted_count = len(midi_paths)
         source_count = len(evt_inputs)
+        registration_status = (
+            " and B00/R00 registrations were used for approximate GM instruments where available. "
+            if getattr(self, "electoneApproximateInstruments", False)
+            else ". "
+        )
         status_text = (
             f"Converted {converted_count} MIDI file(s) from {source_count} Electone MDR EVT file(s)"
             + (f" in {source_name}" if source_name else "")
-            + ".\nThe source files were not modified. B00/R00 registrations were not decoded. "
-            "Use Save As to choose a permanent folder."
+            + ".\nThe source files were not modified. Electone SysEx was preserved"
+            + registration_status
+            + "Use Save As to choose a permanent folder."
         )
         if cancelled:
             status_text += "\nConversion was cancelled after the files listed above were created."
@@ -8156,6 +8219,8 @@ class MidiTitleWindow(QMainWindow):
         )
         if self.pendingFloppyReadConvertToMidi:
             QTimer.singleShot(0, self._convert_loaded_floppy_to_midi_after_read)
+        else:
+            QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
 
     def _on_disk_recovery_failure(self, message):
         if self.diskRecoveryProgressDialog is not None:
@@ -18185,7 +18250,8 @@ class MidiTitleWindow(QMainWindow):
                 f"{self._lt('Author')}: {APP_AUTHOR}<br>"
                 f"{APP_COMPANY}<br>"
                 f"{APP_COMPANY_ADDRESS}<br>"
-                f"{self._lt('License')}: {APP_LICENSE}"
+                f"{self._lt('License')}: {APP_LICENSE}<br><br>"
+                f"<small>{APP_THIRD_PARTY_NOTICE}<br><br>{APP_LAWFUL_USE_NOTICE}</small>"
             ),
             dialog,
         )

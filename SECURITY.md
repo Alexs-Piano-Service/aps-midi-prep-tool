@@ -5,6 +5,11 @@ E-SEQ files, floppy images, and physical floppy disks. Please report security
 issues, suspicious behavior, malware false positives, or destructive data-loss
 bugs as soon as possible.
 
+Third-party names in this project identify compatibility targets only. APS MIDI
+Prep Tool is independent and is not affiliated with, sponsored by, or endorsed
+by Yamaha, Disklavier, PianoSoft, Electone, Clavinova, PianoDisc, Nalbantov,
+Greaseweazle, Akai, MPC, or other companies and products mentioned.
+
 ## How To Report
 
 Use either of these channels:
@@ -38,4 +43,5 @@ Security reports may include:
 
 Use test copies when possible. Do not use this project to distribute copyrighted
 music, commercial player-piano disks, proprietary software, or other material
-you do not have the legal right to share.
+you do not have the legal right to share. Trademarks and product names belong
+to their respective owners.

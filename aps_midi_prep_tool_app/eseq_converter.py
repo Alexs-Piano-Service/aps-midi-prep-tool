@@ -17,6 +17,8 @@ from .midi_type0_converter import (
 ESEQ_SIGNATURE = b"COM-ESEQ"
 Q11_SIGNATURE = b"Q11V1.00"
 ESEQ_HEADER_SIZE = 0x77
+ELECTONE_EVT_HEADER_SIZE = 0x100
+ELECTONE_EVT_STREAM_LENGTH_OFFSET = 0x1F
 Q11_EVENT_STREAM_START = 0x200
 CLAVINOVA_MDA_HEADER_SIZE = 0x57
 CLAVINOVA_MDA_HEADER_PREFIX = b"\xFE\x00\x00\xFF\xFF\x00\x00"
@@ -224,11 +226,39 @@ class EseqHeaderHint:
     prefix_00_stream: bytes | None = None
 
 
+def _looks_like_electone_evt_file(file_path, header):
+    if os.path.splitext(file_path or "")[1].lower() != ".evt":
+        return False
+    if len(header) < ELECTONE_EVT_STREAM_LENGTH_OFFSET + 4:
+        return False
+    if header[7:15] != ESEQ_SIGNATURE:
+        return False
+    try:
+        file_size = os.path.getsize(file_path)
+    except OSError:
+        return False
+    stream_length = int.from_bytes(
+        header[
+            ELECTONE_EVT_STREAM_LENGTH_OFFSET:ELECTONE_EVT_STREAM_LENGTH_OFFSET + 4
+        ],
+        "little",
+    )
+    return (
+        stream_length > 0
+        and file_size > ELECTONE_EVT_HEADER_SIZE
+        and stream_length == file_size - ELECTONE_EVT_HEADER_SIZE
+    )
+
+
 def is_eseq_file(file_path):
     try:
         with open(file_path, "rb") as handle:
-            header = handle.read(15)
-        return len(header) >= 15 and header[7:15] == ESEQ_SIGNATURE
+            header = handle.read(ELECTONE_EVT_HEADER_SIZE)
+        return (
+            len(header) >= 15
+            and header[7:15] == ESEQ_SIGNATURE
+            and not _looks_like_electone_evt_file(file_path, header)
+        )
     except OSError:
         return False
 
