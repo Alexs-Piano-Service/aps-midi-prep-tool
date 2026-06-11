@@ -5,18 +5,20 @@
 
 **Purpose:** implementation reference for converting Yamaha E-SEQ song files (`.FIL` and Clavinova/CVP `.MDA`) to Standard MIDI Files, converting Standard MIDI Files back to E-SEQ containers, and constructing `PIANODIR.FIL` / `MUSIC.DIR` disk indexes for older Yamaha media.
 
-**Revision:** 1.2
+**Revision:** 1.3
 
-**Date:** 2026-05-02
+**Date:** 2026-06-11
 
-**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, `floppy_image.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.6.9 development.
+**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, `floppy_image.py`, `midi_type0_converter.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.6.10 release preparation.
 
 > This document is intentionally written as an engineering reference. It distinguishes proven behavior from inferred or compatibility-oriented behavior. It does not contain proprietary Yamaha source code or third-party program code; it specifies file behavior derived from personal recordings, supplied disk images, static binary inspection, and public format references. Third-party names are used only to identify compatibility targets; APS MIDI Prep Tool is independent and is not affiliated with, sponsored by, or endorsed by Yamaha or other product owners mentioned here.
 
-Review notes for v0.6.9 development:
+Review notes for v0.6.10 release preparation:
 
 - The app stages MIDI-to-E-SEQ, E-SEQ-to-MIDI, and SMF1-to-SMF0 conversions before writing them to disk.
 - In E-SEQ modes, dropped MIDI files are converted through Type 0 before E-SEQ output.
+- E-SEQ-to-MIDI output includes the short APS conversion text marker by default, but does not embed large archival `APS-ESEQ-TIMING` or `APS-ESEQ-HEADER` text metadata unless archival metadata is explicitly requested.
+- Pedal channel/value preservation is the default. Pedal compatibility transforms are exposed as a separate MIDI utility rather than as automatic conversion behavior.
 - Generated `PIANODIR.FIL` records copy the relevant E-SEQ header slice for normal files and use the Q11 recipe for `Q11V1.00` files.
 - Clavinova/CVP `.MDA` files are E-SEQ at the event-stream level, but use a different song container and `MUSIC.DIR` instead of `PIANODIR.FIL`.
 - Generated `MUSIC.DIR` records copy the relevant `.MDA` header slice and use the logical slot map in `MUSIC.DIR`.

@@ -5,13 +5,14 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [0.6.9] - 2026-06-07
+## [0.6.10] - 2026-06-11
 
 ### Added
 
 - `File > Save As ZIP...` for exporting the current listed files as a single ZIP archive while leaving originals untouched.
 - Help menu feedback submission through the same signed support-report channel, using the `feedback.php` endpoint.
 - Settings menu font-size choices for regular, small, and compact UI text.
+- `Utilities > Apply Pedal Compatibility...` as a standalone MIDI utility for optional pedal compatibility transforms outside the E-SEQ conversion workflow.
 
 ### Changed
 
@@ -19,6 +20,7 @@ with release sections grouped by version and date.
   lawful-use, non-affiliation, and third-party trademark notices.
 - E-SEQ to MIDI exports include the short APS conversion text marker, but omit APS archival round-trip header metadata by default while still accepting older metadata when present.
 - E-SEQ to MIDI and SMF1 to SMF0 conversions now preserve pedal channels by default. `Utilities > Apply Pedal Compatibility...` can stage conservative legacy Disklavier channel-3 pedal repair, binary pedal values, duplicate/stuck pedal cleanup, or Piano Roll Vector note-18 sustain markers for listed MIDI files.
+- Pedal compatibility options now start unchecked every time so preservation remains the default behavior unless a user explicitly stages a transform.
 - Portuguese locale aliases such as `pt-PT` now use the included Brazilian Portuguese translation set instead of falling back to English.
 
 ### Removed
@@ -47,7 +49,7 @@ with release sections grouped by version and date.
 - Optional `Do not show this dialog again` choice for Save As Image completion messages.
 - `Trim Title Spaces` utility and hotkey, plus a Read Floppy option to clean Disklavier-spaced titles after normal or Greaseweazle reads.
 - `Help > Report a Bug...` action with a support-report dialog that sends app context and optional recent console output.
-- `Report This Bug...` button on unexpected operation-failure dialogs, prefilled with the error message and recent logs enabled.
+- `Report A Bug...` button on unexpected operation-failure dialogs, prefilled with the error message and recent logs enabled.
 - Empty file-list overlay text plus drag-hover highlighting for supported file drops.
 - Bulgarian language support across the language selector, menus, dialogs, common workflows, and fallback catalog coverage.
 - SoundFont picker and manager in File Inspection for choosing local SoundFonts or downloading SoundFonts from the app's online catalog, including recommended/category details and automatic unpacking for common archives.
