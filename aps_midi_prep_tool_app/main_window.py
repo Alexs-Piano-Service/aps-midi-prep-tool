@@ -93,7 +93,13 @@ from .eseq_converter import (
     is_eseq_file,
 )
 from .dos83_renamer import apply_midi_dos83_plan, build_midi_dos83_plan, validate_midi_dos83_plan
-from .midi_type0_converter import _encode_vlq, _parse_midi_chunks, _parse_track_events, convert_midi_file_to_type0_path
+from .midi_type0_converter import (
+    _encode_vlq,
+    _parse_midi_chunks,
+    _parse_track_events,
+    apply_pedal_compatibility_to_midi_path,
+    convert_midi_file_to_type0_path,
+)
 from .ui_utils import (
     center_dialog_on_parent,
     embedded_logo_dt,
@@ -4195,7 +4201,6 @@ class MidiTitleWindow(QMainWindow):
     SETTINGS_APP = APP_SETTINGS_APP
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
-    SETTING_NORMALIZE_DISKLAVIER_MIDI = "normalize_disklavier_midi"
     SETTING_HIDE_STATUS = "hide_status"
     SETTING_HIDE_QUICK_PANEL = "hide_quick_panel"
     SETTING_HIDE_ALBUM_METADATA = "hide_album_metadata"
@@ -4640,6 +4645,7 @@ class MidiTitleWindow(QMainWindow):
             "Image/Floppy Mode utility: queue conversion of listed MIDI files to Yamaha E-SEQ."
         )
         self.convertMidiToEseqButton.clicked.connect(self.convert_all_midi_to_eseq)
+
         self._apply_compact_button_labels()
 
         utilities_buttons_layout.addWidget(self.renameAllButton, 1, 0)
@@ -4984,6 +4990,13 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesTrimTitleSpacesAction.triggered.connect(self.trim_title_spaces_for_all)
         self.utilitiesMenu.addAction(self.utilitiesTrimTitleSpacesAction)
 
+        self.utilitiesPedalCompatibilityAction = QAction("Apply Pedal Compatibility...", self)
+        self.utilitiesPedalCompatibilityAction.setToolTip(
+            self._lt("Apply optional pedal compatibility transforms to listed MIDI files.")
+        )
+        self.utilitiesPedalCompatibilityAction.triggered.connect(self.show_pedal_compatibility_utility)
+        self.utilitiesMenu.addAction(self.utilitiesPedalCompatibilityAction)
+
         self.utilitiesSmfAction = QAction("Convert All SMF1 to SMF0", self)
         self.utilitiesSmfAction.triggered.connect(self.convert_all_to_type0)
 
@@ -4993,23 +5006,11 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesMidiToEseqAction = QAction("Convert All MIDI to E-SEQ", self)
         self.utilitiesMidiToEseqAction.triggered.connect(self.convert_all_midi_to_eseq)
 
-        self.utilitiesNormalizeDisklavierMidiAction = QAction("Normalize Disklavier MIDI on Conversion", self)
-        self.utilitiesNormalizeDisklavierMidiAction.setCheckable(True)
-        self.utilitiesNormalizeDisklavierMidiAction.setChecked(self._normalize_disklavier_midi_on_conversion())
-        self.utilitiesNormalizeDisklavierMidiAction.setToolTip(
-            self._lt(
-                "When converting E-SEQ to MIDI or SMF1 to SMF0, move Disklavier pedal controllers from channel 3 to channel 1 and add Acoustic Grand Piano on channel 1 when needed."
-            )
-        )
-        self.utilitiesNormalizeDisklavierMidiAction.toggled.connect(self.toggle_normalize_disklavier_midi)
-
         self.utilitiesMenu.addSeparator()
         self.utilitiesConvertMenu = self.utilitiesMenu.addMenu(self._lt("Convert"))
         self.utilitiesConvertMenu.addAction(self.utilitiesSmfAction)
         self.utilitiesConvertMenu.addAction(self.utilitiesEseqToMidiAction)
         self.utilitiesConvertMenu.addAction(self.utilitiesMidiToEseqAction)
-        self.utilitiesConvertMenu.addSeparator()
-        self.utilitiesConvertMenu.addAction(self.utilitiesNormalizeDisklavierMidiAction)
 
         self.utilitiesFormatFloppyAction = QAction("Format Floppy Disk...", self)
         self.utilitiesFormatFloppyAction.setToolTip(
@@ -5583,6 +5584,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.smf0", "category": "Utilities", "label": "Convert All SMF1 to SMF0", "action": "utilitiesSmfAction", "default": "Ctrl+Shift+0"},
             {"id": "utilities.eseq_to_midi", "category": "Utilities", "label": "Convert All E-SEQ to MIDI", "action": "utilitiesEseqToMidiAction", "default": "Ctrl+Shift+M"},
             {"id": "utilities.midi_to_eseq", "category": "Utilities", "label": "Convert All MIDI to E-SEQ", "action": "utilitiesMidiToEseqAction", "default": "Ctrl+Shift+E"},
+            {"id": "utilities.pedal_compatibility", "category": "Utilities", "label": "Apply Pedal Compatibility...", "action": "utilitiesPedalCompatibilityAction", "default": ""},
             {"id": "utilities.recover_image", "category": "Disk", "label": "Recover Damaged Image...", "action": "utilitiesRecoverImageAction", "default": "Ctrl+Shift+D"},
             {"id": "utilities.format_floppy", "category": "Disk", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
             {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
@@ -5871,7 +5873,7 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesSmfAction", "Convert All SMF1 to SMF0", "0"),
             ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
             ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ", "M"),
-            ("utilitiesNormalizeDisklavierMidiAction", "Normalize Disklavier MIDI on Conversion", "N"),
+            ("utilitiesPedalCompatibilityAction", "Apply Pedal Compatibility...", "P"),
             ("utilitiesFormatFloppyAction", "Format Floppy Disk...", "F"),
             ("helpCheckUpdatesAction", "Check for Updates...", "C"),
             ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup", "S"),
@@ -5885,12 +5887,10 @@ class MidiTitleWindow(QMainWindow):
             action = getattr(self, action_name, None)
             if action is not None:
                 action.setText(self._menu_action_text(text, mnemonic))
-        normalize_action = getattr(self, "utilitiesNormalizeDisklavierMidiAction", None)
-        if normalize_action is not None:
-            normalize_action.setToolTip(
-                self._lt(
-                    "When converting E-SEQ to MIDI or SMF1 to SMF0, move Disklavier pedal controllers from channel 3 to channel 1 and add Acoustic Grand Piano on channel 1 when needed."
-                )
+        pedal_compatibility_action = getattr(self, "utilitiesPedalCompatibilityAction", None)
+        if pedal_compatibility_action is not None:
+            pedal_compatibility_action.setToolTip(
+                self._lt("Apply optional pedal compatibility transforms to listed MIDI files.")
             )
 
     def eventFilter(self, obj, event):
@@ -8887,15 +8887,142 @@ class MidiTitleWindow(QMainWindow):
     def _auto_write_protect_on_load(self):
         return self.settings.value(self.SETTING_AUTO_WRITE_PROTECT_ON_LOAD, True, type=bool)
 
-    def _normalize_disklavier_midi_on_conversion(self):
-        return self.settings.value(self.SETTING_NORMALIZE_DISKLAVIER_MIDI, True, type=bool)
+    def _midi_rows_for_pedal_compatibility(self):
+        rows = []
+        for row in range(self.table.rowCount()):
+            if self._is_special_pianodir_row(row):
+                continue
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            path = path_item.text()
+            if self.is_image_mode():
+                if self._image_path_is_midi(path):
+                    rows.append((row, path))
+            elif self._listed_file_title_mode(path) == "midi":
+                rows.append((row, path))
+        return rows
 
-    def toggle_normalize_disklavier_midi(self, enabled):
-        enabled = bool(enabled)
-        self.settings.setValue(self.SETTING_NORMALIZE_DISKLAVIER_MIDI, enabled)
-        action = getattr(self, "utilitiesNormalizeDisklavierMidiAction", None)
-        if action is not None and action.isChecked() != enabled:
-            action.setChecked(enabled)
+    def _set_pedal_compatibility_enabled(self, enabled, disabled_tooltip=""):
+        action = getattr(self, "utilitiesPedalCompatibilityAction", None)
+        if action is None:
+            return
+        if enabled:
+            tooltip = "Apply optional pedal compatibility transforms to listed MIDI files."
+        else:
+            tooltip = disabled_tooltip or "Add MIDI files before using pedal compatibility tools."
+        action.setEnabled(bool(enabled))
+        action.setToolTip(self._lt(tooltip))
+        action.setStatusTip(self._lt(tooltip))
+
+    def _pedal_compatibility_options_dialog(self, file_count):
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._lt("Apply Pedal Compatibility"))
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            self._lt("Choose pedal compatibility transforms to apply to listed MIDI files.")
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        count_note = QLabel(
+            self._lt("Changes will be staged for {count} listed MIDI file(s); nothing is written until you save.").format(
+                count=file_count,
+            )
+        )
+        count_note.setWordWrap(True)
+        layout.addWidget(count_note)
+
+        options_group = QGroupBox(self._lt("MIDI Files"))
+        options_layout = QVBoxLayout(options_group)
+        options_layout.setContentsMargins(12, 10, 12, 10)
+        options_layout.setSpacing(8)
+
+        repair_checkbox = QCheckBox(self._lt("Repair legacy Disklavier channel-3 pedal"))
+        repair_checkbox.setToolTip(
+            self._lt("For listed MIDI files, move channel-3 pedal controllers to channel 1 only if channel 1 does not already contain pedal controller data.")
+        )
+        options_layout.addWidget(repair_checkbox)
+
+        binary_checkbox = QCheckBox(self._lt("Convert pedal controllers to on/off values"))
+        binary_checkbox.setToolTip(
+            self._lt("For CC64, CC66, and CC67, write values below 64 as 0 and values 64 or higher as 127. This removes half-pedal detail.")
+        )
+        options_layout.addWidget(binary_checkbox)
+
+        cleanup_checkbox = QCheckBox(self._lt("Clean up duplicate/stuck pedal events"))
+        cleanup_checkbox.setToolTip(
+            self._lt("Remove repeated identical CC64, CC66, and CC67 values and add final off events for pedals left nonzero at the end.")
+        )
+        options_layout.addWidget(cleanup_checkbox)
+
+        vpr_checkbox = QCheckBox(self._lt("Add Piano Roll Vector note-18 sustain markers"))
+        vpr_checkbox.setToolTip(
+            self._lt("Keep CC64 sustain events and add note 18 marker notes for player-piano roll vector tools that use note 18 as sustain.")
+        )
+        options_layout.addWidget(vpr_checkbox)
+
+        layout.addWidget(options_group)
+
+        preservation_note = QLabel(
+            self._lt("All pedal compatibility options start unchecked so preservation remains the normal default.")
+        )
+        preservation_note.setWordWrap(True)
+        layout.addWidget(preservation_note)
+
+        buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        apply_button = buttons.button(QDialogButtonBox.Ok)
+        if apply_button is not None:
+            apply_button.setText(self._lt("Apply"))
+            apply_button.setEnabled(False)
+
+        checkboxes = (repair_checkbox, binary_checkbox, cleanup_checkbox, vpr_checkbox)
+
+        def update_apply_enabled():
+            if apply_button is not None:
+                apply_button.setEnabled(any(checkbox.isChecked() for checkbox in checkboxes))
+
+        for checkbox in checkboxes:
+            checkbox.toggled.connect(update_apply_enabled)
+
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return None
+
+        return {
+            "repair_disklavier_pedal": repair_checkbox.isChecked(),
+            "binary_pedal": binary_checkbox.isChecked(),
+            "pedal_cleanup": cleanup_checkbox.isChecked(),
+            "virtual_piano_roll_pedal": vpr_checkbox.isChecked(),
+        }
+
+    def show_pedal_compatibility_utility(self):
+        if not self.choose_button.isEnabled():
+            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+            return
+
+        rows = self._midi_rows_for_pedal_compatibility()
+        if not rows:
+            QMessageBox.information(self, "No MIDI Files", "No MIDI files are currently listed.")
+            return
+
+        options = self._pedal_compatibility_options_dialog(len(rows))
+        if options is None:
+            return
+        if not any(options.values()):
+            return
+
+        if self.is_image_mode():
+            self._apply_pedal_compatibility_to_image_rows(rows, options)
+        else:
+            self._apply_pedal_compatibility_to_regular_rows(rows, options)
 
     def toggle_auto_write_protect_on_load(self, enabled):
         self.settings.setValue(self.SETTING_AUTO_WRITE_PROTECT_ON_LOAD, bool(enabled))
@@ -9253,6 +9380,19 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesMidiToEseqAction.setEnabled(self.convertMidiToEseqButton.isEnabled())
         self.utilitiesMidiToEseqAction.setToolTip(self.convertMidiToEseqButton.toolTip())
         self.utilitiesMidiToEseqAction.setStatusTip(self.convertMidiToEseqButton.toolTip())
+
+        if hasattr(self, "utilitiesPedalCompatibilityAction"):
+            if self.choose_button.isEnabled():
+                pedal_rows = self._midi_rows_for_pedal_compatibility()
+                self._set_pedal_compatibility_enabled(
+                    bool(pedal_rows),
+                    "Add MIDI files before using pedal compatibility tools.",
+                )
+            else:
+                self._set_pedal_compatibility_enabled(
+                    False,
+                    "Please wait for the current operation to finish before using pedal compatibility tools.",
+                )
 
         if hasattr(self, "utilitiesFormatFloppyAction"):
             enabled = self.choose_button.isEnabled()
@@ -9860,7 +10000,6 @@ class MidiTitleWindow(QMainWindow):
         changed = convert_midi_file_to_type0_path(
             source_path,
             type0_path,
-            normalize_disklavier=False,
         )
         if changed:
             return type0_path
@@ -10803,7 +10942,6 @@ class MidiTitleWindow(QMainWindow):
                 source_material_path,
                 output_temp_path,
                 title_override=title_override,
-                normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
             )
         else:
             source_material_path = self._type0_midi_source_for_eseq_conversion(
@@ -15551,7 +15689,6 @@ class MidiTitleWindow(QMainWindow):
                 changed = convert_midi_file_to_type0_path(
                     source_material_path,
                     output_temp_path,
-                    normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
                 )
                 if not changed:
                     unchanged_count += 1
@@ -15590,6 +15727,203 @@ class MidiTitleWindow(QMainWindow):
                 errors,
                 warning=True,
                 guidance="The original files were not changed; remove or replace the listed files and try again",
+            )
+
+    def _regular_pedal_source_material_path(self, full_path, scratch_dir):
+        source_material_path = self._regular_source_material_path(full_path)
+        pending_title = self.pendingEdits.get(full_path)
+        if pending_title is None:
+            return source_material_path
+
+        titled_source_path = os.path.join(
+            scratch_dir,
+            f"{uuid.uuid4().hex}_{os.path.basename(full_path)}",
+        )
+        error = update_midi_title_to_path(source_material_path, pending_title, titled_source_path)
+        if error:
+            raise EseqConversionError(error)
+        return titled_source_path
+
+    def _apply_pedal_compatibility_to_regular_rows(self, rows, options):
+        progressDialog = QProgressDialog(
+            "Applying pedal compatibility...",
+            "Cancel",
+            0,
+            len(rows),
+            self,
+        )
+        self._prepare_progress_dialog(progressDialog)
+
+        changed_count = 0
+        unchanged_count = 0
+        errors = []
+        scratch_dir = self._ensure_midi_scratch_dir()
+        for index, (_initial_row, full_path) in enumerate(rows, start=1):
+            if progressDialog.wasCanceled():
+                break
+
+            row = None
+            for candidate_row in range(self.table.rowCount()):
+                item = self.table.item(candidate_row, 1)
+                if item is not None and item.text() == full_path:
+                    row = candidate_row
+                    break
+            if row is None:
+                continue
+
+            target_filename = self._regular_row_output_filename(row)
+            output_temp_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
+            try:
+                source_material_path = self._regular_pedal_source_material_path(full_path, scratch_dir)
+                changed = apply_pedal_compatibility_to_midi_path(
+                    source_material_path,
+                    output_temp_path,
+                    **options,
+                )
+                if not changed:
+                    unchanged_count += 1
+                    continue
+                self._apply_regular_row_pending_conversion(
+                    row,
+                    full_path,
+                    target_filename,
+                    output_temp_path,
+                    "midi",
+                    overwrite_original=True,
+                )
+                changed_count += 1
+            except Exception as exc:
+                errors.append(f"{os.path.basename(full_path)}: {exc}")
+            finally:
+                progressDialog.setValue(index)
+                QApplication.processEvents()
+        progressDialog.close()
+
+        status_parts = [f"Staged pedal compatibility changes for {changed_count} MIDI file(s)."]
+        if unchanged_count:
+            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+        if changed_count:
+            status_parts.append("Use Save to overwrite the originals, or Save As to write copies.")
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) failed.")
+        self.status_label.setText("\n".join(status_parts))
+        self.refresh_midi_type_indicators()
+        self._refresh_regular_mode_action_state()
+
+        if errors:
+            self._show_error_list(
+                "Pedal Compatibility Issues",
+                "Some MIDI files could not be updated",
+                errors,
+                warning=True,
+                guidance="The original files were not changed; remove or replace the listed files and try again",
+            )
+
+    def _image_pedal_source_material_path(self, source_path):
+        source_host_path = self._pending_or_extracted_image_path(source_path)
+        if not source_host_path or not os.path.isfile(source_host_path):
+            raise EseqConversionError(f"Source file could not be found: {os.path.basename(source_path)}")
+
+        pending_title = self.pendingImageTitleEdits.get(source_path)
+        if pending_title is None:
+            return source_host_path
+
+        titled_source_path = os.path.join(
+            self.image_session.patched_dir,
+            f"{uuid.uuid4().hex}_{os.path.basename(source_path)}",
+        )
+        error = update_midi_title_to_path(source_host_path, pending_title, titled_source_path)
+        if error:
+            raise EseqConversionError(error)
+        return titled_source_path
+
+    def _apply_pedal_compatibility_to_image_rows(self, rows, options):
+        if self.image_session is None:
+            QMessageBox.information(
+                self,
+                "Image Mode Only",
+                "This utility is available while editing a MIDI folder, floppy image, or floppy session.",
+            )
+            return
+
+        progressDialog = QProgressDialog(
+            "Applying pedal compatibility...",
+            "Cancel",
+            0,
+            len(rows),
+            self,
+        )
+        self._prepare_progress_dialog(progressDialog)
+
+        changed_count = 0
+        unchanged_count = 0
+        errors = []
+        for index, (row, source_path) in enumerate(rows, start=1):
+            if progressDialog.wasCanceled():
+                break
+
+            try:
+                current_path = self._row_final_image_path(row)
+                source_host_path = self._image_pedal_source_material_path(source_path)
+                output_host_path = os.path.join(
+                    self.image_session.patched_dir,
+                    f"{uuid.uuid4().hex}_{os.path.basename(current_path)}",
+                )
+                changed = apply_pedal_compatibility_to_midi_path(
+                    source_host_path,
+                    output_host_path,
+                    **options,
+                )
+                if not changed:
+                    unchanged_count += 1
+                    continue
+
+                size = os.path.getsize(output_host_path)
+                is_midi, title, midi_type, title_mode, order_key = self._probe_image_file(
+                    current_path,
+                    size,
+                    output_host_path,
+                )
+                self._apply_image_row_conversion(
+                    row,
+                    source_path,
+                    current_path,
+                    output_host_path,
+                    title=title,
+                    midi_type=midi_type,
+                    is_midi=is_midi,
+                    title_mode=title_mode,
+                    size=size,
+                    order_key=order_key,
+                )
+                changed_count += 1
+            except Exception as exc:
+                filename_item = self.table.item(row, 3)
+                label = filename_item.text() if filename_item is not None else os.path.basename(source_path)
+                errors.append(f"{label}: {exc}")
+            finally:
+                progressDialog.setValue(index)
+                QApplication.processEvents()
+        progressDialog.close()
+
+        status_parts = [f"Queued pedal compatibility changes for {changed_count} MIDI file(s)."]
+        if unchanged_count:
+            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+        if self.image_session is not None:
+            remaining = self._pending_image_space_remaining()
+            status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) failed.")
+        self.status_label.setText("\n".join(status_parts))
+        self._refresh_image_mode_action_state()
+
+        if errors:
+            self._show_error_list(
+                "Pedal Compatibility Issues",
+                "Some MIDI files could not be updated",
+                errors,
+                warning=True,
+                guidance="Nothing has been written yet; remove or replace the listed files and try again",
             )
 
     def _dos_eseq_filename(self, filename, *, variant=None, used_filenames=None):
@@ -15731,7 +16065,6 @@ class MidiTitleWindow(QMainWindow):
                 source_host_path,
                 output_host_path,
                 title_override=title_override,
-                normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
             )
         else:
             source_host_path = self._type0_midi_source_for_eseq_conversion(
@@ -15860,7 +16193,6 @@ class MidiTitleWindow(QMainWindow):
                     source_host_path,
                     dest_path,
                     title_override=title_override,
-                    normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
                 )
             else:
                 self._write_image_row_to_destination(source_path, dest_path)
@@ -16192,7 +16524,6 @@ class MidiTitleWindow(QMainWindow):
                         source_material_path,
                         output_temp_path,
                         title_override=title_override,
-                        normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
                     )
                 else:
                     source_material_path = self._type0_midi_source_for_eseq_conversion(
@@ -17089,7 +17420,6 @@ class MidiTitleWindow(QMainWindow):
                 convert_eseq_file_to_midi_path(
                     host_path,
                     staged_path,
-                    normalize_disklavier=self._normalize_disklavier_midi_on_conversion(),
                 )
             else:
                 raise FloppyImageError(f"Unsupported automatic conversion kind: {conversion_kind}")

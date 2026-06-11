@@ -174,7 +174,7 @@ MIDI channel control-change messages have status bytes `0xB0..0xBF`, followed by
 
 This matters because Disklavier piano playback often uses dense note and pedal data, and because un-restored `CC7 = 0` can make a generic MIDI synthesizer produce no audible piano despite valid note events.
 
-APS MIDI Prep Tool's compatibility-oriented E-SEQ-to-MIDI and SMF1-to-SMF0 conversions normalize controller-only legacy Disklavier pedal lanes by moving pedal controllers from MIDI channel 3 to MIDI channel 1 when channel 1 contains piano notes and channel 3 does not contain notes. The user-facing conversion option can disable this for archival channel-for-channel exports.
+APS MIDI Prep Tool preserves pedal channels and controller values by default. Its separate `Utilities > Apply Pedal Compatibility...` MIDI utility can repair controller-only legacy Disklavier pedal lanes by moving pedal controllers from MIDI channel 3 to MIDI channel 1 when channel 1 contains piano notes, channel 1 does not already contain pedal controller data, and channel 3 does not contain notes. Other optional utility transforms can convert CC64/CC66/CC67 pedal values to binary `0/127`, remove duplicate pedal values and add final off events for pedals left nonzero at the end, or keep CC64 sustain data while adding MIDI note 18 markers for Piano Roll Vector style roll rendering.
 
 ---
 
@@ -809,7 +809,7 @@ For SMPTE-timed MIDI divisions, require a special conversion mode because E-SEQ 
 |---|---|---|
 | `8n kk vv` Note Off | `8n kk vv`, or `9n kk 00` by normalization policy | Both are valid MIDI-level note-off representations. |
 | `9n kk vv` Note On | Copy | Preserve velocity. |
-| `Bn cc vv` Control Change | Copy or policy-rewrite | Preserve pedal data; do not quantize continuous pedal unless requested. |
+| `Bn cc vv` Control Change | Copy | Preserve pedal data by default; optional pedal compatibility edits are applied later as a MIDI-file utility. |
 | `Cn pp` Program Change | Copy or omit | Many E-SEQ files omit tick-0 piano program change. |
 | `Dn`, `En`, `An` | Copy | Supported by the parser. |
 | `FF 51` Tempo | Header tempo and `FB` tempo factors | See section 8. |

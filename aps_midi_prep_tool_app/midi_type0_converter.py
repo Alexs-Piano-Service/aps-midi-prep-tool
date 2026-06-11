@@ -20,6 +20,8 @@ DISKLAVIER_PIANO_CHANNEL = 0
 DISKLAVIER_LEGACY_PEDAL_CHANNEL = 2
 DISKLAVIER_ACOUSTIC_GRAND_PROGRAM = 0
 DISKLAVIER_PEDAL_CONTROLLERS = {64, 66, 67}
+VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE = 18
+VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY = 1
 
 
 @dataclass(frozen=True)
@@ -225,6 +227,392 @@ def _is_channel1_program_change(raw):
     )
 
 
+def _is_pedal_controller(raw, channel=None):
+    if not (
+        len(raw) >= 3
+        and (raw[0] & 0xF0) == 0xB0
+        and raw[1] in DISKLAVIER_PEDAL_CONTROLLERS
+    ):
+        return False
+    return channel is None or (raw[0] & 0x0F) == channel
+
+
+def _is_sustain_controller(raw):
+    return len(raw) >= 3 and (raw[0] & 0xF0) == 0xB0 and raw[1] == 64
+
+
+def _is_note_event_for_number(raw, note_number):
+    return (
+        len(raw) >= 3
+        and (raw[0] & 0xF0) in (0x80, 0x90)
+        and raw[1] == note_number
+    )
+
+
+def _replace_event_raw(event, raw):
+    return (*event[:-1], raw)
+
+
+def _event_sequence_value(event):
+    if len(event) == 4:
+        return event[2]
+    return event[1]
+
+
+def _make_synthetic_event_like(reference_event, abs_tick, sequence, raw):
+    if len(reference_event) == 4:
+        return (abs_tick, reference_event[1], sequence, raw)
+    return (abs_tick, sequence, raw)
+
+
+def _non_pedal_note_channels(events):
+    channels = set()
+    for event in events:
+        raw = event[-1]
+        if (
+            len(raw) >= 3
+            and (raw[0] & 0xF0) == 0x90
+            and raw[2] > 0
+            and raw[1] != VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE
+        ):
+            channels.add(raw[0] & 0x0F)
+    return channels
+
+
+def _virtual_piano_roll_target_channel(source_channel, note_channels):
+    if source_channel in note_channels:
+        return source_channel
+    if DISKLAVIER_PIANO_CHANNEL in note_channels:
+        return DISKLAVIER_PIANO_CHANNEL
+    if len(note_channels) == 1:
+        return next(iter(note_channels))
+    return source_channel
+
+
+def apply_pedal_controller_options_to_midi_events(
+    events,
+    *,
+    binary_pedal=False,
+    pedal_cleanup=False,
+    end_tick=None,
+):
+    if not events or not (binary_pedal or pedal_cleanup):
+        return events, False
+
+    tuple_size = len(events[0])
+    if tuple_size not in (3, 4):
+        raise ValueError("Unsupported MIDI event tuple shape for pedal cleanup.")
+
+    source_events = sorted(events, key=lambda item: item[:-1])
+    changed = False
+    adjusted = []
+
+    for event in source_events:
+        raw = event[-1]
+        if binary_pedal and _is_pedal_controller(raw):
+            binary_value = 127 if raw[2] >= 64 else 0
+            if raw[2] != binary_value:
+                raw = raw[:2] + bytes([binary_value])
+                event = _replace_event_raw(event, raw)
+                changed = True
+        adjusted.append(event)
+
+    if not pedal_cleanup:
+        return (adjusted, True) if changed else (events, False)
+
+    cleaned = []
+    previous_values = {}
+    last_values = {}
+    last_events = {}
+    for event in adjusted:
+        raw = event[-1]
+        if _is_pedal_controller(raw):
+            key = (raw[0] & 0x0F, raw[1])
+            value = raw[2]
+            if previous_values.get(key) == value:
+                changed = True
+                continue
+            previous_values[key] = value
+            last_values[key] = value
+            last_events[key] = event
+        cleaned.append(event)
+
+    if last_values:
+        close_tick = max(
+            max((event[0] for event in cleaned), default=0),
+            int(end_tick or 0),
+        )
+        sequence = max((_event_sequence_value(event) for event in cleaned), default=-1) + 1
+        for channel, controller in sorted(last_values):
+            if last_values[(channel, controller)] <= 0:
+                continue
+            cleaned.append(
+                _make_synthetic_event_like(
+                    last_events[(channel, controller)],
+                    close_tick,
+                    sequence,
+                    bytes([0xB0 | channel, controller, 0]),
+                )
+            )
+            sequence += 1
+            changed = True
+
+    return (cleaned, True) if changed else (events, False)
+
+
+def add_virtual_piano_roll_pedal_notes_to_midi_events(events, *, end_tick=None):
+    if not events:
+        return events, False
+
+    tuple_size = len(events[0])
+    if tuple_size not in (3, 4):
+        raise ValueError("Unsupported MIDI event tuple shape for pedal-note conversion.")
+
+    source_events = sorted(events, key=lambda item: item[:-1])
+    note_channels = _non_pedal_note_channels(source_events)
+    channels_with_note18 = {
+        raw[0] & 0x0F
+        for *_, raw in source_events
+        if _is_note_event_for_number(raw, VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE)
+    }
+
+    output = []
+    active_targets = {}
+    sequence = 0
+    last_tick = 0
+    changed = False
+
+    for event in source_events:
+        abs_tick = event[0]
+        raw = event[-1]
+        last_tick = max(last_tick, abs_tick)
+        output.append(_make_synthetic_event_like(event, abs_tick, sequence, raw))
+        sequence += 1
+
+        if not _is_sustain_controller(raw):
+            continue
+
+        source_channel = raw[0] & 0x0F
+        target_channel = _virtual_piano_roll_target_channel(source_channel, note_channels)
+        if target_channel in channels_with_note18:
+            continue
+
+        if raw[2] > 0:
+            if target_channel in active_targets:
+                continue
+            active_targets[target_channel] = event
+            output.append(
+                _make_synthetic_event_like(
+                    event,
+                    abs_tick,
+                    sequence,
+                    bytes([
+                        0x90 | target_channel,
+                        VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE,
+                        VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY,
+                    ]),
+                )
+            )
+            sequence += 1
+            changed = True
+        elif target_channel in active_targets:
+            source_event = active_targets.pop(target_channel)
+            output.append(
+                _make_synthetic_event_like(
+                    source_event,
+                    abs_tick,
+                    sequence,
+                    bytes([
+                        0x80 | target_channel,
+                        VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE,
+                        VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY,
+                    ]),
+                )
+            )
+            sequence += 1
+            changed = True
+
+    close_tick = max(last_tick, int(end_tick or 0))
+    for target_channel, source_event in sorted(active_targets.items()):
+        output.append(
+            _make_synthetic_event_like(
+                source_event,
+                close_tick,
+                sequence,
+                bytes([
+                    0x80 | target_channel,
+                    VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE,
+                    VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY,
+                ]),
+            )
+        )
+        sequence += 1
+        changed = True
+
+    return output, changed
+
+
+def _build_raw_midi_track(events, end_tick=0):
+    track = bytearray()
+    prev_tick = 0
+    for abs_tick, order, raw in sorted(events, key=lambda item: (item[0], item[1])):
+        if abs_tick < prev_tick:
+            raise ValueError("MIDI events are out of order.")
+        track.extend(_encode_vlq(abs_tick - prev_tick))
+        track.extend(raw)
+        prev_tick = abs_tick
+
+    close_tick = max(prev_tick, int(end_tick or 0))
+    track.extend(_encode_vlq(close_tick - prev_tick))
+    track.extend(b"\xFF\x2F\x00")
+    return bytes(track)
+
+
+def _read_track_event_groups(midi_bytes, track_chunks):
+    track_event_groups = []
+    max_end_tick = 0
+    for chunk in track_chunks:
+        track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
+        events, end_tick = _parse_track_events(track_data)
+        track_event_groups.append({"events": list(events), "end_tick": end_tick})
+        max_end_tick = max(max_end_tick, end_tick)
+    return track_event_groups, max_end_tick
+
+
+def _merge_track_event_groups(track_event_groups):
+    merged = []
+    for track_index, track_info in enumerate(track_event_groups):
+        for abs_tick, order, raw in track_info["events"]:
+            merged.append((abs_tick, track_index, order, raw))
+    merged.sort(key=lambda item: (item[0], item[1], item[2]))
+    return merged
+
+
+def _replace_track_event_groups_from_merged(track_event_groups, merged_events):
+    grouped = [[] for _ in track_event_groups]
+    for abs_tick, track_index, order, raw in merged_events:
+        if track_index < 0 or track_index >= len(grouped):
+            raise ValueError("Pedal transform produced an invalid MIDI track index.")
+        grouped[track_index].append((abs_tick, order, raw))
+    for track_index, events in enumerate(grouped):
+        track_event_groups[track_index]["events"] = events
+
+
+def _rebuild_midi_with_track_event_groups(midi_bytes, header_end, chunks, track_event_groups):
+    rebuilt = bytearray(midi_bytes[:header_end])
+    track_index = 0
+    for chunk in chunks:
+        if chunk["id"] == b"MTrk":
+            track_info = track_event_groups[track_index]
+            track_data = _build_raw_midi_track(
+                track_info["events"],
+                end_tick=track_info["end_tick"],
+            )
+            rebuilt.extend(b"MTrk")
+            rebuilt.extend(len(track_data).to_bytes(4, "big"))
+            rebuilt.extend(track_data)
+            track_index += 1
+            continue
+        rebuilt.extend(midi_bytes[chunk["start"]:chunk["data_end"]])
+
+    trailing_start = chunks[-1]["data_end"] if chunks else header_end
+    rebuilt.extend(midi_bytes[trailing_start:])
+    return bytes(rebuilt)
+
+
+def apply_pedal_compatibility_to_midi_bytes(
+    midi_bytes,
+    *,
+    repair_disklavier_pedal=False,
+    binary_pedal=False,
+    pedal_cleanup=False,
+    virtual_piano_roll_pedal=False,
+):
+    if not (
+        repair_disklavier_pedal
+        or binary_pedal
+        or pedal_cleanup
+        or virtual_piano_roll_pedal
+    ):
+        return midi_bytes, False
+
+    header_end, format_type, _, chunks = _parse_midi_chunks(midi_bytes)
+    if format_type == 2:
+        raise ValueError("MIDI format 2 files are not supported for pedal compatibility utilities.")
+
+    track_chunks = [chunk for chunk in chunks if chunk["id"] == b"MTrk"]
+    if not track_chunks:
+        raise ValueError("No track chunks were found in this MIDI file.")
+
+    track_event_groups, max_end_tick = _read_track_event_groups(midi_bytes, track_chunks)
+    merged_events = _merge_track_event_groups(track_event_groups)
+    changed = False
+
+    if repair_disklavier_pedal:
+        merged_events, normalization_changed = _normalize_disklavier_merged_events(merged_events)
+        changed = changed or normalization_changed
+
+    if binary_pedal or pedal_cleanup:
+        merged_events, pedal_options_changed = apply_pedal_controller_options_to_midi_events(
+            merged_events,
+            binary_pedal=binary_pedal,
+            pedal_cleanup=pedal_cleanup,
+            end_tick=max_end_tick,
+        )
+        changed = changed or pedal_options_changed
+
+    if virtual_piano_roll_pedal:
+        merged_events, pedal_note_changed = add_virtual_piano_roll_pedal_notes_to_midi_events(
+            merged_events,
+            end_tick=max_end_tick,
+        )
+        changed = changed or pedal_note_changed
+
+    if not changed:
+        return midi_bytes, False
+
+    _replace_track_event_groups_from_merged(track_event_groups, merged_events)
+    rebuilt = _rebuild_midi_with_track_event_groups(midi_bytes, header_end, chunks, track_event_groups)
+    return rebuilt, rebuilt != midi_bytes
+
+
+def apply_pedal_compatibility_to_midi_path(
+    source_path,
+    dest_path,
+    *,
+    repair_disklavier_pedal=False,
+    binary_pedal=False,
+    pedal_cleanup=False,
+    virtual_piano_roll_pedal=False,
+):
+    if not os.path.isfile(source_path):
+        raise ValueError("File does not exist.")
+
+    with open(source_path, "rb") as handle:
+        midi_bytes = handle.read()
+
+    converted_bytes, changed = apply_pedal_compatibility_to_midi_bytes(
+        midi_bytes,
+        repair_disklavier_pedal=repair_disklavier_pedal,
+        binary_pedal=binary_pedal,
+        pedal_cleanup=pedal_cleanup,
+        virtual_piano_roll_pedal=virtual_piano_roll_pedal,
+    )
+    if not changed:
+        return False
+
+    temp_path = f"{dest_path}.aps_pedal_{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "wb") as handle:
+            handle.write(converted_bytes)
+        os.replace(temp_path, dest_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    return True
+
+
 def _channel1_acoustic_grand_event():
     return bytes([0xC0 | DISKLAVIER_PIANO_CHANNEL, DISKLAVIER_ACOUSTIC_GRAND_PROGRAM])
 
@@ -250,17 +638,26 @@ def _normalize_disklavier_merged_events(merged_events):
     normalized = []
     changed = False
     first_channel1_note_tick = None
+    first_channel1_note_track = 0
     has_channel1_program_before_notes = False
     legacy_pedal_channel_has_notes = False
+    channel1_has_pedal_controller = False
 
     for abs_tick, track_index, order, raw in merged_events:
         if _is_channel1_note_on(raw):
             if first_channel1_note_tick is None or abs_tick < first_channel1_note_tick:
                 first_channel1_note_tick = abs_tick
+                first_channel1_note_track = track_index
         if is_disklavier_channel_note_event(raw, DISKLAVIER_LEGACY_PEDAL_CHANNEL):
             legacy_pedal_channel_has_notes = True
+        if _is_pedal_controller(raw, DISKLAVIER_PIANO_CHANNEL):
+            channel1_has_pedal_controller = True
 
-    should_remap_legacy_pedal = first_channel1_note_tick is not None and not legacy_pedal_channel_has_notes
+    should_remap_legacy_pedal = (
+        first_channel1_note_tick is not None
+        and not legacy_pedal_channel_has_notes
+        and not channel1_has_pedal_controller
+    )
     for abs_tick, track_index, order, raw in merged_events:
         if should_remap_legacy_pedal:
             normalized_raw, event_changed = normalize_disklavier_raw_midi_event(raw)
@@ -275,7 +672,7 @@ def _normalize_disklavier_merged_events(merged_events):
                 has_channel1_program_before_notes = True
                 break
         if not has_channel1_program_before_notes:
-            normalized.append((0, -1, -1, _channel1_acoustic_grand_event()))
+            normalized.append((0, first_channel1_note_track, -1, _channel1_acoustic_grand_event()))
             changed = True
 
     deduped = []
@@ -293,7 +690,11 @@ def _normalize_disklavier_merged_events(merged_events):
     return deduped, changed
 
 
-def _convert_midi_bytes_to_type0(midi_bytes, *, normalize_disklavier=True):
+def _convert_midi_bytes_to_type0(
+    midi_bytes,
+    *,
+    normalize_disklavier=False,
+):
     header_end, format_type, _, chunks = _parse_midi_chunks(midi_bytes)
     track_chunks = [chunk for chunk in chunks if chunk["id"] == b"MTrk"]
 
@@ -370,7 +771,12 @@ def _default_backup_path(file_path):
     return f"{stem}_backup{ext}"
 
 
-def convert_midi_file_to_type0_path(source_path, dest_path, *, normalize_disklavier=True):
+def convert_midi_file_to_type0_path(
+    source_path,
+    dest_path,
+    *,
+    normalize_disklavier=False,
+):
     if not os.path.isfile(source_path):
         raise ValueError("File does not exist.")
 
@@ -401,7 +807,7 @@ def convert_midi_files_to_type0(
     create_backups=False,
     backup_path_builder=None,
     *,
-    normalize_disklavier=True,
+    normalize_disklavier=False,
 ):
     unique_paths = _unique_abs_paths(file_paths)
     backup_path_builder = backup_path_builder or _default_backup_path

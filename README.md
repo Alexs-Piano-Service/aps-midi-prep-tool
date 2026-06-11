@@ -142,11 +142,18 @@ instructions or software; formatting a blank stick by itself is not enough.
 5. Use `Save` to overwrite originals, or `Save As` to write copies.
 
 The conversion is staged first. Original files are not modified until you save.
-By default, SMF1 to SMF0 conversion also normalizes Disklavier piano playback
-data by moving controller-only legacy pedal events from MIDI channel 3 to
-channel 1 and adding Acoustic Grand Piano on channel 1 when needed. Turn off
-`Utilities > Convert > Normalize Disklavier MIDI on Conversion` to leave MIDI
-channel events exactly as they are.
+Pedal channels are preserved by default.
+
+### Apply Pedal Compatibility To MIDI Files
+
+Choose `Utilities > Apply Pedal Compatibility...` when you need an explicit
+compatibility transform on listed MIDI files. The utility stages changes for
+save, so originals are not modified until you use `Save`, `Save As`, or save
+the current image/floppy session. Available transforms include repairing
+controller-only legacy Disklavier channel-3 pedal lanes, converting pedal
+controllers to on/off values, cleaning duplicate or stuck pedal events, and
+adding Piano Roll Vector note-18 sustain markers. All options start unchecked
+because binary values and cleanup can remove half-pedal or archival detail.
 
 ### Convert Between MIDI And E-SEQ
 
@@ -154,12 +161,13 @@ channel events exactly as they are.
 - In E-SEQ mode, dropped MIDI files are staged as E-SEQ conversions.
 - In E-SEQ image or floppy modes, dropped MIDI files are staged as E-SEQ and
   converted through Type 0 first when necessary.
-- E-SEQ to MIDI exports omit APS archival round-trip metadata by default so the
-  Standard MIDI files stay clean for Yamaha hardware. The converter still reads
+- E-SEQ to MIDI exports include a short APS conversion text marker, but omit
+  the large APS archival round-trip header metadata by default so the Standard
+  MIDI files stay compatible with Yamaha hardware. The converter still reads
   older APS metadata when present.
-- E-SEQ to MIDI exports also apply Disklavier MIDI normalization by default,
-  with the same `Utilities > Convert > Normalize Disklavier MIDI on Conversion`
-  option available when an archival channel-for-channel export is needed.
+- E-SEQ to MIDI exports preserve pedal channels and controller values by
+  default. Optional pedal compatibility transforms are a separate MIDI utility
+  under `Utilities > Apply Pedal Compatibility...`.
 - `PIANODIR.FIL` is generated or refreshed on save when needed.
 - `File > Save Options > Create Album Subfolder` controls whether folder
   exports use the current album title and catalog number for a subfolder.
