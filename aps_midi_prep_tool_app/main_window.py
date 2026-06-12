@@ -65,8 +65,10 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSpinBox,
     QStackedWidget,
+    QScrollArea,
     QTreeWidget,
     QTreeWidgetItem,
+    QFrame,
     QLayout,
     QPlainTextEdit,
 )
@@ -1171,6 +1173,30 @@ GM_PROGRAM_NAMES = [
     "Guitar Fret Noise", "Breath Noise", "Seashore", "Bird Tweet", "Telephone Ring", "Helicopter", "Applause", "Gunshot",
 ]
 
+PIANO_LOW_PITCH = 21
+PIANO_HIGH_PITCH = 108
+PIANO_KEY_COUNT = PIANO_HIGH_PITCH - PIANO_LOW_PITCH + 1
+PEDAL_CONTROLLER_NAMES = {
+    64: "Damper/Sustain Pedal",
+    66: "Sostenuto Pedal",
+    67: "Soft Pedal",
+}
+PEDAL_DISPLAY_ORDER = (64, 66, 67)
+PEDAL_SHORT_LABELS = {
+    64: "Sus.",
+    66: "Sost.",
+    67: "Soft",
+}
+PEDAL_COLORS = {
+    64: QColor("#D0A62E"),
+    66: QColor("#7D6BC4"),
+    67: QColor("#3AA76D"),
+}
+PIANO_ROLL_DEFAULT_PIXELS_PER_SECOND = 36
+PIANO_ROLL_MIN_TIMELINE_WIDTH = 900
+PIANO_ROLL_MAX_TIMELINE_WIDTH = 120000
+PIANO_ROLL_LABEL_GUTTER_WIDTH = 78
+
 
 def _program_name(program):
     program = int(program)
@@ -1253,6 +1279,56 @@ def _notes_with_channel_levels(notes, channel_levels):
             continue
         copy = dict(note)
         copy["preview_gain"] = float(copy.get("preview_gain", 1.0)) * (level / 100.0)
+        adjusted.append(copy)
+    return adjusted
+
+
+def _notes_with_sustain_pedal(notes, pedals):
+    notes = list(notes or [])
+    if not notes:
+        return []
+
+    sustain_by_channel = {}
+    for pedal in pedals or []:
+        if int(pedal.get("controller", 0) or 0) != 64:
+            continue
+        if int(pedal.get("value", 0) or 0) < 64:
+            continue
+        try:
+            channel = int(pedal.get("channel", 0) or 0)
+            start = float(pedal.get("start_sec", 0.0) or 0.0)
+            end = float(pedal.get("end_sec", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if channel <= 0 or end <= start:
+            continue
+        sustain_by_channel.setdefault(channel, []).append((start, end))
+
+    if not sustain_by_channel:
+        return notes
+
+    for channel in sustain_by_channel:
+        sustain_by_channel[channel].sort()
+
+    adjusted = []
+    for note in notes:
+        copy = dict(note)
+        try:
+            channel = int(copy.get("channel", 0) or 0)
+            note_end = float(copy.get("end_sec", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            adjusted.append(copy)
+            continue
+
+        for start, end in sustain_by_channel.get(channel, []):
+            if end <= note_end:
+                continue
+            if start <= note_end <= end:
+                note_end = end
+            elif start > note_end:
+                break
+        if note_end > float(copy.get("end_sec", 0.0) or 0.0):
+            copy["end_sec"] = note_end
         adjusted.append(copy)
     return adjusted
 
@@ -1412,7 +1488,49 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
         note["start_sec"] = tick_to_seconds(note["start_tick"])
         note["end_sec"] = max(note["start_sec"] + 0.05, tick_to_seconds(note["end_tick"]))
 
-    duration = max([tick_to_seconds(max_tick)] + [note["end_sec"] for note in notes] + [0.0])
+    pedal_events = [
+        event
+        for event in control_changes
+        if event["controller"] in PEDAL_CONTROLLER_NAMES
+    ]
+    pedal_segments = []
+    events_by_controller_channel = {}
+    for event in pedal_events:
+        events_by_controller_channel.setdefault((event["controller"], event["channel"]), []).append(event)
+    for (controller, channel), events_for_controller in events_by_controller_channel.items():
+        ordered_events = sorted(
+            events_for_controller,
+            key=lambda event: (event["tick"], event["track"], event["value"]),
+        )
+        for index, event in enumerate(ordered_events):
+            if event["value"] < 64:
+                continue
+            next_tick = (
+                ordered_events[index + 1]["tick"]
+                if index + 1 < len(ordered_events)
+                else max_tick
+            )
+            if next_tick <= event["tick"]:
+                next_tick = event["tick"] + max(1, division // 16)
+            pedal_segments.append(
+                {
+                    "start_tick": event["tick"],
+                    "end_tick": next_tick,
+                    "start_sec": tick_to_seconds(event["tick"]),
+                    "end_sec": max(tick_to_seconds(event["tick"]) + 0.02, tick_to_seconds(next_tick)),
+                    "controller": controller,
+                    "channel": channel,
+                    "value": event["value"],
+                    "track": event["track"],
+                }
+            )
+
+    duration = max(
+        [tick_to_seconds(max_tick)]
+        + [note["end_sec"] for note in notes]
+        + [pedal["end_sec"] for pedal in pedal_segments]
+        + [0.0]
+    )
     pitches = [note["pitch"] for note in notes]
     note_counts_by_channel = {}
     for note in notes:
@@ -1489,16 +1607,6 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
     lines.append("Channel toggles affect this inspection preview only; they do not edit the file.")
     lines.append("")
     lines.append("Pedals / Controllers:")
-    pedal_controller_names = {
-        64: "Damper/Sustain Pedal",
-        66: "Sostenuto Pedal",
-        67: "Soft Pedal",
-    }
-    pedal_events = [
-        event
-        for event in control_changes
-        if event["controller"] in pedal_controller_names
-    ]
     if pedal_events:
         summary = {}
         for event in pedal_events:
@@ -1517,7 +1625,7 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
             values = sorted(bucket["values"])
             value_text = f"{values[0]}-{values[-1]}" if values else "none"
             lines.append(
-                f"Channel {channel}: {pedal_controller_names[controller]} "
+                f"Channel {channel}: {PEDAL_CONTROLLER_NAMES[controller]} "
                 f"(CC{controller}) - {bucket['count']} event(s), "
                 f"{bucket['on']} on/pressed, {bucket['off']} off/released, values {value_text}"
             )
@@ -1526,7 +1634,7 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
 
     other_controller_counts = {}
     for event in control_changes:
-        if event["controller"] in pedal_controller_names:
+        if event["controller"] in PEDAL_CONTROLLER_NAMES:
             continue
         key = (event["controller"], event["channel"])
         other_controller_counts[key] = other_controller_counts.get(key, 0) + 1
@@ -1549,6 +1657,7 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
 
     return {
         "notes": notes,
+        "pedals": pedal_segments,
         "metadata_text": "\n".join(lines),
         "duration": duration,
         "channels": channels,
@@ -2663,18 +2772,23 @@ class BatchAudioRenderWorker(QThread):
             self.renderFailed.emit(str(exc))
 
 
-class PianoRollWidget(QWidget):
+class PianoRollTimelineWidget(QWidget):
     seekRequested = Signal(float)
     MAX_DISPLAY_NOTES = 50000
+    MAX_DISPLAY_PEDALS = 20000
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.notes = []
         self.display_notes = []
+        self.pedals = []
+        self.display_pedals = []
         self.duration = 1.0
         self.playhead_sec = 0.0
-        self.setMinimumHeight(220)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.pixels_per_second = PIANO_ROLL_DEFAULT_PIXELS_PER_SECOND
+        self.setMinimumHeight(300)
+        self.setMinimumWidth(PIANO_ROLL_MIN_TIMELINE_WIDTH)
+        self.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Expanding)
         self.setCursor(Qt.PointingHandCursor)
 
     @classmethod
@@ -2702,19 +2816,119 @@ class PianoRollWidget(QWidget):
             last_index = index
         return selected
 
-    def set_notes(self, notes, duration):
+    @classmethod
+    def _pedals_for_display(cls, pedals):
+        pedals = list(pedals or [])
+        if len(pedals) <= cls.MAX_DISPLAY_PEDALS:
+            return pedals
+
+        ordered = sorted(
+            pedals,
+            key=lambda pedal: (
+                float(pedal.get("start_sec", 0.0)),
+                float(pedal.get("end_sec", 0.0)),
+                int(pedal.get("controller", 0)),
+                int(pedal.get("channel", 0)),
+            ),
+        )
+        step = (len(ordered) - 1) / max(1, cls.MAX_DISPLAY_PEDALS - 1)
+        selected = []
+        last_index = -1
+        for position in range(cls.MAX_DISPLAY_PEDALS):
+            index = int(round(position * step))
+            if index == last_index:
+                continue
+            selected.append(ordered[index])
+            last_index = index
+        return selected
+
+    def set_notes(self, notes, duration, pedals=None):
         self.notes = list(notes or [])
         self.display_notes = self._notes_for_display(self.notes)
+        self.pedals = list(pedals or [])
+        self.display_pedals = self._pedals_for_display(self.pedals)
         self.duration = max(0.1, float(duration or 0.1))
         self.playhead_sec = 0.0
+        self.setMinimumWidth(self._timeline_width())
+        self.updateGeometry()
+        self.update()
+
+    def set_pixels_per_second(self, pixels_per_second):
+        next_value = max(6, min(160, int(round(float(pixels_per_second or PIANO_ROLL_DEFAULT_PIXELS_PER_SECOND)))))
+        if next_value == self.pixels_per_second:
+            return
+        self.pixels_per_second = next_value
+        self.setMinimumWidth(self._timeline_width())
+        self.updateGeometry()
         self.update()
 
     def set_playhead(self, seconds):
         self.playhead_sec = max(0.0, min(float(seconds or 0.0), self.duration))
         self.update()
 
+    def _timeline_width(self):
+        width = int(round(self.duration * self.pixels_per_second)) + 16
+        return max(PIANO_ROLL_MIN_TIMELINE_WIDTH, min(PIANO_ROLL_MAX_TIMELINE_WIDTH, width))
+
     def _content_rect(self):
         return self.rect().adjusted(8, 8, -8, -8)
+
+    def _x_for_seconds(self, seconds):
+        rect = self._content_rect()
+        if self.duration <= 0 or rect.width() <= 0:
+            return rect.left()
+        seconds = max(0.0, min(float(seconds or 0.0), self.duration))
+        return rect.left() + int(round((seconds / self.duration) * rect.width()))
+
+    def _timeline_rects(self):
+        rect = self._content_rect()
+        if rect.height() <= 0:
+            return rect, rect
+        separator = 5
+        pedal_height = max(72, min(112, rect.height() // 4))
+        if rect.height() <= pedal_height + separator + PIANO_KEY_COUNT:
+            pedal_height = max(54, min(72, rect.height() // 4))
+        key_rect = rect.adjusted(0, 0, 0, -(pedal_height + separator))
+        pedal_top = key_rect.bottom() + separator + 1
+        pedal_rect = rect.adjusted(0, pedal_top - rect.top(), 0, 0)
+        return key_rect, pedal_rect
+
+    def _pitch_y(self, key_rect, pitch):
+        pitch = max(PIANO_LOW_PITCH, min(PIANO_HIGH_PITCH, int(pitch)))
+        span = max(1, PIANO_HIGH_PITCH - PIANO_LOW_PITCH)
+        return key_rect.top() + int(round(((PIANO_HIGH_PITCH - pitch) / span) * key_rect.height()))
+
+    def _pedal_y(self, pedal_rect, controller):
+        try:
+            index = PEDAL_DISPLAY_ORDER.index(int(controller))
+        except ValueError:
+            index = 0
+        return pedal_rect.top() + int(round(((index + 1) / (len(PEDAL_DISPLAY_ORDER) + 1)) * pedal_rect.height()))
+
+    def _time_grid_step(self, rect):
+        pixels_per_second = rect.width() / max(0.1, self.duration)
+        for step in (1, 2, 5, 10, 15, 30, 60):
+            if step * pixels_per_second >= 70:
+                return step
+        return 120
+
+    def _draw_time_grid(self, painter, rect):
+        if rect.width() <= 0 or self.duration <= 0:
+            return
+        clip = painter.clipBoundingRect().toRect().adjusted(-2, 0, 2, 0)
+        step = self._time_grid_step(rect)
+        major_step = step * 5
+        start_sec = max(0, int(((clip.left() - rect.left()) / max(1, rect.width())) * self.duration))
+        end_sec = min(self.duration, ((clip.right() - rect.left()) / max(1, rect.width())) * self.duration)
+        current = (start_sec // step) * step
+        minor_color = QColor("#34404A") if is_dark_theme() else QColor("#CBD2D9")
+        major_color = QColor("#5F6D78") if is_dark_theme() else QColor("#9DA7B1")
+        while current <= end_sec + step:
+            x = self._x_for_seconds(current)
+            is_major = (current % major_step) == 0
+            painter.setPen(QPen(major_color if is_major else minor_color, 1))
+            painter.drawLine(x, rect.top(), x, rect.bottom())
+            current += step
 
     def _seek_from_x(self, x_pos):
         rect = self._content_rect()
@@ -2740,26 +2954,37 @@ class PianoRollWidget(QWidget):
     def paintEvent(self, _event):
         painter = QPainter(self)
         rect = self._content_rect()
+        key_rect, pedal_rect = self._timeline_rects()
         painter.fillRect(self.rect(), QColor("#15191D") if is_dark_theme() else QColor("#F7F9FB"))
         if rect.width() <= 0 or rect.height() <= 0:
             return
 
-        painter.setPen(QPen(QColor("#303942") if is_dark_theme() else QColor("#D2D8DE"), 1))
-        for index in range(0, 9):
-            y = rect.top() + int((rect.height() * index) / 8)
-            painter.drawLine(rect.left(), y, rect.right(), y)
-        for index in range(0, 9):
-            x = rect.left() + int((rect.width() * index) / 8)
-            painter.drawLine(x, rect.top(), x, rect.bottom())
+        grid_color = QColor("#303942") if is_dark_theme() else QColor("#D2D8DE")
+        octave_color = QColor("#52606B") if is_dark_theme() else QColor("#AAB3BC")
+        painter.setPen(QPen(grid_color, 1))
+        for pitch in range(PIANO_LOW_PITCH, PIANO_HIGH_PITCH + 1):
+            y = self._pitch_y(key_rect, pitch)
+            pitch_class = pitch % 12
+            painter.setPen(QPen(octave_color if pitch_class == 0 else grid_color, 1))
+            painter.drawLine(key_rect.left(), y, key_rect.right(), y)
+        self._draw_time_grid(painter, rect)
 
-        if not self.notes:
+        separator_color = QColor("#53606A") if is_dark_theme() else QColor("#B8C1CA")
+        painter.setPen(QPen(separator_color, 1))
+        painter.drawLine(rect.left(), key_rect.bottom() + 2, rect.right(), key_rect.bottom() + 2)
+
+        for controller in PEDAL_DISPLAY_ORDER:
+            pedal_base = QColor(PEDAL_COLORS.get(controller, QColor("#B2BBC4")))
+            pedal_base.setAlpha(105 if is_dark_theme() else 135)
+            painter.setPen(QPen(pedal_base, 3))
+            y = self._pedal_y(pedal_rect, controller)
+            painter.drawLine(pedal_rect.left(), y, pedal_rect.right(), y)
+
+        if not self.notes and not self.pedals:
             painter.setPen(QColor("#DDE4EA") if is_dark_theme() else QColor("#4B5560"))
-            painter.drawText(rect, Qt.AlignCenter, "No note events to display")
+            painter.drawText(rect, Qt.AlignCenter, "No note or pedal events to display")
             return
 
-        min_pitch = min(note["pitch"] for note in self.notes)
-        max_pitch = max(note["pitch"] for note in self.notes)
-        pitch_span = max(1, max_pitch - min_pitch)
         colors = [
             QColor("#2E86AB"),
             QColor("#3AA76D"),
@@ -2769,20 +2994,39 @@ class PianoRollWidget(QWidget):
             QColor("#C05C9A"),
         ]
         painter.setPen(Qt.NoPen)
+        lane_height = max(2, int(round(key_rect.height() / max(1, PIANO_KEY_COUNT - 1))))
+        note_height = max(2, min(8, int(round(lane_height * 0.9))))
         for note in self.display_notes:
             start = float(note.get("start_sec", 0.0))
             end = float(note.get("end_sec", start + 0.05))
-            x = rect.left() + int((start / self.duration) * rect.width())
-            x2 = rect.left() + int((end / self.duration) * rect.width())
+            x = self._x_for_seconds(start)
+            x2 = self._x_for_seconds(end)
             width = max(2, x2 - x)
-            pitch = int(note.get("pitch", min_pitch))
-            y = rect.bottom() - int(((pitch - min_pitch) / pitch_span) * rect.height())
-            height = max(3, rect.height() // max(18, pitch_span + 1))
+            pitch = int(note.get("pitch", PIANO_LOW_PITCH))
+            y = self._pitch_y(key_rect, pitch)
             color = colors[(int(note.get("channel", 1)) - 1) % len(colors)]
             painter.setBrush(color)
-            painter.drawRect(x, max(rect.top(), y - height), width, height)
+            painter.drawRect(
+                x,
+                max(key_rect.top(), min(key_rect.bottom() - note_height + 1, y - (note_height // 2))),
+                width,
+                note_height,
+            )
 
-        playhead_x = rect.left() + int((self.playhead_sec / self.duration) * rect.width())
+        for pedal in self.display_pedals:
+            controller = int(pedal.get("controller", 64))
+            start = float(pedal.get("start_sec", 0.0))
+            end = float(pedal.get("end_sec", start + 0.02))
+            x = self._x_for_seconds(start)
+            x2 = self._x_for_seconds(end)
+            value = max(1, min(int(pedal.get("value", 1) or 1), 127))
+            color = QColor(PEDAL_COLORS.get(controller, QColor("#D0A62E")))
+            color.setAlpha(max(110, min(255, 80 + int(value * 1.25))))
+            painter.setPen(QPen(color, max(4, min(8, 3 + value // 28))))
+            y = self._pedal_y(pedal_rect, controller)
+            painter.drawLine(x, y, max(x + 2, x2), y)
+
+        playhead_x = self._x_for_seconds(self.playhead_sec)
         playhead_color = QColor("#FFCF33") if is_dark_theme() else QColor("#B55300")
         painter.setPen(QPen(playhead_color, 2))
         painter.drawLine(playhead_x, rect.top(), playhead_x, rect.bottom())
@@ -2796,6 +3040,157 @@ class PianoRollWidget(QWidget):
                 ]
             )
         )
+
+
+class PianoRollLaneLabelsWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(PIANO_ROLL_LABEL_GUTTER_WIDTH)
+        self.setMinimumHeight(300)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
+    def _content_rect(self):
+        return self.rect().adjusted(8, 8, -4, -8)
+
+    def _timeline_rects(self):
+        rect = self._content_rect()
+        if rect.height() <= 0:
+            return rect, rect
+        separator = 5
+        pedal_height = max(72, min(112, rect.height() // 4))
+        if rect.height() <= pedal_height + separator + PIANO_KEY_COUNT:
+            pedal_height = max(54, min(72, rect.height() // 4))
+        key_rect = rect.adjusted(0, 0, 0, -(pedal_height + separator))
+        pedal_top = key_rect.bottom() + separator + 1
+        pedal_rect = rect.adjusted(0, pedal_top - rect.top(), 0, 0)
+        return key_rect, pedal_rect
+
+    def _pitch_y(self, key_rect, pitch):
+        pitch = max(PIANO_LOW_PITCH, min(PIANO_HIGH_PITCH, int(pitch)))
+        span = max(1, PIANO_HIGH_PITCH - PIANO_LOW_PITCH)
+        return key_rect.top() + int(round(((PIANO_HIGH_PITCH - pitch) / span) * key_rect.height()))
+
+    def _pedal_y(self, pedal_rect, controller):
+        try:
+            index = PEDAL_DISPLAY_ORDER.index(int(controller))
+        except ValueError:
+            index = 0
+        return pedal_rect.top() + int(round(((index + 1) / (len(PEDAL_DISPLAY_ORDER) + 1)) * pedal_rect.height()))
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        painter.fillRect(self.rect(), QColor("#15191D") if is_dark_theme() else QColor("#F7F9FB"))
+        key_rect, pedal_rect = self._timeline_rects()
+        text_color = QColor("#DDE4EA") if is_dark_theme() else QColor("#4B5560")
+        border_color = QColor("#53606A") if is_dark_theme() else QColor("#B8C1CA")
+
+        painter.setPen(QPen(border_color, 1))
+        painter.drawLine(self.rect().right() - 1, key_rect.top(), self.rect().right() - 1, pedal_rect.bottom())
+        painter.drawLine(key_rect.left(), key_rect.bottom() + 2, self.rect().right() - 1, key_rect.bottom() + 2)
+
+        painter.setPen(text_color)
+        small_font = QFont(self.font())
+        small_font.setPointSize(max(7, small_font.pointSize() - 1))
+        painter.setFont(small_font)
+        metrics = QFontMetrics(small_font)
+        for label, pitch in (("C8", 108), ("C4", 60), ("A0", 21)):
+            y = self._pitch_y(key_rect, pitch)
+            painter.drawText(key_rect.left(), y + metrics.ascent() // 2, label)
+
+        pedal_font = QFont(self.font())
+        pedal_font.setBold(True)
+        pedal_font.setPointSize(max(8, pedal_font.pointSize()))
+        pedal_metrics = QFontMetrics(pedal_font)
+        for controller in PEDAL_DISPLAY_ORDER:
+            y = self._pedal_y(pedal_rect, controller)
+            color = QColor(PEDAL_COLORS.get(controller, QColor("#D0A62E")))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawRect(key_rect.left(), y - 5, 9, 10)
+
+            label = PEDAL_SHORT_LABELS.get(controller, f"CC{controller}")
+            text_x = key_rect.left() + 14
+            painter.setPen(text_color)
+            painter.setFont(pedal_font)
+            painter.drawText(
+                text_x,
+                y + pedal_metrics.ascent() // 2 - 2,
+                pedal_metrics.elidedText(label, Qt.ElideRight, self.width() - text_x - 4),
+            )
+
+
+class PianoRollWidget(QWidget):
+    seekRequested = Signal(float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.timeline = PianoRollTimelineWidget(self)
+        self.timeline.seekRequested.connect(self.seekRequested.emit)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidget(self.timeline)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.labels = PianoRollLaneLabelsWidget(self)
+        left_column = QWidget(self)
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+        left_layout.addWidget(self.labels, stretch=1)
+        self.scrollbar_spacer = QWidget(left_column)
+        self.scrollbar_spacer.setFixedHeight(self.scroll_area.horizontalScrollBar().sizeHint().height())
+        left_layout.addWidget(self.scrollbar_spacer)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(left_column)
+        layout.addWidget(self.scroll_area, stretch=1)
+
+        self.setMinimumHeight(320)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_notes(self, notes, duration, pedals=None):
+        self.timeline.set_notes(notes, duration, pedals)
+        self.labels.update()
+        self.scroll_area.horizontalScrollBar().setValue(0)
+
+    def set_zoom_percent(self, percent):
+        percent = max(25, min(int(percent or 100), 300))
+        seconds = self.timeline.playhead_sec
+        bar = self.scroll_area.horizontalScrollBar()
+        viewport_width = max(1, self.scroll_area.viewport().width())
+        playhead_offset = self.timeline._x_for_seconds(seconds) - bar.value()
+        if playhead_offset < 0 or playhead_offset > viewport_width:
+            playhead_offset = viewport_width // 2
+        self.timeline.set_pixels_per_second(PIANO_ROLL_DEFAULT_PIXELS_PER_SECOND * (percent / 100.0))
+        self.labels.update()
+        next_x = self.timeline._x_for_seconds(seconds)
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), int(next_x - playhead_offset))))
+        self.timeline.update()
+
+    def set_playhead(self, seconds):
+        self.timeline.set_playhead(seconds)
+        self._ensure_playhead_visible()
+
+    def _ensure_playhead_visible(self):
+        bar = self.scroll_area.horizontalScrollBar()
+        viewport_width = self.scroll_area.viewport().width()
+        if viewport_width <= 0 or bar.maximum() <= 0:
+            return
+        playhead_x = self.timeline._x_for_seconds(self.timeline.playhead_sec)
+        left = bar.value()
+        right = left + viewport_width
+        margin = min(120, max(32, viewport_width // 5))
+        if playhead_x < left + margin:
+            bar.setValue(max(bar.minimum(), playhead_x - margin))
+        elif playhead_x > right - margin:
+            bar.setValue(min(bar.maximum(), playhead_x - viewport_width + margin))
 
 
 class SoundFontManagerDialog(QDialog):
@@ -3355,6 +3750,9 @@ class FileInspectionDialog(QDialog):
         self.current_notes = []
         self.all_notes = []
         self.visible_notes = []
+        self.current_pedals = []
+        self.all_pedals = []
+        self.visible_pedals = []
         self.current_duration = 0.0
         self.current_midi_bytes = b""
         self.current_channel_info = {}
@@ -3364,11 +3762,16 @@ class FileInspectionDialog(QDialog):
         self.preview_render_worker = None
         self.preview_engine_label = ""
         self._position_slider_dragging = False
+        self._playback_clock_position_ms = 0
+        self._playback_clock_started_at = 0.0
         self._closing = False
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(0.35)
         self.player.setAudioOutput(self.audio_output)
+        self.playback_timer = QTimer(self)
+        self.playback_timer.setInterval(33)
+        self.playback_timer.timeout.connect(self._refresh_playback_position)
 
         apply_window_icon(self)
         language = _message_parent_language(parent)
@@ -3452,6 +3855,24 @@ class FileInspectionDialog(QDialog):
         self.piano_roll = PianoRollWidget(self)
         right_layout.addWidget(self.piano_roll, stretch=2)
 
+        zoom_row = QHBoxLayout()
+        self.zoom_label = QLabel(t("Zoom"), self)
+        self.zoom_slider = QSlider(Qt.Horizontal, self)
+        self.zoom_slider.setRange(25, 300)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setSingleStep(5)
+        self.zoom_slider.setPageStep(25)
+        self.zoom_slider.setFixedWidth(160)
+        self.zoom_slider.setToolTip(t("Adjust the horizontal piano-roll zoom."))
+        self.zoom_value_label = QLabel("100%", self)
+        self.zoom_value_label.setMinimumWidth(42)
+        self.zoom_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        zoom_row.addStretch()
+        zoom_row.addWidget(self.zoom_label)
+        zoom_row.addWidget(self.zoom_slider)
+        zoom_row.addWidget(self.zoom_value_label)
+        right_layout.addLayout(zoom_row)
+
         position_row = QHBoxLayout()
         self.elapsed_label = QLabel("0:00", self)
         self.position_slider = QSlider(Qt.Horizontal, self)
@@ -3528,7 +3949,9 @@ class FileInspectionDialog(QDialog):
         self.soundfont_combo.currentIndexChanged.connect(self._on_soundfont_changed)
         self.player.positionChanged.connect(self._on_player_position_changed)
         self.player.durationChanged.connect(self._on_player_duration_changed)
+        self.player.playbackStateChanged.connect(self._on_player_playback_state_changed)
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
         self.show_piano_only_checkbox.toggled.connect(self._update_visible_channels)
         self.tie_channel_levels_checkbox.toggled.connect(self._on_tie_channel_levels_toggled)
         self.position_slider.sliderPressed.connect(self._on_position_slider_pressed)
@@ -3604,7 +4027,8 @@ class FileInspectionDialog(QDialog):
         }
 
     def _notes_for_preview_render(self):
-        return _notes_with_channel_levels(self.visible_notes, self._effective_channel_levels())
+        notes = _notes_with_sustain_pedal(self.visible_notes, self.visible_pedals)
+        return _notes_with_channel_levels(notes, self._effective_channel_levels())
 
     def _current_item(self):
         current = self.file_tree.currentItem()
@@ -3651,6 +4075,7 @@ class FileInspectionDialog(QDialog):
         self.preview_progress_bar.setVisible(False)
 
     def _clear_preview_audio(self):
+        self.playback_timer.stop()
         self.player.stop()
         if self.preview_audio_path and os.path.exists(self.preview_audio_path):
             try:
@@ -3688,10 +4113,13 @@ class FileInspectionDialog(QDialog):
             inspection = _inspect_midi_bytes(payload, source_label=label)
             self.current_midi_bytes = bytes(payload)
             self.all_notes = inspection["notes"]
+            self.all_pedals = inspection.get("pedals", [])
             self.current_channel_info = dict(inspection.get("channel_info") or {})
             self.current_piano_channels = set(inspection.get("piano_channels") or set())
             self.current_notes = list(self.all_notes)
             self.visible_notes = list(self.all_notes)
+            self.current_pedals = list(self.all_pedals)
+            self.visible_pedals = list(self.all_pedals)
             self.current_duration = inspection["duration"]
             self.position_slider.setValue(0)
             self.elapsed_label.setText("0:00")
@@ -3708,9 +4136,12 @@ class FileInspectionDialog(QDialog):
             self.current_midi_bytes = b""
             self.all_notes = []
             self.visible_notes = []
+            self.all_pedals = []
+            self.visible_pedals = []
             self.current_channel_info = {}
             self.current_piano_channels = set()
             self.current_notes = []
+            self.current_pedals = []
             self.current_duration = 0.0
             self.piano_roll.set_notes([], 0.0)
             self.position_slider.setValue(0)
@@ -3799,8 +4230,14 @@ class FileInspectionDialog(QDialog):
             for note in self.all_notes
             if int(note.get("channel", 0)) in channels
         ]
+        self.visible_pedals = [
+            pedal
+            for pedal in self.all_pedals
+            if int(pedal.get("channel", 0)) in channels
+        ]
         self.current_notes = list(self.visible_notes)
-        self.piano_roll.set_notes(self.visible_notes, self.current_duration)
+        self.current_pedals = list(self.visible_pedals)
+        self.piano_roll.set_notes(self.visible_notes, self.current_duration, self.visible_pedals)
         if reset_preview:
             self._reset_preview_for_filter_change()
         self.play_button.setEnabled(bool(self.visible_notes) and self.preview_render_worker is None)
@@ -3882,6 +4319,7 @@ class FileInspectionDialog(QDialog):
         seek_ms = self._current_slider_position_ms()
         if seek_ms > 0:
             self.player.setPosition(seek_ms)
+        self._sync_playback_clock(seek_ms)
         self.player.play()
 
     def _current_slider_position_ms(self):
@@ -3905,7 +4343,9 @@ class FileInspectionDialog(QDialog):
         self.elapsed_label.setText(_format_duration(seconds))
         self.piano_roll.set_playhead(seconds)
         if self.player.duration() > 0:
-            self.player.setPosition(int(seconds * 1000))
+            position_ms = int(seconds * 1000)
+            self.player.setPosition(position_ms)
+            self._sync_playback_clock(position_ms)
 
     def _on_position_slider_pressed(self):
         self._position_slider_dragging = True
@@ -3919,9 +4359,46 @@ class FileInspectionDialog(QDialog):
         self.elapsed_label.setText(_format_duration(seconds))
         self.piano_roll.set_playhead(seconds)
         if self._position_slider_dragging and self.player.duration() > 0:
-            self.player.setPosition(int(seconds * 1000))
+            position_ms = int(seconds * 1000)
+            self.player.setPosition(position_ms)
+            self._sync_playback_clock(position_ms)
 
     def _on_player_position_changed(self, position_ms):
+        self._sync_playback_clock(position_ms)
+        self._set_playback_position_display(position_ms)
+
+    def _sync_playback_clock(self, position_ms=None):
+        if position_ms is None:
+            position_ms = self.player.position()
+        self._playback_clock_position_ms = max(0, int(position_ms or 0))
+        self._playback_clock_started_at = time.monotonic()
+
+    def _smoothed_playback_position_ms(self):
+        position_ms = self._playback_clock_position_ms
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            position_ms += int((time.monotonic() - self._playback_clock_started_at) * 1000)
+        duration_ms = self.player.duration()
+        if duration_ms <= 0:
+            duration_ms = int(max(0.0, self.current_duration) * 1000)
+        return max(0, min(max(0, duration_ms), position_ms))
+
+    def _refresh_playback_position(self):
+        if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self.playback_timer.stop()
+            self._set_playback_position_display(self.player.position())
+            return
+        self._set_playback_position_display(self._smoothed_playback_position_ms())
+
+    def _on_player_playback_state_changed(self, state):
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._sync_playback_clock(self.player.position())
+            if not self.playback_timer.isActive():
+                self.playback_timer.start()
+        else:
+            self.playback_timer.stop()
+            self._set_playback_position_display(self.player.position())
+
+    def _set_playback_position_display(self, position_ms):
         duration_ms = self.player.duration()
         if duration_ms <= 0:
             duration_ms = int(max(0.0, self.current_duration) * 1000)
@@ -3947,7 +4424,13 @@ class FileInspectionDialog(QDialog):
         if self._channel_levels_tied():
             self._refresh_channel_level_controls()
 
+    def _on_zoom_changed(self, value):
+        percent = max(25, min(int(value or 100), 300))
+        self.zoom_value_label.setText(f"{percent}%")
+        self.piano_roll.set_zoom_percent(percent)
+
     def _stop_playback(self):
+        self.playback_timer.stop()
         self.player.stop()
         self._seek_to_seconds(0.0)
 
