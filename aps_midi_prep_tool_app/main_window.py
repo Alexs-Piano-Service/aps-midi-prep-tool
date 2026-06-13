@@ -27,8 +27,8 @@ from array import array
 from math import exp, pi, sin
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QPolygonF, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -1196,6 +1196,8 @@ PIANO_ROLL_DEFAULT_PIXELS_PER_SECOND = 36
 PIANO_ROLL_MIN_TIMELINE_WIDTH = 900
 PIANO_ROLL_MAX_TIMELINE_WIDTH = 120000
 PIANO_ROLL_LABEL_GUTTER_WIDTH = 78
+PIANO_ROLL_PLAYHEAD_WIDTH = 3
+PIANO_ROLL_PLAYHEAD_MARKER_HALF_WIDTH = 6
 
 
 def _program_name(program):
@@ -2786,6 +2788,7 @@ class PianoRollTimelineWidget(QWidget):
         self.duration = 1.0
         self.playhead_sec = 0.0
         self.pixels_per_second = PIANO_ROLL_DEFAULT_PIXELS_PER_SECOND
+        self.view_offset_px = 0.0
         self.setMinimumHeight(300)
         self.setMinimumWidth(PIANO_ROLL_MIN_TIMELINE_WIDTH)
         self.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Expanding)
@@ -2862,9 +2865,27 @@ class PianoRollTimelineWidget(QWidget):
         self.updateGeometry()
         self.update()
 
-    def set_playhead(self, seconds):
-        self.playhead_sec = max(0.0, min(float(seconds or 0.0), self.duration))
+    def set_view_offset_px(self, offset_px):
+        next_offset = max(0.0, float(offset_px or 0.0))
+        if abs(next_offset - self.view_offset_px) < 0.01:
+            return
+        self.view_offset_px = next_offset
         self.update()
+
+    def set_playhead(self, seconds, full_update=False):
+        next_seconds = max(0.0, min(float(seconds or 0.0), self.duration))
+        if abs(next_seconds - self.playhead_sec) < 0.001:
+            return
+        old_x = self._x_for_seconds(self.playhead_sec)
+        self.playhead_sec = next_seconds
+        new_x = self._x_for_seconds(self.playhead_sec)
+        if full_update:
+            self.update()
+            return
+        padding = PIANO_ROLL_PLAYHEAD_MARKER_HALF_WIDTH + PIANO_ROLL_PLAYHEAD_WIDTH + 3
+        left = max(0, int(min(old_x, new_x) - self.view_offset_px) - padding)
+        right = min(self.width(), int(max(old_x, new_x) - self.view_offset_px) + padding)
+        self.update(left, 0, max(padding * 2, right - left), self.height())
 
     def _timeline_width(self):
         width = int(round(self.duration * self.pixels_per_second)) + 16
@@ -2878,7 +2899,10 @@ class PianoRollTimelineWidget(QWidget):
         if self.duration <= 0 or rect.width() <= 0:
             return rect.left()
         seconds = max(0.0, min(float(seconds or 0.0), self.duration))
-        return rect.left() + int(round((seconds / self.duration) * rect.width()))
+        return rect.left() + (seconds / self.duration) * rect.width()
+
+    def _paint_x_for_seconds(self, seconds):
+        return self._x_for_seconds(seconds) - self.view_offset_px
 
     def _timeline_rects(self):
         rect = self._content_rect()
@@ -2918,23 +2942,23 @@ class PianoRollTimelineWidget(QWidget):
         clip = painter.clipBoundingRect().toRect().adjusted(-2, 0, 2, 0)
         step = self._time_grid_step(rect)
         major_step = step * 5
-        start_sec = max(0, int(((clip.left() - rect.left()) / max(1, rect.width())) * self.duration))
-        end_sec = min(self.duration, ((clip.right() - rect.left()) / max(1, rect.width())) * self.duration)
+        start_sec = max(0, int(((clip.left() + self.view_offset_px - rect.left()) / max(1, rect.width())) * self.duration))
+        end_sec = min(self.duration, ((clip.right() + self.view_offset_px - rect.left()) / max(1, rect.width())) * self.duration)
         current = (start_sec // step) * step
         minor_color = QColor("#34404A") if is_dark_theme() else QColor("#CBD2D9")
         major_color = QColor("#5F6D78") if is_dark_theme() else QColor("#9DA7B1")
         while current <= end_sec + step:
-            x = self._x_for_seconds(current)
+            x = self._paint_x_for_seconds(current)
             is_major = (current % major_step) == 0
             painter.setPen(QPen(major_color if is_major else minor_color, 1))
-            painter.drawLine(x, rect.top(), x, rect.bottom())
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
             current += step
 
     def _seek_from_x(self, x_pos):
         rect = self._content_rect()
         if rect.width() <= 0:
             return
-        fraction = max(0.0, min(1.0, (float(x_pos) - rect.left()) / rect.width()))
+        fraction = max(0.0, min(1.0, (float(x_pos) + self.view_offset_px - rect.left()) / rect.width()))
         self.seekRequested.emit(fraction * self.duration)
 
     def mousePressEvent(self, event):
@@ -2993,50 +3017,62 @@ class PianoRollTimelineWidget(QWidget):
             QColor("#7D6BC4"),
             QColor("#C05C9A"),
         ]
+        painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(Qt.NoPen)
         lane_height = max(2, int(round(key_rect.height() / max(1, PIANO_KEY_COUNT - 1))))
         note_height = max(2, min(8, int(round(lane_height * 0.9))))
         for note in self.display_notes:
             start = float(note.get("start_sec", 0.0))
             end = float(note.get("end_sec", start + 0.05))
-            x = self._x_for_seconds(start)
-            x2 = self._x_for_seconds(end)
+            x = self._paint_x_for_seconds(start)
+            x2 = self._paint_x_for_seconds(end)
             width = max(2, x2 - x)
             pitch = int(note.get("pitch", PIANO_LOW_PITCH))
             y = self._pitch_y(key_rect, pitch)
             color = colors[(int(note.get("channel", 1)) - 1) % len(colors)]
             painter.setBrush(color)
             painter.drawRect(
-                x,
-                max(key_rect.top(), min(key_rect.bottom() - note_height + 1, y - (note_height // 2))),
-                width,
-                note_height,
+                QRectF(
+                    x,
+                    max(key_rect.top(), min(key_rect.bottom() - note_height + 1, y - (note_height // 2))),
+                    width,
+                    note_height,
+                )
             )
 
         for pedal in self.display_pedals:
             controller = int(pedal.get("controller", 64))
             start = float(pedal.get("start_sec", 0.0))
             end = float(pedal.get("end_sec", start + 0.02))
-            x = self._x_for_seconds(start)
-            x2 = self._x_for_seconds(end)
+            x = self._paint_x_for_seconds(start)
+            x2 = self._paint_x_for_seconds(end)
             value = max(1, min(int(pedal.get("value", 1) or 1), 127))
             color = QColor(PEDAL_COLORS.get(controller, QColor("#D0A62E")))
             color.setAlpha(max(110, min(255, 80 + int(value * 1.25))))
             painter.setPen(QPen(color, max(4, min(8, 3 + value // 28))))
             y = self._pedal_y(pedal_rect, controller)
-            painter.drawLine(x, y, max(x + 2, x2), y)
+            painter.drawLine(QPointF(x, y), QPointF(max(x + 2, x2), y))
 
-        playhead_x = self._x_for_seconds(self.playhead_sec)
+        playhead_x = self._paint_x_for_seconds(self.playhead_sec)
         playhead_color = QColor("#FFCF33") if is_dark_theme() else QColor("#B55300")
-        painter.setPen(QPen(playhead_color, 2))
-        painter.drawLine(playhead_x, rect.top(), playhead_x, rect.bottom())
+        playhead_left = playhead_x - (PIANO_ROLL_PLAYHEAD_WIDTH // 2)
+        painter.setPen(Qt.NoPen)
+        painter.fillRect(
+            QRectF(
+                playhead_left,
+                rect.top(),
+                PIANO_ROLL_PLAYHEAD_WIDTH,
+                rect.height(),
+            ),
+            playhead_color,
+        )
         painter.setBrush(playhead_color)
         painter.drawPolygon(
-            QPolygon(
+            QPolygonF(
                 [
-                    QPoint(playhead_x, rect.top()),
-                    QPoint(playhead_x - 5, rect.top() - 7),
-                    QPoint(playhead_x + 5, rect.top() - 7),
+                    QPointF(playhead_x, rect.top()),
+                    QPointF(playhead_x - PIANO_ROLL_PLAYHEAD_MARKER_HALF_WIDTH, rect.top() - 7),
+                    QPointF(playhead_x + PIANO_ROLL_PLAYHEAD_MARKER_HALF_WIDTH, rect.top() - 7),
                 ]
             )
         )
@@ -3159,24 +3195,46 @@ class PianoRollWidget(QWidget):
         self.timeline.set_notes(notes, duration, pedals)
         self.labels.update()
         self.scroll_area.horizontalScrollBar().setValue(0)
+        self.timeline.set_view_offset_px(0.0)
 
     def set_zoom_percent(self, percent):
         percent = max(25, min(int(percent or 100), 300))
         seconds = self.timeline.playhead_sec
         bar = self.scroll_area.horizontalScrollBar()
         viewport_width = max(1, self.scroll_area.viewport().width())
-        playhead_offset = self.timeline._x_for_seconds(seconds) - bar.value()
+        playhead_offset = self.timeline._x_for_seconds(seconds) - bar.value() - self.timeline.view_offset_px
         if playhead_offset < 0 or playhead_offset > viewport_width:
             playhead_offset = viewport_width // 2
         self.timeline.set_pixels_per_second(PIANO_ROLL_DEFAULT_PIXELS_PER_SECOND * (percent / 100.0))
         self.labels.update()
         next_x = self.timeline._x_for_seconds(seconds)
-        bar.setValue(max(bar.minimum(), min(bar.maximum(), int(next_x - playhead_offset))))
+        self._set_fractional_view_left(next_x - playhead_offset)
         self.timeline.update()
 
-    def set_playhead(self, seconds):
+    def set_playhead(self, seconds, smooth_follow=False):
+        if smooth_follow:
+            self._set_smooth_follow_view(seconds)
+            self.timeline.set_playhead(seconds, full_update=True)
+            return
+        self.timeline.set_view_offset_px(0.0)
         self.timeline.set_playhead(seconds)
         self._ensure_playhead_visible()
+
+    def _set_fractional_view_left(self, left_px):
+        bar = self.scroll_area.horizontalScrollBar()
+        left_px = max(float(bar.minimum()), min(float(bar.maximum()), float(left_px or 0.0)))
+        whole_px = int(left_px)
+        bar.setValue(whole_px)
+        self.timeline.set_view_offset_px(left_px - whole_px)
+        self.scroll_area.viewport().update()
+
+    def _set_smooth_follow_view(self, seconds):
+        viewport_width = self.scroll_area.viewport().width()
+        if viewport_width <= 0:
+            return
+        playhead_x = self.timeline._x_for_seconds(seconds)
+        anchor_x = viewport_width * 0.42
+        self._set_fractional_view_left(playhead_x - anchor_x)
 
     def _ensure_playhead_visible(self):
         bar = self.scroll_area.horizontalScrollBar()
@@ -3187,10 +3245,22 @@ class PianoRollWidget(QWidget):
         left = bar.value()
         right = left + viewport_width
         margin = min(120, max(32, viewport_width // 5))
+        target = None
         if playhead_x < left + margin:
-            bar.setValue(max(bar.minimum(), playhead_x - margin))
+            target = max(bar.minimum(), playhead_x - margin)
         elif playhead_x > right - margin:
-            bar.setValue(min(bar.maximum(), playhead_x - viewport_width + margin))
+            target = min(bar.maximum(), playhead_x - viewport_width + margin)
+        if target is None:
+            return
+
+        delta = int(target) - left
+        if abs(delta) >= viewport_width:
+            bar.setValue(int(target))
+            return
+        step = int(round(delta * 0.28))
+        if step == 0:
+            step = 1 if delta > 0 else -1
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), left + step)))
 
 
 class SoundFontManagerDialog(QDialog):
@@ -3770,7 +3840,8 @@ class FileInspectionDialog(QDialog):
         self.audio_output.setVolume(0.35)
         self.player.setAudioOutput(self.audio_output)
         self.playback_timer = QTimer(self)
-        self.playback_timer.setInterval(33)
+        self.playback_timer.setTimerType(Qt.PreciseTimer)
+        self.playback_timer.setInterval(16)
         self.playback_timer.timeout.connect(self._refresh_playback_position)
 
         apply_window_icon(self)
@@ -4364,6 +4435,10 @@ class FileInspectionDialog(QDialog):
             self._sync_playback_clock(position_ms)
 
     def _on_player_position_changed(self, position_ms):
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            if abs(int(position_ms or 0) - self._smoothed_playback_position_ms()) > 180:
+                self._sync_playback_clock(position_ms)
+            return
         self._sync_playback_clock(position_ms)
         self._set_playback_position_display(position_ms)
 
@@ -4409,7 +4484,11 @@ class FileInspectionDialog(QDialog):
             self.position_slider.setValue(max(0, min(self.position_slider.maximum(), value)))
             self.position_slider.blockSignals(False)
         self.elapsed_label.setText(_format_duration(seconds))
-        self.piano_roll.set_playhead(seconds)
+        smooth_follow = (
+            self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            and not self._position_slider_dragging
+        )
+        self.piano_roll.set_playhead(seconds, smooth_follow=smooth_follow)
 
     def _on_player_duration_changed(self, duration_ms):
         if duration_ms > 0:
