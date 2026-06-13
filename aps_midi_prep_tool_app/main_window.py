@@ -9269,10 +9269,67 @@ class MidiTitleWindow(QMainWindow):
         if self._is_adjusting_columns:
             return
         if logical_index in self.USER_RESIZABLE_EDGE_COLUMNS:
-            self._manual_column_widths[logical_index] = new_size
+            if old_size <= 0 or new_size <= 0 or self.table.isColumnHidden(logical_index):
+                return
+            neighbor_column = self._next_visible_user_resizable_column(logical_index)
+            if neighbor_column is not None:
+                self._resize_user_column_pair(
+                    logical_index,
+                    neighbor_column,
+                    old_size,
+                    new_size,
+                )
+                return
+            self._manual_column_widths[logical_index] = self.table.columnWidth(logical_index)
             return
         if logical_index != 1:
             self._resize_table_columns_to_fill(preferred_column=logical_index)
+
+    def _next_visible_user_resizable_column(self, column):
+        for candidate in range(column + 1, self.table.columnCount()):
+            if candidate not in self.USER_RESIZABLE_EDGE_COLUMNS:
+                continue
+            if not self.table.isColumnHidden(candidate):
+                return candidate
+        return None
+
+    def _minimum_user_resizable_column_width(self, column):
+        min_section = self.table.horizontalHeader().minimumSectionSize()
+        if column == 5:
+            return max(min_section, self._scaled_int(48, minimum=36))
+        if column == 6:
+            return max(min_section, self._scaled_int(self.TYPE_COLUMN_MIN_WIDTH, minimum=54))
+        return min_section
+
+    def _resize_user_column_pair(
+        self,
+        left_column,
+        right_column,
+        old_left_width,
+        requested_left_width,
+    ):
+        right_width = self.table.columnWidth(right_column)
+        left_min = self._minimum_user_resizable_column_width(left_column)
+        right_min = self._minimum_user_resizable_column_width(right_column)
+
+        left_width = max(left_min, requested_left_width)
+        delta = left_width - old_left_width
+        if delta > 0:
+            max_delta = max(0, right_width - right_min)
+            if delta > max_delta:
+                delta = max_delta
+                left_width = old_left_width + delta
+        right_width = max(right_min, right_width - delta)
+
+        self._is_adjusting_columns = True
+        try:
+            self.table.setColumnWidth(left_column, left_width)
+            self.table.setColumnWidth(right_column, right_width)
+        finally:
+            self._is_adjusting_columns = False
+
+        self._manual_column_widths[left_column] = self.table.columnWidth(left_column)
+        self._manual_column_widths[right_column] = self.table.columnWidth(right_column)
 
     def _default_filename_column_width(self):
         metrics = QFontMetrics(self.table.font())
@@ -9334,11 +9391,13 @@ class MidiTitleWindow(QMainWindow):
         if not self.table.isColumnHidden(5):
             fixed_columns.append(5)
         if not self.table.isColumnHidden(6):
-            type_width = self._preferred_type_column_width()
+            type_min_width = self._minimum_user_resizable_column_width(6)
             if 6 in self._manual_column_widths:
-                type_width = max(type_width, min_section, self._manual_column_widths[6])
+                type_width = max(type_min_width, self._manual_column_widths[6])
+            else:
+                type_width = self._preferred_type_column_width()
             if preferred_column == 6:
-                type_width = max(type_width, self.table.columnWidth(6))
+                type_width = max(type_min_width, self.table.columnWidth(6))
         fixed_total = sum(self.table.columnWidth(column) for column in fixed_columns)
         if type_width is not None:
             fixed_total += type_width
