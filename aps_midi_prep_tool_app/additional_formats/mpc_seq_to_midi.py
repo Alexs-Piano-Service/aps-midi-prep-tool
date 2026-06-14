@@ -15,13 +15,14 @@ What it currently does:
   - reads the MPC track table and track names
   - finds the main bar/time-signature run in the event stream
   - converts note events to separate MIDI tracks
+  - converts control-change events to matching MIDI track/channel CC messages
   - writes tempo and time-signature meta events
   - maps likely drum/percussion tracks to MIDI channel 10
 
 What it does not yet fully do:
   - preserve MPC sample/program assignments or actual sounds
   - preserve MPC note-variation parameters, mixer data, swing, etc.
-  - guarantee all controller/program/pitch events are exported
+  - guarantee all program/pitch/pressure events are exported
   - guarantee correctness for every MPC OS/version or .SEQ variant
 
 Usage:
@@ -74,6 +75,14 @@ class NoteEvent:
 
 
 @dataclass(frozen=True)
+class ControlChangeEvent:
+    tick: int
+    track_id: int
+    controller: int
+    value: int
+
+
+@dataclass(frozen=True)
 class Token:
     offset: int
     kind: str
@@ -90,6 +99,7 @@ class ConversionReport:
     table_tracks: int
     midi_tracks_written: int
     notes_written: int
+    control_changes_written: int
     chosen_bar_run_start: int
     chosen_bar_run_end: int
     chosen_event_offset_hex: str
@@ -431,12 +441,12 @@ def build_bar_start_ticks(bar_run: Sequence[Token]) -> Dict[int, int]:
     return starts
 
 
-def extract_notes(data: bytes) -> Tuple[str, int, float, List[TrackInfo], List[NoteEvent], List[Tuple[int, int, int]], List[str], Tuple[int, int, int]]:
-    """Return parsed notes and time-signature changes.
+def extract_notes(data: bytes) -> Tuple[str, int, float, List[TrackInfo], List[NoteEvent], List[ControlChangeEvent], List[Tuple[int, int, int]], List[str], Tuple[int, int, int]]:
+    """Return parsed notes, control changes, and time-signature changes.
 
     Returns:
-      sequence_name, header_bars, tempo_bpm, tracks, notes, sig_changes, warnings,
-      chosen_run_summary=(start_bar, end_bar, start_offset)
+      sequence_name, header_bars, tempo_bpm, tracks, notes, control_changes,
+      sig_changes, warnings, chosen_run_summary=(start_bar, end_bar, start_offset)
     """
     seq_name, header_bars, tempo_bpm = read_seq_header(data)
     tracks, table_end, warnings = parse_track_table(data)
@@ -461,7 +471,9 @@ def extract_notes(data: bytes) -> Tuple[str, int, float, List[TrackInfo], List[N
             last_sig = (num, den)
 
     notes: List[NoteEvent] = []
+    control_changes: List[ControlChangeEvent] = []
     seen_notes: set[Tuple[int, int, int, int, int]] = set()
+    seen_control_changes: set[Tuple[int, int, int, int]] = set()
     current_tick = 0
     active = False
     for tok in tokens:
@@ -489,6 +501,17 @@ def extract_notes(data: bytes) -> Tuple[str, int, float, List[TrackInfo], List[N
                 continue
             seen_notes.add(key)
             notes.append(NoteEvent(current_tick, track_id, note, velocity, duration, variation))
+        elif tok.kind == "cc":
+            track_id, controller, value = tok.data
+            if track_id not in track_ids:
+                continue
+            if not (0 <= controller <= 127 and 0 <= value <= 127):
+                continue
+            key = (current_tick, track_id, controller, value)
+            if key in seen_control_changes:
+                continue
+            seen_control_changes.add(key)
+            control_changes.append(ControlChangeEvent(current_tick, track_id, controller, value))
 
     if not notes:
         warnings.append("No plausible notes were extracted")
@@ -496,7 +519,7 @@ def extract_notes(data: bytes) -> Tuple[str, int, float, List[TrackInfo], List[N
         warnings.append(
             f"Chosen bar run has {len(bar_run)} bars but header suggests {header_bars}; file may need parser tuning"
         )
-    return seq_name, header_bars, tempo_bpm, tracks, notes, sig_changes, warnings, (start_bar, end_bar, start_offset)
+    return seq_name, header_bars, tempo_bpm, tracks, notes, control_changes, sig_changes, warnings, (start_bar, end_bar, start_offset)
 
 
 # ---- Minimal Standard MIDI File writer ------------------------------------
@@ -534,6 +557,22 @@ def track_chunk(events: List[Tuple[int, bytes]]) -> bytes:
     return midi_chunk(b"MTrk", bytes(payload))
 
 
+def track_event_sort_key(event: Tuple[int, bytes]) -> Tuple[int, int]:
+    event_bytes = event[1]
+    if event_bytes.startswith(b"\xff\x03"):
+        return event[0], 0
+    if not event_bytes:
+        return event[0], 4
+    status = event_bytes[0] & 0xF0
+    if status == 0x80:
+        return event[0], 1
+    if status == 0xB0:
+        return event[0], 2
+    if status == 0x90:
+        return event[0], 3
+    return event[0], 4
+
+
 def tempo_payload(bpm: float) -> bytes:
     bpm = bpm if 20 <= bpm <= 300 else 120.0
     micros_per_quarter = int(round(60_000_000 / bpm))
@@ -557,10 +596,11 @@ def write_midi(
     tempo_bpm: float,
     tracks: Sequence[TrackInfo],
     notes: Sequence[NoteEvent],
+    control_changes: Sequence[ControlChangeEvent],
     sig_changes: Sequence[Tuple[int, int, int]],
     include_empty_tracks: bool = False,
 ) -> int:
-    """Write a Standard MIDI File Type 1. Returns number of MIDI note tracks."""
+    """Write a Standard MIDI File Type 1. Returns number of MIDI event tracks."""
     track_by_id = {t.track_id: t for t in tracks}
 
     chunks: List[bytes] = []
@@ -582,16 +622,24 @@ def write_midi(
     notes_by_track: Dict[int, List[NoteEvent]] = {}
     for n in notes:
         notes_by_track.setdefault(n.track_id, []).append(n)
+    control_changes_by_track: Dict[int, List[ControlChangeEvent]] = {}
+    for cc in control_changes:
+        control_changes_by_track.setdefault(cc.track_id, []).append(cc)
 
-    midi_note_tracks_written = 0
+    midi_event_tracks_written = 0
     for tr in tracks:
         tr_notes = notes_by_track.get(tr.track_id, [])
-        if not tr_notes and not include_empty_tracks:
+        tr_control_changes = control_changes_by_track.get(tr.track_id, [])
+        if not tr_notes and not tr_control_changes and not include_empty_tracks:
             continue
         events: List[Tuple[int, bytes]] = []
         name_bytes = text_payload(tr.name)
         events.append((0, bytes([0xFF, 0x03]) + vlq(len(name_bytes)) + name_bytes))
         channel = max(0, min(15, tr.midi_channel))
+        for cc in tr_control_changes:
+            controller = max(0, min(127, cc.controller))
+            value = max(0, min(127, cc.value))
+            events.append((max(0, cc.tick), bytes([0xB0 | channel, controller, value])))
         for n in tr_notes:
             note = max(0, min(127, n.note))
             vel = max(1, min(127, n.velocity))
@@ -600,14 +648,14 @@ def write_midi(
             # Sort note-offs before note-ons at the same absolute tick by using status bytes later.
             events.append((start, bytes([0x90 | channel, note, vel])))
             events.append((end, bytes([0x80 | channel, note, 0])))
-        # Custom stable ordering within the same tick: track name first, note-offs before note-ons.
-        events.sort(key=lambda x: (x[0], 0 if x[1].startswith(b"\xff\x03") else (1 if x[1][0] & 0xF0 == 0x80 else 2)))
+        # Track name first; note-offs and controllers before note-ons at the same tick.
+        events.sort(key=track_event_sort_key)
         chunks.append(track_chunk(events))
-        midi_note_tracks_written += 1
+        midi_event_tracks_written += 1
 
     header = b"MThd" + (6).to_bytes(4, "big") + (1).to_bytes(2, "big") + len(chunks).to_bytes(2, "big") + PPQN.to_bytes(2, "big")
     output_path.write_bytes(header + b"".join(chunks))
-    return midi_note_tracks_written
+    return midi_event_tracks_written
 
 
 def convert_one(
@@ -633,7 +681,7 @@ def convert_bytes(
     include_empty_tracks: bool = False,
     output_stem: Optional[str] = None,
 ) -> ConversionReport:
-    seq_name, header_bars, tempo_bpm, tracks, notes, sig_changes, warnings, run_summary = extract_notes(data)
+    seq_name, header_bars, tempo_bpm, tracks, notes, control_changes, sig_changes, warnings, run_summary = extract_notes(data)
     stem = safe_filename(output_stem if output_stem is not None else seq_name)
     output_path = output_dir / f"{stem}.mid"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -643,6 +691,7 @@ def convert_bytes(
         tempo_bpm,
         tracks,
         notes,
+        control_changes,
         sig_changes,
         include_empty_tracks=include_empty_tracks,
     )
@@ -656,6 +705,7 @@ def convert_bytes(
         table_tracks=len(tracks),
         midi_tracks_written=midi_tracks_written,
         notes_written=len(notes),
+        control_changes_written=len(control_changes),
         chosen_bar_run_start=start_bar,
         chosen_bar_run_end=end_bar,
         chosen_event_offset_hex=hex(start_offset),
@@ -691,7 +741,7 @@ def convert_all(
                 include_empty_tracks=include_empty_tracks,
                 output_stem=chunk_stem,
             )
-            if report.notes_written <= 0 and not include_empty_sequences:
+            if report.notes_written <= 0 and report.control_changes_written <= 0 and not include_empty_sequences:
                 skipped_empty += 1
                 try:
                     Path(report.output).unlink(missing_ok=True)
@@ -762,6 +812,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for report in all_reports:
                     print(
                         f"  {report.sequence_name}: {report.notes_written} notes, "
+                        f"{report.control_changes_written} control changes, "
                         f"{report.midi_tracks_written} MIDI tracks, tempo {report.tempo_bpm:.1f} BPM "
                         f"-> {Path(report.output).name}"
                     )
@@ -773,7 +824,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 report = convert_one(inp, output_dir, include_empty_tracks=args.include_empty_tracks)
                 reports.append(report)
                 print(
-                    f"{inp.name}: {report.notes_written} notes, {report.midi_tracks_written} MIDI tracks, "
+                    f"{inp.name}: {report.notes_written} notes, "
+                    f"{report.control_changes_written} control changes, "
+                    f"{report.midi_tracks_written} MIDI tracks, "
                     f"tempo {report.tempo_bpm:.1f} BPM -> {Path(report.output).name}"
                 )
                 if report.warnings:
