@@ -387,6 +387,32 @@ def install_tooltip_delay_style(app=None):
     app._aps_tooltip_delay_style = style
 
 
+def _set_optional_palette_color(palette, role_name, color, *, group=None):
+    role = getattr(QPalette, role_name, None)
+    if role is None:
+        return
+    qcolor = QColor(color)
+    if group is None:
+        palette.setColor(role, qcolor)
+    else:
+        palette.setColor(group, role, qcolor)
+
+
+def _set_application_color_scheme(app, mode):
+    style_hints = app.styleHints()
+    set_color_scheme = getattr(style_hints, "setColorScheme", None)
+    if not callable(set_color_scheme):
+        return
+    scheme = {
+        "dark": Qt.ColorScheme.Dark,
+        "light": Qt.ColorScheme.Light,
+    }.get(mode, Qt.ColorScheme.Unknown)
+    try:
+        set_color_scheme(scheme)
+    except RuntimeError:
+        pass
+
+
 def _build_light_palette():
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor("#F5F7FA"))
@@ -403,11 +429,22 @@ def _build_light_palette():
     palette.setColor(QPalette.Highlight, QColor("#B9EAF5"))
     palette.setColor(QPalette.HighlightedText, QColor("#0B2533"))
     palette.setColor(QPalette.Mid, QColor("#A8B1BA"))
+    palette.setColor(QPalette.Midlight, QColor("#D6DEE6"))
     palette.setColor(QPalette.Dark, QColor("#65707A"))
     palette.setColor(QPalette.Light, QColor("#FFFFFF"))
+    palette.setColor(QPalette.Shadow, QColor("#7D8790"))
+    palette.setColor(QPalette.LinkVisited, QColor("#6A4EA3"))
+    _set_optional_palette_color(palette, "PlaceholderText", "#65707A")
+    _set_optional_palette_color(palette, "Accent", "#2E7DB2")
     palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#6D7780"))
     palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#6D7780"))
     palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#6D7780"))
+    palette.setColor(QPalette.Disabled, QPalette.Highlight, QColor("#D4DAE1"))
+    palette.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor("#6D7780"))
+    palette.setColor(QPalette.Disabled, QPalette.Link, QColor("#6D7780"))
+    palette.setColor(QPalette.Disabled, QPalette.LinkVisited, QColor("#6D7780"))
+    _set_optional_palette_color(palette, "PlaceholderText", "#8A949E", group=QPalette.Disabled)
+    _set_optional_palette_color(palette, "Accent", "#A8B1BA", group=QPalette.Disabled)
     return palette
 
 
@@ -427,11 +464,22 @@ def _build_dark_palette():
     palette.setColor(QPalette.Highlight, QColor("#155E75"))
     palette.setColor(QPalette.HighlightedText, QColor("#ECFEFF"))
     palette.setColor(QPalette.Mid, QColor("#56616D"))
+    palette.setColor(QPalette.Midlight, QColor("#2F3841"))
     palette.setColor(QPalette.Dark, QColor("#0C1116"))
     palette.setColor(QPalette.Light, QColor("#3A444F"))
+    palette.setColor(QPalette.Shadow, QColor("#06090C"))
+    palette.setColor(QPalette.LinkVisited, QColor("#C6A6FF"))
+    _set_optional_palette_color(palette, "PlaceholderText", "#AAB3BC")
+    _set_optional_palette_color(palette, "Accent", "#3E8CC7")
     palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#9099A3"))
     palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#9099A3"))
     palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#9099A3"))
+    palette.setColor(QPalette.Disabled, QPalette.Highlight, QColor("#26313A"))
+    palette.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor("#9099A3"))
+    palette.setColor(QPalette.Disabled, QPalette.Link, QColor("#9099A3"))
+    palette.setColor(QPalette.Disabled, QPalette.LinkVisited, QColor("#9099A3"))
+    _set_optional_palette_color(palette, "PlaceholderText", "#69737C", group=QPalette.Disabled)
+    _set_optional_palette_color(palette, "Accent", "#56616D", group=QPalette.Disabled)
     return palette
 
 
@@ -5951,12 +5999,15 @@ class MidiTitleWindow(QMainWindow):
 
         app = QApplication.instance()
         if app is not None:
+            app.setProperty("_aps_appearance_mode", mode)
+            _set_application_color_scheme(app, mode)
             if mode == "dark":
-                app.setPalette(_build_dark_palette())
+                palette = _build_dark_palette()
             elif mode == "light":
-                app.setPalette(_build_light_palette())
+                palette = _build_light_palette()
             else:
-                app.setPalette(getattr(self, "systemPalette", QApplication.palette()))
+                palette = getattr(self, "systemPalette", QApplication.palette())
+            app.setPalette(palette)
 
         if hasattr(self, "appearanceActions"):
             for action_mode, action in self.appearanceActions.items():
@@ -6625,6 +6676,91 @@ class MidiTitleWindow(QMainWindow):
 
     def _guidance_for_error_detail(self, detail):
         return guidance_for_error_detail(detail, self._language_code())
+
+    def _floppy_operation_error_guidance(self, detail, *, operation="write_image", file_level=False):
+        text = str(detail or "").strip()
+        lower = text.lower()
+        raw_operation = operation in {"format", "write_image"}
+
+        access_denied = (
+            "access is denied" in lower
+            or "permission denied" in lower
+            or "could not lock" in lower
+            or "windows denied direct" in lower
+            or "would not allow a full image write" in lower
+        )
+        if access_denied:
+            if raw_operation:
+                return (
+                    "Windows blocked direct access to the floppy drive. Close File Explorer or other disk tools "
+                    "using the drive, then restart APS MIDI Prep Tool as administrator and try again."
+                )
+            return (
+                "Windows could not change files on the floppy. Close File Explorer windows using the drive, "
+                "check the disk's write-protect tab, and try again."
+            )
+
+        if (
+            "write protected" in lower
+            or "write-protected" in lower
+            or "read-only file system" in lower
+        ):
+            return "Check the floppy's write-protect tab, then reinsert the disk and try again."
+
+        if "not ready" in lower or "no medium" in lower or "no media" in lower:
+            return "Insert a floppy disk, wait for the drive to become ready, then try again."
+
+        if "device or resource busy" in lower or "text file busy" in lower or "sharing violation" in lower:
+            return "Close File Explorer windows and any other programs using the floppy drive, then try again."
+
+        media_error = (
+            "i/o device error" in lower
+            or "data error" in lower
+            or "cyclic redundancy" in lower
+            or "crc" in lower
+            or "sector not found" in lower
+            or "device fault" in lower
+        )
+        if media_error:
+            if operation == "format":
+                return (
+                    "The drive or disk rejected the format write. Check that the inserted disk matches the selected "
+                    "format, for example IBM 720K DD needs compatible double-density media and a drive that can write "
+                    "720K. Try a known-good disk, another USB floppy drive, or Greaseweazle."
+                )
+            if operation == "write_image":
+                return (
+                    "The drive or disk rejected the full image write. Check that the image size matches the target "
+                    "floppy format, try a known-good disk or another drive, or use Save To Floppy when the disk is "
+                    "already formatted correctly."
+                )
+            return (
+                "The floppy drive reported an I/O error while copying files. Make sure the disk is already formatted "
+                "and readable in Windows, check the write-protect tab, and try a known-good disk or drive."
+            )
+
+        if "not formatted" in lower or "fat12" in lower or "boot sector" in lower:
+            if file_level:
+                return (
+                    "Save To Floppy copies files onto an already formatted disk. Format the floppy first, or use "
+                    "Write Current Image to Floppy if you need to overwrite the whole disk image."
+                )
+            return "Check that the selected disk format matches the floppy in the drive, then try again."
+
+        if file_level:
+            return (
+                "The current image is still open. Check that the floppy is formatted, writable, and readable in "
+                "Windows, then try Save To Floppy again."
+            )
+        if operation == "format":
+            return (
+                "Check the selected drive, disk type, and write-protect tab. On Windows, restart the app as "
+                "administrator if the error says access was denied or the drive could not be locked."
+            )
+        return (
+            "Check the selected drive, disk type, and write-protect tab. On Windows, restart the app as administrator "
+            "if the error says access was denied or the drive could not be locked."
+        )
 
     def _source_files_missing_error_message(self, detail_text, *, guidance=None):
         message = self._ensure_sentence(self._t("error.source_files_missing.summary"))
@@ -14138,7 +14274,9 @@ class MidiTitleWindow(QMainWindow):
         if drive_size_bytes and drive_size_bytes != disk_format.size_bytes:
             message += (
                 "\n\nThe selected floppy drive currently reports "
-                f"{display_bytes(drive_size_bytes)}, which does not match the selected format."
+                f"{display_bytes(drive_size_bytes)}, which does not match the selected format. "
+                "Many USB floppy drives cannot create a different physical disk format by writing a raw image; "
+                "use media and a drive that match the selected format, or use Greaseweazle."
             )
         return QMessageBox.question(
             self,
@@ -14317,7 +14455,7 @@ class MidiTitleWindow(QMainWindow):
             "Format Failed",
             f"The floppy in {target_name} was not formatted",
             message,
-            guidance="Check the selected drive, disk type, and write permissions before trying again",
+            guidance=self._floppy_operation_error_guidance(message, operation="format"),
         )
 
     def _on_floppy_format_cancelled(self, _message):
@@ -14372,7 +14510,8 @@ class MidiTitleWindow(QMainWindow):
             message += (
                 "\n\nThe selected floppy drive currently reports "
                 f"{display_bytes(drive_size_bytes)}, which does not match the current image size "
-                f"({display_bytes(disk_format.size_bytes)})."
+                f"({display_bytes(disk_format.size_bytes)}). "
+                "A full image write can fail when the USB drive or inserted disk cannot write that format."
             )
         return QMessageBox.question(
             self,
@@ -14396,7 +14535,8 @@ class MidiTitleWindow(QMainWindow):
             message += (
                 "\n\nThe selected floppy drive currently reports "
                 f"{display_bytes(drive_size_bytes)}, which does not match the current image size "
-                f"({display_bytes(disk_format.size_bytes)})."
+                f"({display_bytes(disk_format.size_bytes)}). "
+                "Save To Floppy will copy files to the disk's existing format, not rewrite the whole disk image."
             )
         return QMessageBox.question(
             self,
@@ -14766,14 +14906,18 @@ class MidiTitleWindow(QMainWindow):
                 "Save To Floppy Failed",
                 "The app could not finish saving files to the floppy disk",
                 message,
-                guidance="The current image is still open; check that the selected floppy is formatted and try again",
+                guidance=self._floppy_operation_error_guidance(
+                    message,
+                    operation="save_files",
+                    file_level=True,
+                ),
             )
             return
         self._show_operation_error(
             "Write Image Failed",
             "The app could not finish writing the image to the floppy disk",
             message,
-            guidance="The current image is still open; check the selected drive and try again",
+            guidance=self._floppy_operation_error_guidance(message, operation="write_image"),
         )
 
     def _on_write_image_to_floppy_cancelled(self, _message, *, file_level=False):
@@ -19115,11 +19259,25 @@ class MidiTitleWindow(QMainWindow):
             self.diskCommitProgressDialog.close()
             self.diskCommitProgressDialog = None
         self._log_error_event("Disk", "Save failed", message=message)
+        source_kind = getattr(self.image_session, "source_kind", "") if self.image_session is not None else ""
+        if source_kind == "floppy_usb":
+            guidance = self._floppy_operation_error_guidance(
+                message,
+                operation="save_files",
+                file_level=True,
+            )
+        elif source_kind == "floppy_gw":
+            guidance = (
+                "The current session is still open. Check the Greaseweazle drive, cable, selected drive letter, "
+                "disk format, and write-protect tab, then try saving again."
+            )
+        else:
+            guidance = "Keep this session open and try Save As Image if you need a recoverable copy"
         self._show_operation_error(
             "Floppy Save Failed",
             "The app could not finish writing changes back to the floppy disk",
             message,
-            guidance="Keep this session open and try Save As Image if you need a recoverable copy",
+            guidance=guidance,
         )
 
     def _on_floppy_commit_cancelled(self, _message):

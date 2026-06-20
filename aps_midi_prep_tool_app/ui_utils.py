@@ -9,7 +9,16 @@ from .logo_assets import embedded_logo_dt, embedded_logo_lt
 
 
 def is_dark_theme():
-    pal = QApplication.palette()
+    app = QApplication.instance()
+    if app is not None:
+        appearance_mode = str(app.property("_aps_appearance_mode") or "").strip().lower()
+        if appearance_mode == "dark":
+            return True
+        if appearance_mode == "light":
+            return False
+        pal = app.palette()
+    else:
+        pal = QApplication.palette()
     bg_color = pal.color(QPalette.Window)
     brightness = 0.299 * bg_color.red() + 0.587 * bg_color.green() + 0.114 * bg_color.blue()
     return brightness < 128

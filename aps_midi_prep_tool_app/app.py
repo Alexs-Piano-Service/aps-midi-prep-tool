@@ -12,14 +12,7 @@ def _prefer_xcb_for_appimage() -> None:
 
 _prefer_xcb_for_appimage()
 
-from PySide6.QtCore import QSettings, QTimer
-from PySide6.QtWidgets import QApplication
-
 from .app_info import APP_NAME, APP_VERSION, LEGACY_SETTINGS_APP, SETTINGS_APP, SETTINGS_ORG
-from .onboarding_dialog import show_first_time_dialog
-from .console_log import install_console_capture
-from .main_window import MidiTitleWindow, install_tooltip_delay_style
-from .icon_utils import apply_window_icon, load_app_icon
 
 
 def _set_windows_app_id() -> None:
@@ -36,6 +29,8 @@ def _set_windows_app_id() -> None:
 
 
 def _migrate_legacy_settings() -> None:
+    from PySide6.QtCore import QSettings
+
     if SETTINGS_APP == LEGACY_SETTINGS_APP:
         return
 
@@ -54,6 +49,20 @@ def _migrate_legacy_settings() -> None:
 
 
 def main():
+    from .floppy_image import run_windows_raw_write_helper_from_argv
+
+    helper_exit_code = run_windows_raw_write_helper_from_argv(sys.argv)
+    if helper_exit_code is not None:
+        sys.exit(helper_exit_code)
+
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
+    from .onboarding_dialog import show_first_time_dialog
+    from .console_log import install_console_capture
+    from .main_window import MidiTitleWindow, install_tooltip_delay_style
+    from .icon_utils import apply_window_icon, load_app_icon
+
     _set_windows_app_id()
     app = QApplication(sys.argv)
     install_tooltip_delay_style(app)

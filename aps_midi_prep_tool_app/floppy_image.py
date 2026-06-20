@@ -934,7 +934,8 @@ def _windows_last_error_message(prefix):
     ctypes, _wintypes, _kernel32 = _windows_ctypes()
     error_code = ctypes.get_last_error()
     if error_code:
-        return f"{prefix}: {ctypes.FormatError(error_code).strip()}"
+        separator = " - " if str(prefix or "").endswith(":") else ": "
+        return f"{prefix}{separator}{ctypes.FormatError(error_code).strip()}"
     return f"{prefix}."
 
 
@@ -3053,6 +3054,9 @@ def _read_block_device_recovery_image(device_path, output_path, size_bytes, prog
     return "Full recovery image copied successfully."
 
 
+_WINDOWS_RAW_WRITE_HELPER_ARG = "--aps-raw-floppy-write-helper"
+
+
 def _write_block_device(input_path, device_path, progress_callback=None, cancel_callback=None):
     if os.name == "nt":
         permission_hint = (
@@ -3061,21 +3065,33 @@ def _write_block_device(input_path, device_path, progress_callback=None, cancel_
             "You can also use Save As Image as a safer fallback."
         )
         try:
-            with _WindowsVolumeHandle(device_path, write=True) as volume:
-                volume.lock_for_write()
-                try:
-                    volume.write_file(
-                        input_path,
-                        progress_callback=progress_callback,
-                        cancel_callback=cancel_callback,
-                    )
-                finally:
-                    volume.unlock_after_write()
+            _write_block_device_windows_direct(
+                input_path,
+                device_path,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
             return
         except FloppyOperationCancelled:
             raise
         except FloppyImageError as exc:
             detail = str(exc)
+            if _windows_raw_write_denied(exc):
+                try:
+                    _write_block_device_windows_elevated(
+                        input_path,
+                        device_path,
+                        progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
+                    )
+                    return
+                except FloppyOperationCancelled:
+                    raise
+                except FloppyImageError as elevated_exc:
+                    detail = (
+                        f"{detail}\n\n"
+                        f"Administrator retry failed: {elevated_exc}"
+                    )
             if "Access is denied" in detail or "denied" in detail.lower() or "lock" in detail.lower():
                 detail = f"{detail}\n\n{permission_hint}"
             raise FloppyImageError(detail) from exc
@@ -3130,6 +3146,149 @@ def _write_block_device(input_path, device_path, progress_callback=None, cancel_
         if "Permission denied" in detail or "Text file busy" in detail or "Device or resource busy" in detail:
             detail = f"{detail}\n\n{permission_hint}"
         raise FloppyImageError(detail) from exc
+
+
+def _write_block_device_windows_direct(input_path, device_path, progress_callback=None, cancel_callback=None):
+    if os.name != "nt":
+        raise FloppyImageError("Windows raw floppy writes are only available on Windows.")
+    with _WindowsVolumeHandle(device_path, write=True) as volume:
+        volume.lock_for_write()
+        try:
+            volume.write_file(
+                input_path,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+        finally:
+            volume.unlock_after_write()
+
+
+def _windows_raw_write_helper_command(input_path, device_path, result_path):
+    helper_args = [
+        _WINDOWS_RAW_WRITE_HELPER_ARG,
+        os.path.abspath(input_path),
+        str(device_path),
+        os.path.abspath(result_path),
+    ]
+    if getattr(sys, "frozen", False):
+        return sys.executable, subprocess.list2cmdline(helper_args)
+
+    script_path = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if not script_path:
+        raise FloppyImageError("Could not find the app entry point for administrator retry.")
+    return sys.executable, subprocess.list2cmdline([script_path, *helper_args])
+
+
+def _run_windows_process_as_admin(executable, parameters, cancel_callback=None):
+    ctypes, wintypes, _kernel32 = _windows_ctypes()
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+
+    class _ShellExecuteInfo(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", ctypes.c_ulong),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", wintypes.LPVOID),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIcon", wintypes.HANDLE),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SW_HIDE = 0
+    WAIT_OBJECT_0 = 0x00000000
+    WAIT_TIMEOUT = 0x00000102
+    WAIT_FAILED = 0xFFFFFFFF
+    INFINITE_SLICE_MS = 100
+
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(_ShellExecuteInfo)]
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    info = _ShellExecuteInfo()
+    info.cbSize = ctypes.sizeof(_ShellExecuteInfo)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS
+    info.hwnd = None
+    info.lpVerb = "runas"
+    info.lpFile = executable
+    info.lpParameters = parameters
+    info.lpDirectory = None
+    info.nShow = SW_HIDE
+
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        raise FloppyImageError(_windows_last_error_message("Could not request administrator approval for floppy writing"))
+
+    try:
+        while True:
+            result = kernel32.WaitForSingleObject(info.hProcess, INFINITE_SLICE_MS)
+            if result == WAIT_OBJECT_0:
+                break
+            if result == WAIT_TIMEOUT:
+                continue
+            if result == WAIT_FAILED:
+                raise FloppyImageError(_windows_last_error_message("Could not wait for administrator floppy write helper"))
+            _raise_if_cancelled(cancel_callback)
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code)):
+            raise FloppyImageError(_windows_last_error_message("Could not read administrator floppy write result"))
+        return int(exit_code.value)
+    finally:
+        if info.hProcess:
+            kernel32.CloseHandle(info.hProcess)
+
+
+def _write_block_device_windows_elevated(input_path, device_path, progress_callback=None, cancel_callback=None):
+    if os.name != "nt":
+        raise FloppyImageError("Administrator retry is only available on Windows.")
+    _raise_if_cancelled(cancel_callback)
+    fd, result_path = tempfile.mkstemp(prefix="aps_raw_floppy_write_", suffix=".json")
+    os.close(fd)
+    try:
+        executable, parameters = _windows_raw_write_helper_command(input_path, device_path, result_path)
+        _notify_progress(
+            progress_callback,
+            0,
+            100,
+            "Requesting administrator approval for direct floppy write...",
+        )
+        exit_code = _run_windows_process_as_admin(
+            executable,
+            parameters,
+            cancel_callback=cancel_callback,
+        )
+        result = {}
+        try:
+            with open(result_path, "r", encoding="utf-8") as handle:
+                result = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            result = {}
+        if exit_code == 0 and result.get("ok"):
+            _notify_progress(progress_callback, 100, 100, "Administrator floppy write complete.")
+            return
+        helper_error = str(result.get("error") or "").strip()
+        if helper_error:
+            raise FloppyImageError(helper_error)
+        raise FloppyImageError(f"The administrator floppy write helper exited with code {exit_code}.")
+    finally:
+        try:
+            os.remove(result_path)
+        except OSError:
+            pass
 
 
 def mtools_path(path):
@@ -3286,6 +3445,39 @@ def _windows_raw_write_denied(exc):
             or "could not lock" in lower
         )
     )
+
+
+def _helper_argv_uses_windows_raw_write(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    return len(argv) >= 2 and argv[1] == _WINDOWS_RAW_WRITE_HELPER_ARG
+
+
+def run_windows_raw_write_helper_from_argv(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    if not _helper_argv_uses_windows_raw_write(argv):
+        return None
+    result = {"ok": False}
+    result_path = argv[4] if len(argv) >= 5 else ""
+    try:
+        if os.name != "nt":
+            raise FloppyImageError("The elevated floppy write helper is only available on Windows.")
+        if len(argv) < 5:
+            raise FloppyImageError("The elevated floppy write helper received incomplete arguments.")
+        input_path = argv[2]
+        device_path = argv[3]
+        _write_block_device_windows_direct(input_path, device_path)
+        result = {"ok": True}
+        return 0
+    except Exception as exc:
+        result = {"ok": False, "error": str(exc)}
+        return 1
+    finally:
+        if result_path:
+            try:
+                with open(result_path, "w", encoding="utf-8") as handle:
+                    json.dump(result, handle)
+            except OSError:
+                pass
 
 
 def _image_entry_key(entry):
@@ -7559,7 +7751,8 @@ class FloppyImageSession:
                             )
                         except FloppyImageError as fallback_exc:
                             raise FloppyImageError(
-                                f"Windows denied direct floppy image writing, and file-level saving also failed: {fallback_exc}"
+                                "Windows would not allow a full image write to the floppy drive. "
+                                f"The app tried copying files to the mounted drive instead, but that also failed: {fallback_exc}"
                             ) from fallback_exc
             elif file_level:
                 raise FloppyImageError(
