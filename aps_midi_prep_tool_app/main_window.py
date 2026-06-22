@@ -437,6 +437,45 @@ def _style_name_for_appearance(mode, system_style_name):
     return system_style_name
 
 
+def _palette_is_dark(palette):
+    bg_color = palette.color(QPalette.Window)
+    text_color = palette.color(QPalette.WindowText)
+    bg_brightness = 0.299 * bg_color.red() + 0.587 * bg_color.green() + 0.114 * bg_color.blue()
+    text_brightness = 0.299 * text_color.red() + 0.587 * text_color.green() + 0.114 * text_color.blue()
+    return bg_brightness < text_brightness
+
+
+def _title_bar_uses_dark_mode(mode, palette):
+    if mode == "dark":
+        return True
+    if mode == "light":
+        return False
+    return _palette_is_dark(palette)
+
+
+def _set_windows_title_bar_dark(window, enabled):
+    if not sys.platform.startswith("win") or window is None:
+        return False
+    try:
+        import ctypes
+
+        hwnd = int(window.winId())
+        value = ctypes.c_int(1 if enabled else 0)
+        dwmapi = ctypes.windll.dwmapi
+        for attribute in (20, 19):
+            result = dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd),
+                ctypes.c_uint(attribute),
+                ctypes.byref(value),
+                ctypes.sizeof(value),
+            )
+            if result == 0:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _set_optional_palette_color(palette, role_name, color, *, group=None):
     role = getattr(QPalette, role_name, None)
     if role is None:
@@ -6065,6 +6104,7 @@ class MidiTitleWindow(QMainWindow):
             else:
                 palette = getattr(self, "systemPalette", QApplication.palette())
             app.setPalette(palette)
+            self._apply_windows_title_bar_theme(mode, palette)
 
         if hasattr(self, "appearanceActions"):
             for action_mode, action in self.appearanceActions.items():
@@ -6076,6 +6116,14 @@ class MidiTitleWindow(QMainWindow):
     def _set_appearance_mode(self, mode):
         self._apply_appearance_mode(mode, persist=True, refresh=True)
         self._log_event("Settings", "Appearance changed", mode=self._appearance_mode())
+
+    def _apply_windows_title_bar_theme(self, mode=None, palette=None):
+        mode = self._normalized_appearance_mode(mode or self._appearance_mode())
+        palette = palette or QApplication.palette()
+        _set_windows_title_bar_dark(
+            self,
+            _title_bar_uses_dark_mode(mode, palette),
+        )
 
     def _refresh_theme_sensitive_widgets(self):
         for widget_name in (
@@ -6590,11 +6638,13 @@ class MidiTitleWindow(QMainWindow):
         if event.type() in {QEvent.ApplicationPaletteChange, QEvent.PaletteChange}:
             if self._appearance_mode() == "system":
                 self.systemPalette = QApplication.palette()
+                self._apply_windows_title_bar_theme("system", self.systemPalette)
             self._apply_table_selection_style()
             self._refresh_theme_sensitive_widgets()
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._apply_windows_title_bar_theme()
         if not self._did_apply_initial_column_sizing:
             self._resize_table_columns_to_fill()
             self._did_apply_initial_column_sizing = True
