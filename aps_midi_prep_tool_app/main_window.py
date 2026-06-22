@@ -445,6 +445,26 @@ def _palette_is_dark(palette):
     return bg_brightness < text_brightness
 
 
+def _system_color_scheme_is_dark(app=None, fallback_palette=None):
+    app = app or QApplication.instance()
+    if app is not None:
+        color_scheme = getattr(app.styleHints(), "colorScheme", None)
+        if callable(color_scheme):
+            scheme = color_scheme()
+            if scheme == Qt.ColorScheme.Dark:
+                return True
+            if scheme == Qt.ColorScheme.Light:
+                return False
+    return _palette_is_dark(fallback_palette or QApplication.palette())
+
+
+def _effective_appearance_mode(mode, system_palette=None, app=None):
+    mode = str(mode or "").strip().lower()
+    if mode in {"dark", "light"}:
+        return mode
+    return "dark" if _system_color_scheme_is_dark(app, system_palette) else "light"
+
+
 def _title_bar_uses_dark_mode(mode, palette):
     if mode == "dark":
         return True
@@ -453,8 +473,24 @@ def _title_bar_uses_dark_mode(mode, palette):
     return _palette_is_dark(palette)
 
 
-def _refresh_windows_title_bar(hwnd, ctypes_module):
+def _refresh_windows_title_bar(window, hwnd, ctypes_module):
     user32 = ctypes_module.windll.user32
+    user32.GetForegroundWindow.restype = ctypes_module.c_void_p
+    active_hwnd = int(user32.GetForegroundWindow() or 0)
+    active_value = 1 if active_hwnd == int(hwnd) else 0
+    inactive_value = 0 if active_value else 1
+    user32.SendMessageW(
+        ctypes_module.c_void_p(hwnd),
+        ctypes_module.c_uint(0x0086),  # WM_NCACTIVATE
+        ctypes_module.c_size_t(inactive_value),
+        ctypes_module.c_void_p(0),
+    )
+    user32.SendMessageW(
+        ctypes_module.c_void_p(hwnd),
+        ctypes_module.c_uint(0x0086),  # WM_NCACTIVATE
+        ctypes_module.c_size_t(active_value),
+        ctypes_module.c_void_p(0),
+    )
     swp_flags = (
         0x0001  # SWP_NOSIZE
         | 0x0002  # SWP_NOMOVE
@@ -482,9 +518,32 @@ def _refresh_windows_title_bar(hwnd, ctypes_module):
         ctypes_module.c_void_p(0),
         ctypes_module.c_uint(redraw_flags),
     )
+    user32.DrawMenuBar(ctypes_module.c_void_p(hwnd))
+    user32.SetWindowTextW(ctypes_module.c_void_p(hwnd), str(window.windowTitle()))
     flush = getattr(ctypes_module.windll.dwmapi, "DwmFlush", None)
     if callable(flush):
         flush()
+
+
+def _retry_windows_title_bar_refresh(window):
+    if not sys.platform.startswith("win") or window is None:
+        return
+    try:
+        import ctypes
+
+        _refresh_windows_title_bar(window, int(window.winId()), ctypes)
+    except Exception:
+        pass
+
+
+def _schedule_windows_title_bar_refresh(window):
+    if not sys.platform.startswith("win") or window is None:
+        return
+    for delay_ms in (0, 75, 200):
+        QTimer.singleShot(
+            delay_ms,
+            lambda target=window: _retry_windows_title_bar_refresh(target),
+        )
 
 
 def _set_windows_title_bar_dark(window, enabled):
@@ -504,10 +563,7 @@ def _set_windows_title_bar_dark(window, enabled):
                 ctypes.sizeof(value),
             )
             if result == 0:
-                try:
-                    _refresh_windows_title_bar(hwnd, ctypes)
-                except Exception:
-                    pass
+                _schedule_windows_title_bar_refresh(window)
                 return True
     except Exception:
         return False
@@ -5113,6 +5169,9 @@ class MidiTitleWindow(QMainWindow):
         self.systemPalette = QApplication.palette()
         app = QApplication.instance()
         self.systemStyleName = _base_style_name(app.style()) if app is not None else ""
+        self._applyingAppearanceMode = False
+        self._systemColorSchemeSignalConnected = False
+        self._connect_system_color_scheme_signal(app)
         self.baseApplicationFont = QFont(QApplication.font())
         self.currentAppearanceMode = self._normalized_appearance_mode(
             self.settings.value(self.SETTING_APPEARANCE_MODE, "system") or "system"
@@ -6119,6 +6178,24 @@ class MidiTitleWindow(QMainWindow):
     def _appearance_mode(self):
         return self._normalized_appearance_mode(getattr(self, "currentAppearanceMode", "system"))
 
+    def _connect_system_color_scheme_signal(self, app):
+        if app is None or getattr(self, "_systemColorSchemeSignalConnected", False):
+            return
+        signal = getattr(app.styleHints(), "colorSchemeChanged", None)
+        if signal is None:
+            return
+        try:
+            signal.connect(self._handle_system_color_scheme_changed)
+        except (RuntimeError, TypeError):
+            return
+        self._systemColorSchemeSignalConnected = True
+
+    def _handle_system_color_scheme_changed(self, *_args):
+        if getattr(self, "_applyingAppearanceMode", False):
+            return
+        if self._appearance_mode() == "system":
+            self._apply_appearance_mode("system", persist=False, refresh=True)
+
     def _apply_appearance_mode(self, mode, *, persist=True, refresh=True):
         mode = self._normalized_appearance_mode(mode)
         self.currentAppearanceMode = mode
@@ -6128,21 +6205,27 @@ class MidiTitleWindow(QMainWindow):
 
         app = QApplication.instance()
         if app is not None:
-            app.setProperty("_aps_appearance_mode", mode)
-            app.setStyleSheet("")
-            _set_application_base_style(
-                app,
-                _style_name_for_appearance(mode, getattr(self, "systemStyleName", "")),
-            )
-            _set_application_color_scheme(app, mode)
-            if mode == "dark":
-                palette = _build_dark_palette()
-            elif mode == "light":
-                palette = _build_light_palette()
-            else:
-                palette = getattr(self, "systemPalette", QApplication.palette())
-            app.setPalette(palette)
-            self._apply_windows_title_bar_theme(mode, palette)
+            self._connect_system_color_scheme_signal(app)
+            previous_applying = bool(getattr(self, "_applyingAppearanceMode", False))
+            self._applyingAppearanceMode = True
+            try:
+                _set_application_color_scheme(app, mode)
+                effective_mode = _effective_appearance_mode(
+                    mode,
+                    getattr(self, "systemPalette", QApplication.palette()),
+                    app,
+                )
+                app.setProperty("_aps_appearance_mode", effective_mode)
+                app.setStyleSheet("")
+                _set_application_base_style(
+                    app,
+                    _style_name_for_appearance(effective_mode, getattr(self, "systemStyleName", "")),
+                )
+                palette = _build_dark_palette() if effective_mode == "dark" else _build_light_palette()
+                app.setPalette(palette)
+                self._apply_windows_title_bar_theme(effective_mode, palette)
+            finally:
+                self._applyingAppearanceMode = previous_applying
 
         if hasattr(self, "appearanceActions"):
             for action_mode, action in self.appearanceActions.items():
@@ -6674,9 +6757,11 @@ class MidiTitleWindow(QMainWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() in {QEvent.ApplicationPaletteChange, QEvent.PaletteChange}:
+            if getattr(self, "_applyingAppearanceMode", False):
+                return
             if self._appearance_mode() == "system":
-                self.systemPalette = QApplication.palette()
-                self._apply_windows_title_bar_theme("system", self.systemPalette)
+                self._apply_appearance_mode("system", persist=False, refresh=True)
+                return
             self._apply_table_selection_style()
             self._refresh_theme_sensitive_widgets()
 
