@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QProgressBar,
     QProxyStyle,
+    QStyleFactory,
     QDialog,
     QDialogButtonBox,
     QCheckBox,
@@ -380,11 +381,60 @@ class _TooltipDelayStyle(QProxyStyle):
 
 def install_tooltip_delay_style(app=None):
     app = app or QApplication.instance()
-    if app is None or getattr(app, "_aps_tooltip_delay_style", None) is not None:
+    if app is None:
+        return
+    existing_style = getattr(app, "_aps_tooltip_delay_style", None)
+    if existing_style is not None and app.style() is existing_style:
         return
     style = _TooltipDelayStyle(app.style())
     app.setStyle(style)
     app._aps_tooltip_delay_style = style
+
+
+def _base_style_name(style):
+    if style is None:
+        return ""
+    base_style = getattr(style, "baseStyle", lambda: None)()
+    if base_style is not None and base_style is not style:
+        name = str(base_style.objectName() or "").strip()
+        if name:
+            return name
+    return str(style.objectName() or "").strip()
+
+
+def _style_factory_name(style_name):
+    style_name = str(style_name or "").strip()
+    if not style_name:
+        return ""
+    for candidate in QStyleFactory.keys():
+        if candidate.lower() == style_name.lower():
+            return candidate
+    return ""
+
+
+def _set_application_base_style(app, style_name):
+    if app is None:
+        return
+    factory_name = _style_factory_name(style_name)
+    if not factory_name:
+        install_tooltip_delay_style(app)
+        return
+    if _base_style_name(app.style()).lower() == factory_name.lower():
+        install_tooltip_delay_style(app)
+        return
+    style = QStyleFactory.create(factory_name)
+    if style is None:
+        install_tooltip_delay_style(app)
+        return
+    wrapped_style = _TooltipDelayStyle(style)
+    app.setStyle(wrapped_style)
+    app._aps_tooltip_delay_style = wrapped_style
+
+
+def _style_name_for_appearance(mode, system_style_name):
+    if sys.platform.startswith("win") and mode in {"dark", "light"}:
+        return "Fusion"
+    return system_style_name
 
 
 def _set_optional_palette_color(palette, role_name, color, *, group=None):
@@ -481,316 +531,6 @@ def _build_dark_palette():
     _set_optional_palette_color(palette, "PlaceholderText", "#69737C", group=QPalette.Disabled)
     _set_optional_palette_color(palette, "Accent", "#56616D", group=QPalette.Disabled)
     return palette
-
-
-def _appearance_stylesheet(mode):
-    if mode == "dark":
-        return """
-        QMenuBar {
-            background-color: #1C2228;
-            color: #F0F4F8;
-        }
-        QMenuBar::item {
-            background: transparent;
-            color: #F0F4F8;
-            padding: 4px 10px;
-        }
-        QMenuBar::item:selected,
-        QMenuBar::item:pressed {
-            background-color: #2F3841;
-            color: #FFFFFF;
-        }
-        QMenu {
-            background-color: #1C2228;
-            color: #F0F4F8;
-            border: 1px solid #56616D;
-        }
-        QMenu::item {
-            padding: 4px 24px 4px 24px;
-        }
-        QMenu::item:selected {
-            background-color: #155E75;
-            color: #ECFEFF;
-        }
-        QPushButton,
-        QToolButton {
-            background-color: #2A323A;
-            color: #F0F4F8;
-            border: 1px solid #56616D;
-            border-radius: 3px;
-        }
-        QPushButton:hover,
-        QToolButton:hover {
-            background-color: #34404A;
-            border-color: #6B7784;
-        }
-        QPushButton:pressed,
-        QToolButton:pressed {
-            background-color: #20272E;
-        }
-        QPushButton:disabled,
-        QToolButton:disabled {
-            background-color: #232A31;
-            color: #9099A3;
-            border-color: #3A444F;
-        }
-        QComboBox,
-        QLineEdit,
-        QPlainTextEdit,
-        QTextEdit,
-        QSpinBox,
-        QKeySequenceEdit {
-            background-color: #11161B;
-            color: #F0F4F8;
-            border: 1px solid #56616D;
-            selection-background-color: #155E75;
-            selection-color: #ECFEFF;
-        }
-        QComboBox:disabled,
-        QLineEdit:disabled,
-        QPlainTextEdit:disabled,
-        QTextEdit:disabled,
-        QSpinBox:disabled,
-        QKeySequenceEdit:disabled {
-            background-color: #20272E;
-            color: #9099A3;
-            border-color: #3A444F;
-        }
-        QComboBox::drop-down {
-            background-color: #2A323A;
-            border-left: 1px solid #56616D;
-        }
-        QAbstractItemView {
-            background-color: #11161B;
-            color: #F0F4F8;
-            alternate-background-color: #20272E;
-            selection-background-color: #155E75;
-            selection-color: #ECFEFF;
-        }
-        QHeaderView::section,
-        QTableCornerButton::section {
-            background-color: #2A323A;
-            color: #F0F4F8;
-            border: 1px solid #56616D;
-        }
-        QTableView,
-        QTableWidget,
-        QTreeView,
-        QTreeWidget,
-        QListView {
-            background-color: #11161B;
-            color: #F0F4F8;
-            gridline-color: #3A444F;
-            alternate-background-color: #20272E;
-            selection-background-color: #155E75;
-            selection-color: #ECFEFF;
-        }
-        QGroupBox {
-            color: #F0F4F8;
-            border: 1px solid #56616D;
-            margin-top: 8px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 8px;
-            padding: 0 3px;
-            background-color: #1C2228;
-        }
-        QCheckBox,
-        QRadioButton,
-        QLabel {
-            color: #F0F4F8;
-        }
-        QScrollBar:vertical,
-        QScrollBar:horizontal {
-            background-color: #1C2228;
-            border: 1px solid #2F3841;
-        }
-        QScrollBar::handle:vertical,
-        QScrollBar::handle:horizontal {
-            background-color: #56616D;
-            border-radius: 3px;
-            min-height: 20px;
-            min-width: 20px;
-        }
-        QScrollBar::handle:vertical:hover,
-        QScrollBar::handle:horizontal:hover {
-            background-color: #6B7784;
-        }
-        QScrollBar::add-line,
-        QScrollBar::sub-line {
-            background: transparent;
-            border: none;
-        }
-        QProgressBar {
-            background-color: #11161B;
-            color: #F0F4F8;
-            border: 1px solid #56616D;
-            text-align: center;
-        }
-        QProgressBar::chunk {
-            background-color: #155E75;
-        }
-        QToolTip {
-            background-color: #2C343C;
-            color: #F0F4F8;
-            border: 1px solid #56616D;
-        }
-        """
-    if mode == "light":
-        return """
-        QMenuBar {
-            background-color: #F5F7FA;
-            color: #17202A;
-        }
-        QMenuBar::item {
-            background: transparent;
-            color: #17202A;
-            padding: 4px 10px;
-        }
-        QMenuBar::item:selected,
-        QMenuBar::item:pressed {
-            background-color: #E8EDF2;
-            color: #17202A;
-        }
-        QMenu {
-            background-color: #FFFFFF;
-            color: #17202A;
-            border: 1px solid #A8B1BA;
-        }
-        QMenu::item {
-            padding: 4px 24px 4px 24px;
-        }
-        QMenu::item:selected {
-            background-color: #B9EAF5;
-            color: #0B2533;
-        }
-        QPushButton,
-        QToolButton {
-            background-color: #E8EDF2;
-            color: #17202A;
-            border: 1px solid #A8B1BA;
-            border-radius: 3px;
-        }
-        QPushButton:hover,
-        QToolButton:hover {
-            background-color: #DDE5EC;
-            border-color: #65707A;
-        }
-        QPushButton:pressed,
-        QToolButton:pressed {
-            background-color: #D1DAE3;
-        }
-        QPushButton:disabled,
-        QToolButton:disabled {
-            background-color: #EEF2F6;
-            color: #6D7780;
-            border-color: #C6CED6;
-        }
-        QComboBox,
-        QLineEdit,
-        QPlainTextEdit,
-        QTextEdit,
-        QSpinBox,
-        QKeySequenceEdit {
-            background-color: #FFFFFF;
-            color: #17202A;
-            border: 1px solid #A8B1BA;
-            selection-background-color: #B9EAF5;
-            selection-color: #0B2533;
-        }
-        QComboBox:disabled,
-        QLineEdit:disabled,
-        QPlainTextEdit:disabled,
-        QTextEdit:disabled,
-        QSpinBox:disabled,
-        QKeySequenceEdit:disabled {
-            background-color: #EEF2F6;
-            color: #6D7780;
-            border-color: #C6CED6;
-        }
-        QComboBox::drop-down {
-            background-color: #E8EDF2;
-            border-left: 1px solid #A8B1BA;
-        }
-        QAbstractItemView {
-            background-color: #FFFFFF;
-            color: #17202A;
-            alternate-background-color: #EEF2F6;
-            selection-background-color: #B9EAF5;
-            selection-color: #0B2533;
-        }
-        QHeaderView::section,
-        QTableCornerButton::section {
-            background-color: #E8EDF2;
-            color: #17202A;
-            border: 1px solid #A8B1BA;
-        }
-        QTableView,
-        QTableWidget,
-        QTreeView,
-        QTreeWidget,
-        QListView {
-            background-color: #FFFFFF;
-            color: #17202A;
-            gridline-color: #D6DEE6;
-            alternate-background-color: #EEF2F6;
-            selection-background-color: #B9EAF5;
-            selection-color: #0B2533;
-        }
-        QGroupBox {
-            color: #17202A;
-            border: 1px solid #A8B1BA;
-            margin-top: 8px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 8px;
-            padding: 0 3px;
-            background-color: #F5F7FA;
-        }
-        QCheckBox,
-        QRadioButton,
-        QLabel {
-            color: #17202A;
-        }
-        QScrollBar:vertical,
-        QScrollBar:horizontal {
-            background-color: #F5F7FA;
-            border: 1px solid #D6DEE6;
-        }
-        QScrollBar::handle:vertical,
-        QScrollBar::handle:horizontal {
-            background-color: #A8B1BA;
-            border-radius: 3px;
-            min-height: 20px;
-            min-width: 20px;
-        }
-        QScrollBar::handle:vertical:hover,
-        QScrollBar::handle:horizontal:hover {
-            background-color: #65707A;
-        }
-        QScrollBar::add-line,
-        QScrollBar::sub-line {
-            background: transparent;
-            border: none;
-        }
-        QProgressBar {
-            background-color: #FFFFFF;
-            color: #17202A;
-            border: 1px solid #A8B1BA;
-            text-align: center;
-        }
-        QProgressBar::chunk {
-            background-color: #B9EAF5;
-        }
-        QToolTip {
-            background-color: #FFFFFF;
-            color: #17202A;
-            border: 1px solid #A8B1BA;
-        }
-        """
-    return ""
 
 
 class TitleOverflowDelegate(QStyledItemDelegate):
@@ -5294,6 +5034,8 @@ class MidiTitleWindow(QMainWindow):
             self.settings.value(self.SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
         )
         self.systemPalette = QApplication.palette()
+        app = QApplication.instance()
+        self.systemStyleName = _base_style_name(app.style()) if app is not None else ""
         self.baseApplicationFont = QFont(QApplication.font())
         self.currentAppearanceMode = self._normalized_appearance_mode(
             self.settings.value(self.SETTING_APPEARANCE_MODE, "system") or "system"
@@ -6310,6 +6052,11 @@ class MidiTitleWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setProperty("_aps_appearance_mode", mode)
+            app.setStyleSheet("")
+            _set_application_base_style(
+                app,
+                _style_name_for_appearance(mode, getattr(self, "systemStyleName", "")),
+            )
             _set_application_color_scheme(app, mode)
             if mode == "dark":
                 palette = _build_dark_palette()
@@ -6318,7 +6065,6 @@ class MidiTitleWindow(QMainWindow):
             else:
                 palette = getattr(self, "systemPalette", QApplication.palette())
             app.setPalette(palette)
-            app.setStyleSheet(_appearance_stylesheet(mode))
 
         if hasattr(self, "appearanceActions"):
             for action_mode, action in self.appearanceActions.items():
