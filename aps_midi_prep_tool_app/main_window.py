@@ -453,6 +453,40 @@ def _title_bar_uses_dark_mode(mode, palette):
     return _palette_is_dark(palette)
 
 
+def _refresh_windows_title_bar(hwnd, ctypes_module):
+    user32 = ctypes_module.windll.user32
+    swp_flags = (
+        0x0001  # SWP_NOSIZE
+        | 0x0002  # SWP_NOMOVE
+        | 0x0004  # SWP_NOZORDER
+        | 0x0010  # SWP_NOACTIVATE
+        | 0x0020  # SWP_FRAMECHANGED
+    )
+    user32.SetWindowPos(
+        ctypes_module.c_void_p(hwnd),
+        ctypes_module.c_void_p(0),
+        0,
+        0,
+        0,
+        0,
+        ctypes_module.c_uint(swp_flags),
+    )
+    redraw_flags = (
+        0x0001  # RDW_INVALIDATE
+        | 0x0100  # RDW_UPDATENOW
+        | 0x0400  # RDW_FRAME
+    )
+    user32.RedrawWindow(
+        ctypes_module.c_void_p(hwnd),
+        None,
+        ctypes_module.c_void_p(0),
+        ctypes_module.c_uint(redraw_flags),
+    )
+    flush = getattr(ctypes_module.windll.dwmapi, "DwmFlush", None)
+    if callable(flush):
+        flush()
+
+
 def _set_windows_title_bar_dark(window, enabled):
     if not sys.platform.startswith("win") or window is None:
         return False
@@ -470,6 +504,10 @@ def _set_windows_title_bar_dark(window, enabled):
                 ctypes.sizeof(value),
             )
             if result == 0:
+                try:
+                    _refresh_windows_title_bar(hwnd, ctypes)
+                except Exception:
+                    pass
                 return True
     except Exception:
         return False
