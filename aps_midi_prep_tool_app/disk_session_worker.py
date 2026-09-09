@@ -192,6 +192,8 @@ class BulkExtractionWorker(_CancellableDiskWorker):
         trim_title_spaces=False,
         use_album_names=False,
         language_code=None,
+        job_record_path=None,
+        resume=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -203,6 +205,8 @@ class BulkExtractionWorker(_CancellableDiskWorker):
         self.trim_title_spaces = bool(trim_title_spaces)
         self.use_album_names = bool(use_album_names)
         self.language_code = language_code
+        self.job_record_path = job_record_path
+        self.resume = bool(resume)
 
     def _emit_detailed_progress(self, detail):
         self._raise_if_cancelled()
@@ -220,6 +224,8 @@ class BulkExtractionWorker(_CancellableDiskWorker):
                 trim_title_spaces=self.trim_title_spaces,
                 use_album_names=self.use_album_names,
                 language_code=self.language_code,
+                job_record_path=self.job_record_path,
+                resume=self.resume,
                 progress_callback=self._emit_progress,
                 progress_detail_callback=self._emit_detailed_progress,
                 cancel_callback=self._cancel_requested,
@@ -239,6 +245,7 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
     buildFinished = Signal(object)
     buildFailed = Signal(str)
     overwriteRequested = Signal(object)
+    previewRequested = Signal(object)
     CANCELLED_MESSAGE = "Emulator image creation cancelled."
 
     def __init__(
@@ -253,6 +260,7 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         disk_format,
         output_ext,
         output_content="eseq",
+        require_midi_type0=False,
         include_subfolders=True,
         disk_layout="fill",
         shuffle=False,
@@ -270,6 +278,7 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         self.disk_format = disk_format
         self.output_ext = output_ext
         self.output_content = output_content
+        self.require_midi_type0 = bool(require_midi_type0)
         self.include_subfolders = bool(include_subfolders)
         self.disk_layout = disk_layout
         self.shuffle = bool(shuffle)
@@ -277,10 +286,27 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         self.language_code = language_code
         self._overwrite_response = False
         self._overwrite_response_event = threading.Event()
+        self._preview_response = None
+        self._preview_response_event = threading.Event()
 
     def cancel(self):
         super().cancel()
         self._overwrite_response_event.set()
+        self._preview_response_event.set()
+
+    def resolve_preview_request(self, decision):
+        self._preview_response = decision
+        self._preview_response_event.set()
+
+    def _request_preview(self, preview):
+        self._raise_if_cancelled()
+        self._preview_response = None
+        self._preview_response_event.clear()
+        self.previewRequested.emit(preview)
+        while not self._preview_response_event.wait(0.1):
+            self._raise_if_cancelled()
+        self._raise_if_cancelled()
+        return self._preview_response
 
     def resolve_overwrite_request(self, approved):
         self._overwrite_response = bool(approved)
@@ -308,11 +334,13 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
                 disk_format=self.disk_format,
                 output_ext=self.output_ext,
                 output_content=self.output_content,
+                require_midi_type0=self.require_midi_type0,
                 include_subfolders=self.include_subfolders,
                 disk_layout=self.disk_layout,
                 shuffle=self.shuffle,
                 include_song_lists=self.include_song_lists,
                 overwrite_callback=self._request_overwrite_confirmation,
+                review_callback=self._request_preview,
                 language_code=self.language_code,
                 progress_callback=self._emit_progress,
                 cancel_callback=self._cancel_requested,
@@ -552,13 +580,14 @@ class DiskSessionWriteTargetWorker(_CancellableDiskWorker):
     writeFinished = Signal()
     writeFailed = Signal(str)
 
-    def __init__(self, session, target_kind, target, operations, parent=None, file_level=False):
+    def __init__(self, session, target_kind, target, operations, parent=None, file_level=False, verify_after_write=False):
         super().__init__(parent)
         self.session = session
         self.target_kind = target_kind
         self.target = target
         self.operations = dict(operations or {})
         self.file_level = bool(file_level)
+        self.verify_after_write = bool(verify_after_write)
 
     def run(self):
         try:
@@ -567,6 +596,7 @@ class DiskSessionWriteTargetWorker(_CancellableDiskWorker):
                 self.target,
                 **self.operations,
                 file_level=self.file_level,
+                verify_after_write=self.verify_after_write,
                 progress_callback=self._emit_progress,
                 cancel_callback=self._cancel_requested,
             )

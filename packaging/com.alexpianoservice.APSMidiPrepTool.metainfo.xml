@@ -26,4 +26,12 @@
   </provides>
   <url type="homepage">https://www.alexanderpeppe.com/</url>
   <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.8.2" date="2026-09-08">
+      <description>
+        <p>Prepare songs for Disklavier, PianoDisc, and QRS controllers, review
+        staged changes and emulator disks, and use all 12 interface languages.</p>
+      </description>
+    </release>
+  </releases>
 </component>

@@ -1,6 +1,9 @@
 import os
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from fractions import Fraction
+
+from .eseq_header import analyze_eseq_playback_flags
 
 from .midi_type0_converter import (
     _parse_midi_chunks,
@@ -25,6 +28,7 @@ ESEQ_DURATION_TICKS_OFFSET = 0x37
 ESEQ_DELAY_BEFORE_TICKS_OFFSET = 0x3B
 ESEQ_DELAY_AFTER_TICKS_OFFSET = 0x3F
 ESEQ_MIDI_DIVISION = 384
+ESEQ_DEFAULT_BPM = 117
 ESEQ_DELAY15_MAX = 0x3FFF
 ESEQ_DIRECTORY_U16_MAX = 0xFFFF
 DEFAULT_MIDI_MPQN = 500000
@@ -36,12 +40,18 @@ CC7_POLICY_WARN_ONLY = "warn_only"
 CC7_POLICY_PLAYBACK_FIX_100 = "playback_fix_100"
 CC7_POLICY_PLAYBACK_FIX_127 = "playback_fix_127"
 CC7_POLICY_DROP_EARLY_ZERO = "drop_early_cc7_zero"
-DEFAULT_CC7_POLICY = CC7_POLICY_PLAYBACK_FIX_100
+DEFAULT_CC7_POLICY = CC7_POLICY_PRESERVE
 ESEQ_CONTAINER_DISKLAVIER = "disklavier"
 ESEQ_CONTAINER_CLAVINOVA_MDA = "clavinova_mda"
 MIDI_METADATA_POLICY_CLEAN = "clean"
 MIDI_METADATA_POLICY_ARCHIVAL = "archival"
 DEFAULT_MIDI_METADATA_POLICY = MIDI_METADATA_POLICY_CLEAN
+ESEQ_TIMING_POLICY_AUTO = "auto"
+ESEQ_TIMING_POLICY_PRESERVE = "preserve"
+ESEQ_TIMING_POLICY_MID2ESEQ = "mid2eseq"
+ESEQ_PEDAL_POLICY_AUTO = "auto"
+ESEQ_PEDAL_POLICY_PRESERVE = "preserve"
+ESEQ_PEDAL_POLICY_YAMAHA = "yamaha"
 _ESEQ_PADDING_BYTE = 0xF6
 _ESEQ_TIMING_META_PREFIX = "APS-ESEQ-TIMING"
 _ESEQ_HEADER_META_PREFIX = "APS-ESEQ-HEADER"
@@ -196,6 +206,7 @@ class ParsedEseqFile:
     base_bpm: int
     title: str
     end_tick: int
+    tempo_factors: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -270,7 +281,9 @@ def is_clavinova_mda_eseq_bytes(data, filename=""):
     if (
         data[0:7] == CLAVINOVA_MDA_HEADER_PREFIX
         and data[0x17:0x1F] == CLAVINOVA_MDA_CONST_17
-        and data[0x57:0x5A] == b"\xF1\x00\xF9"
+        # A MIDI source without meter metadata produces no F9. The distinct
+        # MDA header and stream start still identify its shorter container.
+        and data[0x57:0x59] == b"\xF1\x00"
     ):
         return True
     return filename.upper().endswith(".MDA") and data[0x57:0x5A] == b"\xF1\x00\xF9"
@@ -278,10 +291,31 @@ def is_clavinova_mda_eseq_bytes(data, filename=""):
 
 def _eseq_base_bpm(data):
     if _is_q11_eseq(data):
-        return _clamp_base_bpm(data[0x24] + 29)
+        return _eseq_tempo_byte_to_bpm(data[0x24])
     if is_clavinova_mda_eseq_bytes(data):
-        return _clamp_base_bpm(data[0x24] + 29)
-    return _clamp_base_bpm(data[0x33] + 29)
+        return _eseq_tempo_byte_to_bpm(data[0x24])
+    return _eseq_tempo_byte_to_bpm(data[0x33])
+
+
+def _eseq_tempo_byte_to_bpm(value):
+    # Yamaha's esqrOpen and seq::songEseqSetInfo use zero as a sentinel,
+    # including when FIL's 0x33 overrides a different value at 0x24.
+    return value + 29 if value else ESEQ_DEFAULT_BPM
+
+
+def _eseq_header_time_signature(data):
+    # Only the normal FIL program block has these meter fields. MDA and
+    # Q11 use different layouts; their explicit F9 events remain authoritative.
+    if (
+        _is_q11_eseq(data) or is_clavinova_mda_eseq_bytes(data)
+        or data[0x19] != 0x40
+        or int.from_bytes(data[0x1B:0x1F], "little") != 0x50
+    ):
+        return None
+    numerator, denominator = data[0x34:0x36]
+    if not numerator or not denominator or denominator & (denominator - 1):
+        return None
+    return numerator, denominator.bit_length() - 1
 
 
 def _eseq_event_stream_start(data):
@@ -343,7 +377,9 @@ def _sanitize_ascii_filename_key(filename):
 
 def _clamp_base_bpm(bpm):
     bpm = int(round(float(bpm or 0)))
-    return max(29, min(284, bpm))
+    # 29 would encode zero, which Yamaha plays at 117 BPM. Slower MIDI
+    # tempos use a nonzero base plus an FB ratio instead.
+    return max(30, min(284, bpm))
 
 
 def _mpqn_to_bpm(mpqn):
@@ -486,6 +522,11 @@ def _apply_cc7_policy(raw, should_adjust, cc7_policy):
     raise EseqConversionError(f"Unsupported CC7 policy '{cc7_policy}'.")
 
 
+def count_eseq_zero_volume_candidates(eseq_bytes):
+    """Count CC7 zeros followed by notes before volume is restored on that channel."""
+    return len(_zero_cc7_indexes_needing_playback_fix(parse_eseq_bytes(eseq_bytes).events))
+
+
 def _normalize_midi_metadata_policy(midi_metadata_policy):
     policy = str(midi_metadata_policy or DEFAULT_MIDI_METADATA_POLICY).strip().lower()
     policy_aliases = {
@@ -498,20 +539,6 @@ def _normalize_midi_metadata_policy(midi_metadata_policy):
     if policy in {MIDI_METADATA_POLICY_CLEAN, MIDI_METADATA_POLICY_ARCHIVAL}:
         return policy
     raise EseqConversionError(f"Unsupported MIDI metadata policy '{midi_metadata_policy}'.")
-
-
-def _event_class_flags(events):
-    has_notes = False
-    has_controllers = False
-    for _, _, raw in events:
-        if not raw:
-            continue
-        status = raw[0] & 0xF0
-        if status in (0x80, 0x90):
-            has_notes = True
-        elif status == 0xB0:
-            has_controllers = True
-    return has_notes, has_controllers
 
 
 def _effective_initial_mpqn(tempo_events):
@@ -540,9 +567,13 @@ def parse_eseq_bytes(eseq_bytes):
     pos = _eseq_event_stream_start(data)
     declared_stream_end = _declared_stream_end(data, pos)
     events = []
-    tempo_events = [(0, 60_000_000 // base_bpm)]
+    initial_mpqn = 60_000_000 // base_bpm
+    tempo_events = [(0, initial_mpqn)]
+    tempo_factors = []
     time_signature_events = []
-    last_time_signature = None
+    last_time_signature = _eseq_header_time_signature(data)
+    if last_time_signature is not None:
+        time_signature_events.append((0, *last_time_signature))
 
     while pos < len(data):
         if declared_stream_end is not None and pos >= declared_stream_end:
@@ -582,10 +613,13 @@ def parse_eseq_bytes(eseq_bytes):
         if status == 0xFB:
             if pos + 1 >= len(data):
                 break
-            factor = max(1, _decode_15(data[pos], data[pos + 1]))
+            raw_factor = _decode_15(data[pos], data[pos + 1])
+            tempo_factors.append((abs_tick, raw_factor))
+            factor = max(1, raw_factor)
             pos += 2
-            effective_bpm = base_bpm * factor / 1000.0
-            tempo_events.append((abs_tick, max(1, int(60_000_000 // effective_bpm))))
+            # Match Yamaha's integer microsecond header clock. Every FB is
+            # relative to that original clock, not the preceding FB.
+            tempo_events.append((abs_tick, max(1, initial_mpqn * 1000 // factor)))
             continue
 
         if status == 0xF9:
@@ -610,17 +644,39 @@ def parse_eseq_bytes(eseq_bytes):
             events.append((abs_tick, 1, b"\xFF\x20\x01" + bytes([channel & 0x0F])))
             continue
 
-        if status in (0xF0, 0xF7):
-            start = pos - 1
+        if status == 0xF7:
+            raise EseqConversionError(
+                "Unexpected standalone F7 in E-SEQ; cannot safely identify the following song events."
+            )
+
+        if status == 0xF0:
+            # Legacy ESEQ2MID emits a packet at each embedded F3/F4 delay,
+            # advances the clock, then resumes with an SMF F7 continuation.
+            # The F7 packet marker is not part of the transmitted wire bytes.
+            packet = bytearray(b"\xF0")
             while pos < len(data):
-                if data[pos] == 0xF7:
-                    pos += 1
-                    break
+                byte = data[pos]
                 pos += 1
-            payload = data[start:pos]
-            if status == 0xF0 and (not payload or payload[-1] != 0xF7):
+                if byte in (0xF3, 0xF4):
+                    delay_size = 1 if byte == 0xF3 else 2
+                    if pos + delay_size > len(data):
+                        raise EseqConversionError("Encountered an incomplete delay inside E-SEQ SysEx.")
+                    events.append((abs_tick, 3, bytes(packet)))
+                    abs_tick += data[pos] if byte == 0xF3 else _decode_15(data[pos], data[pos + 1])
+                    pos += delay_size
+                    packet = bytearray(b"\xF7")
+                elif byte == 0xF7:
+                    packet.append(byte)
+                    events.append((abs_tick, 3, bytes(packet)))
+                    break
+                elif byte < 0x80:
+                    packet.append(byte)
+                else:
+                    raise EseqConversionError(
+                        f"Cannot safely preserve embedded E-SEQ SysEx status 0x{byte:02X} in MIDI."
+                    )
+            else:
                 raise EseqConversionError("Encountered an unterminated E-SEQ SysEx event.")
-            events.append((abs_tick, 3, payload))
             continue
 
         hi = status & 0xF0
@@ -649,6 +705,7 @@ def parse_eseq_bytes(eseq_bytes):
         base_bpm=base_bpm,
         title=title,
         end_tick=abs_tick,
+        tempo_factors=tempo_factors,
     )
 
 
@@ -733,7 +790,10 @@ def convert_eseq_bytes_to_midi_bytes(
     initial_mpqn = _effective_initial_mpqn(parsed.tempo_events)
     add_track_event(0, _write_midi_tempo(initial_mpqn))
     if parsed.time_signature_events:
-        _, numerator, denominator_power = parsed.time_signature_events[0]
+        numerator, denominator_power = DEFAULT_TIME_SIGNATURE
+        for tick, next_numerator, next_denominator in parsed.time_signature_events:
+            if tick == 0:
+                numerator, denominator_power = next_numerator, next_denominator
         add_track_event(0, _write_midi_time_signature(numerator, denominator_power))
     else:
         numerator, denominator_power = DEFAULT_TIME_SIGNATURE
@@ -826,11 +886,17 @@ def _collect_merged_midi_events(midi_bytes, *, include_end_tick=False):
     for track_index, chunk in enumerate(track_chunks):
         track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
         events, end_tick = _parse_track_events(track_data)
+        events = _normalize_midi_sysex_packets(events, track_index=track_index)
         max_end_tick = max(max_end_tick, end_tick)
         for abs_tick, order, raw in events:
             merged.append((abs_tick, track_index, order, raw))
 
     merged.sort(key=lambda item: (item[0], item[1], item[2]))
+    # A valid packet sequence in one track can still be interrupted by a
+    # transmitted event in another track after merging to one E-SEQ stream.
+    _normalize_midi_sysex_packets(
+        [(tick, order, raw) for tick, _track, order, raw in merged], track_index=None,
+    )
     if include_end_tick:
         return division, merged, max_end_tick
     return division, merged
@@ -975,9 +1041,53 @@ def _decode_midi_sysex_event(raw):
         raise EseqConversionError("Invalid MIDI SysEx event.")
     payload_length, payload_start = _read_vlq_from_bytes(raw, 1)
     payload_end = payload_start + payload_length
-    if payload_end > len(raw):
+    if payload_end != len(raw):
         raise EseqConversionError("Malformed MIDI SysEx event.")
     return bytes([raw[0]]) + raw[payload_start:payload_end]
+
+
+def _normalize_midi_sysex_packets(events, *, track_index):
+    """Validate complete SMF SysEx packet sequences without changing their ticks.
+
+    F7 is a continuation packet marker, not a transmitted leading byte. Its
+    payload is representable only after an unfinished F0 in the same track.
+    E-SEQ F3/F4 delays preserve packet timing; non-transmitted text metadata may
+    occur between packets, but channel, tempo, meter, and prefix events cannot.
+    """
+    pending = False
+    for tick, _order, raw in events:
+        status = raw[0] if raw else None
+        location = f"track {track_index + 1}, tick {tick}" if track_index is not None else f"merged tracks, tick {tick}"
+        if status not in (0xF0, 0xF7):
+            if pending and (status != 0xFF or raw[:2] in (b"\xFF\x20", b"\xFF\x51", b"\xFF\x58")):
+                raise EseqConversionError(
+                    f"Cannot preserve MIDI SysEx packets with intervening MIDI events in E-SEQ ({location})."
+                )
+            continue
+
+        payload = _decode_midi_sysex_event(raw)[1:]
+        if status == 0xF7 and not pending:
+            raise EseqConversionError(
+                f"Cannot preserve a standalone MIDI F7 escape event in E-SEQ ({location}). "
+                "Keep this song as MIDI; the escape data and following notes were not converted."
+            )
+        if status == 0xF0 and pending:
+            raise EseqConversionError(
+                f"A MIDI SysEx message starts before the preceding message ends ({location})."
+            )
+        body = payload[:-1] if payload.endswith(b"\xF7") else payload
+        if any(byte >= 0x80 for byte in body):
+            raise EseqConversionError(
+                f"Cannot safely preserve MIDI SysEx containing an embedded status or premature F7 ({location})."
+            )
+        pending = not payload.endswith(b"\xF7")
+
+    if pending:
+        track_label = f"track {track_index + 1}" if track_index is not None else "merged tracks"
+        raise EseqConversionError(
+            f"MIDI SysEx in {track_label} is missing its terminating F7; E-SEQ conversion was not performed."
+        )
+    return events
 
 
 def _encode_eseq_delta(delta, *, prefer_long=False, avoid_long=False):
@@ -987,7 +1097,7 @@ def _encode_eseq_delta(delta, *, prefer_long=False, avoid_long=False):
     remaining = int(delta)
     if avoid_long:
         while remaining > 0:
-            chunk = min(remaining, 0xFF)
+            chunk = min(remaining, 0x7F)
             out.extend(b"\xF3" + bytes([chunk]))
             remaining -= chunk
         return bytes(out)
@@ -998,13 +1108,15 @@ def _encode_eseq_delta(delta, *, prefer_long=False, avoid_long=False):
             out.extend(b"\xF4" + _encode_15(remaining))
             remaining = 0
             continue
-        if remaining <= 0xFF:
+        # Factory files and legacy MID2ESEQ use a seven-bit F3 operand.
+        # Keep the reader's wider compatibility, but write F4 from 128 ticks.
+        if remaining <= 0x7F:
             out.extend(b"\xF3" + bytes([remaining]))
             remaining = 0
             continue
         chunk = min(remaining, ESEQ_DELAY15_MAX)
-        if prefer_long and 0 < remaining - chunk <= 0xFF:
-            chunk = max(1, remaining - 0x100)
+        if prefer_long and 0 < remaining - chunk <= 0x7F:
+            chunk = max(1, remaining - 0x80)
         out.extend(b"\xF4" + _encode_15(chunk))
         remaining -= chunk
     return bytes(out)
@@ -1014,15 +1126,17 @@ def _build_time_signature_markers(time_signature_events, last_tick):
     if not time_signature_events:
         time_signature_events = [(0, *DEFAULT_TIME_SIGNATURE)]
 
-    sorted_events = sorted(time_signature_events, key=lambda item: (item[0], item[1], item[2]))
+    # Preserve source order at a shared tick: the last signature is the one
+    # that governs the following measure. Sorting by its value reverses that
+    # precedence for some perfectly valid MIDI files.
+    sorted_events = sorted(time_signature_events, key=lambda item: item[0])
     deduped = []
-    previous = None
     for tick, numerator, denominator_power in sorted_events:
         marker = (int(tick), max(1, int(numerator)), max(0, min(int(denominator_power), 7)))
-        if previous == marker:
-            continue
-        deduped.append(marker)
-        previous = marker
+        if deduped and deduped[-1][0] == marker[0]:
+            deduped[-1] = marker
+        else:
+            deduped.append(marker)
 
     markers = set()
     for index, (tick, numerator, denominator_power) in enumerate(deduped):
@@ -1050,17 +1164,16 @@ def _finalize_eseq_header(
     end_tick,
     delay_before_ticks,
     delay_after_ticks,
-    has_notes,
-    has_controllers,
+    playback_flags,
 ):
     used_length = ESEQ_HEADER_SIZE + len(stream_bytes)
     if used_length > 0xFFFFFFFF:
         raise EseqConversionError("E-SEQ output is too large for the Yamaha E-SEQ file format.")
 
-    numerator, denominator_power = (
-        time_signature_events[0][1],
-        time_signature_events[0][2],
-    ) if time_signature_events else DEFAULT_TIME_SIGNATURE
+    numerator, denominator_power = DEFAULT_TIME_SIGNATURE
+    for tick, next_numerator, next_denominator in time_signature_events:
+        if tick == 0:
+            numerator, denominator_power = next_numerator, next_denominator
     denominator = 1 << denominator_power
     header = bytearray(_ESEQ_TEMPLATE)
     if len(header) != ESEQ_HEADER_SIZE:
@@ -1079,9 +1192,16 @@ def _finalize_eseq_header(
     header[0x3B:0x3D] = _clamp_directory_u16(delay_before_ticks).to_bytes(2, "little")
     header[0x3F:0x41] = _clamp_directory_u16(delay_after_ticks).to_bytes(2, "little")
     header[0x43:0x47] = bytes([0x00, 0x77, 0x00, 0x00])
-    header[0x51] = 1 if has_controllers else 0
-    header[0x54] = (0x01 if has_notes else 0) | (0x04 if has_controllers else 0)
+    _write_eseq_playback_flags(header, playback_flags)
     return bytes(header)
+
+
+def _write_eseq_playback_flags(header, flags):
+    # Yamaha esqw::writeTgId/writeHp/writeTrackStatus. Controllers alone
+    # neither imply half-pedal data nor occupy a note channel.
+    header[0x45] = int(flags.has_xg)
+    header[0x51] = int(flags.has_half_pedal)
+    header[0x54:0x56] = flags.note_channel_mask.to_bytes(2, "little")
 
 
 def _finalize_clavinova_mda_header(stream_bytes, base_bpm, filename_hint):
@@ -1109,6 +1229,16 @@ def _pad_eseq_output(data):
     return data + bytes([_ESEQ_PADDING_BYTE]) * (2048 - remainder)
 
 
+def _yamaha_pedal_events(events, controllers):
+    """Expand pedal companions at their source tick, retaining merged order."""
+    from .eseq_pedals import YamahaPedalConverter
+
+    converter = YamahaPedalConverter(controllers)
+    for tick, track, order, raw in events:
+        for offset, message in enumerate(converter.convert_message(raw)):
+            yield tick, track, order * 2 + offset, message
+
+
 def convert_midi_bytes_to_eseq_bytes(
     midi_bytes,
     *,
@@ -1116,14 +1246,97 @@ def convert_midi_bytes_to_eseq_bytes(
     filename_hint="",
     cc7_policy=DEFAULT_CC7_POLICY,
     container_variant=ESEQ_CONTAINER_DISKLAVIER,
+    timing_policy=ESEQ_TIMING_POLICY_AUTO,
+    pedal_policy=ESEQ_PEDAL_POLICY_AUTO,
 ):
     container_variant = (container_variant or ESEQ_CONTAINER_DISKLAVIER).strip().lower()
     if container_variant not in {ESEQ_CONTAINER_DISKLAVIER, ESEQ_CONTAINER_CLAVINOVA_MDA}:
         raise EseqConversionError(f"Unsupported E-SEQ container variant '{container_variant}'.")
+    timing_policy = str(timing_policy or ESEQ_TIMING_POLICY_AUTO).strip().lower()
+    if timing_policy not in {
+        ESEQ_TIMING_POLICY_AUTO, ESEQ_TIMING_POLICY_PRESERVE, ESEQ_TIMING_POLICY_MID2ESEQ,
+    }:
+        raise EseqConversionError(f"Unsupported E-SEQ timing policy '{timing_policy}'.")
+    if container_variant != ESEQ_CONTAINER_DISKLAVIER and timing_policy == ESEQ_TIMING_POLICY_MID2ESEQ:
+        raise EseqConversionError("MID2ESEQ compatibility output requires the Disklavier FIL container.")
+    pedal_policy = str(pedal_policy or ESEQ_PEDAL_POLICY_AUTO).strip().lower()
+    if pedal_policy not in {
+        ESEQ_PEDAL_POLICY_AUTO, ESEQ_PEDAL_POLICY_PRESERVE, ESEQ_PEDAL_POLICY_YAMAHA,
+    }:
+        raise EseqConversionError(f"Unsupported E-SEQ pedal policy '{pedal_policy}'.")
+    if container_variant != ESEQ_CONTAINER_DISKLAVIER and pedal_policy == ESEQ_PEDAL_POLICY_YAMAHA:
+        raise EseqConversionError("Yamaha pedal routing requires the Disklavier FIL container.")
 
     division, merged_events, midi_end_tick = _collect_merged_midi_events(midi_bytes, include_end_tick=True)
+    if division <= 0:
+        raise EseqConversionError("MIDI division must be positive.")
     timing_hint = _extract_eseq_timing_hint(merged_events)
     header_hint = _extract_eseq_header_hint(merged_events)
+    # E-SEQ-derived MIDI keeps its existing timing on return, including clean
+    # exports with only the short conversion notice. Fresh MIDI follows the
+    # independently verified MID2ESEQ output convention for older Disklaviers.
+    eseq_origin = timing_hint is not None or header_hint is not None or any(
+        _decode_midi_meta_text(raw).strip() == ESEQ_TO_MIDI_CONVERSION_TEXT
+        for _tick, _track, _order, raw in merged_events
+    )
+    use_yamaha_pedals = container_variant == ESEQ_CONTAINER_DISKLAVIER and (
+        pedal_policy == ESEQ_PEDAL_POLICY_YAMAHA
+        or (pedal_policy == ESEQ_PEDAL_POLICY_AUTO and not eseq_origin)
+    )
+    controllers = frozenset()
+    if use_yamaha_pedals:
+        from .eseq_pedals import YamahaPedalConverter, yamaha_pedal_controllers
+
+        # Classify complete lanes before writing, including their releases.
+        # Keep source events intact until the timing writer schedules them.
+        controllers = yamaha_pedal_controllers(raw for _tick, _track, _order, raw in merged_events)
+    use_mid2eseq = container_variant == ESEQ_CONTAINER_DISKLAVIER and (
+        timing_policy == ESEQ_TIMING_POLICY_MID2ESEQ
+        or (timing_policy == ESEQ_TIMING_POLICY_AUTO and not eseq_origin)
+    )
+    if use_mid2eseq:
+        from .eseq_legacy import build_legacy_eseq_bytes
+
+        # Apply the same explicit volume policy before scheduling. Keep MIDI
+        # ticks and tempo events intact until the legacy writer integrates time.
+        musical = [
+            (index, (_rescale_tick(tick, division, ESEQ_MIDI_DIVISION), order, raw))
+            for index, (tick, _track, order, raw) in enumerate(merged_events)
+            if raw and raw[0] != 0xFF
+        ]
+        cc7_indexes = _zero_cc7_indexes_needing_playback_fix([event for _, event in musical])
+        replacements = {
+            index: _apply_cc7_policy(event[2], position in cc7_indexes, cc7_policy)
+            for position, (index, event) in enumerate(musical)
+        }
+        prepared_events = []
+        for index, (tick, track, order, raw) in enumerate(merged_events):
+            raw = replacements.get(index, raw)
+            if raw is not None:
+                prepared_events.append((tick, track, order, raw))
+        result = build_legacy_eseq_bytes(
+            prepared_events, division,
+            title=_choose_eseq_title(merged_events, title_override, filename_hint),
+            filename_hint=filename_hint,
+            channel_message_transform=(
+                YamahaPedalConverter(controllers).convert_message if controllers else None
+            ),
+        )
+        if use_yamaha_pedals:
+            # Describe the emitted data, including synthesized binary events
+            # and suppressed duplicate detail. Replay only the pure pedal
+            # transform; the legacy writer alone assigns output times.
+            flag_events = _yamaha_pedal_events(prepared_events, controllers) if controllers else prepared_events
+            messages = (
+                _decode_midi_sysex_event(raw) if raw[0] in (0xF0, 0xF7) else raw
+                for _tick, _track, _order, raw in flag_events
+            )
+            header = bytearray(result[:ESEQ_HEADER_SIZE])
+            _write_eseq_playback_flags(header, analyze_eseq_playback_flags(messages))
+            result = bytes(header) + result[ESEQ_HEADER_SIZE:]
+        return result
+    if controllers:
+        merged_events = list(_yamaha_pedal_events(merged_events, controllers))
     normalized_events = []
     tempo_events = []
     time_signature_events = []
@@ -1133,13 +1346,17 @@ def convert_midi_bytes_to_eseq_bytes(
         scaled_tick = _rescale_tick(abs_tick, division, ESEQ_MIDI_DIVISION)
 
         if raw[:2] == b"\xFF\x51":
-            if len(raw) >= 6:
-                tempo_events.append((scaled_tick, int.from_bytes(raw[3:6], "big")))
+            meta_len, payload_start = _read_vlq_from_bytes(raw, 2)
+            payload = raw[payload_start:payload_start + meta_len]
+            if len(payload) >= 3:
+                tempo_events.append((scaled_tick, int.from_bytes(payload[:3], "big")))
             continue
 
         if raw[:2] == b"\xFF\x58":
-            if len(raw) >= 6:
-                time_signature_events.append((scaled_tick, raw[3], raw[4]))
+            meta_len, payload_start = _read_vlq_from_bytes(raw, 2)
+            payload = raw[payload_start:payload_start + meta_len]
+            if len(payload) >= 3:
+                time_signature_events.append((scaled_tick, payload[0], payload[1]))
             continue
 
         if raw[:2] == b"\xFF\x20":
@@ -1192,6 +1409,14 @@ def convert_midi_bytes_to_eseq_bytes(
 
     initial_mpqn = _effective_initial_mpqn(tempo_events)
     base_bpm = _clamp_base_bpm(_mpqn_to_bpm(initial_mpqn))
+    if container_variant == ESEQ_CONTAINER_DISKLAVIER and header_hint is not None:
+        # Archival output restores the source header below. Encode FB factors
+        # against that same header tempo, even when a tick-zero FB command made
+        # the MIDI's initial tempo differ from the original base tempo.
+        if header_hint.prefix_00_stream is not None and _is_q11_eseq(header_hint.prefix_00_stream):
+            base_bpm = _eseq_base_bpm(header_hint.prefix_00_stream)
+        elif header_hint.slice_27_77 is not None:
+            base_bpm = _eseq_tempo_byte_to_bpm(header_hint.slice_27_77[0x33 - ESEQ_ORDER_KEY_START])
     title = _choose_eseq_title(merged_events, title_override, filename_hint)
     if timing_hint and timing_hint.source_title_blank and title_override is None:
         midi_titles = _extract_midi_titles(merged_events)
@@ -1212,33 +1437,81 @@ def convert_midi_bytes_to_eseq_bytes(
             last_real_event_tick = max(tick for tick, _, _ in normalized_events)
             last_tick = max(last_tick, last_real_event_tick + int(desired_after))
 
+    sysex_intervals = []
+    sysex_start_tick = None
+    for tick, _order, raw in normalized_events:
+        if raw[:1] == b"\xF0" and not raw[1:].endswith(b"\xF7"):
+            sysex_start_tick = tick
+        elif raw[:1] == b"\xF7" and raw[1:].endswith(b"\xF7"):
+            sysex_intervals.append((sysex_start_tick, tick))
+            sysex_start_tick = None
+
+    def inside_sysex(tick):
+        return any(start < tick <= end for start, end in sysex_intervals)
+
+    # Tempo/meter commands cannot occur within an E-SEQ SysEx body. They
+    # would be mistaken for transmitted payload. Repeated generated barlines
+    # can simply be omitted; actual input changes must be reported instead.
+    if any(inside_sysex(tick) for tick, _mpqn in tempo_events) or any(
+        inside_sysex(tick) for tick, _numerator, _denominator in time_signature_events
+    ):
+        raise EseqConversionError(
+            "Cannot preserve a tempo or meter change during MIDI SysEx continuation packets in E-SEQ."
+        )
     marker_events = _build_time_signature_markers(time_signature_events, last_tick) if time_signature_events else []
+    marker_events = [event for event in marker_events if not inside_sysex(event[0])]
     if timing_hint and normalized_events and (
         timing_hint.visible_before_ticks is None or timing_hint.visible_before_ticks > 0
     ):
         first_stream_tick = min(tick for tick, _, _ in normalized_events)
         if first_stream_tick > 0:
-            marker_events = [
-                (
-                    first_stream_tick if tick < first_stream_tick else tick,
-                    numerator,
-                    denominator_power,
-                )
-                for tick, numerator, denominator_power in marker_events
-            ]
-            marker_events = sorted(set(marker_events), key=lambda item: (item[0], item[1], item[2]))
+            restored_meter = None
+            if header_hint is not None:
+                if header_hint.prefix_00_stream is not None:
+                    restored_meter = _eseq_header_time_signature(header_hint.prefix_00_stream)
+                elif header_hint.slice_27_77 is not None:
+                    restored_header = bytearray(_ESEQ_TEMPLATE)
+                    restored_header[ESEQ_ORDER_KEY_START:ESEQ_TITLE_END + 1] = header_hint.slice_27_77
+                    restored_meter = _eseq_header_time_signature(restored_header)
+            early_signatures = {
+                tick: (max(1, int(numerator)), max(0, min(int(denominator_power), 7)))
+                for tick, numerator, denominator_power in time_signature_events
+                if tick < first_stream_tick
+            }
+            changed_ticks = set()
+            previous_meter = restored_meter
+            for tick, meter in early_signatures.items():
+                if meter != previous_meter:
+                    changed_ticks.add(tick)
+                previous_meter = meter
+            if changed_ticks:
+                # Actual changes during the prelude retain their source
+                # ticks. Header-equivalent and generated early barlines may
+                # be omitted to preserve the visible leading delay.
+                marker_events = [
+                    event for event in marker_events
+                    if event[0] >= first_stream_tick or event[0] in changed_ticks
+                ]
+            else:
+                shifted = {}
+                for tick, numerator, denominator_power in marker_events:
+                    shifted[max(first_stream_tick, tick)] = (numerator, denominator_power)
+                marker_events = [(tick, *meter) for tick, meter in sorted(shifted.items())]
+            marker_events = [event for event in marker_events if not inside_sysex(event[0])]
     combined_events = [(0, 0, b"\xF1\x00")]
     combined_events.extend((tick, 1, b"\xF9" + bytes([numerator, denominator_power])) for tick, numerator, denominator_power in marker_events)
 
     for tick, mpqn in tempo_events:
-        factor = max(1, min(int(round((_mpqn_to_bpm(mpqn) * 1000.0) / base_bpm)), ESEQ_DELAY15_MAX))
+        if mpqn <= 0:
+            raise EseqConversionError("Invalid MIDI tempo in E-SEQ conversion.")
+        factor = max(1, min(round(Fraction((60_000_000 // base_bpm) * 1000, mpqn)), ESEQ_DELAY15_MAX))
         if tick == 0 and factor == 1000:
             continue
         combined_events.append((tick, 2, b"\xFB" + _encode_15(factor)))
 
     combined_events.extend((tick, order + 10, raw) for tick, order, raw in normalized_events)
     combined_events.sort(key=lambda item: (item[0], item[1]))
-    has_notes, has_controllers = _event_class_flags(normalized_events)
+    playback_flags = analyze_eseq_playback_flags(raw for _tick, _order, raw in normalized_events)
 
     stream = bytearray()
     previous_tick = 0
@@ -1246,7 +1519,12 @@ def convert_midi_bytes_to_eseq_bytes(
     first_nonzero_delta = True
     visible_before = timing_hint.visible_before_ticks if timing_hint is not None else None
     visible_after = timing_hint.visible_after_ticks if timing_hint is not None else None
+    sysex_open = False
     for abs_tick, _, raw in combined_events:
+        if sysex_open and raw[:1] != b"\xF7":
+            raise EseqConversionError(
+                "Cannot preserve an event interleaved with MIDI SysEx continuation packets in E-SEQ."
+            )
         if first_event:
             first_event = False
         else:
@@ -1260,7 +1538,11 @@ def convert_midi_bytes_to_eseq_bytes(
             )
             if delta > 0:
                 first_nonzero_delta = False
-        stream.extend(raw)
+        # Strip only the continuation packet marker. Its terminal F7, if
+        # present, remains the SysEx message's actual transmitted terminator.
+        stream.extend(raw[1:] if raw[:1] == b"\xF7" else raw)
+        if raw[:1] in (b"\xF0", b"\xF7"):
+            sysex_open = not raw[1:].endswith(b"\xF7")
         previous_tick = abs_tick
     if last_tick > previous_tick:
         stream.extend(
@@ -1297,7 +1579,8 @@ def convert_midi_bytes_to_eseq_bytes(
         prefix[3:7] = used_length.to_bytes(4, "little")
         if len(prefix) >= 0x23:
             prefix[0x1F:0x23] = used_length.to_bytes(4, "little")
-        prefix[0x24] = max(0, min(base_bpm - 29, 255))
+        # The original byte, including Yamaha's zero/default sentinel, is
+        # still the base used to encode the FB ratios above.
         if _should_write_header_title(
             prefix[ESEQ_TITLE_START:ESEQ_TITLE_END + 1],
             merged_events,
@@ -1320,8 +1603,7 @@ def convert_midi_bytes_to_eseq_bytes(
         end_tick,
         delay_before_ticks,
         delay_after_ticks,
-        has_notes,
-        has_controllers,
+        playback_flags,
     ))
     if header_hint is not None and header_hint.slice_27_77 is not None:
         header[ESEQ_ORDER_KEY_START:ESEQ_TITLE_END + 1] = header_hint.slice_27_77
@@ -1334,6 +1616,11 @@ def convert_midi_bytes_to_eseq_bytes(
             title_override,
         ):
             header[ESEQ_TITLE_START:ESEQ_TITLE_END + 1] = _encode_title_bytes(title)
+        # An explicit routing override changes the source representation.
+        # Enable its proven pedal flag, while retaining all existing nonzero
+        # flag values and unrelated/opaque imported metadata.
+        if controllers and playback_flags.has_half_pedal and not header[0x51]:
+            header[0x51] = 1
     return _pad_eseq_output(bytes(header) + bytes(stream))
 
 
@@ -1377,6 +1664,8 @@ def convert_midi_file_to_eseq_path(
     filename_hint="",
     cc7_policy=DEFAULT_CC7_POLICY,
     container_variant=None,
+    timing_policy=ESEQ_TIMING_POLICY_AUTO,
+    pedal_policy=ESEQ_PEDAL_POLICY_AUTO,
 ):
     with open(source_path, "rb") as handle:
         midi_bytes = handle.read()
@@ -1394,5 +1683,7 @@ def convert_midi_file_to_eseq_path(
         filename_hint=filename_hint or os.path.basename(dest_path),
         cc7_policy=cc7_policy,
         container_variant=resolved_variant,
+        timing_policy=timing_policy,
+        pedal_policy=pedal_policy,
     )
     _write_destination_bytes(dest_path, payload)

@@ -1,6 +1,9 @@
 import os
+import json
 from pathlib import Path
 from string import Formatter
+
+import pytest
 
 from aps_midi_prep_tool_app.bulk_extraction import (
     bulk_extract_images,
@@ -14,7 +17,7 @@ from aps_midi_prep_tool_app.eseq_pianodir import (
     PianodirMetadata,
     build_pianodir_metadata_bytes,
 )
-from aps_midi_prep_tool_app.floppy_image import ImageEntry, ImageListing
+from aps_midi_prep_tool_app.floppy_image import ImageEntry, ImageListing, FloppyOperationCancelled
 from aps_midi_prep_tool_app.message_catalog import (
     BULK_EXTRACTION_MESSAGE_IDS,
     MESSAGES,
@@ -416,3 +419,263 @@ def test_bulk_extraction_action_and_progress_are_localized():
         total=2,
         path="SONG.FIL",
     ) == "正在提取 disk.img：1/2（SONG.FIL）..."
+
+
+def test_resume_retries_failed_song_without_reextracting_verified_outputs(tmp_path):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    files = {"ONE.TXT": b"one", "TWO.TXT": b"two", "THREE.TXT": b"three"}
+    fail_second = True
+    extracted = []
+
+    class Session(FakeImageSession):
+        def extract_file(self, name):
+            extracted.append(name)
+            if fail_second and name == "TWO.TXT":
+                raise OSError("unreadable song")
+            return super().extract_file(name)
+
+    loader = lambda path, **kwargs: Session(path, files)
+    checkpoint = output / "job.json"
+    first = bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    assert first.files_extracted == 2
+    assert first.errors
+    fail_second = False
+    extracted.clear()
+
+    resumed = bulk_extract_images(source, output, job_record_path=checkpoint, resume=True, session_loader=loader)
+
+    assert extracted == ["TWO.TXT"]
+    assert resumed.files_extracted == 1
+    assert resumed.files_reused == 2
+    assert resumed.errors == ()
+    assert {path.name: path.read_bytes() for path in (output / "disk").iterdir()} == files
+
+
+def test_cancelled_extraction_keeps_checkpoint_and_resumes_completed_songs(tmp_path):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    files = {"ONE.TXT": b"one", "TWO.TXT": b"two"}
+    checkpoint = output / "job.json"
+    loader = lambda path, **kwargs: FakeImageSession(path, files)
+
+    def cancel_during_second_song(detail):
+        if detail["stage"] == "extracting" and detail["file_completed"] == 1:
+            raise FloppyOperationCancelled("cancelled")
+
+    with pytest.raises(FloppyOperationCancelled):
+        bulk_extract_images(
+            source, output, job_record_path=checkpoint, session_loader=loader,
+            progress_detail_callback=cancel_during_second_song,
+        )
+    saved = json.loads(checkpoint.read_text())
+    assert saved["images"]["disk.img"]["entries"]["ONE.TXT"]["state"] == "complete"
+    assert (output / "disk" / "ONE.TXT").read_bytes() == b"one"
+
+    resumed = bulk_extract_images(source, output, job_record_path=checkpoint, resume=True, session_loader=loader)
+
+    assert resumed.files_extracted == 1
+    assert resumed.files_reused == 1
+    assert resumed.errors == ()
+
+
+def test_resume_preserves_user_modified_output_and_writes_a_new_name(tmp_path):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    checkpoint = output / "job.json"
+    loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"original"})
+    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    (output / "disk" / "ONE.TXT").write_bytes(b"user edited this")
+
+    resumed = bulk_extract_images(source, output, job_record_path=checkpoint, resume=True, session_loader=loader)
+
+    assert resumed.files_reused == 0
+    assert (output / "disk" / "ONE.TXT").read_bytes() == b"user edited this"
+    assert (output / "disk" / "ONE_2.TXT").read_bytes() == b"original"
+
+
+@pytest.mark.parametrize("change", ["input", "options"])
+def test_resume_rejects_changed_inputs_or_conversion_options(tmp_path, change):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    image = source / "disk.img"
+    image.write_bytes(b"image")
+    checkpoint = output / "job.json"
+    loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"original"})
+    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    old_job = checkpoint.read_bytes()
+    if change == "input":
+        image.write_bytes(b"other image")
+
+    with pytest.raises(ValueError, match="changed|different"):
+        bulk_extract_images(
+            source, output, job_record_path=checkpoint, resume=True, session_loader=loader,
+            long_midi_filenames=change == "options",
+        )
+
+    assert checkpoint.read_bytes() == old_job
+    assert (output / "disk" / "ONE.TXT").read_bytes() == b"original"
+
+
+def test_resume_verifies_whole_images_and_retries_failures_before_new_images(tmp_path):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    for name in ("a.img", "z.img"):
+        (source / name).write_bytes(name.encode())
+    checkpoint = output / "job.json"
+
+    def first_loader(path, **kwargs):
+        if Path(path).name == "z.img":
+            raise OSError("could not open image")
+        return FakeImageSession(path, {"ONE.TXT": b"one"})
+
+    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=first_loader)
+    (source / "00.img").write_bytes(b"new image")
+    opened = []
+
+    def retry_loader(path, **kwargs):
+        opened.append(Path(path).name)
+        return FakeImageSession(path, {"ONE.TXT": b"one"})
+
+    result = bulk_extract_images(source, output, job_record_path=checkpoint, resume=True, session_loader=retry_loader)
+
+    assert opened == ["z.img", "00.img"]
+    assert result.images_skipped == 1
+    assert result.files_reused == 1
+    assert result.errors == ()
+
+
+def test_resume_does_not_follow_output_symlinks(tmp_path):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    checkpoint = output / "job.json"
+    loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"original"})
+    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    actual = output / "disk" / "ONE.TXT"
+    actual.unlink()
+    outside = tmp_path / "unrelated.txt"
+    outside.write_bytes(b"unrelated data")
+    try:
+        actual.symlink_to(outside)
+    except OSError:
+        pytest.skip("Creating symlinks is unsupported")
+
+    result = bulk_extract_images(source, output, job_record_path=checkpoint, resume=True, session_loader=loader)
+
+    assert result.errors
+    assert outside.read_bytes() == b"unrelated data"
+    assert actual.is_symlink()
+
+
+def test_checkpoint_never_treats_invalid_converted_midi_as_verified(tmp_path):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    checkpoint = output / "job.json"
+    result = bulk_extract_images(
+        source, output, job_record_path=checkpoint, convert_eseq=True,
+        session_loader=lambda path, **kwargs: FakeImageSession(path, {"SONG.FIL": b"eseq"}),
+        eseq_detector=lambda path: True,
+        eseq_converter=lambda source, dest: Path(dest).write_bytes(b"bad midi"),
+    )
+
+    assert any("output verification" in error for error in result.errors)
+    assert json.loads(checkpoint.read_text())["images"]["disk.img"]["state"] == "failed"
+
+
+def test_same_job_cannot_run_concurrently_and_releases_lock_after_cancellation(tmp_path):
+    from aps_midi_prep_tool_app.bulk_extraction_job import _job_lock
+
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    checkpoint = output / "job.json"
+    loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"one"})
+    with _job_lock(checkpoint):
+        with pytest.raises(ValueError, match="already running"):
+            bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+
+    cancel_state = {"cancelled": False}
+    with pytest.raises(FloppyOperationCancelled):
+        bulk_extract_images(
+            source, output, job_record_path=checkpoint, session_loader=loader,
+            cancel_callback=lambda: cancel_state["cancelled"],
+            progress_detail_callback=lambda _detail: cancel_state.update(cancelled=True),
+        )
+    result = bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader, resume=True)
+    assert result.errors == ()
+
+
+def test_late_conversion_destination_collision_does_not_overwrite_other_file(tmp_path):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+
+    def converter(source, destination):
+        # Another writer creates the planned final name after it was selected.
+        (output / "disk" / "SONG.mid").write_bytes(b"other writer's file")
+        Path(destination).write_bytes(_minimal_midi_bytes())
+
+    result = bulk_extract_images(
+        source, output, convert_eseq=True,
+        session_loader=lambda path, **kwargs: FakeImageSession(path, {"SONG.FIL": b"eseq"}),
+        eseq_detector=lambda path: True, eseq_converter=converter,
+    )
+    assert result.errors
+    assert result.files_converted == 0
+    assert (output / "disk" / "SONG.mid").read_bytes() == b"other writer's file"
+
+
+def test_input_change_during_extraction_is_never_marked_complete(tmp_path):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    image = source / "disk.img"
+    image.write_bytes(b"image")
+    checkpoint = output / "job.json"
+
+    class Session(FakeImageSession):
+        def extract_file(self, path):
+            image.write_bytes(b"changed while extracting")
+            return super().extract_file(path)
+
+    result = bulk_extract_images(
+        source, output, job_record_path=checkpoint,
+        session_loader=lambda path, **kwargs: Session(path, {"ONE.TXT": b"one"}),
+    )
+
+    assert any("changed while extracting" in error for error in result.errors)
+    assert json.loads(checkpoint.read_text())["images"]["disk.img"]["state"] == "failed"
+
+
+@pytest.mark.parametrize("corruption", ["missing_outputs", "empty_outputs", "invalid_output", "invalid_image", "duplicate_output"])
+def test_resume_rejects_malformed_checkpoint_without_skipping_unverified_songs(tmp_path, corruption):
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    checkpoint = output / "job.json"
+    loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"one", "TWO.TXT": b"two"})
+    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    data = json.loads(checkpoint.read_text())
+    image = data["images"]["disk.img"]
+    entry = image["entries"]["ONE.TXT"]
+    if corruption == "missing_outputs":
+        del entry["outputs"]
+    elif corruption == "empty_outputs":
+        entry["outputs"] = []
+    elif corruption == "invalid_output":
+        entry["outputs"] = ["invalid record"]
+    elif corruption == "invalid_image":
+        data["images"]["disk.img"] = []
+    elif corruption == "duplicate_output":
+        image["entries"]["TWO.TXT"]["outputs"] = entry["outputs"]
+    checkpoint.write_text(json.dumps(data))
+
+    with pytest.raises(ValueError, match="job|claims"):
+        bulk_extract_images(source, output, job_record_path=checkpoint, resume=True, session_loader=loader)
+
+    assert (output / "disk" / "ONE.TXT").read_bytes() == b"one"
+    assert (output / "disk" / "TWO.TXT").read_bytes() == b"two"

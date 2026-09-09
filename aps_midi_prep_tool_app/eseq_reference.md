@@ -5,15 +5,15 @@
 
 **Purpose:** implementation reference for converting Yamaha E-SEQ song files (`.FIL` and Clavinova/CVP `.MDA`) to Standard MIDI Files, converting Standard MIDI Files back to E-SEQ containers, and constructing `PIANODIR.FIL` / `MUSIC.DIR` disk indexes for older Yamaha media.
 
-**Revision:** 1.3
+**Revision:** 1.5
 
-**Date:** 2026-08-23
+**Date:** 2026-09-08
 
-**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, `floppy_image.py`, `midi_type0_converter.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.8.1 release preparation.
+**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, `floppy_image.py`, `midi_type0_converter.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.8.2 release preparation.
 
 > This document is intentionally written as an engineering reference. It distinguishes proven behavior from inferred or compatibility-oriented behavior. It does not contain proprietary Yamaha source code or third-party program code; it specifies file behavior derived from personal recordings, supplied disk images, static binary inspection, and public format references. Third-party names are used only to identify compatibility targets; APS MIDI Prep Tool is independent and is not affiliated with, sponsored by, or endorsed by Yamaha or other product owners mentioned here.
 
-Unreleased emulator-set behavior:
+Emulator-set behavior in v0.8.2:
 
 - Folder layout gives each directory's own songs separate disks. Its E-SEQ
   `PIANODIR.FIL` album title defaults to the folder's `PDISK.MNG` title when
@@ -52,12 +52,20 @@ Unreleased emulator-set behavior:
   packing and file presence; this fallback does not repair or validate damaged
   musical events. E-SEQ conversion rejects known bad-sector filler.
 
-Review notes for v0.8.1 release preparation:
+Review notes for v0.8.2 release preparation:
 
+- New MIDI-to-Disklavier conversions default to MID2ESEQ-compatible output:
+  fixed 117 BPM, elapsed-time integration, legacy message scheduling and onset
+  preparation, a 1498-tick trailer, and the unpadded legacy header layout.
+  Clean E-SEQ exports carrying the APS conversion notice and archival exports
+  automatically retain the preservation writer on return. Explicit API timing
+  policies are `auto`, `preserve`, and `mid2eseq`; Clavinova stays on its existing
+  path. See `docs/mid2eseq-compatibility.md` for policy and reference validation.
 - The app stages MIDI-to-E-SEQ, E-SEQ-to-MIDI, and SMF1-to-SMF0 conversions before writing them to disk.
 - In E-SEQ modes, dropped MIDI files are converted through Type 0 before E-SEQ output.
 - E-SEQ-to-MIDI output includes the short APS conversion text marker by default, but does not embed large archival `APS-ESEQ-TIMING` or `APS-ESEQ-HEADER` text metadata unless archival metadata is explicitly requested.
-- Pedal channel/value preservation is the default. Pedal compatibility transforms are exposed as a separate MIDI utility rather than as automatic conversion behavior.
+- Fresh Disklavier output converts continuous CC64/67 into Yamaha's channel-1 binary and channel-3 detailed layers when channel 3 has no notes or matching pedal lane. It uses controller-specific edges, suppresses repeated detail, and emits both layers at the original scheduled tick. CC66 stays on its source channel. Explicit `pedal_policy="preserve"`, recognized E-SEQ returns, and MDA retain their existing events.
+- Static inspection of Mark IV playback and conversion code established the zero-tempo sentinel, integer FB arithmetic, header meter, and several header flags. The reader uses 117 BPM for a zero selected tempo byte. Fresh writers choose a nonzero tempo byte and derive supported header flags from the resulting events, with the legacy and archival preservation exceptions described below.
 - Generated `PIANODIR.FIL` records copy the relevant E-SEQ header slice for normal files and use the Q11 recipe for `Q11V1.00` files.
 - Clavinova/CVP `.MDA` files are E-SEQ at the event-stream level, but use a different song container and `MUSIC.DIR` instead of `PIANODIR.FIL`.
 - Generated `MUSIC.DIR` records copy the relevant `.MDA` header slice and use the logical slot map in `MUSIC.DIR`.
@@ -92,7 +100,7 @@ The most important implementation findings are:
 4. Initial tempo for the tested normal variant is not inferred from note spacing. It is:
 
    ```text
-   base_bpm = eseq[0x33] + 29
+   base_bpm = eseq[0x33] + 29 if eseq[0x33] else 117
    midi_mpqn = floor(60000000 / base_bpm)
    ```
 
@@ -100,8 +108,8 @@ The most important implementation findings are:
 
    ```text
    factor = (hi << 7) | (lo & 0x7F)
-   effective_bpm = base_bpm * factor / 1000
-   midi_mpqn = floor(60000000 / effective_bpm)
+   initial_mpqn = 60000000 // base_bpm
+   midi_mpqn = initial_mpqn * 1000 // factor
    ```
 
 6. `PIANODIR.FIL` is not musical event data. It is the disk index: song order, active-song list, display titles, durations, and copied E-SEQ header metadata.
@@ -121,6 +129,8 @@ The specification below is based on:
 
 - 21 matched E-SEQ/MIDI pairs of personal recordings.
 - Static inspection of a 1998-era `ESEQ2MID.EXE` that converts E-SEQ to MIDI type 0.
+- Static inspection of Yamaha's Mark IV `seq`, `filcvt`, `libcvt.a`, and file-management binaries, including retained function names and DWARF types. These resolve zero-header tempo handling, integer FB arithmetic, pedal routing, and selected header fields.
+- An isolated executable comparison against the original Mark IV `hpdl.o`: all 75,536 pedal event results matched, including exhaustive previous/current value pairs for CC64/67, mixed-controller sequences, and the half-pedal flag. No vendor code is included in the app.
 - 110 Yamaha disk images containing `PIANODIR.FIL` and E-SEQ files.
 - Clavinova/CVP samples containing `.MDA` song files and `MUSIC.DIR` indexes.
 - Static inspection of a third-party `EEXPLORE.EXE` index utility; it was not executed and is treated as secondary evidence.
@@ -149,7 +159,7 @@ One image, `CSC1045.img`, had a `PIANODIR.FIL` root entry whose first data secto
 
 | Label | Meaning | Example |
 |---|---|---|
-| **Proven** | Confirmed by matched pairs, static converter behavior, and/or full disk-image corpus | `F3`/`F4` delays, normal `PIANODIR` record rule, Clavinova `.MDA` event start at `0x57`, Clavinova tempo byte at `0x24`, `base_bpm = byte + 29` for tested variants, duration/before/after delay fields, arrangement/type display code, write-protect flag |
+| **Proven** | Confirmed by matched pairs, static converter behavior, and/or full disk-image corpus | `F3`/`F4` delays, normal `PIANODIR` record rule, Clavinova `.MDA` event start at `0x57`, Clavinova tempo byte at `0x24`, nonzero `base_bpm = byte + 29`, Mark IV zero-tempo default and integer FB arithmetic, duration/before/after delay fields, arrangement/type display code, write-protect flag |
 | **Strongly inferred** | Consistent across available samples and tooling, but may not cover every Yamaha variant | `F9 04 02` as a 4/4 bar marker, `F9 00 00` as a Clavinova no-op/bar marker with no usable meter |
 | **Compatibility rule** | Recommended writer behavior because it matches known converters or old media conventions | Uppercase DOS 8.3 filenames, 6144-byte `PIANODIR.FIL` output |
 | **Open** | Field or behavior not fully explained; copy/preserve rather than interpret | Several opaque header bytes, `PIANODIR` record byte `0x2A`, and some Clavinova `.MDA` category/classification bytes |
@@ -215,7 +225,7 @@ MIDI channel control-change messages have status bytes `0xB0..0xBF`, followed by
 
 This matters because Disklavier piano playback often uses dense note and pedal data, and because un-restored `CC7 = 0` can make a generic MIDI synthesizer produce no audible piano despite valid note events.
 
-APS MIDI Prep Tool preserves pedal channels and controller values by default. Its separate `Utilities > Apply Pedal Compatibility...` MIDI utility can repair controller-only legacy Disklavier pedal lanes by moving pedal controllers from MIDI channel 3 to MIDI channel 1 when channel 1 contains piano notes, channel 1 does not already contain pedal controller data, and channel 3 does not contain notes. Other optional utility transforms can convert CC64/CC66/CC67 pedal values to binary `0/127`, remove duplicate pedal values and add final off events for pedals left nonzero at the end, or keep CC64 sustain data while adding MIDI note 18 markers for Piano Roll Vector style roll rendering.
+Fresh MIDI-to-Disklavier conversion writes continuous CC64/67 positions on channel 3 and synthesizes Yamaha's binary companions on channel 1. It preserves detailed values while suppressing repeats. It leaves CC66, binary-only lanes, and existing native arrangements alone; see the pedal policy below. The separate `Utilities > Apply Pedal Compatibility...` MIDI utility can repair controller-only legacy Disklavier pedal lanes by moving pedal controllers from MIDI channel 3 to MIDI channel 1 when channel 1 contains piano notes, channel 1 does not already contain pedal controller data, and channel 3 does not contain notes. Other optional utility transforms can convert CC64/CC66/CC67 pedal values to binary `0/127`, remove duplicate pedal values and add final off events for pedals left nonzero at the end, or keep CC64 sustain data while adding MIDI note 18 markers for Piano Roll Vector style roll rendering.
 
 ---
 
@@ -255,20 +265,22 @@ The following table is written for implementation. Some fields are fully interpr
 | `0x23` | 1 | Constant/flag | Often `01` in generated personal files. | Copy template or set `01`. |
 | `0x24` | 1 | Tempo mirror / variant tempo byte | Mirrors `0x33` in the tested normal personal files; used as tempo byte in Q11-style `PIANODIR` records. | For normal generated files, mirror `0x33`. |
 | `0x27..0x31` | 11 | DOS 8.3 filename bytes without dot | Used by `PIANODIR` construction. | Write uppercase 8-byte name + 3-byte extension, space padded. |
-| `0x33` | 1 | Initial tempo byte for normal variant | `base_bpm = byte + 29`. | `tempo_byte = clamp(round(base_bpm) - 29, 0, 255)`. |
-| `0x34..0x35` | 2 | Time-signature display | Personal files use `04 04`; likely natural numerator/denominator. | For 4/4 write `04 04`; other meters are provisional. |
+| `0x33` | 1 | Initial tempo byte for normal variant | `base_bpm = byte + 29` for nonzero bytes; zero selects 117 BPM, overriding `0x24` in normal Disklavier files. | Choose base BPM 30–284, producing byte 1–255; zero remains accepted on import. |
+| `0x34..0x35` | 2 | Initial meter, natural numerator/denominator | Valid header meters initialize the MIDI meter, including files with no F9. Later usable F9 messages update it. | For example, 4/4 is `04 04` and 3/8 is `03 08`. |
 | `0x37..0x3A` | 4 | Duration / end-tick accumulator | Little-endian. `EEXPLORE` displays this as seconds by dividing by `750`. In generated personal files it equals the cumulative E-SEQ tick at `F2`. | For generated files, write selected E-SEQ end tick. |
 | `0x3B..0x3C` | 2 | Delay before first note | Little-endian E-SEQ ticks. `EEXPLORE` displays milliseconds as `ticks * 1000 / 750`. Setup/controller events may occur earlier and should not collapse this value. | Recalculate from the event stream. |
 | `0x3D..0x3E` | 2 | Per-song secondary word | Summed into the disk-info secondary aggregate in many indexes. Exact semantics still open. | Copy/preserve. |
 | `0x3F..0x40` | 2 | Delay after last real event | Little-endian E-SEQ ticks from last real event to `F2`/end tick. Display conversion matches delay-before. | Recalculate from the event stream. |
 | `0x41..0x42` | 2 | Opaque playback/index metadata | Copy/preserve. | Copy from template/source. |
-| `0x43..0x46` | 4 | Event-start helper bytes | Normal files show `00 77 00 00`; Q11 `PIANODIR` records show `02 00 00 00`. | For normal generated files write `00 77 00 00`. |
+| `0x43..0x44` | 2 | Event-start helper bytes | Normal files show `00 77`; Q11 `PIANODIR` records show `02 00`. | For normal generated files write `00 77`. |
+| `0x45` | 1 | Tone-generator/XG flag | Yamaha's converter sets `tgid` when it observes XG-On. Preserve unexplained historical encodings on archival return. | Fresh output sets 1 for observed XG-On, otherwise 0. |
+| `0x46` | 1 | Opaque header byte | Preserve. | Copy template/source. |
 | `0x47..0x4E` | 8 | Opaque constants/metadata | Personal files often show `10 7F 00 00 41 xx 00 00`. | Copy from template/source. |
 | `0x4F` | 1 | Write-protect flag | Bit `0x80` set means write-protected. `0x00` means write-protect off in tested samples. Mirrors `PIANODIR` record byte `0x28`. | Preserve from source, or write `0x80` for generated default write-protected files. |
 | `0x50` | 1 | Arrangement/type display code | Low two bits match `PIANODIR` record byte `0x29`: `0` Solo, `1` L-R Split, `2` Ensemble. | Preserve from source, or write `0` for generated default Solo. |
-| `0x51` | 1 | Controller/pedal-present flag | Often `1` when controller events are present. | Set consistently with event stream or copy template. |
+| `0x51` | 1 | Detailed/half-pedal flag | Yamaha's helper sets this when it emits detailed channel-3 CC64/67. It is not a general controller-present flag. | Fresh output sets 1 for channel-3 CC64/67 detail; ordinary CCs and CC66 alone do not set it. |
 | `0x53` | 1 | Opaque constant | Often `41`. | Copy template. |
-| `0x54` | 1 | Event-class bitmask | Personal files: `0x01` notes, `0x04` controllers, `0x05` both. | Set `0x01` if notes, `0x04` if controllers, OR both. |
+| `0x54..0x55` | 2 | Little-endian note-channel bitmask | Bit 0 is MIDI channel 1, bit 15 is channel 16. Note-on and note-off events set bits; controllers alone do not. | Derive from actual note-event channels in fresh output. |
 | `0x56` | 1 | Opaque source/category flag | Varied in personal files. | Copy template unless corpus establishes meaning. |
 | `0x57..0x76` | 32 | Song title/display field | Used by converters as track name or title. | Write title as single-byte text, padded with spaces or NULs. |
 | `0x77` | variable | Event stream start for normal variant | Parse from here unless variant detection says otherwise. | Begin event stream here. |
@@ -357,7 +369,7 @@ Observed non-empty `.MDA` files:
 0x17..0x1E   80 00 21 00 30 00 00 00
 0x1F..0x22   little-endian used length; equals full used file length in good samples
 0x23         00
-0x24         tempo byte: base_bpm = data[0x24] + 29
+0x24         tempo byte: byte + 29 when nonzero; zero defaults to 117 BPM
 0x25..0x26   00 00
 0x27..0x31   DOS 8.3 filename bytes without dot
 0x32         00
@@ -474,6 +486,14 @@ Short delay:
 F3 xx
 ```
 
+Write `F3` only for `1..127` ticks; use `F4` starting at 128 ticks. Legacy
+MID2ESEQ makes this same transition, and none of the 1,505 examined factory
+E-SEQ files uses an `F3` operand above 127. When retaining a short-delay-only
+layout, split longer delays into consecutive `F3` commands of at most 127
+ticks. The reader still accepts full-byte `F3` operands in existing files.
+This is a conservative encoding choice; it does not establish how a physical
+piano handles the wider operands.
+
 Long delay:
 
 ```text
@@ -498,6 +518,9 @@ Delay examples:
 | Bytes | Ticks | Meaning |
 |---|---:|---|
 | `F3 60` | 96 | Short delay. |
+| `F3 7F` | 127 | Largest short delay emitted by the writer. |
+| `F4 00 01` | 128 | Use a long delay from this boundary. |
+| `F4 7F 01` | 255 | Preserve all 255 ticks without a high-bit `F3` operand. |
 | `F4 00 0C` | 1536 | One 4/4 measure at 384 PPQN. |
 | `F4 64 02` | 356 | `(0x02 << 7) + 0x64`. |
 
@@ -506,7 +529,7 @@ Delay writer:
 ```python
 def write_eseq_delay(out, delta):
     while delta > 0:
-        if delta <= 255:
+        if delta <= 127:
             out.extend([0xF3, delta])
             delta = 0
         else:
@@ -567,12 +590,21 @@ MIDI end-of-track policy is selectable:
 
 ## 8. Tempo conversion
 
+A September 7, 2026 timing analysis cross-checks the DKVUTILS executables
+and a 143-image Yamaha corpus. MID2ESEQ
+2.01's actual fixed clock is 748.8 ticks/second (`384 * 117 / 60`), with a
+117 BPM header. Its README's rounded “750” does not establish a different
+clock from the 384-PPQN interpretation used here. Hardware validation of tempo
+commands and dense-message scheduling remains separate.
+
 ### 8.1 Initial tempo: E-SEQ to MIDI
 
-For the tested normal variant, initial tempo byte is `eseq[0x33]`.
+For the normal Disklavier variant, the initial tempo byte is `eseq[0x33]`.
+Yamaha's Mark IV playback and conversion code treat zero as the 117-BPM
+default, even when `0x24` contains a different nonzero tempo.
 
 ```python
-base_bpm = eseq[0x33] + 29
+base_bpm = eseq[0x33] + 29 if eseq[0x33] else 117
 mpqn = 60000000 // base_bpm
 ```
 
@@ -582,10 +614,11 @@ MIDI tempo event:
 00 FF 51 03 <mpqn as 3-byte big-endian integer>
 ```
 
-For the Clavinova/CVP `.MDA` variant, use the same `+29` formula but read the byte at `0x24`:
+For Clavinova/CVP `.MDA` and Q11 variants, select the byte at `0x24` and apply
+the same nonzero encoding/default rule:
 
 ```python
-base_bpm = eseq[0x24] + 29
+base_bpm = eseq[0x24] + 29 if eseq[0x24] else 117
 mpqn = 60000000 // base_bpm
 ```
 
@@ -595,6 +628,14 @@ Examples from the 21 matched files:
 |---:|---:|---:|---|---|
 | `0x58` | 117 | 512820 | `0x07D334` | `07 D3 34` |
 | `0x27` | 68 | 882352 | `0x0D76B0` | `0D 76 B0` |
+
+A zero selected byte also decodes to 512820 MPQN. This edge case comes from
+Mark IV code inspection, not the matched personal recordings above.
+
+For normal FIL, a valid natural header meter at `0x34..0x35` supplies the
+initial MIDI time signature even when the event stream has no F9 command.
+For example, header `03 08` means 3/8. Subsequent usable F9 meters take effect
+at their own ticks; they are not moved back to the song's beginning.
 
 In the matched set:
 
@@ -611,15 +652,16 @@ For the selected initial `MPQN`:
 
 ```python
 desired_bpm = 60000000 / mpqn
-base_bpm = round(desired_bpm)
+base_bpm = max(30, min(284, round(desired_bpm)))
 tempo_byte = base_bpm - 29
 ```
 
-The normal one-byte tempo range is:
+Fresh writers reserve zero for the default sentinel, so their explicit tempo
+range is:
 
 ```text
-tempo_byte = 0..255
-base_bpm = 29..284
+tempo_byte = 1..255
+base_bpm = 30..284
 ```
 
 If the desired BPM is outside range or not close enough to an integer, choose a legal base BPM and emit a tick-0 `FB` tempo factor.
@@ -630,9 +672,14 @@ Decode:
 
 ```python
 factor = (hi << 7) | (lo & 0x7F)
-effective_bpm = base_bpm * factor / 1000
-mpqn = (60000000 * 1000) // (base_bpm * factor)
+initial_mpqn = 60000000 // base_bpm
+mpqn = initial_mpqn * 1000 // factor
 ```
+
+The integer division establishing `initial_mpqn` occurs before applying FB.
+Each FB uses that initial value, not the result of an earlier FB. This matches
+the Mark IV player and avoids the slight difference from computing floating
+point BPM and dividing again. Neutral FB=1000 reproduces the initial MPQN.
 
 Encode from a desired effective BPM:
 
@@ -654,10 +701,11 @@ Examples at `base_bpm = 117`:
 
 ### 8.4 Tempo precision and validation
 
-E-SEQ tempo precision is:
+E-SEQ playback tempo precision follows the integer arithmetic:
 
 ```text
-effective_bpm = integer_base_bpm * integer_factor / 1000
+initial_mpqn = 60000000 // integer_base_bpm
+output_mpqn = initial_mpqn * 1000 // integer_factor
 ```
 
 MIDI precision is integer `MPQN`. Exact round-trip of arbitrary MIDI tempo maps is therefore not guaranteed. Store diagnostics:
@@ -742,6 +790,13 @@ Recommended policies:
 
 Store this in conversion reports because it may explain “silent MIDI” complaints.
 
+The conversion API defaults to `preserve`. Interactive E-SEQ-to-MIDI conversion
+counts zero-volume events that occur before later notes without an intervening
+positive CC7 value on the same channel. When detected, the dialog offers an
+unchecked `playback_fix_100` choice for that batch. This condition is shown even
+when the ordinary conversion prompt was previously hidden. Staged change reports
+include the before/after zero-volume count alongside notes, timing, and pedals.
+
 ---
 
 ## 10. E-SEQ to MIDI conversion algorithm
@@ -810,6 +865,65 @@ The historical converter may use running status. APS MIDI Prep Tool may write fu
 
 ## 11. MIDI to E-SEQ conversion algorithm
 
+### Writer selection and MID2ESEQ compatibility
+
+The public byte and file conversion APIs use `timing_policy="auto"`. Fresh
+normal Disklavier conversions select `eseq_legacy.build_legacy_eseq_bytes`.
+Inputs with APS E-SEQ origin metadata use the preservation algorithm below,
+as do Clavinova conversions. Callers can explicitly select `preserve` or
+`mid2eseq`; the latter requires the normal Disklavier container.
+
+The compatibility writer integrates input MIDI ticks and tempo in integers,
+then computes `floor(floor(A / division) * 44928 / 60000000)`. Its persistent
+crowded-event counter inserts three ticks on the third nonadvancing call;
+positive gaps below three ticks are suppressed. It uses the legacy onset
+preparation rule, writes header BPM 117, omits generated F9/FB commands, and
+ends with `F4 5A 0B F2` (1498 ticks). Declared lengths equal actual lengths;
+there is no block padding. With `pedal_policy="preserve"`, two original
+MIDI/reference FIL pairs reproduce byte for byte, including header fields.
+Unsupported SysEx escapes still fail
+before writing. These facts describe converter behavior, not every Yamaha
+hardware implementation.
+
+The separate default `pedal_policy="auto"` converts continuous channel-1 CC64
+and CC67 lanes into Yamaha's binary/detail layers for fresh Disklavier MIDI. An intermediate
+value (1–126) selects the whole lane, including its 0/127 endpoints. Existing
+channel-3 data for the same controller prevents that lane from being moved.
+Any channel-3 note-on or note-off, including a zero-velocity note-on, prevents
+all new routing into that channel. Yamaha's occupancy check counts notes;
+controller/program setup alone does not reserve channel 3. CC66, binary-only
+pedals, and other channels are unchanged.
+
+The Mark IV ordinary `toEseq` path calls `esqChEvt`, `hpdlf`, and `hpdlCheck` for
+SMF input; native E-SEQ piano-part input bypasses this conversion. The helper
+generates channel-1 binary values using these exact edges:
+
+| Controller | Press (127) | Release (0) |
+| --- | --- | --- |
+| CC64 sustain | current ≥84 and previous raw <84 | current <82 and previous raw ≥82 |
+| CC67 soft | current ≥64 and previous raw <64 | current <61 and previous raw ≥61 |
+
+Previous raw values start at zero and update on every event, independently per
+controller. This is not a latched binary state. Detailed values are emitted
+unchanged on channel 3 only when they differ from the previous detailed value,
+also initialized to zero. An initial zero therefore emits nothing. Binary
+comes before detail at the same tick. The legacy writer schedules the source
+event before expanding or suppressing it; companions never add scheduler calls
+and suppressed duplicates never remove source scheduler calls. Notes, retained
+pedal events, and the end tick keep their existing timing under both writers.
+
+Fresh automatically prepared output also derives the supported playback
+header flags below, including when using MID2ESEQ timing. Returning recognized
+E-SEQ-origin MIDI and MDA preserve routing by
+default; `yamaha` explicitly enables it for Disklavier input and `preserve`
+disables it. See [MID2ESEQ compatibility](../docs/mid2eseq-compatibility.md).
+
+The recovered converter also has selected-part remapping, optional XP filtering,
+and volume/expression-to-velocity rendering. These depend on conversion mode
+and are not implicit fidelity corrections for the app's preservation workflow.
+
+Sections 11.1–11.7 describe the **preservation writer** and its container logic.
+
 ### 11.1 Normalize the MIDI input
 
 1. Parse `MThd` and all `MTrk` chunks.
@@ -850,7 +964,7 @@ For SMPTE-timed MIDI divisions, require a special conversion mode because E-SEQ 
 |---|---|---|
 | `8n kk vv` Note Off | `8n kk vv`, or `9n kk 00` by normalization policy | Both are valid MIDI-level note-off representations. |
 | `9n kk vv` Note On | Copy | Preserve velocity. |
-| `Bn cc vv` Control Change | Copy | Preserve pedal data by default; optional pedal compatibility edits are applied later as a MIDI-file utility. |
+| `Bn cc vv` Control Change | Copy prepared message | Fresh Disklavier input expands continuous channel-1 CC64/67 into binary channel-1 and detailed channel-3 layers, suppressing repeated detail; other CCs retain their values. Explicit pedal preservation disables this transform. |
 | `Cn pp` Program Change | Copy or omit | Many E-SEQ files omit tick-0 piano program change. |
 | `Dn`, `En`, `An` | Copy | Supported by the parser. |
 | `FF 51` Tempo | Header tempo and `FB` tempo factors | See section 8. |
@@ -860,6 +974,21 @@ For SMPTE-timed MIDI divisions, require a special conversion mode because E-SEQ 
 | `FF 20 01 cc` Channel Prefix | `FF cc` | The SMF spec notes this capability is also present in Yamaha ESEQ. |
 | Sysex | `F0 ... F7` | Preserve where possible. |
 | Other meta events | Drop/report | No proven E-SEQ representation. |
+
+The converter preserves complete SMF `F0` SysEx messages and timed `F0`/`F7`
+continuation packets. An embedded E-SEQ `F3` or `F4` ends the current MIDI packet,
+advances the song clock, and starts an SMF `F7` continuation packet. Conversion
+back writes the delay between payload fragments without transmitting an extra
+leading `F7`. This follows the legacy ESEQ2MID packet handling at
+`0x4015E6–0x401635` and the embedded `F4 03 00` patterns in the EC001/EP002 corpus.
+Same-tick fragments may coalesce without changing their transmitted bytes.
+
+Standalone SMF `F7` escapes, unterminated SysEx, and channel/prefix/tempo/meter
+events interleaved with an open message are rejected before writing output;
+keep those songs as MIDI. Generated bar markers are omitted while a SysEx
+message is open. Embedded E-SEQ delay opcodes are never copied into an SMF
+SysEx data payload. These are software conversion checks, not physical piano
+validation.
 
 ### 11.4 Same-tick ordering
 
@@ -918,7 +1047,7 @@ Recommended writer strategy:
 5. Write time signature at `0x34..0x35`.
 6. Write title at `0x57..0x76` for normal Disklavier `.FIL` output only.
 7. Write event stream beginning at `0x77`.
-8. After writing `F2`, update stream length, duration/end tick, event-class flags, and padding.
+8. After writing `F2`, update stream length, duration/end tick, supported playback flags, and padding.
 
 Generated-file update example:
 
@@ -929,10 +1058,24 @@ stream_len = f2_offset + 1 - 0x77
 write_u32_le(header, 0x03, f2_offset + 1)       # converter-style generated files
 write_u32_le(header, 0x1F, stream_len)
 write_u32_le(header, 0x37, end_tick)
-header[0x43:0x47] = bytes([0x00, 0x77, 0x00, 0x00])
-header[0x51] = 1 if has_controllers else 0
-header[0x54] = (0x01 if has_notes else 0) | (0x04 if has_controllers else 0)
+header[0x43:0x45] = bytes([0x00, 0x77])
+header[0x45] = 1 if has_xg_on else 0
+header[0x51] = int(has_channel_3_cc64_or_cc67 and not (note_channel_mask & 4))
+header[0x54:0x56] = note_channel_mask.to_bytes(2, "little")
 ```
+
+The shared header analysis runs on prepared events after routing, so only
+actual note-event channels set mask bits. Generic controllers do not set
+half-pedal metadata. XG-On detection accepts the Yamaha device-number nibble
+and supported split SysEx packets.
+
+Fresh output uses these supported flags, including automatic Yamaha pedal
+preparation with MID2ESEQ timing. Explicit `pedal_policy="preserve"` with the
+legacy writer retains its reference header for byte-exact compatibility.
+Imported archival headers retain their opaque flag bytes; this is not blanket
+normalization of historical files. Explicitly rerouting an archived continuous
+pedal lane may enable a previously zero `0x51` flag; existing nonzero flags and
+unrelated header bytes remain preserved.
 
 Because several header fields remain opaque, a generated E-SEQ writer should identify itself as using a known template profile, for example `normal_0x77_generated`.
 
@@ -1051,23 +1194,36 @@ FE 00 00 00 14 00 00 "PIANODIR" 00
 
 Each song record is 80 bytes (`0x50`).
 
+**September 8 CPC1214 qualification:** the older delay labels below include
+third-party utility/generated-file conventions. In all 13 official CPC1214
+songs, record `0x14:0x16` instead copies the first F4 command's raw seven-bit
+operands, and `0x18:0x1A` copies the last F3 operand plus zero. These describe
+the first event and last inter-event delay, not universally first-note or
+trailing-silence durations. The secondary word equals the delay-command count
+in that album. This finding is specific to the compared factory album; do not
+apply the older little-endian delay interpretation to those factory bytes.
+
 | Record offset | Size | Meaning |
 |---:|---:|---|
 | `0x00` | 11 | DOS 8.3 short filename bytes: 8-byte base + 3-byte extension, space padded. |
 | `0x0B` | 1 | Usually `00` separator. |
-| `0x0C` | 1 | Base tempo byte; normal `base_bpm = byte + 29`. |
+| `0x0C` | 1 | Copied base tempo byte; the song playback interpretation is `byte + 29` when nonzero, otherwise 117 BPM. |
 | `0x0D` | 3 | Time signature / opaque E-SEQ metadata copied from header. |
 | `0x10` | 4 | Duration/end-tick field, little-endian. `EEXPLORE` displays seconds as value / 750. |
 | `0x14` | 2 | Delay before first note, little-endian E-SEQ ticks. Display milliseconds as `ticks * 1000 / 750`. If a song has no note-on events, fall back to the first real event. |
 | `0x16` | 2 | Per-song secondary word; summarized in disk-info field `0x44` in most indexes. |
 | `0x18` | 2 | Delay after last real event, little-endian E-SEQ ticks. Display milliseconds as `ticks * 1000 / 750`. |
 | `0x1A` | 2 | Opaque playback/header metadata; copy. |
-| `0x1C` | 4 | Event-start/helper field. Normal record shows `00 77 00 00`; Q11 record shows `02 00 00 00`. |
+| `0x1C` | 2 | Event-start/helper bytes. Normal record shows `00 77`; Q11 record shows `02 00`. |
+| `0x1E` | 1 | Copied tone-generator/XG flag from normal FIL `0x45`. |
+| `0x1F` | 1 | Opaque metadata; copy. |
 | `0x20` | 8 | Opaque constants/metadata; copy. |
 | `0x28` | 1 | Write-protect flag. Bit `0x80` set means write-protected; `0x00` means write-protect off. Mirrors file offset `0x4F` in normal E-SEQ files. |
 | `0x29` | 1 | Low two bits are arrangement/type display code. Mirrors file offset `0x50` in normal E-SEQ files. |
-| `0x2A` | 1 | Opaque flag. 95 corpus records differed here from the source file's header slice. |
-| `0x2B` | 5 | Opaque metadata; copy. |
+| `0x2A` | 1 | Copied half-pedal flag from normal FIL `0x51`. The Mark IV meaning does not explain all historical values; 95 corpus records differed here from their source header slice. |
+| `0x2B..0x2C` | 2 | Opaque metadata; copy. |
+| `0x2D..0x2E` | 2 | Copied little-endian note-channel mask from normal FIL `0x54..0x55`. |
+| `0x2F` | 1 | Copied counter/display mode from normal FIL `0x56`. |
 | `0x30` | 32 | Display title, often two 16-character display lines. |
 
 Type display from `record[0x29] & 0x03`:
@@ -1204,7 +1360,7 @@ def parse_pianodir(data):
             "slot": slot,
             "filename": decode_dos_8_3(rec[0:11]),
             "tempo_byte": rec[0x0C],
-            "base_bpm": rec[0x0C] + 29,
+            "base_bpm": rec[0x0C] + 29 if rec[0x0C] else 117,
             "duration_raw": le32(rec[0x10:0x14]),
             "display_seconds": le32(rec[0x10:0x14]) / 750,
             "type_code": rec[0x29] & 3,
@@ -1706,11 +1862,11 @@ def write_vlq(value):
 
 ```python
 def normal_eseq_base_bpm(data):
-    return data[0x33] + 29
+    return data[0x33] + 29 if data[0x33] else 117
 
 
 def clavinova_mda_base_bpm(data):
-    return data[0x24] + 29
+    return data[0x24] + 29 if data[0x24] else 117
 
 
 def bpm_to_mpqn_floor(bpm):
@@ -1720,7 +1876,8 @@ def bpm_to_mpqn_floor(bpm):
 def tempo_factor_to_mpqn(base_bpm, factor):
     if factor <= 0:
         raise ValueError("invalid E-SEQ tempo factor")
-    return (60000000 * 1000) // (base_bpm * factor)
+    initial_mpqn = 60000000 // base_bpm
+    return initial_mpqn * 1000 // factor
 
 
 def mpqn_to_bpm(mpqn):
@@ -1749,6 +1906,11 @@ The supplied E-SEQ-to-MIDI converter corroborates the core MIDI conversion behav
 | Tempo constant | Uses decimal `60000000` (`0x03938700`) |
 
 Implementation conclusion: tempo is not inferred from note spacing. The converter uses the E-SEQ header tempo byte and optional in-stream `FB` tempo factors.
+
+The table records this historical converter's behavior. The Mark IV player
+subsequently established a zero-header default of 117 BPM and applies FB to
+the already-truncated initial MPQN. The application follows those Yamaha
+rules as specified in section 8.
 
 ### 19.2 `EEXPLORE.EXE`
 

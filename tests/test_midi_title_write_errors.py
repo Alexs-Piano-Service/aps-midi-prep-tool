@@ -3,6 +3,7 @@ import builtins
 import pytest
 
 from aps_midi_prep_tool_app import midi_metadata
+from aps_midi_prep_tool_app.helpers import atomic_file
 
 
 def _midi_bytes(track=b"\x00\xff\x03\x03Old\x00\xff\x2f\x00"):
@@ -29,8 +30,10 @@ def test_title_io_errors_propagate_without_becoming_format_errors(tmp_path, monk
     original = _midi_bytes()
     source.write_bytes(original)
     destination = tmp_path / "edited.mid"
+    destination.write_bytes(b"existing destination")
     failure = OSError("simulated file I/O failure")
     real_open = builtins.open
+    real_fdopen = atomic_file.os.fdopen
 
     class FailingFile:
         def __init__(self, handle):
@@ -42,6 +45,9 @@ def test_title_io_errors_propagate_without_becoming_format_errors(tmp_path, monk
         def __exit__(self, *args):
             self.handle.close()
 
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
         def read(self):
             raise failure
 
@@ -50,25 +56,26 @@ def test_title_io_errors_propagate_without_becoming_format_errors(tmp_path, monk
             raise failure
 
     def failing_open(path, mode):
-        if mode == "wb" and failure_phase == "open_write":
-            raise failure
         handle = real_open(path, mode)
-        if (mode == "rb" and failure_phase == "read") or (
-            mode == "wb" and failure_phase == "partial_write"
-        ):
+        if mode == "rb" and failure_phase == "read":
             return FailingFile(handle)
         return handle
 
+    def failing_fdopen(descriptor, mode):
+        if failure_phase == "open_write":
+            raise failure
+        handle = real_fdopen(descriptor, mode)
+        return FailingFile(handle) if failure_phase == "partial_write" else handle
+
     monkeypatch.setattr(midi_metadata, "open", failing_open, raising=False)
+    monkeypatch.setattr(atomic_file.os, "fdopen", failing_fdopen)
     with pytest.raises(OSError) as error:
         midi_metadata.write_midi_title_to_path(source, "New title", destination)
 
     assert error.value is failure
     assert source.read_bytes() == original
-    if failure_phase == "partial_write":
-        assert destination.read_bytes() == b"MTh"
-    else:
-        assert not destination.exists()
+    assert destination.read_bytes() == b"existing destination"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["edited.mid", "source.mid"]
 
 
 def test_non_format_exceptions_from_title_edit_propagate(tmp_path, monkeypatch):

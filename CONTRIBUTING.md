@@ -31,9 +31,10 @@ FluidSynth with a redistributable SoundFont, and LAME.
 
 ## Before Submitting Changes
 
-Run the basic syntax and whitespace checks:
+Install the test dependencies, then run the release checks:
 
 ```bash
+python -m pip install -r requirements-test.txt
 make release-check
 ```
 

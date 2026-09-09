@@ -1,5 +1,6 @@
 import ast
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from string import Formatter
 
@@ -44,6 +45,12 @@ def test_release_version_is_consistent_across_app_and_documentation():
     assert changelog_match is not None
     assert readme_match.group(1) == APP_VERSION
     assert changelog_match.group(1) == APP_VERSION
+
+    metadata = ET.parse(PROJECT_ROOT / "packaging/com.alexpianoservice.APSMidiPrepTool.metainfo.xml")
+    release = metadata.find("releases/release")
+    assert release is not None
+    assert release.get("version") == APP_VERSION
+    assert f"## [{APP_VERSION}] - {release.get('date')}" in changelog
 
 
 def test_message_catalog_has_complete_language_and_placeholder_coverage():
@@ -109,7 +116,11 @@ def test_bulgarian_catalog_never_silently_falls_back_to_english():
         assert translations["bg"] != translations["en"], message_id
 
     for source, translations in COMMON_TEXT_TRANSLATIONS.items():
-        assert translations["bg"] != source, source
+        # A layout containing only placeholders and punctuation has no English
+        # prose to translate. Its inserted labels/values are localized separately.
+        literal_text = "".join(part for part, _field, _spec, _conversion in Formatter().parse(source))
+        if any(character.isalpha() for character in literal_text):
+            assert translations["bg"] != source, source
 
 
 def test_literal_translation_calls_are_represented_in_the_catalog():

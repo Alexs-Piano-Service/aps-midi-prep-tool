@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
+import tempfile
 from dataclasses import dataclass
+
+from .bulk_extraction_job import ExtractionJob, serialized_extraction
+from .helpers.atomic_file import atomic_write_bytes
 
 from .eseq_converter import convert_eseq_file_to_midi_path, is_eseq_file
 from .eseq_pianodir import (
@@ -55,6 +58,9 @@ class BulkExtractionResult:
     included_eseq_sources: bool
     output_directories: tuple[str, ...]
     errors: tuple[str, ...]
+    files_reused: int = 0
+    images_skipped: int = 0
+    job_record_path: str = ""
 
 
 def discover_image_files(source_directory):
@@ -174,6 +180,7 @@ def _available_midi_path(
         suffix += 1
 
 
+@serialized_extraction
 def bulk_extract_images(
     source_directory,
     output_directory,
@@ -191,6 +198,8 @@ def bulk_extract_images(
     eseq_converter=None,
     eseq_title_reader=None,
     language_code=None,
+    job_record_path=None,
+    resume=False,
 ):
     """Extract every file from every supported image directly in a folder.
 
@@ -204,6 +213,8 @@ def bulk_extract_images(
     total_images = len(image_paths)
 
     if not image_paths:
+        if resume:
+            raise ValueError("No source images remain for this saved extraction job.")
         return BulkExtractionResult(
             source_directory=source_directory,
             output_directory=output_directory,
@@ -223,6 +234,23 @@ def bulk_extract_images(
     if not os.path.isdir(output_directory):
         raise FloppyImageError(f"The output path is not a folder: {output_directory}")
 
+    job = None
+    if job_record_path is not None:
+        job = ExtractionJob(job_record_path, source_directory, output_directory, {
+            "convert_eseq": bool(convert_eseq),
+            "include_eseq_sources": bool(include_eseq_sources),
+            "long_midi_filenames": bool(long_midi_filenames),
+            "trim_title_spaces": bool(trim_title_spaces),
+            "use_album_names": bool(use_album_names),
+        }, resume=resume, check_cancelled=lambda: _raise_if_cancelled(cancel_callback))
+        job.prepare_images(image_paths)
+        if resume:
+            # Retry previously interrupted/failed images before untouched images.
+            priority = {"running": 0, "failed": 0, "pending": 1, "complete": 2}
+            image_paths.sort(key=lambda path: priority.get(job.image(os.path.basename(path)).get("state"), 1))
+    elif resume:
+        raise ValueError("Choose a saved extraction job to resume.")
+
     session_loader = session_loader or FloppyImageSession.load
     eseq_detector = eseq_detector or is_eseq_file
     eseq_converter = eseq_converter or convert_eseq_file_to_midi_path
@@ -233,6 +261,8 @@ def bulk_extract_images(
     images_processed = 0
     files_extracted = 0
     files_converted = 0
+    files_reused = 0
+    images_skipped = 0
 
     def notify(
         step,
@@ -266,6 +296,21 @@ def bulk_extract_images(
     for image_index, image_path in enumerate(image_paths):
         _raise_if_cancelled(cancel_callback)
         image_name = os.path.basename(image_path)
+        if job is not None:
+            image_record = job.image(image_name)
+            if image_record.get("state") == "complete" and all(
+                job.entry_complete(image_name, name) for name in image_record["entries"]
+            ):
+                job.verify_image_unchanged(image_path)
+                files_reused += sum(len(entry.get("outputs", [])) for entry in image_record["entries"].values())
+                images_processed += 1
+                images_skipped += 1
+                if image_record.get("output_directory"):
+                    output_directories.append(job.safe_output_path(os.path.join(output_directory, image_record["output_directory"])))
+                notify(image_index + 1, "bulk.progress.finished", stage="finished", image_index=image_index + 1, image=image_name)
+                continue
+            image_record["state"] = "running"
+            job.save()
         notify(
             image_index,
             "bulk.progress.opening",
@@ -275,6 +320,7 @@ def bulk_extract_images(
         )
         session = None
         entry_total = 0
+        image_error_start = len(errors)
         try:
             session = session_loader(
                 image_path,
@@ -283,6 +329,8 @@ def bulk_extract_images(
             _raise_if_cancelled(cancel_callback)
             entries = list(session.list_entries().entries)
             entry_total = len(entries)
+            if job is not None:
+                image_record["entry_count"] = entry_total
             smart_pianosoft_song_catalog = smart_pianosoft_catalog_from_session(
                 session,
                 entries,
@@ -292,12 +340,17 @@ def bulk_extract_images(
             preferred_name = os.path.splitext(image_name)[0] or image_name
             if use_album_names:
                 preferred_name = _album_name_from_image(session, entries) or preferred_name
-            image_output_directory = _unique_output_directory(
-                output_directory,
-                preferred_name,
-                used_folder_names,
-            )
-            os.makedirs(image_output_directory)
+            if job is not None and image_record.get("output_directory"):
+                image_output_directory = job.safe_output_path(os.path.join(output_directory, image_record["output_directory"]))
+                os.makedirs(image_output_directory, exist_ok=True)
+            else:
+                image_output_directory = _unique_output_directory(
+                    output_directory, preferred_name, used_folder_names,
+                )
+                os.makedirs(image_output_directory)
+                if job is not None:
+                    image_record["output_directory"] = os.path.relpath(image_output_directory, output_directory)
+                    job.save()
             output_directories.append(image_output_directory)
 
             entry_parts = {}
@@ -318,6 +371,15 @@ def bulk_extract_images(
                 parts = entry_parts.get(id(entry))
                 if parts is None:
                     continue
+                if job is not None:
+                    if job.entry_complete(image_name, entry.path):
+                        saved = image_record["entries"][entry.path]
+                        converted_song_number += bool(saved.get("converted"))
+                        extracted_midi_number += bool(saved.get("renamed_midi"))
+                        files_reused += len(saved.get("outputs", []))
+                        continue
+                    image_record["entries"][entry.path] = {"state": "failed", "outputs": []}
+                    job.save()
                 notify(
                     image_index,
                     "bulk.progress.extracting",
@@ -331,6 +393,8 @@ def bulk_extract_images(
                     path=entry.path,
                 )
                 destination_path = os.path.join(image_output_directory, *parts)
+                if job is not None:
+                    job.safe_output_path(destination_path)
                 try:
                     extracted_path = session.extract_file(entry.path)
                 except Exception as exc:
@@ -339,6 +403,8 @@ def bulk_extract_images(
 
                 eseq_directory_entry = is_eseq_directory_path(entry.path)
                 if convert_eseq and eseq_directory_entry and not include_eseq_sources:
+                    if job is not None:
+                        job.finish_entry(image_name, entry.path, [])
                     continue
 
                 try:
@@ -352,6 +418,8 @@ def bulk_extract_images(
                     continue
 
                 written_paths = []
+                converted_paths = set()
+                rename_midi_entry = False
                 if convert_entry:
                     converted_song_number += 1
                     source_title = ""
@@ -394,16 +462,17 @@ def bulk_extract_images(
                     )
                     try:
                         os.makedirs(os.path.dirname(midi_path), exist_ok=True)
-                        if trim_title_spaces and title_read_successfully:
-                            eseq_converter(
-                                extracted_path,
-                                midi_path,
-                                title_override=conversion_title,
-                            )
-                        else:
-                            eseq_converter(extracted_path, midi_path)
+                        with tempfile.TemporaryDirectory(prefix=".aps_convert_", dir=os.path.dirname(midi_path)) as conversion_dir:
+                            staged_midi_path = os.path.join(conversion_dir, os.path.basename(midi_path))
+                            if trim_title_spaces and title_read_successfully:
+                                eseq_converter(extracted_path, staged_midi_path, title_override=conversion_title)
+                            else:
+                                eseq_converter(extracted_path, staged_midi_path)
+                            with open(staged_midi_path, "rb") as handle:
+                                atomic_write_bytes(midi_path, handle.read(), replace_existing=False)
                         files_converted += 1
                         written_paths.append(midi_path)
+                        converted_paths.add(midi_path)
                     except Exception as exc:
                         errors.append(f"{image_name} / {entry.path} (E-SEQ conversion): {exc}")
                         continue
@@ -443,7 +512,16 @@ def bulk_extract_images(
                 if not convert_entry or include_eseq_sources:
                     try:
                         os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-                        shutil.copy2(extracted_path, destination_path)
+                        if os.path.lexists(destination_path):
+                            stem, extension = os.path.splitext(destination_path)
+                            suffix = 2
+                            while os.path.lexists(f"{stem}_{suffix}{extension}"):
+                                suffix += 1
+                            destination_path = f"{stem}_{suffix}{extension}"
+                        if job is not None:
+                            job.safe_output_path(destination_path)
+                        with open(extracted_path, "rb") as handle:
+                            atomic_write_bytes(destination_path, handle.read(), replace_existing=False)
                         files_extracted += 1
                         written_paths.append(destination_path)
                     except Exception as exc:
@@ -460,11 +538,32 @@ def bulk_extract_images(
                         except (OSError, TypeError, ValueError):
                             pass
 
+                if job is not None:
+                    try:
+                        job.finish_entry(
+                            image_name, entry.path,
+                            [(path, path in converted_paths) for path in written_paths],
+                            converted=convert_entry, renamed_midi=rename_midi_entry,
+                        )
+                    except (OSError, ValueError) as exc:
+                        errors.append(f"{image_name} / {entry.path} (output verification): {exc}")
+
             images_processed += 1
+            if job is not None:
+                job.verify_image_unchanged(image_path)
+                image_record["state"] = "complete" if len(errors) == image_error_start and all(
+                    entry.path in image_record["entries"]
+                    and image_record["entries"][entry.path].get("state") in {"complete", "skipped"}
+                    for entry in entries
+                ) else "failed"
+                job.save()
         except FloppyOperationCancelled:
             raise
         except Exception as exc:
             errors.append(f"{image_name}: {exc}")
+            if job is not None:
+                image_record["state"] = "failed"
+                job.save()
         finally:
             if session is not None:
                 try:
@@ -491,4 +590,7 @@ def bulk_extract_images(
         included_eseq_sources=bool(convert_eseq and include_eseq_sources),
         output_directories=tuple(output_directories),
         errors=tuple(errors),
+        files_reused=files_reused,
+        images_skipped=images_skipped,
+        job_record_path=job.path if job is not None else "",
     )

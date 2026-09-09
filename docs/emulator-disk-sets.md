@@ -14,13 +14,32 @@ songs into numbered IMG or HFE disk images. The source songs are left unchanged.
    set. Expand **Naming and capacity options** to change the filename prefix,
    starting disk number, or free-space reserve. For E-SEQ output, you can also
    set a shared album title.
-5. Start the build and review the completion message for warnings. The app asks
-   before replacing existing output files.
+5. Start preparation and review the proposed disks, songs, title sources, and
+   musical changes. Exclude albums, change album order, or correct album/song
+   titles as needed. Choose **Update Preview** after edits, then **Build Reviewed
+   Output** to write the reviewed set. The app asks before replacing existing
+   output files.
 
-The builder creates disk images, such as `DSKA0001.hfe` and `DSKA0002.hfe`.
+New disk sets start at `DSKA0000.hfe` by default. To append to an existing set,
+choose its next unused disk number under **Naming and capacity options**.
 Keep the setup files from an existing emulator USB stick and follow the emulator
 manufacturer's instructions when preparing the stick. Test the images on your
 player before relying on them.
+
+Preview uses the actual conversion and packing results, including catalog space
+and the free-space reserve. Editing the collection rebuilds the proposal; the
+build button stays disabled until the updated proposal is shown. Every final
+IMG/HFE is reopened and its song and catalog contents are checked against the
+prepared output. This verifies delivered contents, not physical piano playback.
+
+HFE exports also set the interface density to match the selected disk capacity.
+For example, 720 KB images use double density and 1.44 MB images use high
+density, following the [HxC HFE specification](https://hxc2001.com/floppy_drive_emulator/HFE-file-format.html).
+This corrects earlier exports that marked every IBM-format HFE as high density;
+the correction preserves the track data and bitrate. Re-export an older image
+with the correct capacity to apply the updated header.
+For 2.88 MB disks, use IMG: the Greaseweazle HFE writer rejects tracks of that
+size, even though the HFE specification defines an extended-density mode.
 
 ## Choose how folders become disks
 
@@ -33,15 +52,15 @@ album, including songs directly in the selected folder. Folders and songs use
 natural number order, so `Album 2` comes before `Album 10`. Shuffle randomizes
 songs within each album.
 
-For example, with the default prefix and numbering:
+For example, with a Nalbantov or Gotek/FlashFloppy preset:
 
 ```text
 Music/
-  Album 1/    → DSKA0001.hfe
-  Album 2/    → DSKA0002.hfe
+  Album 1/    → DSKA0000.hfe
+  Album 2/    → DSKA0001.hfe
 ```
 
-If Album 1 needs two disks, Album 2 starts on `DSKA0003.hfe` instead. Output
+If Album 1 needs two disks, Album 2 starts on `DSKA0002.hfe` instead. Output
 numbers follow the build order; they are not copied from source folder names.
 
 **Fill disks automatically** combines the selected songs and fills each disk

@@ -6,6 +6,13 @@ __pycache__/
 .venv/
 .venv-appimage/
 
+# Local disk investigations and playback comparisons
+/docs/mark-ii-elton-investigation.md
+/docs/mark-iv-drive-investigation.md
+/docs/eseq-timing-verification.md
+/docs/official-album-comparison.md
+/docs/live-midi-old-new-comparison.md
+
 # Build and release artifacts
 build/
 !build/

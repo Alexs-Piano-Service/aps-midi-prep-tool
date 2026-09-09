@@ -608,7 +608,7 @@ def test_existing_output_is_not_overwritten(tmp_path):
     source.mkdir()
     (source / "Song.mid").write_bytes(_midi_bytes("Song"))
     output.mkdir()
-    existing = output / "EXIS0001.img"
+    existing = output / "EXIS0000.img"
     existing.write_bytes(b"keep this")
     before = hashlib.sha256(existing.read_bytes()).digest()
 
@@ -738,7 +738,8 @@ def test_default_prefix_numbers_even_a_single_image(tmp_path):
         output_content="midi",
     )
 
-    assert [Path(path).name for path in result.output_paths] == ["DSKA0001.img"]
+    assert result.starting_number == 0
+    assert [Path(path).name for path in result.output_paths] == ["DSKA0000.img"]
     assert result.song_list_path == ""
     assert not list(output.glob("*.txt"))
 
@@ -1095,7 +1096,7 @@ def test_oversized_folder_spills_without_filling_remainder_from_next_album(
     sections = text.split("\nImage ")[1:]
     for index, (section, (titles, _metadata), album) in enumerate(zip(
         sections, images, ["Album 1", "Album 1", "Album 2"],
-    ), 1):
+    )):
         assert f"DSKA{index:04d}.img" in section
         assert f"Album: {album}\n" in section
         assert "\n".join(f"{track}. {title}" for track, title in enumerate(titles, 1)) in section
@@ -1214,8 +1215,8 @@ def test_combined_song_list_falls_back_to_filenames_for_missing_or_blank_titles(
         output_content="midi", include_song_lists=True,
     )
     text = Path(result.song_list_path).read_text(encoding="utf-8")
-    assert "Image 1 of 2: DSKA0001.img\nFolder: Album 1\nAlbum: Album 1\n\n1. No title\n" in text
-    assert "Image 2 of 2: DSKA0002.img\nFolder: Album 2\nAlbum: Album 2\n\n1. Blank title\n" in text
+    assert "Image 1 of 2: DSKA0000.img\nFolder: Album 1\nAlbum: Album 1\n\n1. No title\n" in text
+    assert "Image 2 of 2: DSKA0001.img\nFolder: Album 2\nAlbum: Album 2\n\n1. Blank title\n" in text
 
 
 @pytest.mark.parametrize("disk_layout", ["folders", "fill"])
@@ -1264,6 +1265,68 @@ def _image_files(image_path):
         }
     finally:
         session.cleanup()
+
+
+@pytest.mark.parametrize("damaged_name, content", (
+    ("song", "midi"), ("PSONG.MNG", "midi"), ("PIANODIR.FIL", "eseq"),
+))
+def test_packing_corruption_is_rejected_before_preview_or_delivery(tmp_path, monkeypatch, damaged_name, content):
+    source = tmp_path / "packing-source"
+    source.mkdir()
+    (source / "SONG.MID").write_bytes(_midi_bytes("Packing verification"))
+    _write_mng_catalogs(source, "Packing album", [("SONG.MID", "Packing verification")])
+    output = tmp_path / "output"
+    output.mkdir()
+    existing = output / "DSKA0000.img"
+    existing.write_bytes(b"previous delivery")
+    real_copy = emulator_image_builder._copy_host_file_into_image
+    damaged = []
+    previews = []
+
+    def corrupt_after_copy(raw_path, host_path, image_path, **kwargs):
+        result = real_copy(raw_path, host_path, image_path, **kwargs)
+        matches = image_path.upper().endswith(".MID") if damaged_name == "song" else image_path.upper() == damaged_name
+        payload = Path(host_path).read_bytes()
+        # Skip the empty PIANODIR placeholder and corrupt its completed catalog.
+        if matches and damaged_name == "PIANODIR.FIL":
+            matches = int.from_bytes(payload[PIANODIR_COUNT_OFFSET:PIANODIR_COUNT_OFFSET + 2], "little") > 1
+        if matches and not damaged:
+            raw = bytearray(Path(raw_path).read_bytes())
+            position = raw.index(payload)
+            raw[position + len(payload) // 2] ^= 1
+            Path(raw_path).write_bytes(raw)
+            damaged.append(image_path)
+        return result
+
+    monkeypatch.setattr(emulator_image_builder, "_copy_host_file_into_image", corrupt_after_copy)
+    with pytest.raises(FloppyImageError, match="packed contents differ"):
+        build_emulator_disk_images(
+            source, output, output_content=content, output_ext="img", overwrite_existing=True,
+            review_callback=lambda preview: previews.append(preview) or {"action": "build"},
+        )
+    assert len(damaged) == 1
+    assert previews == []
+    assert existing.read_bytes() == b"previous delivery"
+    assert list(output.iterdir()) == [existing]
+    assert (source / "SONG.MID").read_bytes() == _midi_bytes("Packing verification")
+
+
+@pytest.mark.parametrize("content", ("midi", "eseq"))
+def test_generated_catalog_must_reference_prepared_songs_in_playback_order(tmp_path, monkeypatch, content):
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("FIRST", "SECOND"):
+        (source / f"{name}.MID").write_bytes(_midi_bytes(name))
+    _write_mng_catalogs(source, "Ordered album", [("FIRST.MID", "FIRST"), ("SECOND.MID", "SECOND")])
+    if content == "midi":
+        real_builder = emulator_image_builder.build_smart_pianosoft_song_catalog
+        monkeypatch.setattr(emulator_image_builder, "build_smart_pianosoft_song_catalog", lambda template, records: real_builder(template, list(reversed(records))))
+    else:
+        real_builder = emulator_image_builder.build_pianodir_bytes
+        monkeypatch.setattr(emulator_image_builder, "build_pianodir_bytes", lambda tracks, **kwargs: real_builder(list(reversed(tracks)), **kwargs))
+    with pytest.raises(FloppyImageError, match="song references or order differ"):
+        build_emulator_disk_images(source, tmp_path / "output", output_content=content, output_ext="img")
+    assert list((tmp_path / "output").iterdir()) == []
 
 
 @pytest.mark.parametrize("output_content", ["midi", "eseq"])
@@ -1574,7 +1637,7 @@ def test_damaged_cataloged_midi_is_preserved_with_titles_and_image_warnings(
     assert damaged_path.read_bytes() == original
     assert len(result.warnings) == 1
     warning, = result.warnings
-    assert f"DSKA0001.{output_ext} / {damaged_song.filename}" in warning
+    assert f"DSKA0000.{output_ext} / {damaged_song.filename}" in warning
     assert "Album/01 - Catalog title.mid" in warning
     assert "preserved unchanged" in warning
     assert "playback may fail" in warning.lower()

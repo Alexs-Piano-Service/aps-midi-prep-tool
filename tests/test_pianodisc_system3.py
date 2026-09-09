@@ -319,7 +319,8 @@ def test_bulk_extraction_writes_good_songs_and_reports_damaged_ones(tmp_path):
         )
     )
 
-    result = bulk_extract_images(source_directory, output_directory)
+    job_path = output_directory / "job.json"
+    result = bulk_extract_images(source_directory, output_directory, job_record_path=job_path)
 
     assert result.images_found == 1
     assert result.images_processed == 1
@@ -332,3 +333,9 @@ def test_bulk_extraction_writes_good_songs_and_reports_damaged_ones(tmp_path):
         if path.is_file() and path.suffix.lower() == ".mid"
     ]
     assert [path.name for path in midi_paths] == ["PIANO001.MID"]
+
+    resumed = bulk_extract_images(source_directory, output_directory, job_record_path=job_path, resume=True)
+    assert resumed.files_reused == 1
+    assert resumed.images_skipped == 0
+    assert resumed.files_extracted == 0
+    assert any("Incomplete" in error for error in resumed.errors)

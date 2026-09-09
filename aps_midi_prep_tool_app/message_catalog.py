@@ -8,15 +8,21 @@ layer instead of being embedded directly at every call site.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from .pending_changes_translations import PENDING_CHANGE_MESSAGES
+from .recovery_delivery_translations import RECOVERY_DELIVERY_TRANSLATIONS
+from .preparation_preview_translations import PREPARATION_PREVIEW_TRANSLATIONS
 
 from .bulgarian_translations import (
     BULGARIAN_MESSAGE_TRANSLATIONS,
     BULGARIAN_TEXT_TRANSLATIONS,
 )
 from .dialog_translations import DIALOG_TEXT_TRANSLATIONS
+from .conversion_report_translations import CONVERSION_REPORT_TRANSLATIONS
+from .bulk_job_translations import BULK_JOB_TRANSLATIONS
 from .dynamic_dialog_translations import DYNAMIC_DIALOG_TRANSLATIONS
 from .file_inspection_translations import FILE_INSPECTION_TEXT_TRANSLATIONS
 from .file_inspection_report_translations import FILE_INSPECTION_REPORT_TRANSLATIONS
+from .eseq_inspection_translations import ESEQ_INSPECTION_TRANSLATIONS
 from .translation_supplements import COMMON_TEXT_TRANSLATION_SUPPLEMENTS
 from .validation_translations import VALIDATION_TRANSLATIONS
 from .workflow_translations import WORKFLOW_TEXT_TRANSLATIONS
@@ -98,6 +104,76 @@ def normalize_language_code(value):
 
 
 MESSAGES = {
+    "save.partial_counts": {
+        "en": "{saved} file(s) saved; {remaining} file(s) remaining.",
+        "es": "{saved} archivo(s) guardado(s); {remaining} archivo(s) pendiente(s).",
+        "fr": "{saved} fichier(s) enregistré(s) ; {remaining} fichier(s) restant(s).",
+        "de": "{saved} Datei(en) gespeichert; {remaining} Datei(en) verbleibend.",
+        "it": "{saved} file salvati; {remaining} file rimanenti.",
+        "pt-BR": "{saved} arquivo(s) salvo(s); {remaining} arquivo(s) restante(s).",
+        "bg": "Записани файлове: {saved}; оставащи файлове: {remaining}.",
+        "nl": "{saved} bestand(en) opgeslagen; {remaining} bestand(en) resterend.",
+        "pl": "Zapisano {saved} plików; pozostało {remaining} plików.",
+        "ja": "{saved} 個のファイルを保存しました。残りは {remaining} 個です。",
+        "ko": "파일 {saved}개를 저장했습니다. {remaining}개가 남았습니다.",
+        "zh-Hans": "已保存 {saved} 个文件；剩余 {remaining} 个文件。",
+    },
+    "save.cancelled.title": {
+        "en": "Save Cancelled",
+        "es": "Guardado cancelado",
+        "fr": "Enregistrement annulé",
+        "de": "Speichern abgebrochen",
+        "it": "Salvataggio annullato",
+        "pt-BR": "Salvamento cancelado",
+        "bg": "Записът е отменен",
+        "nl": "Opslaan geannuleerd",
+        "pl": "Zapisywanie anulowane",
+        "ja": "保存をキャンセルしました",
+        "ko": "저장 취소됨",
+        "zh-Hans": "保存已取消",
+    },
+    "save.retry": {
+        "en": "Unfinished changes are still pending. Use Save again to retry them.",
+        "es": "Los cambios sin terminar siguen pendientes. Usa Guardar de nuevo para reintentarlos.",
+        "fr": "Les modifications inachevées sont toujours en attente. Cliquez à nouveau sur Enregistrer pour réessayer.",
+        "de": "Nicht abgeschlossene Änderungen sind weiterhin vorgemerkt. Verwenden Sie erneut Speichern, um es noch einmal zu versuchen.",
+        "it": "Le modifiche non completate sono ancora in sospeso. Usa di nuovo Salva per riprovare.",
+        "pt-BR": "As alterações não concluídas continuam pendentes. Use Salvar novamente para tentar de novo.",
+        "bg": "Незавършените промени все още са чакащи. Използвайте отново Запис, за да опитате повторно.",
+        "nl": "Niet-voltooide wijzigingen staan nog klaar. Gebruik Opslaan opnieuw om het nogmaals te proberen.",
+        "pl": "Niedokończone zmiany nadal oczekują. Użyj ponownie opcji Zapisz, aby spróbować jeszcze raz.",
+        "ja": "完了していない変更は保留されています。もう一度「保存」を選択して再試行してください。",
+        "ko": "완료되지 않은 변경 사항은 계속 대기 중입니다. 저장을 다시 선택하여 재시도하세요.",
+        "zh-Hans": "未完成的更改仍处于待保存状态。请再次选择“保存”以重试。",
+    },
+    "save.followup_pending": {
+        "en": "Filename, catalog, or metadata updates may still be pending.",
+        "es": "Las actualizaciones de nombres de archivo, catálogos o metadatos pueden seguir pendientes.",
+        "fr": "Des mises à jour de noms de fichiers, de catalogues ou de métadonnées peuvent encore être en attente.",
+        "de": "Aktualisierungen von Dateinamen, Katalogen oder Metadaten können noch ausstehen.",
+        "it": "Gli aggiornamenti di nomi file, cataloghi o metadati potrebbero essere ancora in sospeso.",
+        "pt-BR": "Atualizações de nomes de arquivo, catálogos ou metadados ainda podem estar pendentes.",
+        "bg": "Възможно е все още да има чакащи актуализации на имена на файлове, каталози или метаданни.",
+        "nl": "Updates van bestandsnamen, catalogi of metadata kunnen nog in behandeling zijn.",
+        "pl": "Aktualizacje nazw plików, katalogów lub metadanych mogą nadal oczekiwać.",
+        "ja": "ファイル名、カタログ、またはメタデータの更新がまだ保留されている可能性があります。",
+        "ko": "파일 이름, 카탈로그 또는 메타데이터 업데이트가 아직 대기 중일 수 있습니다.",
+        "zh-Hans": "文件名、目录或元数据的更新可能仍未完成。",
+    },
+    "save.progress": {
+        "en": "Saving file changes...",
+        "es": "Guardando cambios en los archivos...",
+        "fr": "Enregistrement des modifications des fichiers...",
+        "de": "Dateiänderungen werden gespeichert...",
+        "it": "Salvataggio delle modifiche ai file...",
+        "pt-BR": "Salvando alterações nos arquivos...",
+        "bg": "Записване на промените във файловете...",
+        "nl": "Bestandswijzigingen opslaan...",
+        "pl": "Zapisywanie zmian w plikach...",
+        "ja": "ファイルの変更を保存中...",
+        "ko": "파일 변경 사항 저장 중...",
+        "zh-Hans": "正在保存文件更改...",
+    },
     "menu.settings": {
         "en": "&Settings",
         "es": "&Configuración",
@@ -1952,6 +2028,11 @@ MESSAGES.update(
 
 
 TEXT_TO_MESSAGE_ID = {
+    "{saved} file(s) saved; {remaining} file(s) remaining.": "save.partial_counts",
+    "Save Cancelled": "save.cancelled.title",
+    "Unfinished changes are still pending. Use Save again to retry them.": "save.retry",
+    "Filename, catalog, or metadata updates may still be pending.": "save.followup_pending",
+    "Saving file changes...": "save.progress",
     "Busy": "busy.title",
     "Please wait for floppy processing to finish.": "busy.floppy",
     "Please wait for disk processing to finish.": "busy.disk",
@@ -2816,7 +2897,7 @@ MESSAGES.update({
 
 # Emulator output replacement confirmation and stable-progress messaging.
 MESSAGES.update({
-    "emulator.no_overwrite": {"en": "Images use prefix plus four-digit numbering (for example, DSKA0001.hfe). You will be asked before existing output files are replaced.", "es": "Las imágenes usan el prefijo y cuatro dígitos (por ejemplo, DSKA0001.hfe). Se pedirá confirmación antes de reemplazar archivos de salida existentes.", "fr": "Les images utilisent le préfixe suivi de quatre chiffres (par exemple DSKA0001.hfe). Une confirmation sera demandée avant de remplacer les fichiers de sortie existants.", "de": "Images verwenden Präfix plus vierstellige Nummer (z. B. DSKA0001.hfe). Vor dem Ersetzen vorhandener Ausgabedateien wird nachgefragt.", "it": "Le immagini usano il prefisso più quattro cifre (ad esempio DSKA0001.hfe). Verrà chiesta conferma prima di sostituire i file di output esistenti.", "pt-BR": "As imagens usam o prefixo mais quatro dígitos (por exemplo, DSKA0001.hfe). Será solicitada confirmação antes de substituir arquivos de saída existentes.", "bg": "Образите използват префикс и четирицифрен номер (например DSKA0001.hfe). Ще бъде поискано потвърждение преди замяна на съществуващи изходни файлове.", "nl": "Images gebruiken het voorvoegsel plus vier cijfers (bijvoorbeeld DSKA0001.hfe). Er wordt om bevestiging gevraagd voordat bestaande uitvoerbestanden worden vervangen.", "pl": "Obrazy używają prefiksu i czterech cyfr (np. DSKA0001.hfe). Przed zastąpieniem istniejących plików wyjściowych pojawi się prośba o potwierdzenie.", "ja": "イメージ名は接頭辞と4桁の番号になります（例: DSKA0001.hfe）。既存の出力ファイルを置き換える前に確認します。", "ko": "이미지 이름은 접두사와 네 자리 번호를 사용합니다(예: DSKA0001.hfe). 기존 출력 파일을 교체하기 전에 확인합니다.", "zh-Hans": "映像名称由前缀加四位编号组成（例如 DSKA0001.hfe）。替换现有输出文件前会要求确认。"},
+    "emulator.no_overwrite": {"en": "Images use prefix plus four-digit numbering (for example, DSKA0000.hfe). You will be asked before existing output files are replaced.", "es": "Las imágenes usan el prefijo y cuatro dígitos (por ejemplo, DSKA0000.hfe). Se pedirá confirmación antes de reemplazar archivos de salida existentes.", "fr": "Les images utilisent le préfixe suivi de quatre chiffres (par exemple DSKA0000.hfe). Une confirmation sera demandée avant de remplacer les fichiers de sortie existants.", "de": "Images verwenden Präfix plus vierstellige Nummer (z. B. DSKA0000.hfe). Vor dem Ersetzen vorhandener Ausgabedateien wird nachgefragt.", "it": "Le immagini usano il prefisso più quattro cifre (ad esempio DSKA0000.hfe). Verrà chiesta conferma prima di sostituire i file di output esistenti.", "pt-BR": "As imagens usam o prefixo mais quatro dígitos (por exemplo, DSKA0000.hfe). Será solicitada confirmação antes de substituir arquivos de saída existentes.", "bg": "Образите използват префикс и четирицифрен номер (например DSKA0000.hfe). Ще бъде поискано потвърждение преди замяна на съществуващи изходни файлове.", "nl": "Images gebruiken het voorvoegsel plus vier cijfers (bijvoorbeeld DSKA0000.hfe). Er wordt om bevestiging gevraagd voordat bestaande uitvoerbestanden worden vervangen.", "pl": "Obrazy używają prefiksu i czterech cyfr (np. DSKA0000.hfe). Przed zastąpieniem istniejących plików wyjściowych pojawi się prośba o potwierdzenie.", "ja": "イメージ名は接頭辞と4桁の番号になります（例: DSKA0000.hfe）。既存の出力ファイルを置き換える前に確認します。", "ko": "이미지 이름은 접두사와 네 자리 번호를 사용합니다(예: DSKA0000.hfe). 기존 출력 파일을 교체하기 전에 확인합니다.", "zh-Hans": "映像名称由前缀加四位编号组成（例如 DSKA0000.hfe）。替换现有输出文件前会要求确认。"},
     "emulator.overwrite.title": {"en": "Replace Existing Emulator Files?", "es": "¿Reemplazar los archivos de emulador existentes?", "fr": "Remplacer les fichiers d’émulateur existants ?", "de": "Vorhandene Emulatordateien ersetzen?", "it": "Sostituire i file dell’emulatore esistenti?", "pt-BR": "Substituir arquivos de emulador existentes?", "bg": "Замяна на съществуващите файлове за емулатор?", "nl": "Bestaande emulatorbestanden vervangen?", "pl": "Zastąpić istniejące pliki emulatora?", "ja": "既存のエミュレーターファイルを置き換えますか？", "ko": "기존 에뮬레이터 파일을 교체하시겠습니까?", "zh-Hans": "替换现有模拟器文件？"},
     "emulator.overwrite.message": {"en": "{count} emulator output file(s) already exist. Replace them with the new disk set? The current files will be permanently replaced.", "es": "Ya existen {count} archivos de salida del emulador. ¿Reemplazarlos con el nuevo conjunto de discos? Los archivos actuales se sustituirán permanentemente.", "fr": "{count} fichier(s) de sortie d’émulateur existent déjà. Les remplacer par le nouveau jeu de disques ? Les fichiers actuels seront définitivement remplacés.", "de": "{count} Emulator-Ausgabedatei(en) sind bereits vorhanden. Durch den neuen Diskettensatz ersetzen? Die aktuellen Dateien werden dauerhaft ersetzt.", "it": "Esistono già {count} file di output dell’emulatore. Sostituirli con il nuovo set di dischi? I file attuali verranno sostituiti definitivamente.", "pt-BR": "Já existem {count} arquivos de saída do emulador. Substituí-los pelo novo conjunto de discos? Os arquivos atuais serão substituídos permanentemente.", "bg": "Вече съществуват {count} изходни файла за емулатор. Да бъдат ли заменени с новия комплект дискове? Текущите файлове ще бъдат заменени окончателно.", "nl": "Er bestaan al {count} emulatoruitvoerbestand(en). Vervangen door de nieuwe diskset? De huidige bestanden worden permanent vervangen.", "pl": "Istnieje już {count} plików wyjściowych emulatora. Zastąpić je nowym zestawem dysków? Obecne pliki zostaną trwale zastąpione.", "ja": "{count} 個のエミュレーター出力ファイルが既にあります。新しいディスクセットで置き換えますか？現在のファイルは完全に置き換えられます。", "ko": "에뮬레이터 출력 파일 {count}개가 이미 있습니다. 새 디스크 세트로 교체하시겠습니까? 현재 파일은 영구적으로 교체됩니다.", "zh-Hans": "已有 {count} 个模拟器输出文件。是否用新的磁盘集替换？当前文件将被永久替换。"},
     "emulator.overwrite.more": {"en": "… and {count} more file(s).", "es": "… y {count} archivo(s) más.", "fr": "… et {count} fichier(s) supplémentaire(s).", "de": "… und {count} weitere Datei(en).", "it": "… e altri {count} file.", "pt-BR": "… e mais {count} arquivo(s).", "bg": "… и още {count} файла.", "nl": "… en nog {count} bestand(en).", "pl": "… i jeszcze {count} plików.", "ja": "…ほか {count} ファイル。", "ko": "… 외 {count}개 파일.", "zh-Hans": "……以及另外 {count} 个文件。"},
@@ -2896,7 +2977,7 @@ MESSAGES.update({
     "emulator.complete.song_list": {"en": "Song-list file: {path}", "es": "Archivo de listas de canciones: {path}", "fr": "Fichier de listes de morceaux : {path}", "de": "Songlisten-Datei: {path}", "it": "File degli elenchi dei brani: {path}", "pt-BR": "Arquivo de listas de músicas: {path}", "bg": "Файл със списъци на песни: {path}", "nl": "Songlijstbestand: {path}", "pl": "Plik list utworów: {path}", "ja": "曲リストファイル: {path}", "ko": "곡 목록 파일: {path}", "zh-Hans": "曲目列表文件：{path}"},
     "emulator.set_name_required.message": {"en": "Enter a prefix of one to four letters or numbers, such as DSKA.", "es": "Introduce un prefijo de una a cuatro letras o números, como DSKA.", "fr": "Saisissez un préfixe d’une à quatre lettres ou chiffres, tel que DSKA.", "de": "Geben Sie ein Präfix aus einem bis vier Buchstaben oder Ziffern ein, z. B. DSKA.", "it": "Inserisci un prefisso da una a quattro lettere o cifre, ad esempio DSKA.", "pt-BR": "Digite um prefixo de uma a quatro letras ou números, como DSKA.", "bg": "Въведете префикс от една до четири букви или цифри, например DSKA.", "nl": "Voer een voorvoegsel van één tot vier letters of cijfers in, zoals DSKA.", "pl": "Wpisz prefiks od jednej do czterech liter lub cyfr, na przykład DSKA.", "ja": "DSKA のように、1～4文字の英字または数字の接頭辞を入力してください。", "ko": "DSKA와 같이 1~4자의 영문자 또는 숫자 접두사를 입력하세요.", "zh-Hans": "请输入由一至四个字母或数字组成的前缀，例如 DSKA。"},
     "emulator.format.hfe": {"en": "HFE (Nalbantov; default)", "es": "HFE (Nalbantov; predeterminado)", "fr": "HFE (Nalbantov ; par défaut)", "de": "HFE (Nalbantov; Standard)", "it": "HFE (Nalbantov; predefinito)", "pt-BR": "HFE (Nalbantov; padrão)", "bg": "HFE (Nalbantov; по подразбиране)", "nl": "HFE (Nalbantov; standaard)", "pl": "HFE (Nalbantov; domyślnie)", "ja": "HFE（Nalbantov、既定）", "ko": "HFE(Nalbantov, 기본값)", "zh-Hans": "HFE（Nalbantov；默认）"},
-    "emulator.no_overwrite": {"en": "Images use prefix plus four-digit numbering (for example, DSKA0001.hfe). Existing files are never overwritten.", "es": "Las imágenes usan el prefijo y cuatro dígitos (por ejemplo, DSKA0001.hfe). Nunca se sobrescriben archivos existentes.", "fr": "Les images utilisent le préfixe suivi de quatre chiffres (par exemple DSKA0001.hfe). Les fichiers existants ne sont jamais remplacés.", "de": "Images verwenden Präfix plus vierstellige Nummer (z. B. DSKA0001.hfe). Vorhandene Dateien werden nie überschrieben.", "it": "Le immagini usano il prefisso più quattro cifre (ad esempio DSKA0001.hfe). I file esistenti non vengono mai sovrascritti.", "pt-BR": "As imagens usam o prefixo mais quatro dígitos (por exemplo, DSKA0001.hfe). Arquivos existentes nunca são sobrescritos.", "bg": "Образите използват префикс и четирицифрен номер (например DSKA0001.hfe). Съществуващите файлове никога не се презаписват.", "nl": "Images gebruiken het voorvoegsel plus vier cijfers (bijvoorbeeld DSKA0001.hfe). Bestaande bestanden worden nooit overschreven.", "pl": "Obrazy używają prefiksu i czterech cyfr (np. DSKA0001.hfe). Istniejące pliki nigdy nie są nadpisywane.", "ja": "イメージ名は接頭辞と4桁の番号になります（例: DSKA0001.hfe）。既存ファイルは上書きされません。", "ko": "이미지 이름은 접두사와 네 자리 번호를 사용합니다(예: DSKA0001.hfe). 기존 파일은 덮어쓰지 않습니다.", "zh-Hans": "映像名称由前缀加四位编号组成（例如 DSKA0001.hfe）。绝不会覆盖现有文件。"},
+    "emulator.no_overwrite": {"en": "Images use prefix plus four-digit numbering (for example, DSKA0000.hfe). Existing files are never overwritten.", "es": "Las imágenes usan el prefijo y cuatro dígitos (por ejemplo, DSKA0000.hfe). Nunca se sobrescriben archivos existentes.", "fr": "Les images utilisent le préfixe suivi de quatre chiffres (par exemple DSKA0000.hfe). Les fichiers existants ne sont jamais remplacés.", "de": "Images verwenden Präfix plus vierstellige Nummer (z. B. DSKA0000.hfe). Vorhandene Dateien werden nie überschrieben.", "it": "Le immagini usano il prefisso più quattro cifre (ad esempio DSKA0000.hfe). I file esistenti non vengono mai sovrascritti.", "pt-BR": "As imagens usam o prefixo mais quatro dígitos (por exemplo, DSKA0000.hfe). Arquivos existentes nunca são sobrescritos.", "bg": "Образите използват префикс и четирицифрен номер (например DSKA0000.hfe). Съществуващите файлове никога не се презаписват.", "nl": "Images gebruiken het voorvoegsel plus vier cijfers (bijvoorbeeld DSKA0000.hfe). Bestaande bestanden worden nooit overschreven.", "pl": "Obrazy używają prefiksu i czterech cyfr (np. DSKA0000.hfe). Istniejące pliki nigdy nie są nadpisywane.", "ja": "イメージ名は接頭辞と4桁の番号になります（例: DSKA0000.hfe）。既存ファイルは上書きされません。", "ko": "이미지 이름은 접두사와 네 자리 번호를 사용합니다(예: DSKA0000.hfe). 기존 파일은 덮어쓰지 않습니다.", "zh-Hans": "映像名称由前缀加四位编号组成（例如 DSKA0000.hfe）。绝不会覆盖现有文件。"},
 })
 
 MESSAGES.update({
@@ -2909,7 +2990,7 @@ MESSAGES.update({
 # Keep the final slot-numbering hint aligned with the replacement-confirmation
 # behavior after all of the emulator message overrides above have been applied.
 MESSAGES.update({
-    "emulator.no_overwrite": {"en": "Images use prefix plus four-digit numbering (for example, DSKA0001.hfe). You will be asked before existing output files are replaced.", "es": "Las imágenes usan el prefijo y cuatro dígitos (por ejemplo, DSKA0001.hfe). Se pedirá confirmación antes de reemplazar archivos de salida existentes.", "fr": "Les images utilisent le préfixe suivi de quatre chiffres (par exemple DSKA0001.hfe). Une confirmation sera demandée avant de remplacer les fichiers de sortie existants.", "de": "Images verwenden Präfix plus vierstellige Nummer (z. B. DSKA0001.hfe). Vor dem Ersetzen vorhandener Ausgabedateien wird nachgefragt.", "it": "Le immagini usano il prefisso più quattro cifre (ad esempio DSKA0001.hfe). Verrà chiesta conferma prima di sostituire i file di output esistenti.", "pt-BR": "As imagens usam o prefixo mais quatro dígitos (por exemplo, DSKA0001.hfe). Será solicitada confirmação antes de substituir arquivos de saída existentes.", "bg": "Образите използват префикс и четирицифрен номер (например DSKA0001.hfe). Ще бъде поискано потвърждение преди замяна на съществуващи изходни файлове.", "nl": "Images gebruiken het voorvoegsel plus vier cijfers (bijvoorbeeld DSKA0001.hfe). Er wordt om bevestiging gevraagd voordat bestaande uitvoerbestanden worden vervangen.", "pl": "Obrazy używają prefiksu i czterech cyfr (np. DSKA0001.hfe). Przed zastąpieniem istniejących plików wyjściowych pojawi się prośba o potwierdzenie.", "ja": "イメージ名は接頭辞と4桁の番号になります（例: DSKA0001.hfe）。既存の出力ファイルを置き換える前に確認します。", "ko": "이미지 이름은 접두사와 네 자리 번호를 사용합니다(예: DSKA0001.hfe). 기존 출력 파일을 교체하기 전에 확인합니다.", "zh-Hans": "映像名称由前缀加四位编号组成（例如 DSKA0001.hfe）。替换现有输出文件前会要求确认。"},
+    "emulator.no_overwrite": {"en": "Images use prefix plus four-digit numbering (for example, DSKA0000.hfe). You will be asked before existing output files are replaced.", "es": "Las imágenes usan el prefijo y cuatro dígitos (por ejemplo, DSKA0000.hfe). Se pedirá confirmación antes de reemplazar archivos de salida existentes.", "fr": "Les images utilisent le préfixe suivi de quatre chiffres (par exemple DSKA0000.hfe). Une confirmation sera demandée avant de remplacer les fichiers de sortie existants.", "de": "Images verwenden Präfix plus vierstellige Nummer (z. B. DSKA0000.hfe). Vor dem Ersetzen vorhandener Ausgabedateien wird nachgefragt.", "it": "Le immagini usano il prefisso più quattro cifre (ad esempio DSKA0000.hfe). Verrà chiesta conferma prima di sostituire i file di output esistenti.", "pt-BR": "As imagens usam o prefixo mais quatro dígitos (por exemplo, DSKA0000.hfe). Será solicitada confirmação antes de substituir arquivos de saída existentes.", "bg": "Образите използват префикс и четирицифрен номер (например DSKA0000.hfe). Ще бъде поискано потвърждение преди замяна на съществуващи изходни файлове.", "nl": "Images gebruiken het voorvoegsel plus vier cijfers (bijvoorbeeld DSKA0000.hfe). Er wordt om bevestiging gevraagd voordat bestaande uitvoerbestanden worden vervangen.", "pl": "Obrazy używają prefiksu i czterech cyfr (np. DSKA0000.hfe). Przed zastąpieniem istniejących plików wyjściowych pojawi się prośba o potwierdzenie.", "ja": "イメージ名は接頭辞と4桁の番号になります（例: DSKA0000.hfe）。既存の出力ファイルを置き換える前に確認します。", "ko": "이미지 이름은 접두사와 네 자리 번호를 사용합니다(예: DSKA0000.hfe). 기존 출력 파일을 교체하기 전에 확인합니다.", "zh-Hans": "映像名称由前缀加四位编号组成（例如 DSKA0000.hfe）。替换现有输出文件前会要求确认。"},
 })
 
 
@@ -2933,6 +3014,19 @@ COMMON_TEXT_TRANSLATIONS.update(DIALOG_TEXT_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(DYNAMIC_DIALOG_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(VALIDATION_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(FILE_INSPECTION_REPORT_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(ESEQ_INSPECTION_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(CONVERSION_REPORT_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(BULK_JOB_TRANSLATIONS)
+
+
+MESSAGES.update(PENDING_CHANGE_MESSAGES)
+TEXT_TO_MESSAGE_ID["Undo"] = "pending.undo"
+TEXT_TO_MESSAGE_ID["Undo All"] = "pending.undo_all"
+TEXT_TO_MESSAGE_ID["Review Changes"] = "pending.review"
+TEXT_TO_MESSAGE_ID["Playback order: {before} → {after}."] = "pending.order"
+TEXT_TO_MESSAGE_ID["{path} ({count} folders)"] = "pending.folders"
+COMMON_TEXT_TRANSLATIONS.update(RECOVERY_DELIVERY_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(PREPARATION_PREVIEW_TRANSLATIONS)
 
 
 def tr(message_id, language_code=None, **kwargs):

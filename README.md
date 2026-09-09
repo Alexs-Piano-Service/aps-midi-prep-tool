@@ -21,7 +21,7 @@
   · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-Current version: `0.8.1`
+Current version: `0.8.2`
 
 APS MIDI Prep Tool is a desktop app for Yamaha Disklavier and other legacy
 player-piano workflows. Use it to recover songs from old floppies, organize your
@@ -36,15 +36,47 @@ holds the contents of a floppy disk.
 2. Choose **Open MIDI Folder** for MIDI or E-SEQ songs, **Open Image** for a disk
    image, or **Disk → Read Floppy...** for a physical disk. You can also drag
    files into the main window.
-3. Review song titles, filenames, playback order, and any compatibility warnings.
-   Edit the list or use **Utilities → Convert** to change formats.
+3. Choose **Preparing for...** to review defaults for your controller and delivery
+   method. Review song titles, filenames, and playback order.
+   Applying a destination stages its required conversions. Choose **Custom**
+   in the destination row to return to manual preparation.
 4. Choose **Save As** to export copies to a folder, or **Save As Image** to
    create IMG/HFE floppy images. **Save** updates the current source where
-   supported.
+   supported. If the Save As folder already contains the output files, confirm
+   their replacement in the overwrite prompt; this also works in the source folder.
 
 Edits and conversions in the main list wait until you save. Formatting and
 writing a physical floppy require a separate confirmation. If the floppy is
 irreplaceable, make a disk image before working on it.
+
+Use **Edit → Review Changes** to compare original and proposed filenames,
+titles, and conversions or discard selected songs' edits. **Edit → Undo**
+(**Ctrl+Z**) reverses the latest staged action. **Edit → Undo All** discards all
+staged changes since the current files were loaded or last saved. Cancelled or
+failed folder saves retain unfinished work; use **Save** again to retry it.
+**View → Show Save Destination** optionally shows the save location; it is hidden
+by default, and your preference is remembered.
+See [review, saving, verification, and resume](docs/preparation-reliability.md)
+for the complete preparation workflow.
+
+[Preparation profiles](docs/preparation-profiles.md) use the
+[APS Disklavier compatibility table](https://www.alexanderpeppe.com/disklavier-compatibility-table/)
+and [PianoDisc/QRS manufacturer manuals](docs/controller-compatibility-research.md)
+for controller defaults and keep emulator settings separate. Applying a profile
+shows the proposed settings and stages the needed song conversions for review.
+For example, Mark II preparation switches to E-SEQ mode and prepares MIDI songs
+as E-SEQ with a catalog and 720 KB image defaults.
+PianoDisc floppy profiles automatically prepare MIDI Type 0, including newly
+imported songs and emulator disk sets. Saving stops if a song could not be
+prepared for the selected controller.
+The destination row highlights an active profile. **Custom** turns off automatic
+preparation while keeping changes already staged for review.
+**View → Show Preparation Row** controls its visibility; preparation stays active
+when the row is hidden.
+E-SEQ destinations disable conversion to MIDI, and MIDI destinations disable
+conversion to E-SEQ, with an explanation. **Nalbantov** is available for
+floppy-capable profiles, including Mark III. The **Nalbantov Slim** model is
+offered for Mark II and Mark II XG.
 
 Change the interface language under **Settings → Language**. English, Spanish,
 French, German, Italian, Brazilian Portuguese, Bulgarian, Dutch, Polish,
@@ -61,6 +93,13 @@ and remaining disk space. Save songs to a folder or ZIP, or create a new image.
 Recovery tools can retry difficult disks. Greaseweazle hardware also supports
 SCP archives, which capture the disk's magnetic signals for preservation.
 Recovery cannot guarantee that damaged recordings will play correctly.
+If USB-floppy recovery fails or is cancelled, **Disk → Save partial capture...**
+keeps the recovered image together with sector coverage and diagnostics, without
+reading the disk again. Unread portions are identified in the diagnostics.
+
+For collections of images, **Utilities → Bulk Extraction...** can keep a local
+progress record. **Resume extraction job...** retries failed items first and
+reuses completed outputs only after checking input and output hashes.
 
 ## Convert and organize your music
 
@@ -75,7 +114,11 @@ Recovery cannot guarantee that damaged recordings will play correctly.
   channel, adjust pedal behavior, or remove Yamaha XF metadata.
 
 Conversions in the main list are ready for review before you save them. You
-can apply tools to a whole folder of songs.
+can apply tools to a whole folder of songs. Conversion details compare notes,
+duration, channels, pedals, titles, and removed metadata. E-SEQ conversion
+preserves zero-volume CC7 events by default and offers the playback fix when
+the relevant condition is detected. XF cleanup preserves unrecognized metadata
+and trailing data by default; broader cleanup is a separate explicit option.
 
 <table>
   <tr>
@@ -99,6 +142,20 @@ tempo, and pedals on a piano roll. Mute channels, adjust the preview mix or
 tempo, and listen with a basic piano sound, a SoundFont, or a connected MIDI
 device. A SoundFont supplies instrument sounds for playback.
 
+For E-SEQ songs, **File details** includes the original header's startup tempo,
+tempo factors, meter, pedal and channel flags, write protection, and display
+mode. Raw values accompany their meanings, and uncertain fields remain marked
+as uninterpreted. The decoded MIDI preview appears below the source details.
+
+File Inspection also has **Convert to Type 0** and **Merge Channels to Piano**
+buttons for the selected MIDI song. Each applies in one click and refreshes the
+preview. Type 0 combines tracks while keeping channels and instruments; merging
+routes all channels to MIDI channel 1 and selects Acoustic Grand Piano while
+keeping the MIDI file type. These edits use the complete song, including hidden
+or muted preview channels. Use **Save** to write them or **Edit → Undo** to revert.
+**Utilities → Merge Channels to Piano...** applies the same merge to one song or
+all listed MIDI songs, including files being edited inside a disk image.
+
 Use **Utilities → Render Audio...** to create WAV or MP3 copies. SoundFont
 playback and rendering need optional tools listed below.
 
@@ -118,6 +175,8 @@ Choose the contents, image format, and capacity supported by your player.
 Enable **Include Song Lists** for one text file listing every image, album, and
 track in playback order. **Naming and capacity options** lets you change disk
 numbering and the amount of space left free.
+Review the proposed disks before writing. The preview supports album exclusions,
+album order changes, title corrections, and source-to-output musical reports.
 
 [![Options for building a numbered floppy-emulator disk set](docs/images/aps-midi-prep-tool-hfe-emulator-disk-builder.png)](docs/images/aps-midi-prep-tool-hfe-emulator-disk-builder.png)
 
@@ -134,8 +193,12 @@ USB stick and follow the manufacturer's instructions to prepare the stick.
 - Make an image of an irreplaceable floppy before editing it.
 - Use **File → Write Protection → Write-Protect Original** to prevent **Save**
   from overwriting the open image or floppy. You can still export copies.
-- Enable backups under **File → Save Options** and test new disks or images on
-  your player before relying on them.
+- Backups are enabled by default under **File → Save Options**; an existing saved
+  preference is respected. Title and order updates are checked in a temporary
+  file before replacing their destination.
+- Emulator disk builds reopen their final images and verify delivered file
+  contents. Enable **Disk → Verify floppy contents after writing** for physical
+  readback. These checks verify delivery; test playback on your player too.
 - If your operating system offers to format an old piano disk, cancel that
   prompt and open the disk through APS MIDI Prep Tool instead.
 

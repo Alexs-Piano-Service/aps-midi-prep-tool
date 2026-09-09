@@ -6,10 +6,12 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QStackedWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QLabel, QStackedWidget, QPushButton, QWidget
 
 from aps_midi_prep_tool_app import onboarding_dialog
-from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, tr, translate_text
+from aps_midi_prep_tool_app.message_catalog import (
+    COMMON_TEXT_TRANSLATIONS, MESSAGES, SUPPORTED_LANGUAGES, TEXT_TO_MESSAGE_ID, tr, translate_text,
+)
 from aps_midi_prep_tool_app.onboarding_translations import ONBOARDING_TRANSLATIONS
 
 
@@ -32,9 +34,34 @@ def test_every_onboarding_language_has_all_pages_and_matching_placeholders():
                 assert translated != source, (code, message_id)
 
 
+def test_onboarding_dynamic_titles_and_menu_labels_have_explicit_language_coverage():
+    languages = {entry.code for entry in SUPPORTED_LANGUAGES if entry.code != "en"}
+    sources = {title for title, _message_id in onboarding_dialog.ONBOARDING_PAGES}
+    sources.update(("Back", "Next", "Close", "Do not show this dialog again", "Preparing for..."))
+    for labels in onboarding_dialog.ONBOARDING_MENU_PATHS.values():
+        for label in labels:
+            if label.startswith("@"):
+                assert set(MESSAGES[label[1:]]) >= languages
+            else:
+                sources.add(label)
+    for source in sources:
+        message_id = TEXT_TO_MESSAGE_ID.get(source)
+        if message_id:
+            translations = MESSAGES[message_id]
+        else:
+            translations = COMMON_TEXT_TRANSLATIONS.get(source)
+            if translations is None and source.endswith("..."):
+                translations = COMMON_TEXT_TRANSLATIONS.get(source[:-3])
+        assert translations is not None, source
+        assert set(translations) >= languages, source
+
+
 @pytest.mark.parametrize("code", [language.code for language in SUPPORTED_LANGUAGES])
 def test_onboarding_displays_localized_bodies_notice_menu_paths_and_pagination(monkeypatch, code):
     app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    for method_name in ("load_floppy_drive", "choose_preparation_profile", "browse_directory"):
+        setattr(parent, method_name, lambda: None)
 
     class Settings:
         def value(self, key, default=None, **_kwargs):
@@ -44,15 +71,30 @@ def test_onboarding_displays_localized_bodies_notice_menu_paths_and_pagination(m
     inspected = []
 
     def inspect_dialog(dialog):
+        dialog.show()
+        app.processEvents()
         assert dialog.windowTitle() == ONBOARDING_TRANSLATIONS[code]["welcome"].format(
             app=onboarding_dialog.APP_TITLE_WITH_VERSION,
         )
         selector = dialog.findChild(QComboBox)
         stack = dialog.findChild(QStackedWidget)
         assert stack.count() == 11
+        assert dialog.findChild(QCheckBox).text() == translate_text("Do not show this dialog again", code)
+        buttons = {button.text() for button in dialog.findChildren(QPushButton)}
+        assert {translate_text(label, code) for label in ("Back", "Next", "Close")} <= buttons
+        for label, method_name in (
+            ("Read Floppy...", "load_floppy_drive"),
+            ("Preparing for...", "choose_preparation_profile"),
+            ("Edit Titles", "browse_directory"),
+        ):
+            button = dialog.findChild(QPushButton, "launch_" + method_name)
+            assert button.text() == translate_text(label, code)
+            assert button.isVisible()
         for index, (source_title, message_id) in enumerate(onboarding_dialog.ONBOARDING_PAGES):
             selector.setCurrentIndex(index)
+            app.processEvents()
             assert stack.currentIndex() == index
+            assert selector.currentText() == translate_text(source_title, code)
             labels = stack.currentWidget().findChildren(QLabel)
             assert labels[0].text() == translate_text(source_title, code)
             body = labels[1].text()
@@ -72,9 +114,39 @@ def test_onboarding_displays_localized_bodies_notice_menu_paths_and_pagination(m
             if code != "en":
                 assert ONBOARDING_TRANSLATIONS["en"]["notice"] not in body
         inspected.append(True)
+        dialog.close()
         return QDialog.Accepted
 
     monkeypatch.setattr(QDialog, "exec", inspect_dialog)
-    onboarding_dialog.show_first_time_dialog(force_show=True)
+    onboarding_dialog.show_first_time_dialog(parent=parent, force_show=True)
     assert inspected == [True]
+    parent.deleteLater()
     app.processEvents()
+
+
+@pytest.mark.parametrize("method_name", ["load_floppy_drive", "choose_preparation_profile", "browse_directory"])
+def test_onboarding_launches_selected_existing_workflow_after_closing(monkeypatch, method_name):
+    app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    calls = []
+    setattr(parent, method_name, lambda: calls.append(method_name))
+
+    class Settings:
+        def value(self, key, default=None, **kwargs):
+            return default
+
+    monkeypatch.setattr(onboarding_dialog, "QSettings", lambda *args: Settings())
+
+    def activate(dialog):
+        button = dialog.findChild(QPushButton, "launch_" + method_name)
+        assert button is not None
+        button.click()
+        assert dialog.result() == QDialog.Accepted
+        assert calls == []
+        return QDialog.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", activate)
+    onboarding_dialog.show_first_time_dialog(parent=parent, force_show=True)
+    app.processEvents()
+    assert calls == [method_name]
+    parent.deleteLater()

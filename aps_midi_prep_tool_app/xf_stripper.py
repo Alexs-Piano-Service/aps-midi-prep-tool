@@ -1,5 +1,26 @@
 import os
-import uuid
+
+from .helpers.atomic_file import atomic_write_bytes
+
+
+XF_CLEANUP_TARGETED = "targeted"
+XF_CLEANUP_BROAD = "broad"
+
+
+def is_yamaha_xf_payload(payload):
+    """Recognize documented XF records; retain unknown or malformed records.
+
+    Yamaha XF Format Specifications V2.01, pp. 7, 19–25, 31:
+    https://musescore.org/sites/musescore.org/files/2023-09/xfspec.pdf
+    Later lyrics bitmap record: Yamaha PSR-A1000 Data List, p. 38.
+    """
+    if len(payload) < 3 or payload[:2] != b"\x43\x7b":
+        return False
+    kind = payload[2]
+    fixed_lengths = {0x00: 9, 0x01: 7, 0x02: 4, 0x03: 5, 0x04: 4, 0x05: 6, 0x0C: 5, 0x7F: 13}
+    if kind in fixed_lengths:
+        return len(payload) == fixed_lengths[kind] and (kind != 0 or payload[3:5] == b"XF")
+    return kind in {0x10, 0x12, 0x21} and len(payload) >= {0x10: 6, 0x12: 6, 0x21: 5}[kind]
 
 
 _SYSTEM_MESSAGE_DATA_LENGTHS = {
@@ -48,12 +69,13 @@ def _take(data, offset, length):
     return data[offset:end], end
 
 
-def _strip_xf_track(track_data):
+def _strip_xf_track(track_data, *, cleanup_mode=XF_CLEANUP_TARGETED):
     offset = 0
     running_status = None
     pending_delta = 0
     removed_events = 0
     output = bytearray()
+    trailing = b""
 
     while offset < len(track_data):
         delta, offset = _read_vlq(track_data, offset)
@@ -82,10 +104,13 @@ def _strip_xf_track(track_data):
             offset += 1
             meta_length, offset = _read_vlq(track_data, offset)
             payload, offset = _take(track_data, offset, meta_length)
-            if meta_type == 0x7F:
+            if meta_type == 0x7F and (
+                cleanup_mode == XF_CLEANUP_BROAD or is_yamaha_xf_payload(payload)
+            ):
                 removed_events += 1
                 continue
             if meta_type == 0x2F:
+                trailing = track_data[offset:]
                 break
             output.extend(_encode_vlq(pending_delta))
             output.extend((0xFF, meta_type))
@@ -129,11 +154,21 @@ def _strip_xf_track(track_data):
 
     output.extend(_encode_vlq(pending_delta))
     output.extend(b"\xFF\x2F\x00")
+    if cleanup_mode == XF_CLEANUP_TARGETED:
+        if not removed_events:
+            return track_data, 0
+        output.extend(trailing)
     return bytes(output), removed_events
 
 
-def strip_xf_from_midi_bytes(midi_bytes):
-    """Remove Yamaha XF metadata while preserving Standard MIDI performance data."""
+def strip_xf_from_midi_bytes(midi_bytes, *, cleanup_mode=XF_CLEANUP_TARGETED):
+    """Remove recognized XF records, retaining unknown metadata and trailing data.
+
+    ``cleanup_mode='broad'`` explicitly removes all FF 7F records, extended
+    header bytes, and data after the declared tracks.
+    """
+    if cleanup_mode not in {XF_CLEANUP_TARGETED, XF_CLEANUP_BROAD}:
+        raise ValueError(f"Unsupported XF cleanup mode: {cleanup_mode}")
     if len(midi_bytes) < 14 or midi_bytes[:4] != b"MThd":
         raise ValueError("This is not a valid Standard MIDI File.")
 
@@ -155,6 +190,8 @@ def strip_xf_from_midi_bytes(midi_bytes):
     output.extend(format_type.to_bytes(2, "big"))
     output.extend(track_count.to_bytes(2, "big"))
     output.extend(division.to_bytes(2, "big"))
+    if cleanup_mode == XF_CLEANUP_TARGETED:
+        output = bytearray(midi_bytes[:header_end])
 
     offset = header_end
     for _track_index in range(track_count):
@@ -165,17 +202,22 @@ def strip_xf_from_midi_bytes(midi_bytes):
         track_end = track_start + track_length
         if track_end > len(midi_bytes):
             raise ValueError("A MIDI track is truncated.")
-        track_data, _removed_events = _strip_xf_track(midi_bytes[track_start:track_end])
+        track_data, _removed_events = _strip_xf_track(
+            midi_bytes[track_start:track_end], cleanup_mode=cleanup_mode,
+        )
         output.extend(b"MTrk")
         output.extend(len(track_data).to_bytes(4, "big"))
         output.extend(track_data)
         offset = track_end
 
+    if cleanup_mode == XF_CLEANUP_TARGETED:
+        output.extend(midi_bytes[offset:])
+
     stripped_bytes = bytes(output)
     return stripped_bytes, stripped_bytes != midi_bytes
 
 
-def strip_xf_from_midi_path(source_path, dest_path):
+def strip_xf_from_midi_path(source_path, dest_path, *, cleanup_mode=XF_CLEANUP_TARGETED):
     """Strip XF data into ``dest_path`` and return whether any bytes changed."""
     if not os.path.isfile(source_path):
         raise ValueError("File does not exist.")
@@ -183,17 +225,10 @@ def strip_xf_from_midi_path(source_path, dest_path):
     with open(source_path, "rb") as handle:
         midi_bytes = handle.read()
 
-    stripped_bytes, changed = strip_xf_from_midi_bytes(midi_bytes)
+    stripped_bytes, changed = strip_xf_from_midi_bytes(midi_bytes, cleanup_mode=cleanup_mode)
     if not changed:
         return False
 
-    temp_path = f"{dest_path}.aps_xf_{uuid.uuid4().hex}.tmp"
-    try:
-        with open(temp_path, "wb") as handle:
-            handle.write(stripped_bytes)
-        os.replace(temp_path, dest_path)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    atomic_write_bytes(dest_path, stripped_bytes)
 
     return True

@@ -1,7 +1,7 @@
 import html
 import sys
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -200,6 +200,29 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 )
             )
         layout.addWidget(page_stack)
+
+        # Close onboarding before launching a task so its instructions never
+        # block the existing file pickers or preparation dialog.
+        launch_layout = QHBoxLayout()
+        launch_actions = (
+            ("Read Floppy...", "load_floppy_drive"),
+            ("Preparing for...", "choose_preparation_profile"),
+            ("Edit Titles", "browse_directory"),
+        )
+        for label, method_name in launch_actions:
+            callback = getattr(parent, method_name, None)
+            if callback is None:
+                continue
+            button = QPushButton(t(label), dialog)
+            button.setObjectName("launch_" + method_name)
+
+            def launch(_checked=False, action=callback):
+                dialog.accept()
+                QTimer.singleShot(0, action)
+
+            button.clicked.connect(launch)
+            launch_layout.addWidget(button)
+        layout.addLayout(launch_layout)
 
         dont_show_checkbox = QCheckBox(t("Do not show this dialog again"))
         layout.addWidget(dont_show_checkbox)

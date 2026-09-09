@@ -2,11 +2,12 @@ import os
 import re
 
 from .message_catalog import translate_text
+from .helpers.atomic_file import atomic_write_bytes
 
 from .eseq_converter import (
     is_clavinova_mda_eseq_bytes,
     is_eseq_file,
-    refresh_eseq_timing_fields_in_bytes,
+    parse_eseq_bytes,
 )
 
 _SYSTEM_MESSAGE_DATA_LENGTHS = {
@@ -155,10 +156,11 @@ def _parse_midi_chunks(midi_bytes):
 
     return declared_track_count, chunks
 
-def _find_first_track_name_event(track_data):
+def _find_first_track_name_event(track_data, *, validate_remainder=False):
     pos = 0
     track_end = len(track_data)
     running_status = None
+    first_title_event = None
 
     while pos < track_end:
         _, pos = _parse_vlq(track_data, pos, track_end)
@@ -193,12 +195,14 @@ def _find_first_track_name_event(track_data):
             if payload_end > track_end:
                 raise ValueError("Meta event exceeds track bounds.")
 
-            if meta_type == 0x03:
-                return {
+            if meta_type == 0x03 and first_title_event is None:
+                first_title_event = {
                     "length_start": length_start,
                     "payload_start": payload_start,
                     "payload_end": payload_end,
                 }
+                if not validate_remainder:
+                    return first_title_event
 
             pos = payload_end
             continue
@@ -233,7 +237,7 @@ def _find_first_track_name_event(track_data):
         pos += data_len
         running_status = None
 
-    return None
+    return first_title_event
 
 def _replace_chunk_data(midi_bytes, chunk, new_track_data):
     new_len = len(new_track_data)
@@ -282,7 +286,9 @@ def _set_eseq_title_in_bytes(data, new_title):
         + padded
         + data[_ESEQ_TITLE_END + 1:]
     )
-    return refresh_eseq_timing_fields_in_bytes(patched)
+    # A title edit must preserve source timing/header conventions, including
+    # the zero before/after fields written by MID2ESEQ. No events changed.
+    return patched
 
 
 def _describe_char_for_error(ch):
@@ -411,14 +417,7 @@ def extract_eseq_title_from_file(file_path):
 
 def update_midi_title(midi_path, new_title):
     try:
-        with open(midi_path, "rb") as f:
-            midi_bytes = f.read()
-
-        patched = _set_first_title_in_midi_bytes(midi_bytes, new_title)
-
-        with open(midi_path, "wb") as f:
-            f.write(patched)
-
+        write_midi_title_to_path(midi_path, new_title, midi_path)
         return None
     except Exception as e:
         return f"Could not update MIDI title in {os.path.basename(midi_path)}: {e}"
@@ -426,47 +425,48 @@ def update_midi_title(midi_path, new_title):
 
 def update_eseq_title(file_path, new_title):
     try:
-        with open(file_path, "rb") as f:
-            data = f.read()
-
-        patched = _set_eseq_title_in_bytes(data, new_title)
-
-        with open(file_path, "wb") as f:
-            f.write(patched)
-
+        write_eseq_title_to_path(file_path, new_title, file_path)
         return None
     except Exception as e:
         return f"Could not update E-SEQ title in {os.path.basename(file_path)}: {e}"
 
 def update_midi_title_to_destination(source_path, new_title, dest_dir):
     try:
-        with open(source_path, "rb") as f:
-            midi_bytes = f.read()
-
-        patched = _set_first_title_in_midi_bytes(midi_bytes, new_title)
-
         dest_path = os.path.join(dest_dir, os.path.basename(source_path))
-
-        with open(dest_path, "wb") as f:
-            f.write(patched)
-
+        write_midi_title_to_path(source_path, new_title, dest_path)
         return None
     except Exception as e:
         return f"Could not write updated title for {os.path.basename(source_path)}: {e}"
 
 
+def _validate_midi_title_bytes(midi_bytes, new_title):
+    declared_track_count, chunks = _parse_midi_chunks(midi_bytes)
+    tracks = [chunk for chunk in chunks if chunk["id"] == b"MTrk"]
+    if declared_track_count != len(tracks):
+        raise ValueError("The MIDI track count does not match its header.")
+    first_title = None
+    for chunk in tracks:
+        track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
+        event = _find_first_track_name_event(track_data, validate_remainder=True)
+        if event is not None and first_title is None:
+            first_title = _decode_title_bytes(track_data[event["payload_start"]:event["payload_end"]])
+    if first_title != new_title:
+        raise ValueError("The saved MIDI title does not match the requested title.")
+
+
 def write_midi_title_to_path(source_path, new_title, dest_path):
-    """Write a title edit, distinguishing MIDI format errors from file I/O errors."""
+    """Atomically write a checked title edit; keep format and I/O errors distinct."""
     with open(source_path, "rb") as f:
         midi_bytes = f.read()
 
     try:
         patched = _set_first_title_in_midi_bytes(midi_bytes, new_title)
+        atomic_write_bytes(
+            dest_path, patched,
+            validate=lambda data: _validate_midi_title_bytes(data, new_title),
+        )
     except ValueError as exc:
         raise MidiTitleFormatError(str(exc)) from exc
-
-    with open(dest_path, "wb") as f:
-        f.write(patched)
 
 
 def update_midi_title_to_path(source_path, new_title, dest_path):
@@ -477,16 +477,27 @@ def update_midi_title_to_path(source_path, new_title, dest_path):
         return f"Could not write updated title for {os.path.basename(source_path)}: {e}"
 
 
+def write_eseq_title_to_path(source_path, new_title, dest_path):
+    """Atomically write a checked E-SEQ title, allowing errors to propagate."""
+    with open(source_path, "rb") as f:
+        data = f.read()
+
+    patched = _set_eseq_title_in_bytes(data, new_title)
+
+    def validate(written):
+        parse_eseq_bytes(written)
+        # Clavinova MDA has no embedded title and intentionally stays unchanged.
+        if not is_clavinova_mda_eseq_bytes(written):
+            expected = _encode_title_bytes(new_title).ljust(_ESEQ_TITLE_LENGTH, b" ")
+            if written[_ESEQ_TITLE_START:_ESEQ_TITLE_END + 1] != expected:
+                raise ValueError("The saved E-SEQ title does not match the requested title.")
+
+    atomic_write_bytes(dest_path, patched, validate=validate)
+
+
 def update_eseq_title_to_path(source_path, new_title, dest_path):
     try:
-        with open(source_path, "rb") as f:
-            data = f.read()
-
-        patched = _set_eseq_title_in_bytes(data, new_title)
-
-        with open(dest_path, "wb") as f:
-            f.write(patched)
-
+        write_eseq_title_to_path(source_path, new_title, dest_path)
         return None
     except Exception as e:
         return f"Could not write updated E-SEQ title for {os.path.basename(source_path)}: {e}"

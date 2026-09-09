@@ -26,7 +26,7 @@ def _install_fake_device(monkeypatch, read):
     device = _FakeRecoveryDevice(read)
     monkeypatch.setattr(
         floppy_image,
-        "_open_block_device_for_read",
+        "_open_block_device_for_recovery_read",
         lambda _device_path: device,
     )
     return device
@@ -291,6 +291,77 @@ def test_recovery_reader_counts_healthy_chunk_as_readable_sectors(monkeypatch, t
     _assert_sector_accounting(diagnostics)
 
 
+def test_default_recovery_reads_small_chunks_and_reports_progress_between_reads(
+    monkeypatch,
+    tmp_path,
+):
+    source = b"A" * (40 * SECTOR_SIZE)
+    progress = []
+
+    def read(offset, size):
+        # Each completed chunk must be reported before another read starts.
+        assert len(progress) == len(device.calls) - 1
+        return source[offset:offset + size]
+
+    device = _install_fake_device(monkeypatch, read)
+    output_path = tmp_path / "default-chunks.img"
+    diagnostics = floppy_image._read_block_device_recovery_image(
+        "A:",
+        output_path,
+        len(source),
+        progress_callback=lambda *update: progress.append(update),
+    )
+
+    assert device.closed
+    assert output_path.read_bytes() == source
+    assert [(offset, size) for offset, size, _label in device.calls] == [
+        (0, 8 * 1024),
+        (8 * 1024, 8 * 1024),
+        (16 * 1024, 4 * 1024),
+    ]
+    assert [(value, total) for value, total, _message in progress] == [
+        (28, 100),
+        (56, 100),
+        (70, 100),
+    ]
+    assert "40 of 40 sector(s) attempted; 40 readable, 0 bad, 0 unresolved" in progress[-1][2]
+    _assert_sector_accounting(diagnostics)
+
+
+def test_fallback_progress_updates_when_attempted_percentage_stays_the_same(
+    monkeypatch,
+    tmp_path,
+):
+    progress = []
+
+    def read(offset, size):
+        if size > SECTOR_SIZE or offset == SECTOR_SIZE:
+            raise OSError("unreadable")
+        return b"A" * size
+
+    device, _output_path, diagnostics = _read_recovery_image(
+        monkeypatch,
+        tmp_path,
+        read,
+        progress_callback=lambda *update: progress.append(update),
+    )
+
+    assert device.closed
+    assert len(progress) == 4
+    assert [(value, total) for value, total, _message in progress] == [(70, 100)] * 4
+    for (_value, _total, message), counts in zip(
+        progress,
+        (
+            "1 readable, 0 bad, 3 unresolved",
+            "1 readable, 1 bad, 2 unresolved",
+            "2 readable, 1 bad, 1 unresolved",
+            "3 readable, 1 bad, 0 unresolved",
+        ),
+    ):
+        assert counts in message
+    _assert_sector_accounting(diagnostics)
+
+
 def test_recovery_reader_fallback_zero_fills_only_unreadable_sector(monkeypatch, tmp_path):
     sectors = {
         0: b"A" * SECTOR_SIZE,
@@ -492,7 +563,7 @@ def test_bounded_reader_preflight_deadline_does_not_mark_sectors_attempted(
     device = PreflightDeadlineDevice()
     monkeypatch.setattr(
         floppy_image,
-        "_open_block_device_for_read",
+        "_open_block_device_for_recovery_read",
         lambda _path: device,
     )
 
@@ -512,6 +583,54 @@ def test_bounded_reader_preflight_deadline_does_not_mark_sectors_attempted(
     assert diagnostics["attempted_sectors"] == 0
     assert diagnostics["unresolved_sectors"] == 0
     assert diagnostics["unattempted_sectors"] == 4
+
+
+def test_submitted_read_deadline_leaves_range_unresolved_without_retrying(
+    monkeypatch,
+    tmp_path,
+):
+    class DeadlineDevice:
+        closed = False
+
+        def __init__(self):
+            self.calls = []
+
+        def read_at_recovery(self, offset, size, _label, **kwargs):
+            self.calls.append((offset, size, kwargs["deadline_at"]))
+            kwargs["submitted_callback"]()
+            raise floppy_image._RecoveryReadDeadlineExceeded("deadline")
+
+        def close(self):
+            self.closed = True
+
+    device = DeadlineDevice()
+    monkeypatch.setattr(floppy_image.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        floppy_image,
+        "_open_block_device_for_recovery_read",
+        lambda _path: device,
+    )
+    output_path = tmp_path / "submitted-deadline.img"
+
+    diagnostics = floppy_image._read_block_device_recovery_image(
+        "A:",
+        output_path,
+        12 * SECTOR_SIZE,
+        chunk_size=4 * SECTOR_SIZE,
+    )
+
+    assert device.closed
+    assert device.calls == [(0, 4 * SECTOR_SIZE, 400.0)]
+    assert output_path.read_bytes() == b"\x00" * (12 * SECTOR_SIZE)
+    assert diagnostics["read_deadline_mode"] == "windows_overlapped_cancel"
+    assert diagnostics["stop_reason"] == "soft_deadline"
+    assert diagnostics["read_calls"] == 1
+    assert diagnostics["fallback_read_calls"] == 0
+    assert diagnostics["attempted_sectors"] == 4
+    assert diagnostics["bad_sectors"] == 0
+    assert diagnostics["unresolved_sector_ranges"] == [[0, 3]]
+    assert diagnostics["unattempted_sector_ranges"] == [[4, 11]]
+    _assert_sector_accounting(diagnostics)
 
 
 def test_recovery_reader_stops_early_when_sample_is_entirely_unreadable(monkeypatch, tmp_path):

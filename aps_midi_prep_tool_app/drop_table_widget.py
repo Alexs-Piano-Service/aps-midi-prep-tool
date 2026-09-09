@@ -248,11 +248,13 @@ class DropTableWidget(QTableWidget):
                 return
             except Exception:
                 pass
-        QMessageBox.warning(
-            self,
-            self._lt("Drop Failed"),
-            self._lt("The dropped files could not be added.") + f"\n\n{detail}",
-        )
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle(self._lt("Drop Failed"))
+        dialog.setText(self._lt("The dropped files could not be added.") + f"\n\n{detail}")
+        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.button(QMessageBox.Ok).setText(self._lt("OK"))
+        dialog.exec()
 
     def _log_drop_event(self, main_window, action, **details):
         logger = getattr(main_window, "_log_event", None)
@@ -456,12 +458,12 @@ class DropTableWidget(QTableWidget):
                         results.append({
                             "status": "error",
                             "path": "",
-                            "message": f"Could not prepare dropped files: {exc}",
+                            "message": self._lt("Could not prepare dropped files: {error}").format(error=exc),
                         })
                 total = len(regular_paths)
                 if total > 1:
-                    progressDialog = QProgressDialog("Adding files...", "Cancel", 0, total, main_window)
-                    progressDialog.setWindowTitle("Adding Files")
+                    progressDialog = QProgressDialog(self._lt("Adding files..."), self._lt("Cancel"), 0, total, main_window)
+                    progressDialog.setWindowTitle(self._lt("Adding Files"))
                     progressDialog.setWindowModality(Qt.WindowModal)
                     progressDialog.setMinimumDuration(0)
                     center_dialog_on_parent(progressDialog, main_window)
@@ -473,7 +475,7 @@ class DropTableWidget(QTableWidget):
                             result = {
                                 "status": "error",
                                 "path": file_path,
-                                "message": f"Could not add dropped file: {exc}",
+                                "message": self._lt("Could not add dropped file: {error}").format(error=exc),
                             }
                         results.append(result)
                         if result and result.get("status") == "cancelled":

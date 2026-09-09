@@ -3,6 +3,7 @@ import unittest
 from aps_midi_prep_tool_app.main_window import (
     FluidSynthPlaybackProcess,
     MidiOutputWorker,
+    _inspect_midi_bytes,
     _midi_meta_payload,
     _midi_channel_color,
     _midi_output_events,
@@ -10,6 +11,7 @@ from aps_midi_prep_tool_app.main_window import (
     _normalized_tempo_percent,
     _scale_midi_tempo_bytes,
     _scale_preview_timed_items,
+    _tick_seconds_converter,
 )
 from aps_midi_prep_tool_app.midi_type0_converter import (
     _encode_vlq,
@@ -50,6 +52,79 @@ def _track_events(midi_bytes):
 
 
 class FileInspectionTempoTests(unittest.TestCase):
+    def test_type_one_conductor_tempo_matches_visual_rendered_and_rebased_live_timing(self):
+        conductor = _type_zero_midi([
+            (0, b"\xFF\x51\x03" + (428571).to_bytes(3, "big")),
+        ])[14:]
+        performance = _type_zero_midi([
+            (0, b"\x90\x3C\x50"), (1024, b"\x80\x3C\x00"),
+            (4096, b"\x90\x40\x48"), (4352, b"\x80\x40\x00"),
+        ])[14:]
+        source = (b"MThd\x00\x00\x00\x06\x00\x01\x00\x02\x01\x00"
+                  + conductor + performance)
+        inspected = _inspect_midi_bytes(source)
+        self.assertEqual(len(inspected["notes"]), 2)
+        self.assertAlmostEqual(inspected["duration"], 7.285707)
+        rebased_events = _midi_output_events(
+            FluidSynthPlaybackProcess._tempo_rebased_midi_bytes(source)
+        )
+        # Independent 140 BPM expectations at 256 PPQN. A default-tempo
+        # override would incorrectly put the second onset at 8 seconds.
+        expected_at_normal_speed = (0.0, 1.714284, 6.857136, 7.285707)
+        for percent, expected_multiplier in ((100, 2.0), (50, 1.0)):
+            with self.subTest(tempo_percent=percent):
+                visual_notes = _scale_preview_timed_items(inspected["notes"], percent)
+                visual_times = [note[key] for note in visual_notes
+                                for key in ("start_sec", "end_sec")]
+                rendered_events = _midi_output_events(_scale_midi_tempo_bytes(source, percent))
+                command = FluidSynthPlaybackProcess._tempo_command(percent)
+                live_multiplier = float(command.split()[1])
+                self.assertEqual(live_multiplier, expected_multiplier)
+                self.assertEqual([raw for _, raw in rebased_events],
+                                 [raw for _, raw in rendered_events])
+                self.assertEqual(len(rendered_events), 4)
+                for index, base_seconds in enumerate(expected_at_normal_speed):
+                    expected = base_seconds * 100 / percent
+                    self.assertAlmostEqual(visual_times[index], expected)
+                    self.assertAlmostEqual(rendered_events[index][0], expected)
+                    self.assertAlmostEqual(rebased_events[index][0] / live_multiplier, expected)
+
+    def test_explicit_initial_tempo_controls_inspected_note_times_and_duration(self):
+        for mpqn in (250000, 444444, 1000000):
+            with self.subTest(mpqn=mpqn):
+                source = _type_zero_midi([
+                    (0, b"\xFF\x51\x03" + mpqn.to_bytes(3, "big")),
+                    (96, bytes([0x90, 60, 100])),
+                    (192, bytes([0x80, 60, 0])),
+                ])
+
+                inspected = _inspect_midi_bytes(source)
+                playback = _midi_output_events(source)
+
+                self.assertAlmostEqual(inspected["notes"][0]["start_sec"], mpqn / 1000000)
+                self.assertAlmostEqual(inspected["notes"][0]["end_sec"], 2 * mpqn / 1000000)
+                self.assertAlmostEqual(inspected["duration"], 2 * mpqn / 1000000)
+                self.assertAlmostEqual(inspected["notes"][0]["start_sec"], playback[0][0])
+                self.assertAlmostEqual(inspected["notes"][0]["end_sec"], playback[1][0])
+
+    def test_last_source_tempo_wins_when_changes_share_a_tick(self):
+        for first, final in ((800000, 250000), (250000, 800000)):
+            with self.subTest(first=first, final=final):
+                convert = _tick_seconds_converter(
+                    [(0, 500000), (0, first), (0, final), (96, 1000000), (96, 300000)], 96,
+                )
+
+                self.assertEqual(convert(0), 0)
+                self.assertAlmostEqual(convert(96), final / 1000000)
+                self.assertAlmostEqual(convert(192), final / 1000000 + 0.3)
+
+    def test_future_tempo_change_leaves_default_tempo_before_its_tick(self):
+        convert = _tick_seconds_converter([(96, 250000)], 96)
+
+        self.assertAlmostEqual(convert(48), 0.25)
+        self.assertAlmostEqual(convert(96), 0.5)
+        self.assertAlmostEqual(convert(192), 0.75)
+
     def test_all_midi_channels_have_distinct_legend_colors(self):
         colors = [
             _midi_channel_color(channel).name()

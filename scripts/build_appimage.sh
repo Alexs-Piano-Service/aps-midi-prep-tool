@@ -360,8 +360,16 @@ if [[ ! -x "$APPIMAGETOOL" ]]; then
     download_appimagetool
 fi
 
+APPIMAGETOOL_ARGS=()
+if command -v appstreamcli >/dev/null 2>&1; then
+    # Validate locally: homepage availability must not decide whether a build
+    # succeeds. appimagetool otherwise repeats validation with network checks.
+    appstreamcli validate --no-net "$APP_METAINFO"
+    APPIMAGETOOL_ARGS+=(--no-appstream)
+fi
+
 rm -f "$APPIMAGE_PATH" "$CHECKSUM_PATH"
-ARCH="$APPIMAGE_ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_PATH"
+ARCH="$APPIMAGE_ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "${APPIMAGETOOL_ARGS[@]}" "$APPDIR" "$APPIMAGE_PATH"
 
 chmod +x "$APPIMAGE_PATH"
 (

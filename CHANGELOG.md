@@ -5,10 +5,49 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [Unreleased]
+## [0.8.2] - 2026-09-08
 
 ### Added
 
+- E-SEQ File Details now reads the original header alongside the decoded MIDI
+  preview: startup tempo, exact FB factors, meter, XG and piano-part flags,
+  detailed pedals, note-channel mask, write protection, and counter display.
+  Raw offsets and values remain visible; unproven flags and album-specific
+  timing bytes are identified without guessing their meaning. All 12 languages
+  include the new report.
+- File Inspection has one-click **Convert to Type 0** and **Merge Channels to
+  Piano** actions for the selected MIDI song. They refresh the preview, retain
+  pending titles, and stage undoable edits for folder and image songs. Type 0
+  keeps channels and instruments; piano merging sends all channels to MIDI
+  channel 1 with Acoustic Grand Piano while retaining the MIDI type. Utilities
+  exposes the same merge for one song or a batch under **Merge Channels to
+  Piano...**. All new controls and status messages support all 12 languages.
+- Controller categories for Disklavier, PianoDisc, and QRS, with manufacturer
+  references and seven new PianoDisc/QRS preparation profiles. Model choices
+  are indented in the open list while the selected value stays aligned.
+- A **Preparing for...** workflow proposes controller and delivery defaults from
+  the APS Disklavier compatibility table, with separate emulator configuration.
+  Applying a destination stages its required format and mode; opposing
+  conversions are disabled with an explanation. The destination row highlights
+  active preparation and offers **Custom** to return to manual control.
+  Nalbantov is available for floppy-capable profiles, including Mark III;
+  the Nalbantov Slim model is limited to Mark II and Mark II XG.
+- The **Edit** menu offers **Undo** (**Ctrl+Z**), **Undo All**, and **Review
+  Changes**. Review compares original/proposed names, titles, and conversions
+  and can discard selected songs' edits. Undo All clears staged changes since
+  the current files were loaded or last saved.
+- Conversion reports compare musical events, timing, channels, pedals, titles,
+  and metadata. Welcome pages can launch disk capture, preparation, and title
+  editing directly.
+- Failed and cancelled USB-floppy recovery captures can be saved with sector
+  coverage and diagnostics. Final emulator images are reopened and verified;
+  physical writes offer optional content readback.
+- Disk-set preview shows the actual prepared disks, albums, songs, title sources,
+  musical changes, filenames, capacity, and warnings before writing. Album
+  exclusions, order changes, and title corrections rebuild the preview.
+- Bulk extraction can save a local job record and resume with failed items
+  first. Input and output hashes are verified before reusing completed work;
+  edited or unrelated output files are preserved.
 - MIDI emulator images now include available `PSONG.MNG` and `PDISK.MNG`
   catalogs. Song records follow output filenames, title edits, shuffling and
   disk splits; disk-space and directory-slot reservations include the catalogs.
@@ -29,6 +68,11 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Backups default to enabled while preserving an existing user preference.
+  Windows release builds run the automated suite before packaging and upload.
+- E-SEQ conversions preserve zero-volume CC7 events by default and offer an
+  explicit playback fix when detected. Targeted XF cleanup preserves unknown
+  sequencer metadata and trailing bytes; broad removal is a separate choice.
 - Shortened dialog instructions and reorganized the README around getting started,
   common tasks, and user needs. Detailed emulator disk-set guidance has its own guide.
 - `Include Song Lists` is a build-wide control outside the individual disk
@@ -50,10 +94,100 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Save As Image, New Image, and emulator disk sets consistently start with the
+  selected delivery format, including HFE, even when the source is IMG or an
+  older format preference was saved. An explicit delivery choice also works
+  with an unsure controller; manual format changes remain available.
+- PIANODIR status rows and filename-specific image-export progress messages
+  now use the selected language in both folder and image sessions.
+- Save As now asks once before overwriting existing destination files, including
+  listed source files, instead of rejecting the folder. It prepares all songs,
+  catalogs and optional metadata first, preserves the backup preference, and
+  restores previous destination contents if publication fails. Renamed songs
+  can safely exchange filenames; duplicate output names still require correction.
+- Realtime SoundFont preview now finishes silent initialization before starting
+  audible playback and the visual clock together. Temporary per-track metadata
+  lets FluidSynth rewind accurately without losing sustained first notes;
+  controller state is reset before replaying the requested start position.
+  Startup no longer treats a delayed shell response as the beginning of music.
+- File Inspection samples the current audio position when synchronizing its
+  cursor, so queued position notifications cannot rewind the display. The
+  playback timer also recovers without waiting for another notification, and
+  inactive audio-player signals cannot reset live SoundFont or MIDI clocks.
+  Piano-roll painting now selects visible note and pedal intervals instead of
+  scanning the entire song every frame, retaining sustained events and drawing
+  order while reducing display lag in dense files.
+- File Inspection now keeps source order for simultaneous tempo events. An
+  explicit initial tempo above 120 BPM is no longer overridden by the default,
+  keeping displayed note timing and duration consistent with playback.
+- Required MIDI Type 0 preparation now covers new imports, image additions
+  and replacements, and emulator disk sets. Saving and export stop when a song
+  cannot meet the selected profile. Floppy preparation retains DOS 8.3 names
+  when naming files from their titles.
+- E-SEQ conversion now follows recovered Yamaha Mark IV playback rules for
+  zero/default tempo bytes and integer relative-tempo calculations. Slow MIDI
+  input no longer writes a zero tempo byte that Yamaha would play at 117 BPM.
+  Header time signatures and later meter changes are retained in MIDI exports.
+- Fresh Yamaha preparation writes XG, detailed-pedal, and all 16 note-channel
+  header flags from the actual output. Continuous-pedal routing now handles
+  CC64/67 only, preserves sostenuto CC66, and avoids channel 3 when it contains
+  notes. Imported archival flags and explicit MID2ESEQ preservation remain intact.
+- HFE exports now set the interface density for the selected disk format,
+  including double density for 720 KB and high density for 1.2/1.44 MB.
+  Previously, every IBM-format HFE was marked high density. Track data and
+  bitrate are preserved.
+- Fresh MIDI-to-Disklavier E-SEQ conversions now follow MID2ESEQ's constant
+  117 BPM clock, event scheduling, preparation delay, two-second trailer, and
+  header/file layout. Both supplied Elton John reference conversions are
+  reproduced byte for byte with pedal routing set to preserve. Returning
+  recognized E-SEQ-derived MIDI preserves its existing timing, and Clavinova
+  conversion retains its own container rules.
+- Fresh MIDI-to-Disklavier conversion moves continuous channel-1 pedal lanes
+  to channel 3, including their release values, and generates channel-1 binary
+  companions using Yamaha's distinct sustain/soft thresholds. Repeated detail
+  is suppressed; both layers share the original event's scheduled time, without
+  changing note timing or duration. The pedal routine matches the original
+  Mark IV helper across 75,536 independent executable checks.
+  Binary-only pedals and occupied destination lanes keep their existing routing.
+  Conversion reports explain generated companions and suppressed duplicates,
+  independently verify expected event order and timing, and retain their original
+  change flags. Saved reports retain pedal counts after being reloaded.
+- MIDI-to-E-SEQ preservation keeps 4/4 until a later meter change actually
+  occurs, honors the final source signature at a shared tick, and correctly
+  reads tempo/meter events with multibyte MIDI length fields. Archival returns
+  retain real meter changes during opening silence.
+- MIDI conversion now stops each track at its end-of-track marker, retaining
+  that track's ending silence and other tracks' later music. Trailing bytes
+  after an ended track no longer become unintended notes.
+- E-SEQ title and filename edits preserve unrelated header fields, including
+  the legacy converter's timing metadata and exact file layout.
+- E-SEQ output follows Yamaha/legacy seven-bit short-delay encoding, using the
+  long-delay form for 128 ticks and above.
+- MIDI-to-E-SEQ conversion now rejects unsupported F7 escapes before writing
+  output, preventing later notes from being swallowed as SysEx data. Complete
+  SysEx and continuation packets preserve their wire messages; the preservation
+  timing policy also retains their existing packet times.
+- E-SEQ delays inside SysEx now produce valid timed MIDI packets and advance
+  subsequent events correctly. Converting back retains the embedded delays.
+- Archival E-SEQ round trips keep tempo factors consistent with the restored
+  header, including songs whose initial tempo command changes the header tempo.
+- Yamaha directory reconstruction uses stream lengths and bounded FAT-chain
+  data to recover complete songs when header sizes undercount or saturate.
+- Cancelled or failed folder saves clear only completed changes and retain
+  unfinished titles, order keys, conversions, and follow-up catalog work for
+  retry. Cancellation stops later renames and metadata writes. Mixed title and
+  conversion batches no longer lose ordinary title edits when completing.
+- MIDI/E-SEQ title and order updates use checked sibling temporary files before
+  replacement, preserving original data on failed writes or validation. Combined
+  E-SEQ title/order changes are committed together, including Save As output.
+  Read-only destinations remain protected; read-only sources can still be
+  exported to a writable destination.
 - Completed missing translations in welcome pages, conversion and disk dialogs,
-  validation errors, and file pickers across all supported languages. Corrected
-  mistranslations, clarified deletion warnings, and preserved specific action
-  button labels when translating dialogs.
+  preparation profiles, change review, extraction-job validation, preview
+  warnings, progress dialogs, and file pickers across all 12 supported languages.
+  Preparation dialogs honor the saved language even without a main-window
+  parent. Corrected mistranslations, clarified deletion warnings, and preserved
+  specific action button labels when translating dialogs.
 - Extraction and batch disk creation now read MNG catalogs whose CRLF endings
   were converted to LF. Album/song fields retain their correct offsets, and
   generated catalogs use CRLF. Batch creation also recognizes old numeric

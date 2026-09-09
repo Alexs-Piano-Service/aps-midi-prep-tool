@@ -40,7 +40,7 @@ def _events(midi_bytes):
     )
 
 
-def test_strip_xf_removes_sequencer_metadata_and_appended_chunks_only():
+def test_explicit_broad_cleanup_removes_sequencer_metadata_and_appended_chunks_only():
     musical_events = [
         (0, b"\xFF\x03\x05Piano"),
         (0, b"\x90\x3C\x50"),
@@ -51,7 +51,7 @@ def test_strip_xf_removes_sequencer_metadata_and_appended_chunks_only():
     trailing = b"XFIH" + (5).to_bytes(4, "big") + b"extra"
     source = _midi(_track(musical_events, end_tick=600), trailing=trailing)
 
-    stripped, changed = strip_xf_from_midi_bytes(source)
+    stripped, changed = strip_xf_from_midi_bytes(source, cleanup_mode="broad")
 
     assert changed
     assert b"YAMAHA" not in stripped
@@ -71,7 +71,7 @@ def test_strip_xf_preserves_tracks_sysex_tempo_and_continuous_pedal():
         [
             (0, b"\xFF\x51\x03\x07\xA1\x20"),
             (0, b"\xF0\x03\x43\x12\xF7"),
-            (120, b"\xFF\x7F\x03XF1"),
+            (120, b"\xFF\x7F\x09\x43\x7b\x00XF02\x00\x00"),
         ],
         end_tick=240,
     )
@@ -102,6 +102,41 @@ def test_strip_xf_preserves_tracks_sysex_tempo_and_continuous_pedal():
         (0, b"\xF0\x03\x43\x12\xF7"),
     ]
     assert [raw[2] for _tick, _order, raw in second_events] == [0, 36, 88, 127, 0]
+
+
+def test_targeted_cleanup_preserves_unknown_records_and_trailing_data():
+    unknown = [
+        b"\xff\x7f\x03XF1",  # text is not a manufacturer identifier
+        b"\xff\x7f\x04\x43\x73\x01\x00",  # Yamaha, but not XF
+        b"\xff\x7f\x04\x43\x7b\x66\x00",  # unknown XF record type
+        b"\xff\x7f\x04\x43\x7b\x01\x00",  # incomplete chord record
+        b"\xff\x7f\x04\x41\x7b\x01\x00",  # another manufacturer
+    ]
+    known_xf = b"\xff\x7f\x07\x43\x7b\x01\x31\x00\x7f\x7f"
+    events = [(0, b"\x90\x3c\x50")] + [(120, item) for item in unknown]
+    events += [(240, known_xf), (480, b"\x80\x3c\x40")]
+    trailing = b"XFIH\x00\x00\x00\x05extra"
+    source = _midi(_track(events, end_tick=600), trailing=trailing)
+
+    result, changed = strip_xf_from_midi_bytes(source)
+
+    assert changed
+    assert result.endswith(trailing)
+    retained, end_tick = _events(result)
+    assert [(tick, raw) for tick, _, raw in retained] == [
+        (tick, raw) for tick, raw in events if raw != known_xf
+    ]
+    assert end_tick == 600
+
+
+def test_targeted_cleanup_is_byte_identical_without_recognized_xf():
+    # Running status, extended headers, noncanonical VLQs and unknown tails stay intact.
+    track_data = b"\x80\x00\x90\x3c\x40\x60\x3c\x00\x00\xff\x2f\x00hidden"
+    track = b"MTrk" + len(track_data).to_bytes(4, "big") + track_data
+    header = struct.pack(">4sIHHH", b"MThd", 8, 0, 1, 480) + b"ab"
+    source = header + track + b"unknown appended data"
+
+    assert strip_xf_from_midi_bytes(source) == (source, False)
 
 
 def test_clean_canonical_midi_is_left_unchanged(tmp_path):

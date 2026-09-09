@@ -5,7 +5,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from aps_midi_prep_tool_app.main_window import MidiTitleWindow
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
+from aps_midi_prep_tool_app.preparation_profiles import SETTING_PROFILE, get_preparation_profile
 from aps_midi_prep_tool_app.ui_utils import center_dialog_on_parent
 
 
@@ -136,6 +137,65 @@ class _EmulatorDialogHarness(QWidget):
         self.build_call = (args, kwargs)
 
 
+@pytest.mark.parametrize("profile_key", ("mark_ii", "mark_ii_xg", "mark_iii", "enspire"))
+def test_builder_respects_destination_format_despite_conflicting_saved_content(tmp_path, profile_key):
+    app = QApplication.instance() or QApplication([])
+    window = _EmulatorDialogHarness(tmp_path)
+    target = get_preparation_profile(profile_key).song_format
+    other = "midi" if target == "eseq" else "eseq"
+    window.settings.setValue(SETTING_PROFILE, profile_key)
+    window.settings.setValue(window.SETTING_EMULATOR_IMAGE_CONTENT, other)
+
+    def inspect(dialog):
+        content = dialog.findChild(QComboBox, "emulatorContentCombo")
+        assert content.currentData() == target
+        other_index = content.findData(other)
+        assert not content.model().item(other_index).isEnabled()
+        assert content.model().item(content.findData(target)).isEnabled()
+        reason = MidiTitleWindow._preparation_conversion_restriction(window, other)
+        assert content.toolTip() == reason
+        assert content.itemData(other_index, Qt.ToolTipRole) == reason
+        assert dialog.findChild(QLabel, "emulatorContentRestrictionHint").text() == reason
+        content.setCurrentIndex(other_index)
+        assert content.currentData() == target
+        return QDialog.Accepted
+
+    window.inspect_dialog = inspect
+    try:
+        window.show_emulator_image_utility()
+        assert window.build_call[1]["output_content"] == target
+        assert window.settings.value(window.SETTING_EMULATOR_IMAGE_CONTENT) == target
+    finally:
+        window.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("profile_key", ("custom", "unsure"))
+def test_builder_custom_destination_keeps_both_format_choices(tmp_path, profile_key):
+    app = QApplication.instance() or QApplication([])
+    window = _EmulatorDialogHarness(tmp_path)
+    window.settings.setValue(SETTING_PROFILE, profile_key)
+    window.settings.setValue(window.SETTING_EMULATOR_IMAGE_CONTENT, "midi")
+
+    def inspect(dialog):
+        content = dialog.findChild(QComboBox, "emulatorContentCombo")
+        assert content.currentData() == "midi"
+        assert all(content.model().item(index).isEnabled() for index in range(content.count()))
+        assert content.toolTip() == ""
+        assert dialog.findChild(QLabel, "emulatorContentRestrictionHint") is None
+        content.setCurrentIndex(content.findData("eseq"))
+        assert content.currentData() == "eseq"
+        return QDialog.Accepted
+
+    window.inspect_dialog = inspect
+    try:
+        window.show_emulator_image_utility()
+        assert window.build_call[1]["output_content"] == "eseq"
+    finally:
+        window.deleteLater()
+        app.processEvents()
+
+
 @pytest.mark.parametrize("include_song_lists", [False, True])
 def test_completed_build_shows_all_file_warnings_even_without_song_lists(tmp_path, include_song_lists):
     app = QApplication.instance() or QApplication([])
@@ -239,7 +299,7 @@ def test_folder_mode_guidance_naming_and_advanced_options(tmp_path):
         assert album.placeholderText() == "Defaults to the catalog title or folder name"
         assert recursive.isChecked()
         assert not recursive.isEnabled()
-        assert "DSKA001/ → DSKA0001.hfe" in preview.text()
+        assert "DSKA001/ → DSKA0000.hfe" in preview.text()
 
         advanced = dialog.findChild(QWidget, "emulatorAdvancedOptions")
         assert advanced.isHidden()
@@ -397,7 +457,7 @@ def test_translated_folder_dialog_keeps_controls_accessible_on_small_screens(tmp
         dialog.show()
         app.processEvents()
         preview = dialog.findChild(QLabel, "emulatorNamingExample").text()
-        assert "DSKA0001.hfe" in preview
+        assert "DSKA0000.hfe" in preview
         assert "{folder}" not in preview and "{image}" not in preview
         assert dialog.height() <= 460
         assert dialog.width() >= 600

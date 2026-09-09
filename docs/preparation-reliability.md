@@ -1,0 +1,109 @@
+# Review, save, verify, and resume
+
+## Prepare for a controller
+
+**Preparing for...** combines a controller with a delivery method. Review its
+proposed settings before applying. Mark I and uncertain Mark II controllers use
+E-SEQ with a catalog and 720 KB disks. Applying a destination prepares the loaded
+songs as staged changes and sets the corresponding editing mode. Imports follow
+the selected destination. Review the musical report before saving, or use
+**Edit → Undo** (**Ctrl+Z**) to reverse preparation. The destination row highlights
+an active profile; its **Custom** button returns to manual preparation without
+discarding changes already staged.
+
+An E-SEQ destination disables conversion to MIDI; a MIDI destination disables
+conversion to E-SEQ. Disabled controls explain the restriction. Switch
+destinations or choose **Custom** to enable the other
+conversion. This also applies to conversion after reading a floppy.
+
+The [profile guide](preparation-profiles.md) records the compatibility sources
+and the distinction between controller requirements and emulator configuration.
+Profiles do not run instrument merging or the separate Pedal Compatibility and
+metadata-cleanup utilities. Fresh MIDI-to-Disklavier E-SEQ conversion does
+automatically generate Yamaha's binary channel-1 and continuous channel-3 pedal
+layers. Required format conversion can remove unsupported metadata; the musical
+report describes those changes.
+
+## Keep unfinished edits
+
+**Edit → Review Changes** shows original and proposed filenames, titles,
+formats, playback order, and conversion reports. Select songs to discard their
+edits. **Edit → Undo** (**Ctrl+Z**) reverses the latest staged action; **Edit →
+Undo All** discards every staged change since the current files were loaded or
+last saved. Undo and discard leave saved source files intact.
+
+Enable **View → Show Save Destination** to display the save location above the
+song list. This line is hidden by default; the app remembers your choice.
+
+Folder Save records each completed file independently. Cancellation or a failed
+write keeps all unfinished work and stops subsequent rename/catalog/metadata
+steps. The result reports saved and remaining file counts. Use Save again to
+retry remaining changes. Successful conversions already point to their saved
+outputs, so retry does not collide with those outputs or repeat their writes.
+
+Folder Save As asks once before replacing existing files, including files in
+the current source list. The prompt includes existing catalogs, sidecars and
+metadata summaries that will be replaced. All output is prepared before the
+prompt, so declining leaves the files and pending edits intact. Confirmed
+replacements honor the backup setting and restore earlier writes if a later
+write fails. Songs with swapped output filenames are prepared from their
+original inputs; two songs targeting the same output name still need distinct
+filenames. If restoration fails, the error identifies retained recovery copies.
+
+Backups are enabled for new settings; an existing preference is respected.
+Title/order writes prepare and validate a sibling temporary before replacing the
+destination. Combined E-SEQ title/order changes commit together. Catalog updates
+also use checked temporary output.
+Read-only destination files are preserved and reported as save failures. Use
+Save As with a writable destination to export edits from a read-only source.
+
+## Understand conversion reports
+
+Reports compare notes, timing, channels, pedal events, titles, and metadata.
+For Yamaha pedal conversion they independently check the expected binary
+companions, continuous positions, event order, and timing, and explain generated
+events and suppressed repeats. Reports retain these details when saved and
+reloaded, in every supported language.
+E-SEQ conversion preserves zero-volume CC7 by default; the conversion dialog
+offers a playback fix when the potentially silent condition is found. Targeted
+XF removal preserves unknown sequencer metadata and trailing bytes. Broad
+cleanup is available as an explicit choice.
+
+File Inspection provides one-click Type 0 conversion and piano channel merging
+for the selected MIDI song. These stage real edits with the same Undo and Save
+workflow as other utilities. Preview filters, temporary instrument choices, and
+preview volume do not limit or alter the source used by these actions. The
+preview reloads after an edit; returning to inspection refreshes saved or undone
+changes. **Utilities → Merge Channels to Piano...** offers the same piano merge
+for one song or all listed MIDI songs.
+
+Disk-set preview shows the actual prepared and packed songs, including musical
+change reports and title provenance. Collection edits require an updated preview
+before output can be built. See the [disk-set guide](emulator-disk-sets.md).
+
+## Distinguish verification levels
+
+Final image verification reopens IMG files or decodes final HFE files and checks
+every contained file against the prepared output, including catalogs and song
+order. Corrupted final output fails verification. **Disk → Verify floppy contents
+after writing** adds a physical readback comparison. If readback is cancelled,
+the result distinguishes completed writing from unverified contents.
+
+Automated tests use self-created songs, temporary FAT12 images, fault injection,
+and simulated devices. They validate preparation and delivery behavior. They do
+not establish playback compatibility on an actual piano or test a physical USB
+floppy drive; those require the controller, firmware, media, and drive combination.
+
+## Preserve recovery and extraction work
+
+After a failed or cancelled USB recovery read, **Save partial capture...** saves
+the captured image and a JSON diagnostic record, including sector coverage and
+affected files where the filesystem provides enough evidence. Unread regions
+are identified; zero-filled bytes are not recovered song data.
+
+Bulk extraction can save a local progress record. **Resume extraction job...**
+restores its options, checks that input images are unchanged, and verifies output
+hashes before skipping completed songs. Failed images are retried first. Modified
+or unrelated destination files are preserved, and newly extracted copies get
+unused filenames. Keep the original inputs, output folder, and job record together
+until the extraction is complete.

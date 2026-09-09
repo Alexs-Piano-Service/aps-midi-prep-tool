@@ -54,7 +54,7 @@ class _InspectionPlaybackStub:
 
 
 class FileInspectionPlaybackTests(unittest.TestCase):
-    def test_realtime_fluidsynth_does_not_restart_after_starting(self):
+    def test_realtime_fluidsynth_waits_for_stopped_position_before_audible_start(self):
         class _Process:
             READY_MARKER = FluidSynthPlaybackProcess.READY_MARKER
             tempo_percent = 50
@@ -64,6 +64,11 @@ class FileInspectionPlaybackTests(unittest.TestCase):
 
             def __init__(self):
                 self.commands = ""
+                self._ready = False
+                self._stopping = False
+
+            def _probe_startup_position(self):
+                FluidSynthPlaybackProcess._probe_startup_position(self)
 
             def write(self, payload):
                 self.commands += bytes(payload).decode("utf-8")
@@ -74,7 +79,7 @@ class FileInspectionPlaybackTests(unittest.TestCase):
         self.assertEqual(
             process.commands.splitlines(),
             [
-                "player_tempo_int 1.000000",
+                "player_stop",
                 "echo APS_MIDI_PREVIEW_READY",
             ],
         )
@@ -82,6 +87,7 @@ class FileInspectionPlaybackTests(unittest.TestCase):
     def test_realtime_fluidsynth_is_configured_before_first_note(self):
         class _Process:
             _start_tick = 96
+            _startup_seek_tick = 97
             tempo_percent = 75
             program_overrides = {5: 40}
             _tempo_command = staticmethod(
@@ -97,7 +103,7 @@ class FileInspectionPlaybackTests(unittest.TestCase):
             ),
             [
                 "player_tempo_int 1.500000",
-                "player_seek 96",
+                "player_seek 97",
                 "select 4 1 0 40",
             ],
         )

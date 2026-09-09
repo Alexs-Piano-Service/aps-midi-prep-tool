@@ -2,7 +2,8 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from .eseq_converter import is_clavinova_mda_eseq_bytes, refresh_eseq_timing_fields_in_bytes
+from .eseq_converter import is_clavinova_mda_eseq_bytes
+from .helpers.atomic_file import atomic_write_bytes
 
 
 PIANODIR_FILENAME = "PIANODIR.FIL"
@@ -400,18 +401,14 @@ def update_eseq_order_key_to_path(source_path, order_key, dest_path):
             data = bytearray(handle.read())
         if is_clavinova_mda_bytes(data, filename=os.path.basename(source_path)):
             data[CLAVINOVA_MDA_RECORD_SOURCE_START:CLAVINOVA_MDA_RECORD_SOURCE_START + 11] = normalize_eseq_order_key(order_key)[:11]
-            with open(dest_path, "wb") as handle:
-                handle.write(bytes(data))
+            atomic_write_bytes(dest_path, bytes(data))
             return None
         if len(data) < ESEQ_ORDER_KEY_END:
             raise ValueError("File is too small to contain an E-SEQ order key.")
         data[ESEQ_ORDER_KEY_OFFSET:ESEQ_ORDER_KEY_END] = normalize_eseq_order_key(order_key)
-        try:
-            output = refresh_eseq_timing_fields_in_bytes(bytes(data))
-        except Exception:
-            output = bytes(data)
-        with open(dest_path, "wb") as handle:
-            handle.write(output)
+        # Changing the filename/order key does not change musical timing.
+        # Keep every unrelated source-header byte for subsequent catalog use.
+        atomic_write_bytes(dest_path, bytes(data))
         return None
     except Exception as exc:
         return f"Error updating {os.path.basename(source_path)}: {exc}"

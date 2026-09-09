@@ -145,10 +145,14 @@ def _parse_track_events(track_data):
             if payload_end > end:
                 raise ValueError("Meta event exceeds track bounds.")
 
-            if meta_type != 0x2F:
-                raw = b"\xFF" + bytes([meta_type]) + track_data[length_start:payload_end]
-                events.append((abs_tick, order, raw))
-                order += 1
+            if meta_type == 0x2F:
+                # The declared track end is a boundary, even if its chunk
+                # contains trailing padding or another recoverable fragment.
+                # Preserve its delta while leaving later bytes out of music.
+                break
+            raw = b"\xFF" + bytes([meta_type]) + track_data[length_start:payload_end]
+            events.append((abs_tick, order, raw))
+            order += 1
             pos = payload_end
             continue
 

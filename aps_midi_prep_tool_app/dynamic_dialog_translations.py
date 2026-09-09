@@ -888,6 +888,33 @@ for _source, _template in (
 ):
     DYNAMIC_DIALOG_TRANSLATIONS[_source] = dict(DYNAMIC_DIALOG_TRANSLATIONS[_template])
 
+_add_recovery_copy("Could not prepare dropped files: {error}", (
+    "No se pudieron preparar los archivos arrastrados: {error}",
+    "Impossible de préparer les fichiers déposés : {error}",
+    "Die abgelegten Dateien konnten nicht vorbereitet werden: {error}",
+    "Impossibile preparare i file trascinati: {error}",
+    "Não foi possível preparar os arquivos arrastados: {error}",
+    "Пуснатите файлове не могат да бъдат подготвени: {error}",
+    "De neergezette bestanden konden niet worden voorbereid: {error}",
+    "Nie można przygotować upuszczonych plików: {error}",
+    "ドロップされたファイルを準備できませんでした: {error}",
+    "끌어 놓은 파일을 준비할 수 없습니다: {error}",
+    "无法准备拖入的文件：{error}",
+))
+_add_recovery_copy("Could not add dropped file: {error}", (
+    "No se pudo añadir el archivo arrastrado: {error}",
+    "Impossible d’ajouter le fichier déposé : {error}",
+    "Die abgelegte Datei konnte nicht hinzugefügt werden: {error}",
+    "Impossibile aggiungere il file trascinato: {error}",
+    "Não foi possível adicionar o arquivo arrastado: {error}",
+    "Пуснатият файл не може да бъде добавен: {error}",
+    "Het neergezette bestand kon niet worden toegevoegd: {error}",
+    "Nie można dodać upuszczonego pliku: {error}",
+    "ドロップされたファイルを追加できませんでした: {error}",
+    "끌어 놓은 파일을 추가할 수 없습니다: {error}",
+    "无法添加拖入的文件：{error}",
+))
+
 _add_recovery_copy("Converting image...", (
     "Convirtiendo imagen...", "Conversion de l'image...", "Image wird konvertiert...", "Conversione dell'immagine...",
     "Convertendo imagem...", "Преобразуване на образ...", "Image converteren...", "Konwertowanie obrazu...",
