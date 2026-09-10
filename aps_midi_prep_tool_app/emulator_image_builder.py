@@ -74,9 +74,6 @@ from .smart_pianosoft import (
 )
 
 
-MIDI_EXTENSIONS = {".mid", ".midi"}
-ESEQ_EXTENSIONS = {".fil", ".mda"}
-SONG_EXTENSIONS = MIDI_EXTENSIONS | ESEQ_EXTENSIONS
 EMULATOR_IMAGE_EXTENSIONS = {"img", "hfe"}
 EMULATOR_CONTENT_FORMATS = {"eseq", "midi"}
 EMULATOR_DISK_LAYOUTS = {"fill", "folders"}
@@ -166,31 +163,34 @@ def _natural_sort_key(path):
 
 
 def discover_song_files(source_directory, *, include_subfolders=True):
-    """Return candidate MIDI and E-SEQ song files in stable natural order."""
+    """Identify MIDI and E-SEQ songs by content, independent of extensions."""
     source_directory = os.path.abspath(os.fspath(source_directory))
     if not os.path.isdir(source_directory):
         raise FloppyImageError(f"The MIDI folder was not found: {source_directory}")
 
     paths = []
+
+    def add_song(path):
+        if os.path.basename(path).upper() in {
+            PIANODIR_FILENAME,
+            "MUSIC.DIR",
+            SMART_PIANOSOFT_DISK_CATALOG_NAME,
+            SMART_PIANOSOFT_SONG_CATALOG_NAME,
+        }:
+            return
+        if os.path.isfile(path) and (is_midi_file(path) or is_eseq_file(path)):
+            paths.append(os.path.abspath(path))
+
     try:
         if include_subfolders:
             for root, directory_names, filenames in os.walk(source_directory):
                 directory_names.sort(key=_natural_sort_key)
                 for filename in filenames:
-                    if (
-                        os.path.splitext(filename)[1].lower() in SONG_EXTENSIONS
-                        and filename.upper() not in {"PIANODIR.FIL", "MUSIC.DIR"}
-                    ):
-                        paths.append(os.path.abspath(os.path.join(root, filename)))
+                    add_song(os.path.join(root, filename))
         else:
             with os.scandir(source_directory) as entries:
                 for entry in entries:
-                    if (
-                        entry.is_file()
-                        and os.path.splitext(entry.name)[1].lower() in SONG_EXTENSIONS
-                        and entry.name.upper() not in {"PIANODIR.FIL", "MUSIC.DIR"}
-                    ):
-                        paths.append(os.path.abspath(entry.path))
+                    add_song(entry.path)
     except OSError as exc:
         raise FloppyImageError(f"Could not read the MIDI folder: {exc}") from exc
 
@@ -211,7 +211,7 @@ def discover_midi_files(source_directory, *, include_subfolders=True):
             source_directory,
             include_subfolders=include_subfolders,
         )
-        if os.path.splitext(path)[1].lower() in MIDI_EXTENSIONS
+        if is_midi_file(path)
     ]
 
 

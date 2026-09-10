@@ -137,6 +137,14 @@ def _normalized_eseq_variant(eseq_variant):
     return ESEQ_VARIANT_DISKLAVIER
 
 
+def _host_file_matches_eseq_variant(path, eseq_variant):
+    if not _host_file_is_eseq(path):
+        return False
+    return is_clavinova_mda_file(path) == (
+        _normalized_eseq_variant(eseq_variant) == ESEQ_VARIANT_CLAVINOVA
+    )
+
+
 def _eseq_directory_filename_for_variant(eseq_variant):
     return MUSICDIR_FILENAME if _normalized_eseq_variant(eseq_variant) == ESEQ_VARIANT_CLAVINOVA else PIANODIR_FILENAME
 
@@ -9626,6 +9634,7 @@ class FloppyImageSession:
         }
         listing = read_image_listing(target_img)
         track_entries = []
+        excluded_paths = set()
 
         for entry in listing.entries:
             _raise_if_cancelled(cancel_callback)
@@ -9642,10 +9651,8 @@ class FloppyImageSession:
                 extracted_path,
                 cancel_callback=cancel_callback,
             )
-            if eseq_variant == ESEQ_VARIANT_CLAVINOVA:
-                if not is_clavinova_mda_file(extracted_path):
-                    continue
-            elif not _host_file_is_eseq(extracted_path) or is_clavinova_mda_file(extracted_path):
+            if not _host_file_matches_eseq_variant(extracted_path, eseq_variant):
+                excluded_paths.add(entry.path)
                 continue
 
             title = extract_eseq_title_from_file(extracted_path)
@@ -9682,11 +9689,11 @@ class FloppyImageSession:
         mdel = _require_command("mdel")
         for entry in listing.entries:
             _raise_if_cancelled(cancel_callback)
-            if not is_eseq_directory_path(entry.path):
+            if not is_eseq_directory_path(entry.path) and entry.path not in excluded_paths:
                 continue
             self._run_mtools(
                 [mdel, "-i", target_img, mtools_path(entry.path)],
-                f"Could not replace existing {directory_filename} in image",
+                f"Could not delete {entry.path} from image",
                 cancel_callback=cancel_callback,
             )
 
@@ -9743,6 +9750,42 @@ class FloppyImageSession:
         try:
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 1, 4, "Applying pending changes to floppy image...")
+            if generate_pianodir:
+                # Classify the final payload, including pending conversions, before
+                # copying files or applying metadata edits. The source image and
+                # host files remain untouched; only this prepared image is pruned.
+                existing_paths = {entry.path for entry in read_image_listing(target_img).entries}
+                excluded_paths = set()
+                for image_path in sorted(existing_paths | additions.keys()):
+                    _raise_if_cancelled(cancel_callback)
+                    if image_path in deletes and image_path not in additions:
+                        continue
+                    if is_eseq_directory_path(image_path):
+                        excluded_paths.add(image_path)
+                        continue
+                    source_path = additions.get(image_path) or replacements.get(image_path)
+                    if source_path is None:
+                        source_path = os.path.join(
+                            self.extracted_dir,
+                            f"{uuid.uuid4().hex}_{os.path.basename(_normalize_image_path(image_path))}",
+                        )
+                        self._extract_from_image(
+                            target_img, image_path, source_path, cancel_callback=cancel_callback,
+                        )
+                    elif not os.path.isfile(source_path):
+                        if image_path in additions:
+                            raise FloppyImageError(f"File to add no longer exists: {source_path}")
+                        raise FloppyImageError(f"Replacement file no longer exists: {source_path}")
+                    if not _host_file_matches_eseq_variant(source_path, eseq_variant):
+                        excluded_paths.add(image_path)
+
+                deletes.update(existing_paths & excluded_paths)
+                additions = {path: value for path, value in additions.items() if path not in excluded_paths}
+                replacements = {path: value for path, value in replacements.items() if path not in excluded_paths}
+                renames = {path: value for path, value in renames.items() if path not in excluded_paths}
+                title_edits = {path: value for path, value in title_edits.items() if path not in excluded_paths}
+                order_key_edits = {path: value for path, value in order_key_edits.items() if path not in excluded_paths}
+
             for image_path in sorted(deletes, key=lambda item: item.lower(), reverse=True):
                 _raise_if_cancelled(cancel_callback)
                 self._run_mtools(

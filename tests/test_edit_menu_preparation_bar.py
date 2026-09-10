@@ -144,7 +144,7 @@ def test_preparation_bar_refreshes_profile_delivery_controls_and_tooltips_in_eve
 
 
 @pytest.mark.parametrize("profile_key,medium,expected", (
-    ("mark_ii", "nalbantov_slim", 0),
+    ("mark_ii", "nalbantov", 0),
     ("mark_ii_xg", "flashfloppy_img", 0),
     ("custom", "custom", 1),
 ))

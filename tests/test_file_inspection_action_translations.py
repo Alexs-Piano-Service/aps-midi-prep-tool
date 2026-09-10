@@ -9,6 +9,11 @@ from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translat
 
 
 SOURCES = (
+    "Yamaha E-SEQ type and arrangement information.",
+    "Double-click to inspect this song.",
+    "Detected MIDI file type from header bytes.",
+    "File type from the image filename.",
+    "MIDI type could not be determined for this file.",
     "FluidSynth did not report its startup position.",
     "Combine all tracks into MIDI Type 0 while keeping channels and instruments.",
     "Convert to Type 0",

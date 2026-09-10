@@ -171,6 +171,29 @@ def test_sanitizes_portable_image_set_names():
     assert sanitize_image_prefix("---") == "DSKA"
 
 
+@pytest.mark.parametrize("include_subfolders", [False, True])
+def test_discovers_songs_by_content_and_excludes_catalogs(tmp_path, include_subfolders):
+    source = tmp_path / "songs"
+    source.mkdir()
+    midi_path = source / "FIRST"
+    midi_path.write_bytes(_midi_bytes("First song"))
+    eseq_path = source / "SECOND"
+    convert_midi_file_to_eseq_path(midi_path, eseq_path)
+    (source / "NOTES.FIL").write_bytes(b"This is not a song.")
+    (source / "NOTES.MID").write_bytes(b"This is not MIDI.")
+    # Directory/catalog files are never song entries, even if a damaged or
+    # mislabeled catalog happens to contain a recognized song header.
+    for name in ("PIANODIR.FIL", "MUSIC.DIR", "PDISK.MNG", "psong.mng"):
+        (source / name).write_bytes(eseq_path.read_bytes())
+
+    assert discover_song_files(source, include_subfolders=include_subfolders) == [
+        str(midi_path), str(eseq_path),
+    ]
+    assert discover_midi_files(source, include_subfolders=include_subfolders) == [
+        str(midi_path),
+    ]
+
+
 def test_builds_multiple_verified_images_with_a_pianodir_per_disk(
     tmp_path,
     monkeypatch,
@@ -1349,7 +1372,8 @@ def test_folder_mng_titles_follow_original_renamed_and_converted_songs(
     (first / "first.MiD").write_bytes(_midi_bytes("Old first title"))
     (first / "02 - Summer Wind.mid").write_bytes(_midi_bytes("Old second title"))
     (second / "FIRST.MID").write_bytes(_midi_bytes("Old other album"))
-    convert_midi_file_to_eseq_path(first / "first.MiD", first / "THIRD.fil")
+    convert_midi_file_to_eseq_path(first / "first.MiD", first / "THIRD")
+    (first / "NOTES.FIL").write_bytes(b"Not an E-SEQ song.")
     (second / "PSONG.MNG").rename(second / "psong.mng")
     (second / "PDISK.MNG").rename(second / "pdisk.mng")
     originals = {path: path.read_bytes() for path in source.rglob("*") if path.is_file()}

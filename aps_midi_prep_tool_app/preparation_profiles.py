@@ -54,11 +54,7 @@ class PianoProfile:
     preparation_note: str = ""
 
 
-FLOPPY_MEDIA = ("original", "nalbantov", "nalbantov_slim", "flashfloppy_img", "flashfloppy_hfe", "emulator_custom")
-# Slim fit is distinct from the controller's supported disk/song formats.
-# Owner-supplied fit guidance limits this preset to Mark II and Mark II XG.
-STANDARD_FLOPPY_MEDIA = tuple(key for key in FLOPPY_MEDIA if key != "nalbantov_slim")
-NALBANTOV_SLIM_FIT_GUIDANCE = "Nalbantov Slim is offered for Mark II and Mark II XG."
+FLOPPY_MEDIA = ("original", "nalbantov", "flashfloppy_img", "flashfloppy_hfe", "emulator_custom")
 PIANO_PROFILES = (
     PianoProfile(
         "unsure", "I'm not sure", category="general",
@@ -67,7 +63,7 @@ PIANO_PROFILES = (
     PianoProfile("custom", "Custom", caution="Keep the current manual preparation settings.", category="general"),
     PianoProfile(
         "mark_i", "Mark I — MX100A/B, DKW10, DKC5R", "eseq", ("eseq",), (),
-        "ibm.720", STANDARD_FLOPPY_MEDIA, "original", "documented",
+        "ibm.720", FLOPPY_MEDIA, "original", "documented",
         "Use E-SEQ on 720 KB (2DD) disks. MIDI IN support does not imply MIDI-file playback from floppy.",
     ),
     PianoProfile(
@@ -77,7 +73,7 @@ PIANO_PROFILES = (
     ),
     PianoProfile(
         "dsr1", "DSR1 upgrade", "midi", ("midi", "eseq"), (0, 1),
-        "ibm.1440", STANDARD_FLOPPY_MEDIA, "original", "documented",
+        "ibm.1440", FLOPPY_MEDIA, "original", "documented",
         "The DSR1 controller supports MIDI and E-SEQ on 2DD or 2HD disks. Keep one song format per floppy.",
     ),
     PianoProfile(
@@ -87,12 +83,12 @@ PIANO_PROFILES = (
     ),
     PianoProfile(
         "mark_iii", "Mark III — DKC55 / DKC55CD / DKC55RCD / DKC60RCD", "midi", ("midi", "eseq"), (0, 1),
-        "ibm.1440", STANDARD_FLOPPY_MEDIA, "original", "documented",
+        "ibm.1440", FLOPPY_MEDIA, "original", "documented",
         "MIDI and E-SEQ playback are documented. Keep one song format per floppy; recording features vary by controller.",
     ),
     PianoProfile(
         "mark_iv", "Mark IV / PRO", "midi", ("midi", "eseq"), (0, 1),
-        "ibm.1440", ("usb",) + STANDARD_FLOPPY_MEDIA, "usb", "documented",
+        "ibm.1440", ("usb",) + FLOPPY_MEDIA, "usb", "documented",
         "MIDI folder export is preferred for USB. E-SEQ playback is supported; preserve PRO/XP metadata unless a separate conversion requires changes.",
     ),
     PianoProfile(
@@ -178,11 +174,6 @@ MEDIA = (
         source_url="https://www.alexanderpeppe.com/copying-a-yamaha-pianosoft-floppy-disk-to-a-nalbantov-usb-stick/",
     ),
     PreparationMedium(
-        "nalbantov_slim", "Nalbantov Slim", "hfe", "DSKA", 0, "documented",
-        "Nalbantov Slim numeric-display workflow: DSKA0000.HFE onward. Keep the existing USB configuration files; confirm the installed drive matches your piano. eXtreme naming may differ.",
-        "https://www.alexanderpeppe.com/adding-removing-or-changing-titles-in-nalbantov-usb-stick-virtual-disks/",
-    ),
-    PreparationMedium(
         "flashfloppy_img", "FlashFloppy — IMG", "img", "DSKA", 0, "documented",
         "Requires FlashFloppy indexed mode and a matching drive interface. Disk-set names start at DSKA0000.IMG.",
         FLASHFLOPPY_SOURCE,
@@ -208,6 +199,9 @@ def get_preparation_profile(key):
 
 def get_preparation_medium(profile, key):
     key = str(key or "")
+    # Older preferences used a separate name for the same HFE/DSKA workflow.
+    if key == "nalbantov_slim":
+        key = "nalbantov"
     if key not in profile.media:
         key = profile.default_medium
     return MEDIA_BY_KEY[key]

@@ -75,8 +75,8 @@ preparation while keeping changes already staged for review.
 when the row is hidden.
 E-SEQ destinations disable conversion to MIDI, and MIDI destinations disable
 conversion to E-SEQ, with an explanation. **Nalbantov** is available for
-floppy-capable profiles, including Mark III. The **Nalbantov Slim** model is
-offered for Mark II and Mark II XG.
+floppy-capable Disklavier profiles, including Mark III, and prepares HFE images
+numbered from `DSKA0000.HFE`.
 
 Change the interface language under **Settings → Language**. English, Spanish,
 French, German, Italian, Brazilian Portuguese, Bulgarian, Dutch, Polish,

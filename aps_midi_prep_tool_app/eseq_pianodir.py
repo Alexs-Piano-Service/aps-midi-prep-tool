@@ -158,17 +158,12 @@ def read_eseq_write_protect_from_file(path):
         return extract_eseq_write_protect_from_bytes(handle.read())
 
 
-def eseq_type_display_label(file_kind, arrangement_type_label, write_protected=None):
+def eseq_type_display_label(file_kind, arrangement_type_label):
     file_kind = (file_kind or "FIL").strip() or "FIL"
     arrangement_type_label = (arrangement_type_label or "").strip()
-    details = []
-    if arrangement_type_label:
-        details.append(arrangement_type_label)
-    if write_protected is not None:
-        details.append("WP" if write_protected else "WP Off")
-    if not details:
+    if not arrangement_type_label:
         return file_kind
-    return f"{file_kind} ({', '.join(details)})"
+    return f"{file_kind} ({arrangement_type_label})"
 
 
 def pianodir_is_populated(size_bytes):

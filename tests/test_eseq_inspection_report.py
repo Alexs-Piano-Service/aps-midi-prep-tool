@@ -52,6 +52,8 @@ def test_report_distinguishes_raw_header_startup_factor_and_stream_facts():
     assert "Counter display [0x56]: 01 — Measure" in report
     assert "Unresolved header byte [0x53]: 41 — Not interpreted" in report
     assert "Timing bytes (album-specific) [0x3B]: 1C 0D 33 20 0C 00 — Not interpreted" in report
+    assert "Write protection [0x4F]: 80 — Set" in report
+    assert "Mark IV" not in report
     assert source == _source()
 
 
@@ -71,6 +73,8 @@ def test_file_details_show_original_header_in_every_language_without_changing_pr
     assert "0x33" in report and "512820" in report and "256410" in report
     assert translate_text("Unknown flag value", language) in report
     assert translate_text("Measure", language) in report
+    assert translate_text("Write protection", language) in report
+    assert "Mark IV" not in report and "Mark-IV" not in report
     assert not dialog.convert_type0_button.isEnabled()
     assert not dialog.merge_piano_button.isEnabled()
     midi = convert_eseq_bytes_to_midi_bytes(source, include_conversion_text=False)

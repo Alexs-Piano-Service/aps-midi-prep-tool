@@ -78,7 +78,7 @@ def test_enspire_profile_excludes_eseq_and_floppy_defaults():
 @pytest.mark.parametrize("key", ("pianodisc_128plus", "pianodisc_228cfx"))
 def test_pianodisc_floppy_defaults_require_type0_without_assuming_emulator_fit(key):
     profile = get_preparation_profile(key)
-    medium = get_preparation_medium(profile, "nalbantov_slim")
+    medium = get_preparation_medium(profile, "nalbantov")
     settings = proposed_settings(profile, medium)
     assert profile.category == "pianodisc"
     assert profile.midi_types == (0,)

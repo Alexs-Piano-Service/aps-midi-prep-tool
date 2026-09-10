@@ -48,7 +48,7 @@ def window(monkeypatch, tmp_path):
     app.processEvents()
 
 
-def _load_album(window, tmp_path, image_mode):
+def _load_album(window, tmp_path, image_mode, write_protected):
     midi = mido.MidiFile(type=0)
     midi.tracks.append(mido.MidiTrack([
         mido.MetaMessage("track_name", name="Present"),
@@ -58,7 +58,9 @@ def _load_album(window, tmp_path, image_mode):
     buffer = io.BytesIO()
     midi.save(file=buffer)
     song = tmp_path / "PRESENT.FIL"
-    song.write_bytes(convert_midi_bytes_to_eseq_bytes(buffer.getvalue(), title_override="Present"))
+    song_bytes = bytearray(convert_midi_bytes_to_eseq_bytes(buffer.getvalue(), title_override="Present"))
+    song_bytes[0x4F] = 0x80 if write_protected else 0
+    song.write_bytes(song_bytes)
     catalog = tmp_path / "PIANODIR.FIL"
     catalog.write_bytes(build_pianodir_bytes(
         [PianodirTrackEntry(song.name, str(song), "Present")],
@@ -109,12 +111,19 @@ def _assert_row(window, language, image_mode, state, state_tooltip):
         if not window._is_special_pianodir_row(song_row):
             assert window.table.item(song_row, 3).text() == "PRESENT.FIL"
             assert window._row_raw_title(song_row) == "Present"
+            kind_item = window.table.item(song_row, 6)
+            assert kind_item.text() == "FIL (Solo)"
+            tooltip = translate_text("Yamaha E-SEQ type and arrangement information.", language)
+            if not image_mode:
+                tooltip += " " + translate_text("Double-click to inspect this song.", language)
+            assert kind_item.toolTip() == tooltip
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
 @pytest.mark.parametrize("image_mode", (False, True), ids=("folder", "image"))
 def test_pianodir_states_retranslate_on_language_change_and_preserve_metadata(window, tmp_path, language, image_mode):
-    originals = _load_album(window, tmp_path, image_mode)
+    # Exercise protected and unprotected songs in both folder and image views.
+    originals = _load_album(window, tmp_path, image_mode, write_protected=LANGUAGES.index(language) % 2 == 0)
     for state_index, (present, refresh, state, tooltip) in enumerate(STATES):
         if image_mode:
             window.imageHasPianodir = present

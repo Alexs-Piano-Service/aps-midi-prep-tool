@@ -30,8 +30,8 @@ with release sections grouped by version and date.
   Applying a destination stages its required format and mode; opposing
   conversions are disabled with an explanation. The destination row highlights
   active preparation and offers **Custom** to return to manual control.
-  Nalbantov is available for floppy-capable profiles, including Mark III;
-  the Nalbantov Slim model is limited to Mark II and Mark II XG.
+  A single Nalbantov option is available for floppy-capable Disklavier profiles,
+  including Mark III, using HFE images numbered from `DSKA0000.HFE`.
 - The **Edit** menu offers **Undo** (**Ctrl+Z**), **Undo All**, and **Review
   Changes**. Review compares original/proposed names, titles, and conversions
   and can discard selected songs' edits. Undo All clears staged changes since
@@ -68,6 +68,11 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- E-SEQ saves and disk exports omit MIDI management catalogs and other non-E-SEQ
+  files while retaining their song and album titles. Song detection uses file
+  contents, including extensionless E-SEQ files, rather than trusting `.FIL`.
+- E-SEQ File Details omits converter provenance. The Type column shows format
+  and arrangement, with write protection kept in File Details.
 - Backups default to enabled while preserving an existing user preference.
   Windows release builds run the automated suite before packaging and upload.
 - E-SEQ conversions preserve zero-volume CC7 events by default and offer an

@@ -232,7 +232,7 @@ def test_summary_combines_related_defaults_and_keeps_required_counts(application
     settings.setValue("emulator_image_prefix", "MINE")
     settings.setValue("emulator_image_starting_number", 12)
     before = {key: settings.value(key) for key in settings.allKeys()}
-    dialog = PreparationProfileDialog(settings, "mark_ii", "nalbantov_slim", song_counts={"midi": 3, "dos83_midi": 2})
+    dialog = PreparationProfileDialog(settings, "mark_ii", "nalbantov", song_counts={"midi": 3, "dos83_midi": 2})
     try:
         assert _rows(dialog) == [
             ("Song format", "MIDI", "Yamaha E-SEQ + PIANODIR.FIL"),
@@ -250,7 +250,7 @@ def test_summary_combines_related_defaults_and_keeps_required_counts(application
         dialog.close()
 
 
-@pytest.mark.parametrize("medium_key", ("nalbantov_slim", "flashfloppy_img", "flashfloppy_hfe"))
+@pytest.mark.parametrize("medium_key", ("nalbantov", "flashfloppy_img", "flashfloppy_hfe"))
 def test_emulator_summary_omits_numbering_row(application, tmp_path, medium_key):
     settings = QSettings(str(tmp_path / "profile.ini"), QSettings.IniFormat)
     settings.setValue("emulator_image_starting_number", 12)

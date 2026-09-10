@@ -84,7 +84,6 @@ def format_eseq_header_details(data, *, source_label="", language_code="en"):
             lines.append(report("{label} [{offset}]: {raw} — {value}",
                                 label=report(_FIELD_LABELS[field.key]), offset=f"0x{field.offset:02X}",
                                 raw=field.raw.hex(" ").upper(), value=value))
-        lines.append(report("Header flag meanings follow the Mark IV converter; other raw values are left uninterpreted."))
         if any(field.key == "timing_bookkeeping" for field in info.fields):
             lines.append(report("Timing-field meanings vary between E-SEQ variants and albums."))
     lines.append(report("Note channels in stream: {channels}", channels=channels(info.actual_note_channels)))

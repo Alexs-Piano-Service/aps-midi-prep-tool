@@ -115,6 +115,8 @@ from .long_midi_filename import build_long_midi_filename
 from .smart_pianosoft import (
     SMART_PIANOSOFT_SONG_CATALOG_NAME,
     smart_pianosoft_catalog_from_session,
+    smart_pianosoft_disk_title_from_session,
+    smart_pianosoft_metadata_from_directory,
     update_smart_pianosoft_catalog_to_path,
 )
 from .midi_type0_converter import (
@@ -208,7 +210,6 @@ from .eseq_pianodir import (
     read_music_dir_order_keys_from_file,
     read_eseq_order_key_from_file,
     read_eseq_arrangement_type_label_from_file,
-    read_eseq_write_protect_from_file,
     is_eseq_filename,
     is_musicdir_path,
     is_pianodir_path,
@@ -9158,7 +9159,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if profile.song_format and medium.key not in FLOPPY_MEDIA:
                 self.settings.remove(SETTING_IMAGE_FORMAT)
                 self.settings.remove(SETTING_DISK_FORMAT)
-        if profile.song_format and medium.key in {"nalbantov", "nalbantov_slim", "flashfloppy_img", "flashfloppy_hfe"}:
+        if profile.song_format and medium.key in {"nalbantov", "flashfloppy_img", "flashfloppy_hfe"}:
             self.settings.setValue("emulator_image_starting_number", 0)
         self.currentLanguage = normalize_language_code(
             self.settings.value(self.SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
@@ -12623,6 +12624,21 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     self._populate_regular_pianodir_row(pianodir_row)
             finally:
                 self.table.blockSignals(was_blocked)
+        was_blocked = self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                if self._is_special_pianodir_row(row):
+                    continue
+                item = self.table.item(row, 6)
+                path_item = self.table.item(row, 1)
+                if item is None or path_item is None:
+                    continue
+                info = (self.imageFileInfo if self.is_image_mode() else self.listedFileInfo).get(path_item.text(), {})
+                item.setToolTip(self._type_column_tooltip(
+                    item.text(), image_mode=self.is_image_mode(), is_midi=info.get("is_midi", False),
+                ))
+        finally:
+            self.table.blockSignals(was_blocked)
         self._refresh_static_action_text()
         self._update_compat_warning_ui()
         self._update_floppy_save_option_ui()
@@ -18601,6 +18617,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             rows.append(row)
         return rows
 
+    def _regular_export_rows(self):
+        rows = self._regular_file_rows()
+        if not self.is_local_eseq_mode():
+            return rows
+        return [row for row in rows
+                if self._listed_file_title_mode(self.table.item(row, 1).text()) == "eseq"]
+
     def _regular_file_count(self):
         return len(self.listedFileInfo)
 
@@ -19318,9 +19341,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return count
 
     def _current_eseq_file_count(self):
-        if self.is_image_mode():
-            return self._image_song_file_count()
-        return self._regular_file_count()
+        return len(self._current_eseq_rows())
 
     def _active_eseq_file_limit(self):
         return (
@@ -19547,11 +19568,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 arrangement_type = read_eseq_arrangement_type_label_from_file(file_path)
             except Exception:
                 arrangement_type = ""
-            try:
-                write_protected = read_eseq_write_protect_from_file(file_path)
-            except Exception:
-                write_protected = None
-            midi_type = eseq_type_display_label(eseq_kind, arrangement_type, write_protected)
+            midi_type = eseq_type_display_label(eseq_kind, arrangement_type)
 
         if is_midi:
             if title_mode != "eseq":
@@ -19710,6 +19727,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.pendingRegularRenames.pop(full_path, None)
         self.listedFileInfo.pop(full_path, None)
 
+    def _regular_eseq_conversion_title(self, full_path, current_title):
+        if full_path in self.pendingEdits:
+            return current_title
+        metadata = smart_pianosoft_metadata_from_directory(os.path.dirname(os.path.abspath(full_path)))
+        name = os.path.basename(full_path).casefold()
+        return next((song.title for song in metadata.songs
+                     if song.filename.casefold() == name and song.title), current_title)
+
     def _stage_regular_row_conversion(self, row, full_path, target_kind):
         reason = MidiTitleWindow._preparation_conversion_restriction(self, target_kind)
         if reason:
@@ -19728,6 +19753,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         source_material_path = self._regular_source_material_path(full_path)
         title_override = self._row_raw_title(row) or None
+        if target_kind == "eseq":
+            title_override = self._regular_eseq_conversion_title(full_path, title_override)
 
         if target_kind == "midi":
             convert_eseq_file_to_midi_path(
@@ -19957,6 +19984,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._set_regular_mode_context(file_paths=file_paths)
         regular_specs = []
         probe_errors = []
+        folder_metadata = {
+            directory: smart_pianosoft_metadata_from_directory(directory)
+            for directory in {os.path.dirname(os.path.abspath(path)) for path in file_paths}
+        }
+        album_titles = {metadata.disk_title for metadata in folder_metadata.values() if metadata.disk_title}
+        fallback_disk_title = next(iter(album_titles)) if len(album_titles) == 1 else ""
         loaded_pianodir_metadata = PianodirMetadata()
         music_dir_order_keys = {}
         if any(os.path.basename(path).upper() == MUSICDIR_FILENAME for path in file_paths):
@@ -20060,11 +20093,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 order_key=order_key,
             )
 
+        if not loaded_pianodir_metadata.disk_title and fallback_disk_title:
+            loaded_pianodir_metadata = PianodirMetadata(
+                catalog_number=loaded_pianodir_metadata.catalog_number, disk_title=fallback_disk_title,
+            )
         if self.regularEseqMode:
             self._set_loaded_regular_pianodir_metadata(loaded_pianodir_metadata)
             self._refresh_regular_pianodir_row()
         else:
-            self._set_loaded_regular_pianodir_metadata(PianodirMetadata())
+            self._set_loaded_regular_pianodir_metadata(loaded_pianodir_metadata)
             self.table.setSortingEnabled(True)
             self.table.sortItems(3, order=Qt.AscendingOrder)
         self._refresh_regular_title_display_items()
@@ -20544,6 +20581,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             source_path = path_item.text()
             if self._is_special_pianodir_path(source_path) or source_path in self.pendingImageDeletes:
                 continue
+            if self.imageEseqMode and self._image_path_title_mode(source_path) != "eseq":
+                continue
             export_rows.append((row, source_path))
 
         generate_pianodir = self._should_generate_pianodir(for_export=True)
@@ -20567,7 +20606,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             )
             output_paths.append(dest_path)
 
-            if self._is_eseq_candidate(final_image_path, is_midi=self._image_path_is_midi(source_path)):
+            if self._image_path_title_mode(source_path) == "eseq":
                 display_title = self._row_raw_title(row)
                 pianodir_entries.append(
                     PianodirTrackEntry(
@@ -20614,14 +20653,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         metadata_summary_path_label_base_dir=None,
     ):
         os.makedirs(export_dir, exist_ok=True)
-        row_count = self._regular_file_count()
+        export_rows = MidiTitleWindow._regular_export_rows(self)
+        row_count = len(export_rows)
         total_steps = max(1, row_count + 3)
         regular_order_key_edits = self._regular_eseq_order_key_edits() if self.is_local_eseq_mode() else {}
         errors = []
         output_paths = []
         output_path_map = {}
 
-        for index, row in enumerate(self._regular_file_rows(), start=1):
+        for index, row in enumerate(export_rows, start=1):
             full_path_item = self.table.item(row, 1)
             if full_path_item is None:
                 continue
@@ -21025,13 +21065,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 if self._final_image_path(source_path).replace("\\", "/").upper() == normalized_target:
                     info = source_info
                     break
-        if info.get("title_mode") == "eseq":
-            return True
-        if is_midi is None:
-            is_midi = self._image_path_is_midi(image_path)
-        if not is_eseq_filename(image_path):
-            return False
-        return self.imageHasPianodir or bool(is_midi)
+        # The file probe checks the header, including songs without extensions.
+        # A .FIL name or an existing catalog cannot turn unrelated data into E-SEQ.
+        return info.get("title_mode") == "eseq"
 
     def _find_pianodir_row(self):
         for row in range(self.table.rowCount()):
@@ -21177,11 +21213,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 arrangement_type = read_eseq_arrangement_type_label_from_file(extraction_path)
             except Exception:
                 arrangement_type = ""
-            try:
-                write_protected = read_eseq_write_protect_from_file(extraction_path)
-            except Exception:
-                write_protected = None
-            midi_type = eseq_type_display_label(eseq_kind, arrangement_type, write_protected)
+            midi_type = eseq_type_display_label(eseq_kind, arrangement_type)
 
         if is_midi:
             if title_mode != "eseq":
@@ -22960,7 +22992,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
             return
         if self.imageEseqMode and not self._ensure_eseq_file_limit(
-            self._image_song_file_count(),
+            len(self._image_eseq_rows()),
             action_text="Saving this E-SEQ set to floppy",
         ):
             return
@@ -23002,7 +23034,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
             return
         if self.imageEseqMode and not self._ensure_eseq_file_limit(
-            self._image_song_file_count(),
+            len(self._image_eseq_rows()),
             action_text="Writing this E-SEQ image to floppy",
         ):
             return
@@ -24078,6 +24110,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 is_pending_addition=False,
             )
 
+        if not loaded_pianodir_metadata.disk_title:
+            loaded_pianodir_metadata = PianodirMetadata(
+                catalog_number=loaded_pianodir_metadata.catalog_number,
+                disk_title=smart_pianosoft_disk_title_from_session(self.image_session, entries),
+            )
         loaded_pianodir_metadata = self._image_pianodir_metadata_with_source_catalog(loaded_pianodir_metadata)
         self._set_loaded_image_pianodir_metadata(loaded_pianodir_metadata)
         self._refresh_pianodir_row()
@@ -24147,12 +24184,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         kind_item = QTableWidgetItem(midi_type or self._kind_for_image_file(filename))
         kind_item.setTextAlignment(Qt.AlignCenter)
         kind_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        if title_mode == "eseq" or kind_item.text().startswith(("FIL", "ESQ")):
-            kind_item.setToolTip("Yamaha E-SEQ type, arrangement, and write-protect information.")
-        elif is_midi:
-            kind_item.setToolTip("Detected MIDI file type from header bytes.")
-        else:
-            kind_item.setToolTip("File type from the image filename.")
+        kind_item.setToolTip(self._type_column_tooltip(kind_item.text(), image_mode=True, is_midi=is_midi))
         self.table.setItem(row, 6, kind_item)
 
     def _unique_backup_path(self, desired_path):
@@ -24386,17 +24418,25 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 continue
             self._update_compat_indicator(row, self._row_raw_title(row))
 
-    def _update_midi_type_indicator(self, row, midi_type):
-        indicator = QTableWidgetItem(midi_type if midi_type else "Unknown")
-        indicator.setTextAlignment(Qt.AlignCenter)
-        indicator.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        if midi_type and midi_type.startswith(("FIL", "ESQ")):
-            tooltip = "Yamaha E-SEQ type, arrangement, and write-protect information."
+    def _type_column_tooltip(self, midi_type, *, image_mode=False, is_midi=True):
+        if midi_type and midi_type.startswith(("FIL", "ESQ", "MDA")):
+            tooltip = "Yamaha E-SEQ type and arrangement information."
+        elif image_mode and not is_midi:
+            tooltip = "File type from the image filename."
         elif midi_type:
             tooltip = "Detected MIDI file type from header bytes."
         else:
             tooltip = "MIDI type could not be determined for this file."
-        indicator.setToolTip(f"{tooltip} Double-click to inspect this song.")
+        translated = self._lt(tooltip)
+        if not image_mode:
+            translated += " " + self._lt("Double-click to inspect this song.")
+        return translated
+
+    def _update_midi_type_indicator(self, row, midi_type):
+        indicator = QTableWidgetItem(midi_type if midi_type else "Unknown")
+        indicator.setTextAlignment(Qt.AlignCenter)
+        indicator.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        indicator.setToolTip(self._type_column_tooltip(midi_type))
         self.table.setItem(row, 6, indicator)
 
     def refresh_midi_type_indicators(self):
@@ -26446,6 +26486,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             output_temp_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
             source_material_path = self._regular_source_material_path(full_path)
             title_override = current_title or None
+            if target_kind == "eseq":
+                title_override = self._regular_eseq_conversion_title(full_path, title_override)
             try:
                 if target_kind == "midi":
                     convert_eseq_file_to_midi_path(
@@ -26568,7 +26610,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
 
         if target_kind == "eseq" and not self._ensure_eseq_file_limit(
-            self._image_song_file_count(),
+            len(self._image_eseq_rows()) + len(applicable_rows),
             action_text="Converting this floppy set to E-SEQ",
         ):
             return
@@ -27272,6 +27314,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if self.pendingGeneratePianodir:
                 return True
             return self._regular_pianodir_needs_refresh(for_export=for_export)
+        if self.imageEseqMode and not self.pendingDeletePianodir and self._image_eseq_rows():
+            if any(
+                info.get("title_mode") != "eseq"
+                and path not in self.pendingImageDeletes
+                and not is_eseq_directory_path(path)
+                for path, info in self.imageFileInfo.items()
+            ):
+                # Rebuild the delivered set even when its existing catalog is
+                # populated, so unrelated payloads are excluded from image saves.
+                return True
         return self.imageEseqMode and (
             self._image_pianodir_needs_refresh()
             or self.pendingGeneratePianodir
@@ -27737,12 +27789,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 kind_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 self.table.setItem(row, 6, kind_item)
             kind_item.setText(midi_type or self._kind_for_image_file(target_name))
-            if title_mode == "eseq" or kind_item.text().startswith(("FIL", "ESQ", "MDA")):
-                kind_item.setToolTip("Yamaha E-SEQ type, arrangement, and write-protect information.")
-            elif is_midi:
-                kind_item.setToolTip("Detected MIDI file type from header bytes.")
-            else:
-                kind_item.setToolTip("File type from the image filename.")
+            kind_item.setToolTip(self._type_column_tooltip(kind_item.text(), image_mode=True, is_midi=is_midi))
 
             for old_path in (old_addition, old_replacement):
                 if old_path not in (old_addition_marker, old_replacement_marker, staged_host_path) and old_path:
@@ -27926,6 +27973,56 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 return unique_candidate
         raise ValueError(f"Could not create a unique filename for {filename}.")
 
+    def _pending_eseq_image_used_bytes(self, listing, extra_additions=None):
+        additions = dict(self.pendingImageAdditions)
+        additions.update(extra_additions or {})
+        cluster_size = listing.cluster_size
+        is_clavinova = self.imageEseqVariant == ESEQ_VARIANT_CLAVINOVA
+
+        def prepared_size(host_path, fallback_size=0):
+            size = fallback_size
+            try:
+                size = allocated_size(os.path.getsize(host_path), cluster_size)
+                # A read error must not be mistaken for an excluded sidecar.
+                with open(host_path, "rb") as handle:
+                    handle.read(1)
+            except OSError:
+                return size
+            if not is_eseq_file(host_path) or not has_eseq_title_metadata(host_path):
+                return 0
+            if is_clavinova_mda_file(host_path) != is_clavinova:
+                return 0
+            return size
+
+        used = 0
+        song_count = 0
+        for entry in listing.entries:
+            if is_eseq_directory_path(entry.path):
+                additions.pop(entry.path, None)
+                continue
+            if entry.path in self.pendingImageDeletes and entry.path not in additions:
+                continue
+            old_size = entry.packed_size or allocated_size(entry.size, cluster_size)
+            host_path = additions.pop(entry.path, None) or self.pendingImageReplacements.get(entry.path)
+            if host_path is None:
+                try:
+                    host_path = self.image_session.extract_file(entry.path)
+                except (OSError, FloppyImageError):
+                    used += old_size
+                    song_count += 1
+                    continue
+            size = prepared_size(host_path, old_size)
+            used += size
+            song_count += bool(size)
+
+        for image_path, host_path in additions.items():
+            if is_eseq_directory_path(image_path):
+                continue
+            size = prepared_size(host_path)
+            used += size
+            song_count += bool(size)
+        return used + allocated_size(self._generated_eseq_directory_size(song_count), cluster_size)
+
     def _pending_image_space_remaining(self, extra_additions=None):
         if self.image_session is None:
             return 0
@@ -27933,6 +28030,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         entries_by_path = {entry.path: entry for entry in listing.entries}
         cluster_size = listing.cluster_size
         free_space = listing.free_space
+
+        if self.imageEseqMode and self._should_generate_pianodir():
+            existing_used = sum(
+                entry.packed_size or allocated_size(entry.size, cluster_size)
+                for entry in listing.entries
+            )
+            return free_space + existing_used - self._pending_eseq_image_used_bytes(listing, extra_additions)
 
         freed = 0
         for image_path in self.pendingImageDeletes:
@@ -27974,6 +28078,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return 0
 
         listing = self.image_session.list_entries()
+        if self.imageEseqMode and self._should_generate_pianodir():
+            return self._pending_eseq_image_used_bytes(listing)
         cluster_size = listing.cluster_size
         used = 0
 
@@ -28013,7 +28119,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.diskUsageBar.set_fraction(self._pending_image_used_bytes() / total_size)
         self.eseqCountBar.setVisible(bool(self.imageEseqMode))
         self.eseqCountBar.set_segment_limit(self._active_eseq_file_limit())
-        self.eseqCountBar.set_count(self._image_song_file_count() if self.imageEseqMode else 0)
+        self.eseqCountBar.set_count(len(self._image_eseq_rows()) if self.imageEseqMode else 0)
 
     @staged_batch
     def queue_image_additions(self, file_paths):
@@ -28586,7 +28692,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if not self._confirm_floppy_write():
             return
         if self.imageEseqMode and not self._ensure_eseq_file_limit(
-            self._image_song_file_count(),
+            len(self._image_eseq_rows()),
             action_text="Saving this E-SEQ floppy set",
         ):
             return
@@ -29735,7 +29841,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
         if self.imageEseqMode and not self._ensure_eseq_file_limit(
-            self._image_song_file_count(),
+            len(self._image_eseq_rows()),
             action_text="Saving this E-SEQ floppy set as a separate image",
         ):
             return
@@ -30021,12 +30127,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return f"{base_path}.{output_ext}", output_ext, disk_format
 
     def _stage_files_for_image_export(self, temp_dir, progress_callback=None):
-        row_count = self._regular_file_count()
+        export_rows = MidiTitleWindow._regular_export_rows(self)
+        row_count = len(export_rows)
         file_specs = []
         used_names = set()
         regular_order_key_edits = self._regular_eseq_order_key_edits() if self.is_local_eseq_mode() else {}
 
-        for index, row in enumerate(self._regular_file_rows(), start=1):
+        for index, row in enumerate(export_rows, start=1):
             full_path_item = self.table.item(row, 1)
             if full_path_item is None:
                 continue
@@ -30148,7 +30255,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             QMessageBox.information(self, "No Files", "Add one or more files first.")
             return
         if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
-            self._regular_file_count(),
+            len(self._regular_eseq_rows()),
             action_text="Saving this E-SEQ set as an image",
         ):
             return
@@ -30389,7 +30496,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             QMessageBox.information(self, "No Changes", "There are no pending changes to save.")
             return
         if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
-            self._regular_file_count(), action_text="Saving this E-SEQ set",
+            len(self._regular_eseq_rows()), action_text="Saving this E-SEQ set",
         ):
             return
 
@@ -30548,7 +30655,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if self.image_session is None:
                 return
             if self.imageEseqMode and not self._ensure_eseq_file_limit(
-                self._image_song_file_count(),
+                len(self._image_eseq_rows()),
                 action_text="Exporting this E-SEQ floppy set to a ZIP archive",
             ):
                 return
@@ -30570,7 +30677,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 )
                 return
             if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
-                self._regular_file_count(),
+                len(self._regular_eseq_rows()),
                 action_text="Exporting this E-SEQ set to a ZIP archive",
             ):
                 return
@@ -30677,7 +30784,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
     def _regular_save_as_destination_paths(self, export_dir):
         paths = [os.path.join(export_dir, self._regular_row_output_filename(row))
-                 for row in self._regular_file_rows()]
+                 for row in MidiTitleWindow._regular_export_rows(self)]
         if self._tag_sidecars_enabled():
             paths.extend(self._tag_sidecar_path_for_output(path) for path in tuple(paths)
                          if not is_pianodir_path(path))
@@ -30796,7 +30903,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
         if self.is_image_mode():
             if self.imageEseqMode and not self._ensure_eseq_file_limit(
-                self._image_song_file_count(),
+                len(self._image_eseq_rows()),
                 action_text="Exporting this E-SEQ floppy set to a folder",
             ):
                 return
@@ -30881,7 +30988,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if not dest_dir:
             return
         if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
-            self._regular_file_count(),
+            len(self._regular_eseq_rows()),
             action_text="Exporting this E-SEQ set to a folder",
         ):
             return

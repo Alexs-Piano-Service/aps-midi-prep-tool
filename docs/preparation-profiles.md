@@ -90,20 +90,16 @@ similarly named Plus and Prodigy profiles. See the
 manufacturer links and page references.
 
 **Nalbantov** is available for floppy-capable **Disklavier** profiles, including
-Mark I and Mark III. **Nalbantov Slim** is selectable for **Mark II and Mark II XG
-only**. This follows owner-supplied guidance about the Slim model's physical
-fit. Drive fit is separate from the controller's disk and song-format support
-in the compatibility table. For another installed emulator, use its preset or
+Mark I and Mark III. Use the single Nalbantov option to prepare HFE images.
+For another installed emulator, use its preset or
 **Other emulator / manual configuration**.
 PianoDisc and QRS floppy profiles offer the original drive or manual emulator
-configuration; they do not assume Nalbantov or Gotek fit for those brands.
-Previously saved incompatible Slim selections fall back to the controller's
-default delivery method.
+configuration.
 
-Nalbantov, Nalbantov Slim, and Gotek/FlashFloppy presets start at `DSKA0000`.
-The Nalbantov presets use HFE files; see the
-[APS Slim workflow](https://www.alexanderpeppe.com/adding-removing-or-changing-titles-in-nalbantov-usb-stick-virtual-disks/).
-Keep the stick's configuration files; eXtreme naming can differ.
+Nalbantov and Gotek/FlashFloppy presets start at `DSKA0000`.
+Nalbantov images are named `DSKA0000.HFE`, `DSKA0001.HFE`, and so on; see the
+[APS Nalbantov workflow](https://www.alexanderpeppe.com/adding-removing-or-changing-titles-in-nalbantov-usb-stick-virtual-disks/).
+Keep the stick's configuration files.
 
 FlashFloppy indexed profiles require the emulator's indexed navigation mode.
 See [FlashFloppy navigation](https://github.com/keirf/flashfloppy/wiki/Image-Navigation-Modes)

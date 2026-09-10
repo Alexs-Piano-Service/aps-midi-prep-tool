@@ -13,7 +13,7 @@ from aps_midi_prep_tool_app.emulator_preview_dialog import EmulatorPreviewDialog
 from aps_midi_prep_tool_app.message_catalog import COMMON_TEXT_TRANSLATIONS, SUPPORTED_LANGUAGES, translate_text
 from aps_midi_prep_tool_app.preparation_profile_dialog import PreparationProfileDialog
 from aps_midi_prep_tool_app.preparation_profiles import (
-    COMPATIBILITY_SOURCE, NALBANTOV_SLIM_FIT_GUIDANCE, PIANO_PROFILES,
+    COMPATIBILITY_SOURCE, PIANO_PROFILES,
     PIANO_PROFILE_CATEGORIES, MEDIA, SETTING_LABELS, get_preparation_profile,
 )
 from aps_midi_prep_tool_app.preparation_preview_translations import PREPARATION_PREVIEW_TRANSLATIONS
@@ -35,7 +35,7 @@ def test_preparation_preview_catalog_covers_all_languages_and_preserves_placehol
 
 def test_profile_guidance_and_setting_labels_are_localized():
     labels = [
-        NALBANTOV_SLIM_FIT_GUIDANCE, *SETTING_LABELS.values(), "MIDI type", "MIDI Type 0",
+        *SETTING_LABELS.values(), "MIDI type", "MIDI Type 0",
         *(label for _category, label in PIANO_PROFILE_CATEGORIES),
         *(entry.caution for entry in (*PIANO_PROFILES, *MEDIA) if entry.caution),
         *(profile.label for profile in PIANO_PROFILES if profile.category != "disklavier"),
