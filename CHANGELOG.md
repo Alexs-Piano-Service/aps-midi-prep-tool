@@ -25,6 +25,11 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- MIDI channel merging and Type 0 piano remapping preserve note endings from
+  channel-wide stop commands, including notes spread across Type 1 tracks and
+  overlapping pitches, without stopping unrelated parts.
+- Pedal cleanup retains repeated presses after Reset All Controllers and
+  recognized GM, GM2, GS, XG, and System Reset messages.
 - Windows image preparation now finds tools in nested bundled directories and
   uses that same lookup for extraction fallback. Windows build scripts bundle
   all required mtools commands instead of relying on the recipient's PATH.

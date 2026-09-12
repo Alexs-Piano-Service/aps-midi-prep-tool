@@ -2,6 +2,7 @@ import os
 import shutil
 import uuid
 from bisect import bisect_right
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from math import ceil
 
@@ -26,6 +27,7 @@ VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE = 18
 VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY = 1
 MIDI_BANK_SELECT_CONTROLLERS = {0, 32}
 MIDI_CHANNEL_MODE_CONTROLLERS = set(range(120, 128))
+MIDI_NOTE_TERMINATION_CONTROLLERS = {120, 123, 124, 125, 126, 127}
 SUSTAIN_PEDAL_CONTROLLER = 64
 SUSTAIN_PEDAL_ON_THRESHOLD = 64
 DEFAULT_MIDI_TEMPO_US = 500000
@@ -277,6 +279,114 @@ def _make_synthetic_event_like(reference_event, abs_tick, sequence, raw):
     return (abs_tick, sequence, raw)
 
 
+def _is_midi_system_reset(raw):
+    """Recognize complete GM/GM2, GS, XG and escaped System Reset messages."""
+    if raw == b"\xFF":
+        return True
+    if not raw or raw[0] not in (0xF0, 0xF7):
+        return False
+    try:
+        length, start = _parse_vlq(raw, 1, len(raw))
+    except ValueError:
+        return False
+    if start + length != len(raw):
+        return False
+    payload = raw[start:]
+    if raw[0] == 0xF7:
+        # F7 escape packets contain wire bytes, including the initial status.
+        if payload == b"\xFF":
+            return True
+        if not payload.startswith(b"\xF0"):
+            return False
+        payload = payload[1:]
+    return (
+        len(payload) == 5
+        and payload[0] == 0x7E
+        and payload[1] < 0x80
+        and payload[2] == 0x09
+        and payload[3] in (0x01, 0x03)
+        and payload[4] == 0xF7
+    ) or (
+        len(payload) == 10
+        and payload[0] == 0x41
+        and payload[1] < 0x20
+        and payload[2:] == b"\x42\x12\x40\x00\x7F\x00\x41\xF7"
+    ) or (
+        len(payload) == 8
+        and payload[0] == 0x43
+        and (payload[1] & 0xF0) == 0x10
+        and payload[2:] == b"\x4C\x00\x00\x7E\x00\xF7"
+    )
+
+
+def _expand_channel_note_terminations(events):
+    """Prepare source note lifetimes before their channels are collapsed.
+
+    Keep every attack, but defer releases of an overlapping pitch until its
+    last source voice ends. Then balance every emitted Note On with a Note Off
+    for receivers that stack repeated notes. CC120 uses note releases because
+    a channel-wide immediate silence would also stop the other merged parts.
+    """
+    active_notes = Counter()
+    active_pitches = Counter()
+    deferred_releases = defaultdict(list)
+    seen_notes = set()
+    expanded = []
+    changed = False
+
+    def release_pitch(pitch, releases):
+        deferred_releases[pitch].extend(releases)
+        if active_pitches[pitch]:
+            return []
+        return deferred_releases.pop(pitch)
+
+    for event in sorted(events, key=lambda item: item[:-1]):
+        raw = event[-1]
+        replacements = [raw]
+        if _is_midi_system_reset(raw):
+            active_notes.clear()
+            active_pitches.clear()
+            deferred_releases.clear()
+        elif len(raw) >= 3 and 0x80 <= raw[0] <= 0xEF:
+            message_type = raw[0] & 0xF0
+            channel = raw[0] & 0x0F
+            pitch = raw[1]
+            key = (channel, pitch)
+            if message_type == 0x90 and raw[2] > 0:
+                active_notes[key] += 1
+                active_pitches[pitch] += 1
+                seen_notes.add(key)
+            elif message_type in (0x80, 0x90):
+                if active_notes[key]:
+                    active_notes[key] -= 1
+                    active_pitches[pitch] -= 1
+                    if not active_notes[key]:
+                        del active_notes[key]
+                    replacements = release_pitch(pitch, [raw])
+                elif key in seen_notes or active_pitches[pitch]:
+                    # A late individual release after All Notes Off must not
+                    # release a different part that now owns this pitch.
+                    replacements = []
+            elif message_type == 0xB0 and raw[1] in MIDI_NOTE_TERMINATION_CONTROLLERS:
+                replacements = []
+                for source_channel, note in sorted(active_notes):
+                    if source_channel != channel:
+                        continue
+                    count = active_notes.pop((channel, note))
+                    active_pitches[note] -= count
+                    replacements.extend(
+                        release_pitch(note, [bytes([0x80 | channel, note, 0])] * count)
+                    )
+
+        changed = changed or replacements != [raw]
+        for replacement in replacements:
+            expanded.append(
+                _make_synthetic_event_like(event, event[0], len(expanded), replacement)
+            )
+
+    return (expanded, True) if changed else (events, False)
+
+
 def _non_pedal_note_channels(events):
     channels = set()
     for event in events:
@@ -338,6 +448,19 @@ def apply_pedal_controller_options_to_midi_events(
     last_events = {}
     for event in adjusted:
         raw = event[-1]
+        if len(raw) >= 3 and (raw[0] & 0xF0) == 0xB0 and raw[1] == 121:
+            # The receiver reset these pedals, so neither deduplication nor
+            # final pedal-up synthesis may rely on their pre-reset values.
+            channel = raw[0] & 0x0F
+            for controller in DISKLAVIER_PEDAL_CONTROLLERS:
+                key = (channel, controller)
+                previous_values.pop(key, None)
+                last_values.pop(key, None)
+                last_events.pop(key, None)
+        elif _is_midi_system_reset(raw):
+            previous_values.clear()
+            last_values.clear()
+            last_events.clear()
         if _is_pedal_controller(raw):
             key = (raw[0] & 0x0F, raw[1])
             value = raw[2]
@@ -1226,8 +1349,8 @@ def _normalize_disklavier_merged_events(merged_events):
 
 
 def _remap_merged_events_to_piano_channel0(merged_events):
+    merged_events, changed = _expand_channel_note_terminations(merged_events)
     remapped = []
-    changed = False
     first_note_track = 0
     has_notes = False
 

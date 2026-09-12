@@ -5,8 +5,12 @@ from .midi_type0_converter import (
     MIDI_BANK_SELECT_CONTROLLERS,
     MIDI_CHANNEL_MODE_CONTROLLERS,
     _build_raw_midi_track,
+    _expand_channel_note_terminations,
+    _merge_track_event_groups,
     _parse_track_events,
     _parse_vlq,
+    _replace_event_raw,
+    _replace_track_event_groups_from_merged,
 )
 
 
@@ -82,19 +86,20 @@ def _remap_channel_prefix(raw):
 
 
 def _merge_track_events(events):
+    events, changed = _expand_channel_note_terminations(events)
     merged = []
-    changed = False
     has_notes = False
 
-    for abs_tick, order, raw in events:
+    for event in events:
+        raw = event[-1]
         remapped_meta, meta_changed = _remap_channel_prefix(raw)
         if meta_changed:
-            merged.append((abs_tick, order, remapped_meta))
+            merged.append(_replace_event_raw(event, remapped_meta))
             changed = True
             continue
 
         if not raw or not (0x80 <= raw[0] <= 0xEF):
-            merged.append((abs_tick, order, raw))
+            merged.append(event)
             continue
 
         message_type = raw[0] & 0xF0
@@ -112,7 +117,7 @@ def _merge_track_events(events):
             continue
 
         remapped = bytes([message_type | PIANO_CHANNEL]) + raw[1:]
-        merged.append((abs_tick, order, remapped))
+        merged.append(_replace_event_raw(event, remapped))
         changed = changed or channel != PIANO_CHANNEL
 
     return merged, changed, has_notes
@@ -175,22 +180,40 @@ def merge_midi_channels_to_channel0_bytes(midi_bytes):
             continue
         track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
         events, end_tick = _parse_track_events(track_data)
-        merged, changed, has_notes = _merge_track_events(events)
         tracks.append(
             {
                 "original_events": events,
-                "events": merged,
+                "events": events,
                 "end_tick": end_tick,
-                "changed": changed,
-                "has_notes": has_notes,
+                "changed": False,
             }
         )
 
     if _is_canonical_channel_merge(format_type, tracks):
         return midi_bytes, False
 
+    if format_type == 2:
+        # Type 2 tracks are independent sequences, each with its own channels.
+        for track in tracks:
+            track["events"], track["changed"], _has_notes = _merge_track_events(
+                track["events"]
+            )
+    else:
+        # Type 1 tracks share channel state. A controller track can terminate
+        # notes on another track, so process the complete timeline together.
+        merged, _changed, _has_notes = _merge_track_events(
+            _merge_track_event_groups(tracks)
+        )
+        _replace_track_event_groups_from_merged(tracks, merged)
+        for track in tracks:
+            track["changed"] = (
+                [(tick, raw) for tick, _, raw in track["events"]]
+                != [(tick, raw) for tick, _, raw in track["original_events"]]
+            )
+
     note_track_indexes = [
-        index for index, track in enumerate(tracks) if track["has_notes"]
+        index for index, track in enumerate(tracks)
+        if any(raw and (raw[0] & 0xF0) in (0x80, 0x90) for _, _, raw in track["events"])
     ]
     if format_type != 2 and note_track_indexes:
         note_track_indexes = note_track_indexes[:1]
