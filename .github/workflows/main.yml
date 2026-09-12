@@ -68,6 +68,10 @@ jobs:
         shell: pwsh
         run: ./scripts/stage_windows_hfe_tool.ps1 -Destination "$env:RUNNER_TEMP/aps-hfe"
 
+      - name: Verify image tools are available
+        shell: pwsh
+        run: python -c "import shutil; assert all(shutil.which(name) for name in ('mformat', 'mcopy', 'mdir', 'mdel', 'mren', 'gw')), 'mtools and Greaseweazle are required for image regression tests'"
+
       - name: Run automated tests
         shell: pwsh
         env:
