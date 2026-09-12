@@ -123,40 +123,37 @@ jobs:
           $pyInstallerArgs += @("--add-binary", "$lameExe;bin")
           pyinstaller @pyInstallerArgs aps_midi_prep_tool.py
 
-      - name: Install AzureSignTool
+      - name: Require Windows EXE
         shell: pwsh
-        run: dotnet tool install --global AzureSignTool
+        run: |
+          if (!(Test-Path -LiteralPath "dist/APSMIDIPrepTool.exe" -PathType Leaf)) {
+            throw "Build output not found: dist/APSMIDIPrepTool.exe"
+          }
 
       - name: Sign EXE with Trusted Signing
-        shell: pwsh
-        env:
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
-          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-        run: |
-          $exe = "dist/APSMIDIPrepTool.exe"
-          if (!(Test-Path $exe)) { throw "Build output not found: $exe" }
-
-          azuresigntool sign `
-            -kvu "$env:AZURE_TRUSTED_SIGNING_ENDPOINT" `
-            -kvi "$env:AZURE_CLIENT_ID" `
-            -kvt "$env:AZURE_TENANT_ID" `
-            -kvs "$env:AZURE_CLIENT_SECRET" `
-            -tr "http://timestamp.acs.microsoft.com" `
-            -td sha256 `
-            -fd sha256 `
-            -dlib "Azure.CodeSigning.Dlib.dll" `
-            -dmdf "$env:AZURE_TRUSTED_SIGNING_ACCOUNT/$env:AZURE_TRUSTED_SIGNING_PROFILE" `
-            "$exe"
+        uses: azure/trusted-signing-action@v0.5.9
+        with:
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT || secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT || secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_PROFILE || secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Verify signature
         shell: pwsh
         run: |
           $exe = "dist/APSMIDIPrepTool.exe"
-          Get-AuthenticodeSignature $exe | Format-List
+          $sig = Get-AuthenticodeSignature -LiteralPath $exe -ErrorAction Stop
+          $sig | Format-List
+          if ($sig.Status -ne 'Valid') {
+            throw "Signature invalid for ${exe}: $($sig.Status) - $($sig.StatusMessage)"
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
