@@ -46,6 +46,7 @@ jobs:
         run: python -m pip install -r requirements-test.txt
 
       - name: Install image tools for regression tests
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -53,7 +54,26 @@ jobs:
 
       - name: Expose image tools to Python
         shell: pwsh
-        run: Add-Content $env:GITHUB_PATH 'C:\msys64\ucrt64\bin'
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $mtoolsBin = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin'
+          if (-not (Test-Path -LiteralPath $mtoolsBin -PathType Container)) {
+            throw "MSYS2 UCRT64 binary directory was not found: $mtoolsBin"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $mtoolsBin -Encoding utf8
+
+      - name: Install HFE test dependency
+        shell: pwsh
+        run: ./scripts/stage_windows_hfe_tool.ps1 -Destination "$env:RUNNER_TEMP/aps-hfe"
+
+      - name: Verify image tools are available
+        shell: pwsh
+        run: python scripts/check_mtools.py
+
+      - name: Verify HFE helper is available
+        shell: pwsh
+        run: gw convert --help
 
       - name: Run automated tests
         shell: pwsh

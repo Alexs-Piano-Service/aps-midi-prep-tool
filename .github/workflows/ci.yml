@@ -35,9 +35,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mtools libegl1 libopengl0
+          sudo apt-get install -y --no-install-recommends mtools libegl1 libopengl0 libpulse0
       - name: Install Windows image tools
         if: runner.os == 'Windows'
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -45,11 +46,28 @@ jobs:
       - name: Expose Windows image tools to Python
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Add-Content $env:GITHUB_PATH 'C:\msys64\ucrt64\bin'
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $mtoolsBin = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin'
+          if (-not (Test-Path -LiteralPath $mtoolsBin -PathType Container)) {
+            throw "MSYS2 UCRT64 binary directory was not found: $mtoolsBin"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $mtoolsBin -Encoding utf8
       - name: Install test dependencies
         run: python -m pip install -r requirements-test.txt
+      - name: Install Linux HFE test dependency
+        if: runner.os == 'Linux'
+        # Greaseweazle v1.23, pinned to its upstream source commit.
+        run: python -m pip install git+https://github.com/keirf/greaseweazle@a0ae343d7e2603b9f3fdc0149ef8e89de5399f58
+      - name: Install Windows HFE test dependency
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/stage_windows_hfe_tool.ps1 -Destination "$env:RUNNER_TEMP/aps-hfe"
       - name: Verify image tools are available
-        run: python -c "import shutil; assert all(shutil.which(name) for name in ('mformat', 'mcopy', 'mdir', 'mdel', 'mren')), 'mtools is required for image regression tests'"
+        run: python scripts/check_mtools.py
+      - name: Verify HFE helper is available
+        run: gw convert --help
       - name: Check Python syntax
         run: python -m compileall -q aps_midi_prep_tool.py aps_midi_prep_tool_app scripts
       - name: Run automated tests

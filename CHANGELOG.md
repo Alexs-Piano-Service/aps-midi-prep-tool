@@ -25,6 +25,14 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Windows CI and signed release builds locate mtools using the MSYS2 setup
+  action's actual installation directory. The dependency check reports each
+  command's path and version, and identifies missing or unusable executables.
+- Linux CI installs the PulseAudio runtime required to import Qt Multimedia
+  during test collection.
+- Both CI platforms install a pinned Greaseweazle helper for HFE image tests.
+  Windows tests compare the report's portable path separators and fully delete
+  inspection dialogs between tests to avoid Qt shutdown crashes.
 - MIDI channel merging and Type 0 piano remapping preserve note endings from
   channel-wide stop commands, including notes spread across Type 1 tracks and
   overlapping pitches, without stopping unrelated parts.

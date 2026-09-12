@@ -50,12 +50,20 @@ Windows builds require `mformat.exe`, `mcopy.exe`, `mdir.exe`, `mdel.exe`, and
 when using `build/build_windows_main.ps1`. The signed workflow installs the
 native UCRT64 mtools package through MSYS2. Both build routes include the tools
 with `--add-binary`, allowing PyInstaller to collect their DLL dependencies.
+CI and signed releases add the setup action's reported `msys2-location` plus
+`ucrt64/bin` to PATH; the action can install into a runner temporary directory,
+so the runner's preinstalled `C:\msys64` must not be assumed. Both workflows run
+`python scripts/check_mtools.py` to report and execute all five required tools
+before testing. HFE image tests also require Greaseweazle: CI installs the
+pinned v1.23 source on Linux and stages the verified standalone Windows archive
+with `scripts/stage_windows_hfe_tool.ps1` in Windows CI and signed releases.
 Recipients do not need to install mtools separately. Verify an actual Windows
 package on a machine without a development toolchain before distributing it.
 
 The **CI** workflow runs the full suite on Linux and Windows for every branch
-push and pull request. Both jobs install mtools so disk-image regression tests
-exercise actual images. Configure branch protection to require **Tests
+push and pull request. Both jobs install mtools and Greaseweazle so disk-image
+regression tests exercise actual images. Linux also installs the Qt Multimedia
+runtime dependencies, including `libpulse0`. Configure branch protection to require **Tests
 (ubuntu-latest)** and **Tests (windows-latest)** before merging.
 
 Before tagging a release, commit the version/documentation changes, push that
