@@ -179,6 +179,11 @@ def test_sanitizes_portable_image_set_names():
     assert sanitize_image_prefix("---") == "DSKA"
 
 
+@pytest.mark.parametrize("name", ["CON", "aux", "NUL", "PRN", "COM1", "LPT9", "CON.mid", "AUX.mid", "COM¹"])
+def test_image_set_names_are_portable_windows_device_names(name):
+    assert sanitize_image_set_name(name) == "_" + name
+
+
 @pytest.mark.parametrize("include_subfolders", [False, True])
 def test_discovers_songs_by_content_and_excludes_catalogs(tmp_path, include_subfolders):
     source = tmp_path / "songs"

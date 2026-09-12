@@ -35,8 +35,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mtools libegl1 libopengl0
+          sudo apt-get install -y --no-install-recommends mtools libegl1 libopengl0 libpulse0
       - name: Install Windows image tools
+        id: msys2
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
@@ -45,7 +46,16 @@ jobs:
       - name: Expose Windows image tools to Python
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Add-Content $env:GITHUB_PATH 'C:\msys64\ucrt64\bin'
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $toolDirectory = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin'
+          foreach ($tool in 'mformat', 'mcopy', 'mdir', 'mdel', 'mren') {
+            $toolPath = Join-Path $toolDirectory "$tool.exe"
+            if (!(Test-Path -LiteralPath $toolPath)) { throw "Missing Windows image tool: $toolPath" }
+            Write-Host "$tool -> $toolPath"
+          }
+          Add-Content $env:GITHUB_PATH $toolDirectory
       - name: Install test dependencies
         run: python -m pip install -r requirements-test.txt
       - name: Verify image tools are available
@@ -53,7 +63,32 @@ jobs:
       - name: Check Python syntax
         run: python -m compileall -q aps_midi_prep_tool.py aps_midi_prep_tool_app scripts
       - name: Run automated tests
-        run: python -m pytest -q
+        run: python -m pytest -q --ignore=tests/windows --junitxml=test-results/regression.xml
+      - name: Install Windows HFE test dependency
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/stage_windows_hfe_tool.ps1 -Destination "$env:RUNNER_TEMP/aps-hfe"
+      - name: Run native Windows image and process tests
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/windows --windows-require-tools --junitxml=test-results/windows.xml
+      - name: Build portable Windows manual test kit
+        if: runner.os == 'Windows'
+        run: python -m scripts.build_windows_test_kit --output dist/windows-test-kit
+      - name: Upload Windows manual test kit
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-kit
+          path: dist/windows-test-kit/
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: test-results/*.xml
+          if-no-files-found: warn
       - name: Check whitespace
         run: git diff --check
       - name: Check AppImage build script
