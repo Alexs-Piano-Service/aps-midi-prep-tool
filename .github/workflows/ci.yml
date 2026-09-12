@@ -71,7 +71,28 @@ jobs:
       - name: Check Python syntax
         run: python -m compileall -q aps_midi_prep_tool.py aps_midi_prep_tool_app scripts
       - name: Run automated tests
-        run: python -m pytest -q
+        run: python -m pytest -q --ignore=tests/windows --junitxml=test-results/regression.xml
+      - name: Run native Windows image and process tests
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/windows --windows-require-tools --junitxml=test-results/windows.xml
+      - name: Build portable Windows manual test kit
+        if: runner.os == 'Windows'
+        run: python -m scripts.build_windows_test_kit --output dist/windows-test-kit
+      - name: Upload Windows manual test kit
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-kit
+          path: dist/windows-test-kit/
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: test-results/*.xml
+          if-no-files-found: warn
       - name: Check whitespace
         run: git diff --check
       - name: Check AppImage build script

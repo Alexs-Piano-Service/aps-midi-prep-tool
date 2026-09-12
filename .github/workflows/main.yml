@@ -76,7 +76,17 @@ jobs:
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+        run: python -m pytest -q --ignore=tests/windows
+
+      - name: Run native Windows image and process tests
+        run: python -m pytest -q tests/windows --windows-require-tools
+
+      - name: Build portable Windows manual test kit
+        run: python -m scripts.build_windows_test_kit --output dist/windows-test-kit
+
+      - name: Archive portable Windows manual test kit
+        shell: pwsh
+        run: Compress-Archive -Path dist/windows-test-kit/* -DestinationPath dist/windows-test-kit.zip
 
       - name: Install LAME
         shell: pwsh
@@ -100,10 +110,10 @@ jobs:
             $toolPath = (Get-Command "$toolName.exe" -ErrorAction Stop).Source
             $pyInstallerArgs += @("--add-binary", "$toolPath;aps_midi_prep_tool_app/bin/mtools")
           }
-          $gwExe = "aps_midi_prep_tool_app/bin/greaseweazle/gw.exe"
-          if (Test-Path $gwExe) {
-            $pyInstallerArgs += @("--add-binary", "$gwExe;aps_midi_prep_tool_app/bin/greaseweazle")
-          }
+          # The standalone helper needs its lib directory, DLLs, and licenses.
+          $gwDirectory = $env:APS_WINDOWS_GW_DIR
+          if (!(Test-Path -LiteralPath (Join-Path $gwDirectory 'gw.exe'))) { throw 'Standalone Greaseweazle is missing.' }
+          $pyInstallerArgs += @("--add-data", "$gwDirectory;aps_midi_prep_tool_app/bin/greaseweazle")
           $lameExe = (Get-Command lame.exe -ErrorAction SilentlyContinue).Source
           if (-not $lameExe) {
             $lameExe = Get-ChildItem "$env:ChocolateyInstall/lib/lame/tools" -Recurse -Filter lame.exe -ErrorAction SilentlyContinue |
@@ -152,10 +162,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: APSMIDIPrepTool-windows-signed
-          path: dist/APSMIDIPrepTool.exe
+          path: |
+            dist/APSMIDIPrepTool.exe
+            dist/windows-test-kit.zip
 
       - name: Attach signed EXE to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/APSMIDIPrepTool.exe
+          files: |
+            dist/APSMIDIPrepTool.exe
+            dist/windows-test-kit.zip

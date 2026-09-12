@@ -9,6 +9,12 @@ with release sections grouped by version and date.
 
 ### Added
 
+- Native Windows tests exercise real IMG/HFE round trips, clean versus ordinary
+  E-SEQ saves, bundled mtools without PATH access, capacity failures, reserved
+  filenames, locked destinations, and cancellation of helper descendants.
+  CI publishes a portable clean-machine manual test kit with generated songs,
+  mixed and damaged images, checksums, a PowerShell launcher, and result records.
+
 - An optional `aps-midi-prep-tool.json` beside the executable presets all saved
   preferences, remembered dialogs, shortcuts, and paths at each launch. Instrument
   and delivery selections supply preparation defaults; relative paths support
@@ -24,6 +30,14 @@ with release sections grouped by version and date.
   workflow require a recorded pass for both platforms on the exact commit.
 
 ### Fixed
+
+- Emulator image set names sanitize Windows device names such as CON, AUX,
+  COM1, and names with extensions such as CON.mid before creating output folders.
+
+- CI and Windows release builds use the MSYS2 action's actual installation
+  directory to locate mtools. Linux CI installs the PulseAudio library needed
+  to import Qt Multimedia before collecting tests. Both platforms install
+  Greaseweazle before running the existing HFE regression cases.
 
 - Windows image preparation now finds tools in nested bundled directories and
   uses that same lookup for extraction fallback. Windows build scripts bundle
