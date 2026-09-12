@@ -96,6 +96,12 @@ APIs to check commit identity and both test results.
 
 ## Documentation
 
+For Windows IMG/HFE changes, run the native suite and the packaged-release
+acceptance checks in [Windows test plan](docs/windows-test-plan.md). CI publishes
+a portable fixture kit and JUnit results; testers need only the packaged EXE
+and Windows PowerShell on a clean machine. Missing real tools must fail the
+automated release run (`--windows-require-tools`), not silently skip it.
+
 Keep `README.md` user-focused, keep `CHANGELOG.md` updated, and update
 `aps_midi_prep_tool_app/eseq_reference.md` when E-SEQ behavior changes.
 

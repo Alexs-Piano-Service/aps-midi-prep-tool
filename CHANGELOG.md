@@ -9,6 +9,12 @@ with release sections grouped by version and date.
 
 ### Added
 
+- Native Windows tests exercise real IMG/HFE round trips, clean versus ordinary
+  E-SEQ saves, bundled mtools without PATH access, capacity failures, reserved
+  filenames, locked destinations, and cancellation of helper descendants.
+  CI publishes a portable clean-machine manual test kit with generated songs,
+  mixed and damaged images, checksums, a PowerShell launcher, and result records.
+
 - An optional `aps-midi-prep-tool.json` beside the executable presets all saved
   preferences, remembered dialogs, shortcuts, and paths at each launch. Instrument
   and delivery selections supply preparation defaults; relative paths support
@@ -25,6 +31,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Emulator image set names sanitize Windows device names such as CON, AUX,
+  COM1, and names with extensions such as CON.mid before creating output folders.
 - Windows CI and signed release builds locate mtools using the MSYS2 setup
   action's actual installation directory. The dependency check reports each
   command's path and version, and identifies missing or unusable executables.
