@@ -125,6 +125,9 @@ def dialog_factory(application, monkeypatch):
         dialog.deleteLater()
     for parent in parents:
         parent.deleteLater()
+    # processEvents alone does not dispatch DeferredDelete without a running
+    # event loop. Drain the dialogs before the next test constructs completers.
+    application.sendPostedEvents(None, QEvent.DeferredDelete)
     application.processEvents()
 
 
