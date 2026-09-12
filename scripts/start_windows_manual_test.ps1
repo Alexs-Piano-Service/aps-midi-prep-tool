@@ -27,8 +27,9 @@ foreach ($name in $commands) {
     $found[$name] = @(Get-Command $name -CommandType Application -All -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Source)
 }
-if ($RequireCleanMachine -and @($found.Values | ForEach-Object { $_ }).Count -gt 0) {
-    throw 'Development tools are on PATH. Use a clean Windows VM for release acceptance, or omit -RequireCleanMachine for a PATH-isolation smoke check.'
+$imageToolsFound = @('mformat', 'mcopy', 'mdir', 'mdel', 'mren', 'gw') | Where-Object { $found[$_].Count -gt 0 }
+if ($RequireCleanMachine -and @($imageToolsFound).Count -gt 0) {
+    throw 'External image tools are on PATH. Use a clean Windows VM for release acceptance, or omit -RequireCleanMachine for a PATH-isolation smoke check.'
 }
 if (Test-Path -LiteralPath $ResultsDirectory) { throw "Choose a new results directory: $ResultsDirectory" }
 $results = New-Item -ItemType Directory -Path $ResultsDirectory

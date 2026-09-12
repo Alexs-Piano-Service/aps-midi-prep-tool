@@ -28,8 +28,10 @@ the EXE hash and signature status, and launches it with a Windows-only PATH.
 It restores the shell's PATH after the app exits. Run every test against the
 copies under `results-...\work`, and save outputs in the results folder.
 
-`-RequireCleanMachine` rejects tools found on PATH. Also confirm manually that
-MSYS2 and development environments are absent; PATH inspection alone cannot
+`-RequireCleanMachine` rejects external image tools found on PATH. Python and
+Git paths are recorded for review (a Windows Python Store alias is not itself
+a Python installation). Also confirm manually that MSYS2, Python, Git, and
+development environments are absent; PATH inspection alone cannot
 prove a clean installation. Omitting the switch allows a development-machine
 smoke check, which must be recorded as such. Without `-Launch`, only fixture
 and environment preflight runs. Neither mode marks any manual case as passed.
@@ -52,7 +54,7 @@ the executable's path, hash, signature status, and available commands.
 | 8 | Edit a title in the generated HFE; delete or replace a song if supported. Save as `DSKA0001.HFE`, exit, restart, and reopen. | Edits persist; all intended songs remain readable. |
 | 9 | Export `test720.img` as `from-img.HFE` and reopen. | Same intended songs, bytes, titles, and order. |
 | 10 | Export the generated HFE as `from-hfe.img` and reopen. | Same intended songs, bytes, titles, order, and 720 KB capacity. |
-| 11 | In MIDI mode, create IMG and HFE with `work\capacity\NEARFULL.MID`, then try `TOOBIG.MID`. Also try adding beyond capacity to a single existing disk. | Near-full succeeds. A single oversized song fails clearly and preserves existing output. Multi-image builders may legitimately split a set: verify every image instead of expecting failure. E-SEQ conversion can remove padding, so use MIDI mode for these fixtures. |
+| 11 | In MIDI mode, create IMG and HFE with `work\capacity\NEARFULL.MID`, then try `TOOBIG.MID`. Set the emulator builder's safety margin to zero for this boundary check. Also try adding beyond capacity to a single existing disk. | Near-full succeeds. A single oversized song fails clearly and preserves existing output. Multi-image builders may legitimately split a set: verify every image instead of expecting failure. E-SEQ conversion can remove padding, so use MIDI mode for these fixtures. |
 | 12 | Build from `work\filename-cases`. Try output set names CON, AUX, NUL, COM1, LPT1, CON.mid, and AUX.mid. | Exactly the long-name MIDI, Test Song.mid, and valid NOEXTENSION are selected; backups, temps, and dot files are excluded. Output folder names are usable. Windows normally aliases Test Song.mid/test song.mid and cannot create ordinary CON.mid/AUX.mid input files: test these as requested output names, not separate host files. |
 | 13 | Open `work\images\damaged-boot.img` and `truncated.img`; use available recovery/reconstruction, extracting to a new Recovered folder. Reopen reconstructed output if offered. | No hang. Boot-damaged fixture has intact songs/catalog/FAT and should recover; severely truncated data may fail with useful diagnostics. No silent claim that unread data is valid; damaged sources remain unchanged. |
 | 14 | Start a sufficiently large IMG/HFE build, cancel during work, and repeat during recovery where supported. | Prompt return, unchanged sources/existing outputs, no persistent mformat/mcopy/gw descendants. Incomplete output is removed or clearly identified. |
