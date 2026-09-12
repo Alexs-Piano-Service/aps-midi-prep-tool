@@ -43,6 +43,49 @@ translation-catalog consistency. When changing floppy, image, E-SEQ, or MIDI
 conversion behavior, test with copies of representative files and note what
 workflow you verified.
 
+## CI and release tags
+
+Windows builds require `mformat.exe`, `mcopy.exe`, `mdir.exe`, `mdel.exe`, and
+`mren.exe` on the build machine's PATH, or in `aps_midi_prep_tool_app/bin/mtools`
+when using `build/build_windows_main.ps1`. The signed workflow installs the
+native UCRT64 mtools package through MSYS2. Both build routes include the tools
+with `--add-binary`, allowing PyInstaller to collect their DLL dependencies.
+Recipients do not need to install mtools separately. Verify an actual Windows
+package on a machine without a development toolchain before distributing it.
+
+The **CI** workflow runs the full suite on Linux and Windows for every branch
+push and pull request. Both jobs install mtools so disk-image regression tests
+exercise actual images. Configure branch protection to require **Tests
+(ubuntu-latest)** and **Tests (windows-latest)** before merging.
+
+Before tagging a release, commit the version/documentation changes, push that
+exact commit to the repository that will publish the release, and wait for
+both CI jobs to pass. Create the tag with the checked helper:
+
+```bash
+python scripts/tag_release.py v0.8.3 --repo OWNER/REPOSITORY
+git push RELEASE_REMOTE v0.8.3
+```
+
+Replace the example tag, repository, and remote with the intended release.
+The helper refuses a dirty checkout, missing CI, a failed or unfinished latest
+run, and missing/skipped platform jobs. It creates a local annotated tag at the
+validated commit and records the CI run URL in the tag message. Use `GH_TOKEN`
+or `GITHUB_TOKEN` with Actions read access for a private repository.
+
+The signed Windows release workflow remains responsible for packaging and
+signing. It also checks that the exact checked-out commit already passed both
+CI jobs, so a manually created tag without recorded validation cannot publish
+an executable through that workflow. A local test log alone does not qualify.
+The helper does not push tags, configure repository protection, or backfill CI
+history for older releases. Administrators can still create tags outside this
+helper; repository rules must restrict tag creation if that bypass needs to be
+prevented. Publish the release only after the validated tag has been pushed.
+
+The gate uses GitHub [workflow run](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow)
+and [workflow job](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run)
+APIs to check commit identity and both test results.
+
 ## Documentation
 
 Keep `README.md` user-focused, keep `CHANGELOG.md` updated, and update

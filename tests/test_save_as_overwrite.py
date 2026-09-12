@@ -243,7 +243,12 @@ def test_destination_folder_symlink_alias_uses_confirmation_and_preserves_alias(
     original = source.read_bytes()
     _stage_title(w, source, monkeypatch)
     alias = tmp_path / "alias"
-    alias.symlink_to(source.parent, target_is_directory=True)
+    try:
+        alias.symlink_to(source.parent, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable.")
+        raise
     questions = _choose_destination(monkeypatch, alias, yes=True)
 
     w.save_as_changes()

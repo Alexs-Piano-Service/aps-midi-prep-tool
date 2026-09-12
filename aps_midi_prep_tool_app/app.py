@@ -62,6 +62,7 @@ def main():
     from .console_log import install_console_capture
     from .main_window import MidiTitleWindow, install_tooltip_delay_style
     from .icon_utils import apply_window_icon, load_app_icon
+    from .startup_config import StartupConfigError, load_startup_config
 
     _set_windows_app_id()
     app = QApplication(sys.argv)
@@ -75,7 +76,15 @@ def main():
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
-    window = MidiTitleWindow()
+    config_error = None
+    try:
+        initial_settings = load_startup_config()
+    except StartupConfigError as exc:
+        initial_settings = {}
+        config_error = exc
+        print(f"Startup configuration ignored: {exc}", file=sys.stderr)
+
+    window = MidiTitleWindow(initial_settings=initial_settings)
     apply_window_icon(window)
     window.show()
 
@@ -87,6 +96,17 @@ def main():
         ):
             QTimer.singleShot(50, lambda: run_startup_dialogs(attempt + 1))
             return
+        if config_error is not None:
+            from PySide6.QtCore import Qt
+            from PySide6.QtWidgets import QMessageBox
+
+            message = QMessageBox(window)
+            message.setIcon(QMessageBox.Warning)
+            message.setWindowTitle(APP_NAME)
+            message.setTextFormat(Qt.PlainText)
+            message.setText(window._t("startup_config.error"))
+            message.setInformativeText(str(config_error))
+            message.exec()
         show_first_time_dialog(app_icon, parent=window)
         window.schedule_startup_update_check()
 

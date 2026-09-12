@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import ntpath
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,13 @@ from aps_midi_prep_tool_app.smart_pianosoft import (
     parse_smart_pianosoft_disk_title,
     parse_smart_pianosoft_song_catalog,
 )
+
+
+def test_windows_report_paths_use_forward_slashes(monkeypatch):
+    monkeypatch.setattr(emulator_image_builder.os.path, "relpath", ntpath.relpath)
+    assert emulator_image_builder._display_relative_path(
+        r"C:\Music\Billy Joel\SONG.MID", r"C:\Music",
+    ) == "Billy Joel/SONG.MID"
 
 
 def _midi_bytes(title):
@@ -192,6 +200,29 @@ def test_discovers_songs_by_content_and_excludes_catalogs(tmp_path, include_subf
     assert discover_midi_files(source, include_subfolders=include_subfolders) == [
         str(midi_path),
     ]
+
+
+@pytest.mark.parametrize("include_subfolders", [False, True])
+def test_song_discovery_ignores_backup_temp_and_hidden_copies(tmp_path, include_subfolders):
+    source = tmp_path / "songs"
+    source.mkdir()
+    midi = source / "song.mid"
+    midi.write_bytes(_midi_bytes("One intended song"))
+    eseq = source / "song.fil"
+    convert_midi_file_to_eseq_path(midi, eseq)
+    for name in ("song.mid.bak", "song.mid.orig", "song.mid.tmp", "song.mid~", ".hidden", ".hidden.mid", "COPY~"):
+        (source / name).write_bytes(midi.read_bytes())
+    for name in ("song.fil~", "song.fil.orig", "song.fil.bak", "song.recovered", ".hidden.fil"):
+        (source / name).write_bytes(eseq.read_bytes())
+    hidden_folder = source / ".backup"
+    hidden_folder.mkdir()
+    (hidden_folder / "song.mid").write_bytes(midi.read_bytes())
+    nested = source / "Album"
+    nested.mkdir()
+    (nested / "song.mid.bak").write_bytes(midi.read_bytes())
+    (nested / "song.fil~").write_bytes(eseq.read_bytes())
+
+    assert discover_song_files(source, include_subfolders=include_subfolders) == [str(eseq), str(midi)]
 
 
 def test_builds_multiple_verified_images_with_a_pianodir_per_disk(

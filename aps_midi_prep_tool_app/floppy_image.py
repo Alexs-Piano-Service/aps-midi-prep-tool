@@ -110,6 +110,10 @@ class FastFloppyReadError(FloppyImageError):
         self.fallback_allowed = bool(fallback_allowed)
 
 
+class _FloppyReadStalled(FastFloppyReadError):
+    """Stop a stalled read without starting another pass or filling it with zeros."""
+
+
 class FloppyRecoveryError(FloppyImageError):
     """Raised when recovery fails with structured disk-level diagnostics."""
 
@@ -949,6 +953,20 @@ def _volume_label_for_mformat(label):
 def _terminate_process(process):
     if process.poll() is not None:
         return
+    if os.name == "nt":
+        # A bundled one-file helper can have its own child process. Stopping
+        # only its launcher leaves that child holding files in _MEI directories.
+        taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+        try:
+            subprocess.run(
+                [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=5,
+                **windows_subprocess_kwargs(),
+            )
+            process.wait(timeout=2)
+            return
+        except Exception:
+            pass
     try:
         process.terminate()
         process.wait(timeout=2)
@@ -963,26 +981,22 @@ def _terminate_process(process):
             pass
 
 
-def _run_command(args, error_prefix, *, cancel_callback=None):
-    if cancel_callback is None:
-        result = subprocess.run(
-            args,
-            text=True,
-            capture_output=True,
-            check=False,
-            **windows_subprocess_kwargs(),
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            if detail:
-                raise FloppyImageError(f"{error_prefix}: {detail}")
-            raise FloppyImageError(f"{error_prefix}.")
-        return (result.stdout or "") + (result.stderr or "")
+def _command_timeout_error(args, error_prefix, timeout):
+    tool = os.path.basename(os.fspath(args[0]))
+    return FloppyImageError(
+        f"{error_prefix}. APS stopped waiting because the disk-image tool did not finish "
+        f"within {timeout:g} seconds ({tool}). "
+        "Try saving to a folder on this computer first. If you are reading an original "
+        "floppy, try Read Floppy with Start in recovery mode."
+    )
 
+
+def _run_command(args, error_prefix, *, cancel_callback=None, timeout=120.0):
     _raise_if_cancelled(cancel_callback)
     process = subprocess.Popen(
         args,
         text=True,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         **windows_subprocess_kwargs(),
@@ -1000,11 +1014,14 @@ def _run_command(args, error_prefix, *, cancel_callback=None):
 
     communicator = threading.Thread(target=_communicate, daemon=True)
     communicator.start()
+    deadline = time.monotonic() + timeout
     try:
         while communicator.is_alive():
             _raise_if_cancelled(cancel_callback)
+            if time.monotonic() >= deadline:
+                raise _command_timeout_error(args, error_prefix, timeout)
             communicator.join(timeout=0.1)
-    except FloppyOperationCancelled:
+    except BaseException:
         _terminate_process(process)
         communicator.join(timeout=2)
         raise
@@ -1026,6 +1043,7 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None, 
     _raise_if_cancelled(cancel_callback)
     process = subprocess.Popen(
         args,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1121,9 +1139,9 @@ def _bundled_tool_search_dirs():
     suffixes = (
         "",
         "bin",
-        os.path.join("bin", "greaseweazle"),
         os.path.join("aps_midi_prep_tool_app", "bin"),
-        os.path.join("aps_midi_prep_tool_app", "bin", "greaseweazle"),
+        *(os.path.join(root, tool) for root in ("bin", os.path.join("aps_midi_prep_tool_app", "bin"))
+          for tool in ("mtools", "7zip", "greaseweazle", "fluidsynth", "lame")),
     )
     dirs = []
     seen = set()
@@ -1159,8 +1177,10 @@ def _dependency_command_message(command_name):
     mtools_commands = {"mformat", "mcopy", "mdel", "mren", "mdir"}
     if command in mtools_commands:
         return (
-            f"Required mtools command '{command}' was not found. "
-            "Install mtools, or run an AppImage build that bundles mtools, then try again."
+            "APS could not find one of the tools needed to prepare this disk image "
+            f"(mtools: {command}). "
+            "Please download a complete APS build and try again. "
+            "If you run APS from Python source, install mtools."
         )
     if command == "7z":
         return (
@@ -1794,7 +1814,7 @@ def list_greaseweazle_devices():
 
 
 def _require_command(command_name):
-    path = shutil.which(command_name)
+    path = shutil.which(command_name) or _find_bundled_command(command_name)
     if not path:
         raise FloppyImageError(_dependency_command_message(command_name))
     return path
@@ -3550,7 +3570,7 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
 
 def _open_block_device_for_read(device_path):
     if os.name == "nt":
-        return _WindowsVolumeHandle(device_path, write=False)
+        return _WindowsRecoveryVolumeHandle(device_path, write=False)
     try:
         return os.open(device_path, os.O_RDONLY)
     except OSError as exc:
@@ -3593,11 +3613,13 @@ def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=
         cursor = 0
         chunk_size = 64 * 1024
         last_progress = -1
-        with _WindowsVolumeHandle(device_path, write=False) as volume:
+        with _WindowsRecoveryVolumeHandle(device_path, write=False) as volume:
             while remaining > 0:
                 _raise_if_cancelled(cancel_callback)
                 current_size = min(chunk_size, remaining)
-                chunk = volume.read_at(cursor, current_size, "floppy image")
+                chunk = _read_device_exact(
+                    volume, cursor, current_size, "floppy image", cancel_callback=cancel_callback,
+                )
                 if not chunk:
                     raise FloppyImageError(
                         "Could not read floppy device: the drive stopped returning data before the full disk was read. "
@@ -5712,7 +5734,19 @@ def _read_device_exact(device, offset, size, label, cancel_callback=None):
     while remaining > 0:
         _raise_if_cancelled(cancel_callback)
         try:
-            if hasattr(device, "read_at"):
+            if callable(getattr(device, "read_at_recovery", None)):
+                try:
+                    chunk = device.read_at_recovery(
+                        cursor, remaining, label, cancel_callback=cancel_callback,
+                        deadline_at=time.monotonic() + 30.0,
+                    )
+                except _RecoveryReadDeadlineExceeded as exc:
+                    raise _FloppyReadStalled(
+                        "The floppy drive did not finish reading this part of the disk within 30 seconds. "
+                        "APS stopped the read. Try Read Floppy with Start in recovery mode. "
+                        f"Read location: {label}, byte {cursor}."
+                    ) from exc
+            elif hasattr(device, "read_at"):
                 chunk = device.read_at(cursor, remaining, label)
             else:
                 chunk = os.pread(device, remaining, cursor)
@@ -5733,7 +5767,7 @@ def _read_device_exact(device, offset, size, label, cancel_callback=None):
 def _try_read_device_exact(device, offset, size, cancel_callback=None):
     try:
         return _read_device_exact(device, offset, size, "floppy sector", cancel_callback=cancel_callback)
-    except FloppyOperationCancelled:
+    except (FloppyOperationCancelled, _FloppyReadStalled):
         raise
     except FloppyImageError:
         return None
@@ -5742,7 +5776,7 @@ def _try_read_device_exact(device, offset, size, cancel_callback=None):
 def _read_device_best_effort(device, offset, size, label, *, sector_size=_YAMAHA_BYTES_PER_SECTOR, cancel_callback=None):
     try:
         return _read_device_exact(device, offset, size, label, cancel_callback=cancel_callback), []
-    except FloppyOperationCancelled:
+    except (FloppyOperationCancelled, _FloppyReadStalled):
         raise
     except FloppyImageError:
         pass
@@ -5763,7 +5797,7 @@ def _read_device_best_effort(device, offset, size, label, *, sector_size=_YAMAHA
                 label,
                 cancel_callback=cancel_callback,
             )
-        except FloppyOperationCancelled:
+        except (FloppyOperationCancelled, _FloppyReadStalled):
             raise
         except FloppyImageError:
             chunk = b"\x00" * current_size
@@ -6399,7 +6433,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                             sector_size=candidate_geometry.bytes_per_sector,
                             cancel_callback=cancel_callback,
                         )
-                    except FloppyOperationCancelled:
+                    except (FloppyOperationCancelled, _FloppyReadStalled):
                         raise
                     except FloppyImageError:
                         continue
@@ -8005,6 +8039,8 @@ class FloppyImageSession:
                 read_image_listing(working_img)
             except FloppyOperationCancelled:
                 raise
+            except _FloppyReadStalled:
+                raise
             except FastFloppyReadError as fast_exc:
                 if not fast_exc.fallback_allowed:
                     raise FloppyImageError(
@@ -9545,10 +9581,8 @@ class FloppyImageSession:
         _raise_if_cancelled(cancel_callback)
         try:
             data = _read_fat12_file_bytes(source_img, image_path)
-        except FloppyImageError as fat_exc:
-            mcopy = shutil.which("mcopy")
-            if not mcopy:
-                raise fat_exc
+        except FloppyImageError:
+            mcopy = _require_command("mcopy")
             mcopy_dest_path, cleanup_dir = _mtools_host_destination_path(dest_path, image_path)
             try:
                 self._run_mtools(
@@ -9634,7 +9668,6 @@ class FloppyImageSession:
         }
         listing = read_image_listing(target_img)
         track_entries = []
-        excluded_paths = set()
 
         for entry in listing.entries:
             _raise_if_cancelled(cancel_callback)
@@ -9652,7 +9685,6 @@ class FloppyImageSession:
                 cancel_callback=cancel_callback,
             )
             if not _host_file_matches_eseq_variant(extracted_path, eseq_variant):
-                excluded_paths.add(entry.path)
                 continue
 
             title = extract_eseq_title_from_file(extracted_path)
@@ -9689,7 +9721,9 @@ class FloppyImageSession:
         mdel = _require_command("mdel")
         for entry in listing.entries:
             _raise_if_cancelled(cancel_callback)
-            if not is_eseq_directory_path(entry.path) and entry.path not in excluded_paths:
+            # Updating the active catalog must not remove other payloads or
+            # the opposite variant's catalog from an in-place save.
+            if os.path.basename(entry.path).upper() != directory_filename:
                 continue
             self._run_mtools(
                 [mdel, "-i", target_img, mtools_path(entry.path)],
@@ -9734,6 +9768,8 @@ class FloppyImageSession:
         delete_pianodir=False,
         progress_callback=None,
         cancel_callback=None,
+        *,
+        clean_eseq_delivery=False,
     ):
         renames = renames or {}
         deletes = set(deletes or set())
@@ -9750,10 +9786,10 @@ class FloppyImageSession:
         try:
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 1, 4, "Applying pending changes to floppy image...")
-            if generate_pianodir:
+            if generate_pianodir and clean_eseq_delivery:
                 # Classify the final payload, including pending conversions, before
-                # copying files or applying metadata edits. The source image and
-                # host files remain untouched; only this prepared image is pruned.
+                # copying files or applying metadata edits. Only explicit delivery
+                # exports prune unrelated payloads; commits preserve them.
                 existing_paths = {entry.path for entry in read_image_listing(target_img).entries}
                 excluded_paths = set()
                 for image_path in sorted(existing_paths | additions.keys()):
@@ -10326,6 +10362,7 @@ class FloppyImageSession:
             delete_pianodir=delete_pianodir,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
+            clean_eseq_delivery=True,
         )
         try:
             self.write_image(
@@ -10375,6 +10412,7 @@ class FloppyImageSession:
             delete_pianodir=delete_pianodir,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
+            clean_eseq_delivery=True,
         )
         extract_dir = tempfile.mkdtemp(prefix="aps_repack_image_", dir=self.temp_dir)
         try:
@@ -10565,6 +10603,7 @@ class FloppyImageSession:
             delete_pianodir=delete_pianodir,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
+            clean_eseq_delivery=True,
         )
         try:
             reports = ()

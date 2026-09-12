@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build-sign-upload:
@@ -20,6 +21,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Require cross-platform CI for this commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_gate.py --repo "$env:GITHUB_REPOSITORY" --sha (git rev-parse HEAD)
 
       - name: Install dependencies
         shell: pwsh
@@ -37,6 +44,16 @@ jobs:
       - name: Install test dependencies
         shell: pwsh
         run: python -m pip install -r requirements-test.txt
+
+      - name: Install image tools for regression tests
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-mtools
+
+      - name: Expose image tools to Python
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH 'C:\msys64\ucrt64\bin'
 
       - name: Run automated tests
         shell: pwsh
@@ -62,6 +79,10 @@ jobs:
             "--icon", "aps_midi_prep_tool_app/aps.ico",
             "--manifest", "manifests/main_as_invoker.xml"
           )
+          foreach ($toolName in @("mformat", "mcopy", "mdir", "mdel", "mren")) {
+            $toolPath = (Get-Command "$toolName.exe" -ErrorAction Stop).Source
+            $pyInstallerArgs += @("--add-binary", "$toolPath;aps_midi_prep_tool_app/bin/mtools")
+          }
           $gwExe = "aps_midi_prep_tool_app/bin/greaseweazle/gw.exe"
           if (Test-Path $gwExe) {
             $pyInstallerArgs += @("--add-binary", "$gwExe;aps_midi_prep_tool_app/bin/greaseweazle")

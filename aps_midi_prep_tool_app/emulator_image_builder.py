@@ -162,8 +162,13 @@ def _natural_sort_key(path):
     )
 
 
+def _display_relative_path(path, start):
+    """Normalize separators for reports only, without changing filesystem paths."""
+    return os.path.relpath(path, start).replace("\\", "/")
+
+
 def discover_song_files(source_directory, *, include_subfolders=True):
-    """Identify MIDI and E-SEQ songs by content, independent of extensions."""
+    """Identify songs with normal extensions or no extension, checking content."""
     source_directory = os.path.abspath(os.fspath(source_directory))
     if not os.path.isdir(source_directory):
         raise FloppyImageError(f"The MIDI folder was not found: {source_directory}")
@@ -171,7 +176,12 @@ def discover_song_files(source_directory, *, include_subfolders=True):
     paths = []
 
     def add_song(path):
-        if os.path.basename(path).upper() in {
+        filename = os.path.basename(path)
+        if filename.startswith(".") or filename.endswith("~"):
+            return
+        if os.path.splitext(filename)[1].lower() not in {"", ".mid", ".midi", ".fil", ".mda"}:
+            return
+        if filename.upper() in {
             PIANODIR_FILENAME,
             "MUSIC.DIR",
             SMART_PIANOSOFT_DISK_CATALOG_NAME,
@@ -184,6 +194,7 @@ def discover_song_files(source_directory, *, include_subfolders=True):
     try:
         if include_subfolders:
             for root, directory_names, filenames in os.walk(source_directory):
+                directory_names[:] = [name for name in directory_names if not name.startswith(".")]
                 directory_names.sort(key=_natural_sort_key)
                 for filename in filenames:
                     add_song(os.path.join(root, filename))
@@ -1144,7 +1155,7 @@ def _build_emulator_song_lists_text(
     """Describe the whole set in image/playback order, retaining source albums."""
     def source_album_label(song):
         folder = os.path.dirname(song.source_path)
-        relative_folder = os.path.relpath(folder, source_directory)
+        relative_folder = _display_relative_path(folder, source_directory)
         return _song_list_display_text(
             relative_folder if relative_folder != "." else os.path.basename(folder)
         )
@@ -1463,7 +1474,7 @@ def build_emulator_disk_images(
         )
         warnings = tuple(
             f"{os.path.basename(final_path)} / {song.image_path} "
-            f"({os.path.relpath(song.source_path, source_directory)}): {song.warning}"
+            f"({_display_relative_path(song.source_path, source_directory)}): {song.warning}"
             for (_raw_path, songs), final_path in zip(raw_images, final_paths)
             for song in songs if song.warning
         )

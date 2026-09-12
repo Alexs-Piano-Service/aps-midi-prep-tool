@@ -384,6 +384,21 @@ def test_sanitize_output_folder_name_is_portable():
     assert sanitize_output_folder_name("CON") == "CON Image"
 
 
+@pytest.mark.parametrize("name, expected", [
+    ("CON.txt", "CON Image.txt"),
+    ("AUX.backup", "AUX Image.backup"),
+    ("LPT1.foo", "LPT1 Image.foo"),
+    ("con.TXT", "con Image.TXT"),
+    ("PRN.one.two", "PRN Image.one.two"),
+    ("Concert.txt", "Concert.txt"),
+])
+def test_reserved_device_names_with_extensions_produce_creatable_folders(tmp_path, name, expected):
+    folder = tmp_path / sanitize_output_folder_name(name)
+    assert folder.name == expected
+    folder.mkdir()
+    assert folder.is_dir()
+
+
 def test_bulk_extraction_messages_cover_every_supported_language():
     supported_codes = {language.code for language in SUPPORTED_LANGUAGES}
     formatter = Formatter()

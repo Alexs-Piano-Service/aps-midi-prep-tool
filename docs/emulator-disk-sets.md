@@ -43,6 +43,13 @@ size, even though the HFE specification defines an extended-density mode.
 
 ## Choose how folders become disks
 
+Song discovery checks the contents of `.mid`, `.midi`, `.fil`, `.mda`, and
+extensionless files. It ignores backup/temp suffixes such as `.bak`, `.orig`,
+`.tmp`, and `~`, other unrecognized extensions, dot-prefixed files, and hidden
+dot-prefixed subfolders. This keeps editor backups from becoming duplicate songs
+while retaining extensionless Yamaha performances. Rename an intended song to
+its normal extension if it was stored under a backup or recovery suffix.
+
 **One album per folder** starts a new disk for every folder containing songs.
 An album that exceeds one disk's capacity continues on extra disks; different
 folders never share a disk. Empty folders are skipped.

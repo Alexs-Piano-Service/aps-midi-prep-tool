@@ -1,0 +1,14 @@
+{
+  "preparation_profile": "mark_ii",
+  "preparation_medium": "nalbantov",
+  "language": "en",
+  "show_preparation_row": true,
+  "skip_first_time_dialog": true,
+  "check_updates_at_startup": false,
+  "skip_update_reminders": true,
+  "open_folder_location": "./Music",
+  "open_image_location": "./Nalbantov",
+  "save_as_location": "./Prepared",
+  "emulator_image_source": "./Music",
+  "emulator_image_output": "./Nalbantov"
+}

@@ -87,6 +87,18 @@ def test_save_as_image_output_stays_selected_when_option_cannot_apply(tmp_path):
     )
 
 
+def test_album_subfolder_note_preserves_case_on_case_insensitive_system(tmp_path, monkeypatch):
+    window = FakeWindow(enabled=True)
+    monkeypatch.setattr(os.path, "normcase", lambda path: path.lower())
+    selected = tmp_path / "Disk.img"
+    output = tmp_path / "Billy Joel Album" / "Disk.img"
+    note = MidiTitleWindow._save_as_image_album_subfolder_note(window, str(selected), str(output))
+    assert note == "Saved image in album subfolder: Billy Joel Album"
+    assert MidiTitleWindow._save_as_image_album_subfolder_note(
+        window, str(selected), str(selected).upper(),
+    ) == ""
+
+
 def test_save_as_image_album_subfolder_messages_cover_every_language():
     supported_codes = {language.code for language in SUPPORTED_LANGUAGES}
     formatter = Formatter()

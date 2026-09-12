@@ -82,11 +82,27 @@ Change the interface language under **Settings → Language**. English, Spanish,
 French, German, Italian, Brazilian Portuguese, Bulgarian, Dutch, Polish,
 Japanese, Korean, and Simplified Chinese are available.
 
+For a USB deployment, place `aps-midi-prep-tool.json` beside the executable to
+preset the instrument, delivery method, saved preferences, remembered dialogs,
+and folders. Relative paths follow the executable's directory, even if the USB
+drive letter changes. See the [startup configuration guide](docs/startup-configuration.md)
+and [Nalbantov example](docs/examples/aps-midi-prep-tool.json).
+
 ## Recover songs from a floppy or disk image
 
 Open common IMG/BIN raw images and HFE images, or read a physical floppy with a
 compatible drive. The app shows song titles, playback order, album information,
 and remaining disk space. Save songs to a folder or ZIP, or create a new image.
+
+Ordinary **Save** preserves unrelated files in an E-SEQ image, including notes,
+MIDI files, and management catalogs, unless you explicitly delete them.
+**Save As** and **Save As Image** still prepare a clean E-SEQ delivery set.
+
+After three successful physical floppy reads, APS offers an optional review
+invitation. **Remind me later** waits for three more successful reads;
+**Never ask again** permanently dismisses it. **Write a review** opens the
+review page in your browser and dismisses future invitations. These choices
+are remembered across launches.
 
 [![A Yamaha E-SEQ floppy image with editable song titles](docs/images/aps-midi-prep-tool-yamaha-eseq-floppy-image-editor.png)](docs/images/aps-midi-prep-tool-yamaha-eseq-floppy-image-editor.png)
 
@@ -96,6 +112,9 @@ Recovery cannot guarantee that damaged recordings will play correctly.
 If USB-floppy recovery fails or is cancelled, **Disk → Save partial capture...**
 keeps the recovered image together with sector coverage and diagnostics, without
 reading the disk again. Unread portions are identified in the diagnostics.
+
+For stalled image creation or a Windows `_MEI…` temporary-directory warning,
+see [Windows disk troubleshooting](docs/windows-disk-troubleshooting.md).
 
 For collections of images, **Utilities → Bulk Extraction...** can keep a local
 progress record. **Resume extraction job...** retries failed items first and

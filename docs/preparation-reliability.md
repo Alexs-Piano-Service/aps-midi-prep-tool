@@ -26,6 +26,17 @@ report describes those changes.
 
 ## Keep unfinished edits
 
+An ordinary in-place **Save** of an E-SEQ image updates the edited songs and
+their active catalog while preserving unrelated payloads, including `NOTES.TXT`,
+MIDI files, `PSONG.MNG`, `PDISK.MNG`, and the opposite E-SEQ variant and its
+catalog. Only explicitly staged deletions remove unrelated files. Capacity
+checks include those retained files. A populated catalog does not need refreshing
+merely because unrelated files are present.
+
+**Save As** / **Save As Image** still produce the clean delivery set for the
+selected E-SEQ variant. Their output excludes unrelated payloads and regenerates
+the matching catalog, while leaving the original image unchanged.
+
 **Edit → Review Changes** shows original and proposed filenames, titles,
 formats, playback order, and conversion reports. Select songs to discard their
 edits. **Edit → Undo** (**Ctrl+Z**) reverses the latest staged action; **Edit →

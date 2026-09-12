@@ -942,3 +942,26 @@ WORKFLOW_TEXT_TRANSLATIONS.update({
         "zh-Hans": "恢复通常在约五分钟后停止，但正在进行的设备读取可能耗时更长。读取范围为所选容量，或可靠检测到的较小 FAT12 容量，并显示扇区进度。大多数 Disklavier 软盘为 IBM 720K DD。",
     },
 })
+
+WORKFLOW_TEXT_TRANSLATIONS.update({
+    "Stopping Disk Work": {
+        "es": "Deteniendo la operación de disco", "fr": "Arrêt de l’opération sur disque",
+        "de": "Datenträgervorgang wird angehalten", "it": "Arresto dell’operazione su disco",
+        "pt-BR": "Interrompendo a operação de disco", "bg": "Спиране на операцията с диска",
+        "nl": "Schijfbewerking stoppen", "pl": "Zatrzymywanie operacji dyskowej",
+        "ja": "ディスク操作を停止しています", "ko": "디스크 작업 중지 중", "zh-Hans": "正在停止磁盘操作",
+    },
+    "APS is stopping the current disk operation. Please wait for it to finish, then close APS again. Windows may need a little time to release the drive.\n\nTemporary working files will be cleaned up after disk work has stopped.": {
+        "es": "APS está deteniendo la operación de disco actual. Espere a que termine y vuelva a cerrar APS. Windows puede necesitar un poco de tiempo para liberar la unidad.\n\nLos archivos de trabajo temporales se eliminarán después de que se detenga la operación de disco.",
+        "fr": "APS arrête l’opération sur disque en cours. Attendez qu’elle se termine, puis fermez de nouveau APS. Windows peut avoir besoin d’un peu de temps pour libérer le lecteur.\n\nLes fichiers de travail temporaires seront supprimés une fois l’opération sur disque arrêtée.",
+        "de": "APS hält den aktuellen Datenträgervorgang an. Warten Sie, bis er beendet ist, und schließen Sie APS erneut. Windows benötigt möglicherweise etwas Zeit, um das Laufwerk freizugeben.\n\nTemporäre Arbeitsdateien werden nach dem Anhalten des Datenträgervorgangs entfernt.",
+        "it": "APS sta arrestando l’operazione su disco in corso. Attendi che termini, quindi chiudi di nuovo APS. Windows potrebbe impiegare un po’ di tempo a rilasciare l’unità.\n\nI file di lavoro temporanei verranno eliminati dopo l’arresto dell’operazione su disco.",
+        "pt-BR": "O APS está interrompendo a operação de disco atual. Aguarde a conclusão e feche o APS novamente. O Windows pode precisar de um pouco de tempo para liberar a unidade.\n\nOs arquivos de trabalho temporários serão removidos após a interrupção da operação de disco.",
+        "bg": "APS спира текущата операция с диска. Изчакайте тя да приключи, след което затворете APS отново. Windows може да се нуждае от малко време, за да освободи устройството.\n\nВременните работни файлове ще бъдат изтрити след спирането на операцията с диска.",
+        "nl": "APS stopt de huidige schijfbewerking. Wacht tot deze is voltooid en sluit APS daarna opnieuw. Windows heeft mogelijk even tijd nodig om het station vrij te geven.\n\nTijdelijke werkbestanden worden opgeruimd nadat de schijfbewerking is gestopt.",
+        "pl": "APS zatrzymuje bieżącą operację dyskową. Poczekaj na jej zakończenie, a następnie ponownie zamknij APS. System Windows może potrzebować chwili na zwolnienie napędu.\n\nTymczasowe pliki robocze zostaną usunięte po zatrzymaniu operacji dyskowej.",
+        "ja": "APS は現在のディスク操作を停止しています。操作が終了するまで待ってから、もう一度 APS を閉じてください。Windows がドライブを解放するまで少し時間がかかる場合があります。\n\nディスク操作の停止後に、一時作業ファイルが削除されます。",
+        "ko": "APS가 현재 디스크 작업을 중지하고 있습니다. 작업이 끝날 때까지 기다린 후 APS를 다시 닫아 주세요. Windows에서 드라이브를 해제하는 데 시간이 조금 걸릴 수 있습니다.\n\n디스크 작업이 중지된 후 임시 작업 파일이 정리됩니다.",
+        "zh-Hans": "APS 正在停止当前磁盘操作。请等待操作结束，然后再次关闭 APS。Windows 可能需要一些时间来释放驱动器。\n\n磁盘操作停止后，将清理临时工作文件。",
+    },
+})

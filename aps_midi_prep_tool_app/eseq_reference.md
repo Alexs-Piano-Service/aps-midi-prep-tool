@@ -15,6 +15,14 @@
 
 Emulator-set behavior in v0.8.2:
 
+Unreleased save-preservation correction: catalog generation now replaces only
+the active variant's catalog. In-place image commits retain unknown files, MIDI,
+MNG catalogs, and the opposite E-SEQ variant and catalog unless explicitly
+deleted. Delivery exports opt into content-based pruning of their temporary
+image. In-place capacity accounting includes retained payloads; export accounting
+can exclude them. An existing active catalog also determines the variant when
+an unrelated opposite-variant song is present in the image.
+
 - Folder layout gives each directory's own songs separate disks. Its E-SEQ
   `PIANODIR.FIL` album title defaults to the folder's `PDISK.MNG` title when
   available, otherwise its folder name, while catalog IDs

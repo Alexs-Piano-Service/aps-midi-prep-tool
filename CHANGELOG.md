@@ -5,6 +5,48 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
+## [Unreleased]
+
+### Added
+
+- An optional `aps-midi-prep-tool.json` beside the executable presets all saved
+  preferences, remembered dialogs, shortcuts, and paths at each launch. Instrument
+  and delivery selections supply preparation defaults; relative paths support
+  USB deployments on Windows and Linux, including AppImage releases. Open MIDI
+  Folder and Open Image now remember their starting folders. A configuration
+  guide and Nalbantov example cover deployment and supported setting names.
+- A polite review invitation after the third successful physical floppy read,
+  with Write a review, Remind me later, and Never ask again choices in all 12
+  languages. Counts and choices persist; reminders wait three more successful
+  reads. Image opens, failed reads, and cancelled reads do not advance the count.
+- Linux and Windows CI on branch pushes and pull requests, with mtools installed
+  for real-image regression tests. The tagging helper and signed packaging
+  workflow require a recorded pass for both platforms on the exact commit.
+
+### Fixed
+
+- Windows image preparation now finds tools in nested bundled directories and
+  uses that same lookup for extraction fallback. Windows build scripts bundle
+  all required mtools commands instead of relying on the recipient's PATH.
+- Image tools have a two-minute timeout and cannot wait for hidden console
+  input. Cancellation stops the helper's Windows process tree; APS retains
+  disk resources and shows a friendly explanation when closed during disk work.
+- Ordinary Windows floppy reads now use cancellable I/O with a 30-second limit
+  per read request. A stalled read stops with recovery guidance instead of
+  retrying indefinitely or treating a timeout as missing data to fill with zeros.
+- Image warnings use consistent displayed path separators, album folder notes
+  preserve capitalization on Windows, and symlink tests skip when Windows does
+  not grant the required privilege.
+- Ordinary E-SEQ image Save preserves unrelated files and the opposite variant's
+  catalog. Catalog regeneration and capacity accounting no longer assume that
+  in-place saves should remove non-song data. Save As/export retains clean
+  delivery output, and an unrelated MDA no longer switches an existing catalog's
+  selected variant.
+- Emulator song discovery accepts normal song extensions and extensionless files
+  while ignoring backup/temp names and dot-prefixed copies and subfolders.
+- Bulk extraction safely renames Windows device names with extensions, including
+  `CON.txt`, `AUX.backup`, and `LPT1.foo`.
+
 ## [0.8.2] - 2026-09-08
 
 ### Added

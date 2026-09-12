@@ -8,6 +8,71 @@ from aps_midi_prep_tool_app import floppy_image
 SECTOR_SIZE = 512
 
 
+def test_ordinary_read_forwards_cancellation_and_deadline(monkeypatch):
+    calls = []
+    cancel = lambda: False
+    class Device:
+        def read_at_recovery(self, offset, size, label, **kwargs):
+            calls.append((offset, size, kwargs))
+            return b"S" * size
+        def read_at(self, *_args):
+            pytest.fail("Ordinary reads must use cancellable I/O")
+    monkeypatch.setattr(floppy_image.time, "monotonic", lambda: 100.0)
+    assert floppy_image._read_device_exact(Device(), 512, 4, "song", cancel) == b"SSSS"
+    assert calls == [(512, 4, {"cancel_callback": cancel, "deadline_at": 130.0})]
+
+
+@pytest.mark.parametrize("reader", [
+    floppy_image._try_read_device_exact,
+    lambda device, offset, size: floppy_image._read_device_best_effort(device, offset, size, "song"),
+])
+def test_stalled_read_is_not_retried_or_zero_filled(reader):
+    calls = []
+    class Device:
+        def read_at_recovery(self, *_args, **_kwargs):
+            calls.append(True)
+            raise floppy_image._RecoveryReadDeadlineExceeded("deadline")
+    with pytest.raises(floppy_image.FastFloppyReadError, match="30 seconds") as error:
+        reader(Device(), 512, 1024)
+    assert not error.value.fallback_allowed
+    assert calls == [True]
+
+
+def test_fast_read_stalled_at_25_percent_stops_without_publishing_image(tmp_path, monkeypatch):
+    source = tmp_path / "original.img"
+    layout = floppy_image._PROTECTED_FAT12_LAYOUTS[0]
+    floppy_image._create_blank_fat12_image_from_layout(source, layout, "ORIGINAL")
+    data = bytearray(source.read_bytes())
+    geometry = floppy_image._geometry_from_boot_sector(data[:512])
+    for index in range(geometry.num_fats):
+        fat_start = geometry.fat_offset + index * geometry.fat_size
+        data[fat_start + 3:fat_start + 5] = b"\xff\x0f"  # cluster 2 ends this file
+    entry = floppy_image._dos_directory_entry(b"SONG    FIL", 2, 4)
+    data[geometry.root_offset:geometry.root_offset + 32] = entry
+    data[geometry.data_offset:geometry.data_offset + 4] = b"SONG"
+    source.write_bytes(data)
+    progress = []
+    closed = []
+    class Device:
+        def read_at_recovery(self, offset, size, _label, **_kwargs):
+            if offset >= geometry.data_offset:
+                raise floppy_image._RecoveryReadDeadlineExceeded("driver still waiting")
+            return bytes(data[offset:offset + size])
+        def close(self):
+            closed.append(True)
+    monkeypatch.setattr(floppy_image, "_open_block_device_for_read", lambda _path: Device())
+    output = tmp_path / "copy.img"
+    with pytest.raises(floppy_image.FastFloppyReadError, match="Start in recovery mode"):
+        floppy_image._read_floppy_device_fast_image(
+            str(source), str(output), len(data),
+            progress_callback=lambda step, *_args: progress.append(step),
+        )
+    assert progress[-1] == 25
+    assert closed == [True]
+    assert not output.exists()
+    assert source.read_bytes() == data
+
+
 class _FakeRecoveryDevice:
     def __init__(self, read):
         self._read = read

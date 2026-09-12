@@ -97,8 +97,9 @@ def sanitize_output_folder_name(name, fallback="image"):
     text = re.sub(r"\s+", " ", "".join(cleaned)).strip(" .")
     if not text:
         text = str(fallback or "image").strip() or "image"
-    if text.upper() in _WINDOWS_RESERVED_NAMES:
-        text = f"{text} Image"
+    stem, dot, extension = text.partition(".")
+    if stem.upper() in _WINDOWS_RESERVED_NAMES:
+        text = f"{stem} Image{dot}{extension}"
     return text[:150].rstrip(" .") or "image"
 
 

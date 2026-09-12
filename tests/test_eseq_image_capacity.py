@@ -23,7 +23,7 @@ def _capacity_window(session, variant="disklavier", generate=True):
         image_session=session, imageEseqMode=generate, imageEseqVariant=variant,
         imageHasPianodir=True, pendingImageDeletes=set(), pendingDeletePianodir=False,
         pendingImageReplacements={}, pendingImageAdditions={},
-        _should_generate_pianodir=lambda: generate,
+        _should_generate_pianodir=lambda **_kwargs: generate,
         _generated_eseq_directory_size=lambda count=None: 160 + (count or 0) * 48 if variant == "clavinova" else 6144,
         _image_entry_for_path=lambda _path: None,
     )
@@ -55,20 +55,21 @@ def test_capacity_matches_pruned_image_for_pending_conversions_and_additions(tmp
 
         output = session.create_modified_image(
             replacements=window.pendingImageReplacements, additions=window.pendingImageAdditions,
-            generate_pianodir=True, eseq_variant=variant,
+            generate_pianodir=True, eseq_variant=variant, clean_eseq_delivery=True,
         )
         prepared_listing = read_image_listing(output)
-        assert window._pending_image_space_remaining() == prepared_listing.free_space
-        assert window._pending_image_space_remaining() > 0
-        assert window._pending_image_used_bytes() == sum(entry.packed_size for entry in prepared_listing.entries)
+        assert window._pending_image_space_remaining(for_export=True) == prepared_listing.free_space
+        assert window._pending_image_space_remaining(for_export=True) > 0
+        assert window._pending_image_used_bytes(for_export=True) == sum(entry.packed_size for entry in prepared_listing.entries)
+        assert window._pending_image_space_remaining() < 0  # Ordinary Save retains the large unrelated files.
 
         extra = {"EXTRA": str(prepared), "EXTRA.FIL": str(sidecar)}
         output = session.create_modified_image(
             replacements=window.pendingImageReplacements,
             additions={**window.pendingImageAdditions, **extra},
-            generate_pianodir=True, eseq_variant=variant,
+            generate_pianodir=True, eseq_variant=variant, clean_eseq_delivery=True,
         )
-        assert window._pending_image_space_remaining(extra) == read_image_listing(output).free_space
+        assert window._pending_image_space_remaining(extra, for_export=True) == read_image_listing(output).free_space
     finally:
         session.cleanup()
 
@@ -119,5 +120,24 @@ def test_ordinary_mixed_capacity_still_counts_management_files(tmp_path):
         listing = session.list_entries()
         assert window._pending_image_used_bytes() == sum(entry.packed_size for entry in listing.entries)
         assert window._pending_image_space_remaining() == listing.free_space
+    finally:
+        session.cleanup()
+
+
+@pytest.mark.parametrize("variant", ("disklavier", "clavinova"))
+def test_in_place_capacity_matches_image_with_retained_unrelated_payloads(tmp_path, variant):
+    container = ESEQ_CONTAINER_CLAVINOVA_MDA if variant == "clavinova" else ESEQ_CONTAINER_DISKLAVIER
+    song = convert_midi_bytes_to_eseq_bytes(_midi(), container_variant=container)
+    image_path, _sources = _image(tmp_path, {
+        "SONG.FIL": song, "NOTES.TXT": bytes(16 * 1024), "PSONG.MNG": bytes(4096),
+        "PIANODIR.FIL": b"Disklavier catalog", "MUSIC.DIR": b"Clavinova catalog",
+    })
+    session = FloppyImageSession.load(str(image_path))
+    try:
+        window = _capacity_window(session, variant)
+        output = session.create_modified_image(generate_pianodir=True, eseq_variant=variant)
+        listing = read_image_listing(output)
+        assert window._pending_image_space_remaining() == listing.free_space
+        assert window._pending_image_used_bytes() == sum(entry.packed_size for entry in listing.entries)
     finally:
         session.cleanup()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from .pending_changes_translations import PENDING_CHANGE_MESSAGES
+from .review_prompt_translations import REVIEW_PROMPT_MESSAGES
 from .recovery_delivery_translations import RECOVERY_DELIVERY_TRANSLATIONS
 from .preparation_preview_translations import PREPARATION_PREVIEW_TRANSLATIONS
 
@@ -3020,6 +3021,21 @@ COMMON_TEXT_TRANSLATIONS.update(BULK_JOB_TRANSLATIONS)
 
 
 MESSAGES.update(PENDING_CHANGE_MESSAGES)
+MESSAGES.update(REVIEW_PROMPT_MESSAGES)
+MESSAGES["startup_config.error"] = {
+    "en": "The startup configuration could not be loaded. APS will use its saved settings. Correct the file and restart APS to try again.",
+    "es": "No se pudo cargar la configuración inicial. APS usará sus ajustes guardados. Corrija el archivo y reinicie APS para volver a intentarlo.",
+    "fr": "La configuration de démarrage n’a pas pu être chargée. APS utilisera ses paramètres enregistrés. Corrigez le fichier et redémarrez APS pour réessayer.",
+    "de": "Die Startkonfiguration konnte nicht geladen werden. APS verwendet die gespeicherten Einstellungen. Korrigieren Sie die Datei und starten Sie APS erneut.",
+    "it": "Impossibile caricare la configurazione iniziale. APS userà le impostazioni salvate. Correggere il file e riavviare APS per riprovare.",
+    "pt-BR": "Não foi possível carregar a configuração inicial. O APS usará as configurações salvas. Corrija o arquivo e reinicie o APS para tentar novamente.",
+    "bg": "Началната конфигурация не можа да бъде заредена. APS ще използва запазените настройки. Поправете файла и рестартирайте APS, за да опитате отново.",
+    "nl": "De opstartconfiguratie kon niet worden geladen. APS gebruikt de opgeslagen instellingen. Corrigeer het bestand en start APS opnieuw om het nogmaals te proberen.",
+    "pl": "Nie udało się wczytać konfiguracji początkowej. APS użyje zapisanych ustawień. Popraw plik i uruchom APS ponownie, aby spróbować jeszcze raz.",
+    "ja": "起動時の設定を読み込めませんでした。APS は保存済みの設定を使用します。ファイルを修正し、APS を再起動してください。",
+    "ko": "시작 설정을 불러올 수 없습니다. APS는 저장된 설정을 사용합니다. 파일을 수정한 후 APS를 다시 시작하세요.",
+    "zh-Hans": "无法加载启动配置。APS 将使用已保存的设置。请修正文件并重新启动 APS 以重试。",
+}
 TEXT_TO_MESSAGE_ID["Undo"] = "pending.undo"
 TEXT_TO_MESSAGE_ID["Undo All"] = "pending.undo_all"
 TEXT_TO_MESSAGE_ID["Review Changes"] = "pending.review"

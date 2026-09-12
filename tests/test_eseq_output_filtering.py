@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app.eseq_converter import (
-    convert_midi_bytes_to_eseq_bytes, parse_eseq_bytes,
+    ESEQ_CONTAINER_CLAVINOVA_MDA, convert_midi_bytes_to_eseq_bytes, parse_eseq_bytes,
 )
 from aps_midi_prep_tool_app.eseq_pianodir import (
     PIANODIR_COUNT_OFFSET, PIANODIR_HEADER, PIANODIR_TRACK_SIZE,
@@ -84,7 +84,7 @@ def _export(window, tmp_path, route):
     if route == "image_to_image":
         paths = window.image_session.export_to_images(
             str(destination / "saved.img"), "img", DISK_FORMAT_BY_KEY["ibm.720"],
-            **window._collect_current_image_write_operations(),
+            **window._collect_current_image_write_operations(for_export=True),
         )
         assert paths == [str(destination / "saved.img")]
         saved = FloppyImageSession.load(paths[0])
@@ -208,7 +208,8 @@ def test_unchanged_native_album_refreshes_populated_catalog_to_exclude_non_songs
     originals = _load(window, tmp_path, files, route)
     assert window.imageHasPianodir and window.imagePianodirPopulated
     assert not window.pendingImageReplacements and not window.pendingImageDeletes
-    assert window._should_generate_pianodir()
+    assert not window._should_generate_pianodir()
+    assert window._should_generate_pianodir(for_export=True)
 
     output = _export(window, tmp_path, route)
 
@@ -217,6 +218,64 @@ def test_unchanged_native_album_refreshes_populated_catalog_to_exclude_non_songs
     assert parse_pianodir_metadata(output["PIANODIR.FIL"]) == parse_pianodir_metadata(catalog)
     assert parse_eseq_bytes(output["EXTLESS"]) == parse_eseq_bytes(song)
     assert catalog_source.read_bytes() == song
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+def test_ordinary_save_of_edited_eseq_image_preserves_unrelated_files(window, tmp_path, monkeypatch):
+    song = convert_midi_bytes_to_eseq_bytes(_song("Original title", 60))
+    catalog_source = tmp_path / "catalog-source"
+    catalog_source.write_bytes(song)
+    catalog = build_pianodir_bytes([PianodirTrackEntry("SONG.FIL", str(catalog_source), "Original title")])
+    unrelated = {
+        "NOTES.TXT": b"Original disk notes must not be destroyed",
+        "PSONG.MNG": _psong_bytes([("UNUSED.MID", "Unused title")]),
+        "PDISK.MNG": _pdisk_bytes("Original album"),
+        "UNUSED.MID": _song("Unrelated MIDI", 64),
+        "JUNK.FIL": b"Not an E-SEQ performance",
+        "OTHER.MDA": convert_midi_bytes_to_eseq_bytes(
+            _song("Opposite variant", 67), container_variant=ESEQ_CONTAINER_CLAVINOVA_MDA,
+        ),
+        "MUSIC.DIR": b"Opposite variant catalog",
+    }
+    _load(window, tmp_path, {"SONG.FIL": song, "PIANODIR.FIL": catalog, **unrelated}, "image_to_image")
+    assert not window._should_generate_pianodir()
+    window.toggle_original_write_protection(False)
+    row = next(row for row in range(window.table.rowCount()) if window.table.item(row, 1).text() == "SONG.FIL")
+    monkeypatch.setattr(window, "_prompt_for_title", lambda *_args, **_kwargs: ("Edited title", True))
+    window.edit_image_title(row)
+    assert window.pendingImageTitleEdits == {"SONG.FIL": "Edited title"}
+    assert not window.pendingImageDeletes
+
+    window.fileSaveAction.trigger()
+
+    saved = FloppyImageSession.load(str(tmp_path / "original.img"))
+    try:
+        for name, contents in unrelated.items():
+            assert Path(saved.extract_file(name)).read_bytes() == contents, name
+        assert parse_eseq_bytes(Path(saved.extract_file("SONG.FIL")).read_bytes()).title == "Edited title"
+        assert _catalog_tracks(Path(saved.extract_file("PIANODIR.FIL")).read_bytes()) == [("SONG.FIL", "Edited title")]
+        assert not window.pendingImageTitleEdits
+        assert not window._should_generate_pianodir()
+    finally:
+        saved.cleanup()
+
+
+@pytest.mark.parametrize("route", ("image_to_folder", "image_to_image"))
+def test_unchanged_export_excludes_opposite_variant_even_without_sidecars(window, tmp_path, route):
+    song = convert_midi_bytes_to_eseq_bytes(_song("Native song", 60))
+    catalog_source = tmp_path / "catalog-source"
+    catalog_source.write_bytes(song)
+    catalog = build_pianodir_bytes([PianodirTrackEntry("SONG.FIL", str(catalog_source), "Native song")])
+    originals = _load(window, tmp_path, {
+        "SONG.FIL": song, "PIANODIR.FIL": catalog,
+        "OTHER.FIL": convert_midi_bytes_to_eseq_bytes(
+            _song("Other variant", 67), container_variant=ESEQ_CONTAINER_CLAVINOVA_MDA,
+        ),
+    }, route)
+    assert not window._should_generate_pianodir()
+    output = _export(window, tmp_path, route)
+    assert set(output) == {"SONG.FIL", "PIANODIR.FIL"}
+    assert _catalog_tracks(output["PIANODIR.FIL"]) == [("SONG.FIL", "Native song")]
     assert {path: path.read_bytes() for path in originals} == originals
 
 

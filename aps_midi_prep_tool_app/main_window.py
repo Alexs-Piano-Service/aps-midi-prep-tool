@@ -8969,6 +8969,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     SETTING_RECOVERY_IMAGE_FORMAT = "disk_recovery_image_format"
     SETTING_RECOVERY_FLOPPY_FORMAT = "disk_recovery_floppy_format"
     SETTING_SAVE_AS_LOCATION = "save_as_location"
+    SETTING_OPEN_FOLDER_LOCATION = "open_folder_location"
+    SETTING_OPEN_IMAGE_LOCATION = "open_image_location"
     SETTING_BULK_EXTRACTION_SOURCE = "bulk_extraction_source"
     SETTING_BULK_EXTRACTION_OUTPUT = "bulk_extraction_output"
     SETTING_BULK_EXTRACTION_CONVERT_ESEQ = "bulk_extraction_convert_eseq"
@@ -9058,7 +9060,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._controlPanelLayoutPairs.append((panel_layout, grid_layout))
         return grid_layout
 
-    def __init__(self):
+    def __init__(self, *, initial_settings=None):
         super().__init__()
         install_tooltip_delay_style()
         self.setWindowTitle(APP_NAME)
@@ -9161,6 +9163,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 self.settings.remove(SETTING_DISK_FORMAT)
         if profile.song_format and medium.key in {"nalbantov", "flashfloppy_img", "flashfloppy_hfe"}:
             self.settings.setValue("emulator_image_starting_number", 0)
+        self._reset_user_hide_choices_if_needed()
+        self._reset_gw_sector_report_hide_choices_if_needed()
+        # Deployment choices take precedence over migrations, including the
+        # first-run resets of remembered dialogs and emulator numbering.
+        if initial_settings:
+            from .startup_config import apply_startup_config
+
+            apply_startup_config(self.settings, initial_settings)
         self.currentLanguage = normalize_language_code(
             self.settings.value(self.SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
         )
@@ -9179,8 +9189,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.settings.value(self.SETTING_FONT_SCALE, "regular") or "regular"
         )
         self._apply_font_scale(self.currentFontScale, persist=False, refresh=False)
-        self._reset_user_hide_choices_if_needed()
-        self._reset_gw_sector_report_hide_choices_if_needed()
         self._shownGwSectorReportFingerprints = set()
         self._did_apply_initial_column_sizing = False
         self._is_adjusting_columns = False
@@ -10068,6 +10076,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._refresh_translated_ui()
         if self._preparation_profile().song_format == "eseq":
             self._refresh_regular_pianodir_row()
+        from .review_prompt import ReviewPrompt
+
+        self.reviewPrompt = ReviewPrompt(self.settings, self)
         self._log_event(
             "Application",
             "Started",
@@ -13275,6 +13286,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return True
 
     def _on_disk_load_success(self, session, listing):
+        read_kind = self.diskLoadContext.get("load_kind", "")
         if self.diskLoadProgressDialog is not None:
             self.diskLoadProgressDialog.close()
             self.diskLoadProgressDialog = None
@@ -13293,6 +13305,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     "The PianoDisc System 3 image was recognized, but its songs could not be opened",
                     exc,
                 )
+            else:
+                self.reviewPrompt.record_successful_read(read_kind)
             return
 
         should_offer_capture = bool(self.diskLoadShouldOfferCapture)
@@ -13335,6 +13349,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             QTimer.singleShot(0, self._convert_loaded_floppy_to_midi_after_read)
         else:
             QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
+        self.reviewPrompt.record_successful_read(read_kind)
 
     def _open_pianodisc_system3_session_as_midi(self, session, listing):
         source_name = getattr(session, "source_name", "") or os.path.basename(
@@ -15190,6 +15205,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             )
             return
 
+        self.reviewPrompt.record_successful_read("floppy_gw")
         drive_name = gw_source.drive.lower()
         default_path = os.path.join(
             os.path.expanduser("~"),
@@ -15815,6 +15831,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return True
 
     def _on_disk_recovery_success(self, session, listing):
+        read_kind = self.diskRecoveryContext.get("load_kind", "")
         if self.diskRecoveryProgressDialog is not None:
             self.diskRecoveryProgressDialog.close()
             self.diskRecoveryProgressDialog = None
@@ -15866,6 +15883,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             QTimer.singleShot(0, self._convert_loaded_floppy_to_midi_after_read)
         else:
             QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
+        self.reviewPrompt.record_successful_read(read_kind)
 
     def _on_disk_recovery_failure(self, message):
         if self.diskRecoveryProgressDialog is not None:
@@ -16539,6 +16557,26 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return "keep", do_all
 
     def closeEvent(self, event):
+        if self._disk_worker_busy():
+            # Keep the event loop, sessions and bundled executables alive until
+            # cancellation has returned and the worker's finished slot ran.
+            event.ignore()
+            for name in (
+                "diskLoadWorker", "diskRecoveryWorker", "diskFormatWorker",
+                "diskCommitWorker", "diskWriteTargetWorker", "diskImageCaptureWorker",
+                "bulkExtractionWorker", "emulatorImageWorker",
+            ):
+                worker = getattr(self, name, None)
+                if worker is not None:
+                    worker.cancel()
+            QMessageBox.information(
+                self,
+                "Stopping Disk Work",
+                "APS is stopping the current disk operation. Please wait for it to finish, "
+                "then close APS again. Windows may need a little time to release the drive.\n\n"
+                "Temporary working files will be cleaned up after disk work has stopped.",
+            )
+            return
         if self.is_image_mode() and not self._confirm_discard_image_changes():
             event.ignore()
             return
@@ -18484,11 +18522,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _save_as_image_album_subfolder_note(self, selected_output_path, output_path):
         if not self._image_album_subfolder_enabled():
             return ""
-        selected_dir = os.path.normcase(
-            os.path.abspath(os.path.dirname(selected_output_path))
-        )
-        output_dir = os.path.normcase(os.path.abspath(os.path.dirname(output_path)))
-        if selected_dir != output_dir:
+        selected_dir = os.path.abspath(os.path.dirname(selected_output_path))
+        output_dir = os.path.abspath(os.path.dirname(output_path))
+        if os.path.normcase(selected_dir) != os.path.normcase(output_dir):
             return self._t(
                 "save_as_image.album_subfolder.saved_note",
                 folder=os.path.basename(os.path.normpath(output_dir)),
@@ -19428,7 +19464,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if not active_paths:
             return False
         target_name = self._eseq_directory_filename(self.imageEseqVariant).upper()
-        return active_paths != {target_name}
+        # The opposite variant's catalog may be unrelated data that an
+        # ordinary save must retain. Its presence alone is not a pending edit.
+        return target_name not in active_paths
 
     def _image_pianodir_needs_refresh(self):
         if not self.imageEseqMode or not self.imageHasPianodir or self.pendingDeletePianodir:
@@ -20581,8 +20619,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             source_path = path_item.text()
             if self._is_special_pianodir_path(source_path) or source_path in self.pendingImageDeletes:
                 continue
-            if self.imageEseqMode and self._image_path_title_mode(source_path) != "eseq":
-                continue
+            if self.imageEseqMode:
+                if self._image_path_title_mode(source_path) != "eseq":
+                    continue
+                host_path = self._pending_or_extracted_image_path(source_path)
+                if not host_path or not os.path.isfile(host_path):
+                    raise FloppyImageError(f"Source file could not be found for export: {source_path}")
+                if is_clavinova_mda_file(host_path) != (self.imageEseqVariant == ESEQ_VARIANT_CLAVINOVA):
+                    continue
             export_rows.append((row, source_path))
 
         generate_pianodir = self._should_generate_pianodir(for_export=True)
@@ -22722,7 +22766,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.diskFormatWorker.deleteLater()
             self.diskFormatWorker = None
 
-    def _collect_current_image_write_operations(self):
+    def _collect_current_image_write_operations(self, *, for_export=False):
         renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
         return {
             "renames": renames,
@@ -22732,7 +22776,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             "title_edits": title_edits,
             "order_key_edits": self._image_eseq_order_key_edits(),
             "pianodir_metadata": self._image_pianodir_metadata_for_save(),
-            "generate_pianodir": self._should_generate_pianodir(),
+            "generate_pianodir": self._should_generate_pianodir(for_export=for_export),
             "eseq_variant": self.imageEseqVariant,
             "eseq_directory_order": self._image_eseq_directory_order(),
             "delete_pianodir": delete_pianodir,
@@ -23436,7 +23480,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
     def open_image_dialog(self):
         filters = self._image_open_filters()
-        default_path = os.path.expanduser("~")
+        default_path = self._existing_directory_for_dialog_path(
+            self.settings.value(self.SETTING_OPEN_IMAGE_LOCATION, "")
+        ) or os.path.expanduser("~")
         image_path, _ = QFileDialog.getOpenFileName(
             self,
             self._lt("Open Floppy Image"),
@@ -23445,6 +23491,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         if not image_path:
             return
+        self.settings.setValue(self.SETTING_OPEN_IMAGE_LOCATION, os.path.dirname(image_path))
         self.load_image_file(image_path)
 
     def recover_damaged_image_dialog(self):
@@ -23912,6 +23959,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 ]
             )
 
+        self.reviewPrompt.record_successful_read(source_kind)
+
     def _on_floppy_image_capture_failure(self, message):
         if self.diskImageCaptureProgressDialog is not None:
             self.diskImageCaptureProgressDialog.close()
@@ -24069,7 +24118,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             ]
         )
 
-        if any(
+        if not self.imageHasPianodir and any(
             spec.get("title_mode") == "eseq"
             and os.path.splitext(spec.get("filename", ""))[1].lower() == ".mda"
             for spec in row_specs
@@ -24464,8 +24513,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 return
             leaving_image_mode = True
 
-        directory = QFileDialog.getExistingDirectory(self, self._lt("Open MIDI Folder"))
+        default_path = self._existing_directory_for_dialog_path(
+            self.settings.value(self.SETTING_OPEN_FOLDER_LOCATION, "")
+        )
+        directory = QFileDialog.getExistingDirectory(
+            self, self._lt("Open MIDI Folder"), default_path,
+        )
         if directory:
+            self.settings.setValue(self.SETTING_OPEN_FOLDER_LOCATION, directory)
             self._log_event("Folder", "Open requested", path=directory)
             if leaving_image_mode:
                 self._reset_image_state()
@@ -27314,16 +27369,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if self.pendingGeneratePianodir:
                 return True
             return self._regular_pianodir_needs_refresh(for_export=for_export)
-        if self.imageEseqMode and not self.pendingDeletePianodir and self._image_eseq_rows():
-            if any(
-                info.get("title_mode") != "eseq"
-                and path not in self.pendingImageDeletes
-                and not is_eseq_directory_path(path)
-                for path, info in self.imageFileInfo.items()
-            ):
-                # Rebuild the delivered set even when its existing catalog is
-                # populated, so unrelated payloads are excluded from image saves.
-                return True
+        if for_export and self.imageEseqMode and not self.pendingDeletePianodir and self._image_eseq_rows():
+            # Exports rebuild the matching catalog and select delivery payloads
+            # by content, including opposite variants with song-like filenames.
+            return True
         return self.imageEseqMode and (
             self._image_pianodir_needs_refresh()
             or self.pendingGeneratePianodir
@@ -27973,13 +28022,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 return unique_candidate
         raise ValueError(f"Could not create a unique filename for {filename}.")
 
-    def _pending_eseq_image_used_bytes(self, listing, extra_additions=None):
+    def _pending_eseq_image_used_bytes(self, listing, extra_additions=None, *, for_export=False):
         additions = dict(self.pendingImageAdditions)
         additions.update(extra_additions or {})
         cluster_size = listing.cluster_size
         is_clavinova = self.imageEseqVariant == ESEQ_VARIANT_CLAVINOVA
+        directory_name = "MUSIC.DIR" if is_clavinova else PIANODIR_FILENAME
 
-        def prepared_size(host_path, fallback_size=0):
+        def prepared_payload(host_path, fallback_size=0):
             size = fallback_size
             try:
                 size = allocated_size(os.path.getsize(host_path), cluster_size)
@@ -27987,17 +28037,22 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 with open(host_path, "rb") as handle:
                     handle.read(1)
             except OSError:
-                return size
-            if not is_eseq_file(host_path) or not has_eseq_title_metadata(host_path):
-                return 0
-            if is_clavinova_mda_file(host_path) != is_clavinova:
-                return 0
-            return size
+                return size, True
+            is_song = (
+                is_eseq_file(host_path) and has_eseq_title_metadata(host_path)
+                and is_clavinova_mda_file(host_path) == is_clavinova
+            )
+            return (size if is_song or not for_export else 0), is_song
+
+        def replaces_catalog(path):
+            if for_export:
+                return is_eseq_directory_path(path)
+            return os.path.basename(path).upper() == directory_name
 
         used = 0
         song_count = 0
         for entry in listing.entries:
-            if is_eseq_directory_path(entry.path):
+            if replaces_catalog(entry.path):
                 additions.pop(entry.path, None)
                 continue
             if entry.path in self.pendingImageDeletes and entry.path not in additions:
@@ -28011,19 +28066,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     used += old_size
                     song_count += 1
                     continue
-            size = prepared_size(host_path, old_size)
+            size, is_song = prepared_payload(host_path, old_size)
             used += size
-            song_count += bool(size)
+            song_count += is_song
 
         for image_path, host_path in additions.items():
-            if is_eseq_directory_path(image_path):
+            if replaces_catalog(image_path):
                 continue
-            size = prepared_size(host_path)
+            size, is_song = prepared_payload(host_path)
             used += size
-            song_count += bool(size)
+            song_count += is_song
         return used + allocated_size(self._generated_eseq_directory_size(song_count), cluster_size)
 
-    def _pending_image_space_remaining(self, extra_additions=None):
+    def _pending_image_space_remaining(self, extra_additions=None, *, for_export=False):
         if self.image_session is None:
             return 0
         listing = self.image_session.list_entries()
@@ -28031,12 +28086,18 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         cluster_size = listing.cluster_size
         free_space = listing.free_space
 
-        if self.imageEseqMode and self._should_generate_pianodir():
+        generate_pianodir = self.imageEseqMode and (
+            self._should_generate_pianodir(for_export=True)
+            if for_export else self._should_generate_pianodir()
+        )
+        if self.imageEseqMode and generate_pianodir:
             existing_used = sum(
                 entry.packed_size or allocated_size(entry.size, cluster_size)
                 for entry in listing.entries
             )
-            return free_space + existing_used - self._pending_eseq_image_used_bytes(listing, extra_additions)
+            return free_space + existing_used - self._pending_eseq_image_used_bytes(
+                listing, extra_additions, for_export=for_export,
+            )
 
         freed = 0
         for image_path in self.pendingImageDeletes:
@@ -28073,13 +28134,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         return free_space + freed - used - replacement_delta
 
-    def _pending_image_used_bytes(self):
+    def _pending_image_used_bytes(self, *, for_export=False):
         if self.image_session is None:
             return 0
 
         listing = self.image_session.list_entries()
-        if self.imageEseqMode and self._should_generate_pianodir():
-            return self._pending_eseq_image_used_bytes(listing)
+        if self.imageEseqMode and (
+            self._should_generate_pianodir(for_export=True)
+            if for_export else self._should_generate_pianodir()
+        ):
+            return self._pending_eseq_image_used_bytes(listing, for_export=for_export)
         cluster_size = listing.cluster_size
         used = 0
 
@@ -29847,7 +29911,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
         if not self._ensure_pianodir_generation_for_save():
             return
-        if self._pending_image_space_remaining() < 0:
+        if self._pending_image_space_remaining(for_export=True) < 0:
             QMessageBox.warning(
                 self,
                 "Image Is Full",
@@ -29924,7 +29988,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 title_edits=title_edits,
                 order_key_edits=order_key_edits,
                 pianodir_metadata=self._image_pianodir_metadata_for_save(),
-                generate_pianodir=self._should_generate_pianodir(),
+                generate_pianodir=self._should_generate_pianodir(for_export=True),
                 eseq_variant=self.imageEseqVariant,
                 eseq_directory_order=self._image_eseq_directory_order(),
                 delete_pianodir=delete_pianodir,

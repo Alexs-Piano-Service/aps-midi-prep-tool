@@ -35,6 +35,17 @@ $PyInstallerArgs = @(
     "--manifest", (Join-Path $RepoRoot "manifests\main_as_invoker.xml")
 )
 
+# Image creation must work on a recipient's PC without a separate mtools install.
+# PyInstaller also collects the DLL dependencies of these executables.
+foreach ($ToolName in @("mformat", "mcopy", "mdir", "mdel", "mren")) {
+    $BundledTool = Join-Path $RepoRoot "aps_midi_prep_tool_app\bin\mtools\$ToolName.exe"
+    $ToolPath = if (Test-Path $BundledTool) { $BundledTool } else {
+        Resolve-Executable -ExplicitPath "" -CommandName "$ToolName.exe"
+    }
+    if (-not $ToolPath) { throw "mtools is required for the Windows bundle: $ToolName.exe was not found." }
+    $PyInstallerArgs += @("--add-binary", "$ToolPath;aps_midi_prep_tool_app\bin\mtools")
+}
+
 $GreaseweazleExe = Join-Path $RepoRoot "aps_midi_prep_tool_app\bin\greaseweazle\gw.exe"
 if (Test-Path $GreaseweazleExe) {
     $PyInstallerArgs += @(
