@@ -1073,7 +1073,7 @@ def test_folder_albums_keep_root_nested_and_sibling_songs_separate(
             assert metadata.catalog_number == f"DSKB-{index:04d}"
     song_list = Path(result.song_list_path).read_text(encoding="utf-8")
     assert "Folder: Collection" in song_list
-    assert f"Folder: {Path('DSKA002') / 'Bonus'}" in song_list
+    assert "Folder: DSKA002/Bonus" in song_list
     assert "Album: DSKA002" in song_list
     sections = song_list.split("\nImage ")[1:]
     assert len(sections) == result.images_created
@@ -1255,7 +1255,7 @@ def test_recursive_fill_song_list_keeps_source_albums_in_shuffled_image_order(
             f"{track}. {title}" for track, title in enumerate(titles, 1)
         ]
     assert text.count("Source album: Album 1\n") == 2
-    assert f"Source album: {Path('Nested') / 'Album 2'}\n2. Nested title\n" in text
+    assert "Source album: Nested/Album 2\n2. Nested title\n" in text
     assert text.index("First title") < text.index("Nested title") < text.index("Second title")
     assert list(output.glob("*.txt")) == [Path(result.song_list_path)]
 

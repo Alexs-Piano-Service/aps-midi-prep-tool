@@ -36,7 +36,8 @@ with release sections grouped by version and date.
 
 - CI and Windows release builds use the MSYS2 action's actual installation
   directory to locate mtools. Linux CI installs the PulseAudio library needed
-  to import Qt Multimedia before collecting tests.
+  to import Qt Multimedia before collecting tests. Both platforms install
+  Greaseweazle before running the existing HFE regression cases.
 
 - Windows image preparation now finds tools in nested bundled directories and
   uses that same lookup for extraction fallback. Windows build scripts bundle
