@@ -14,9 +14,9 @@ MTOOLS = ("mformat", "mcopy", "mdir", "mdel", "mren")
 
 
 def pytest_addoption(parser):
-    group = parser.getgroup("Windows image tests")
+    group = parser.getgroup("Windows integration tests")
     group.addoption("--windows-require-tools", action="store_true",
-                    help="Fail instead of skipping when real mtools/Greaseweazle are missing.")
+                    help="Fail instead of skipping when real mtools/Greaseweazle/staged LAME are missing.")
 
 
 def pytest_collection_modifyitems(items):

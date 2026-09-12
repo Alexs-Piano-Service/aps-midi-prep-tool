@@ -45,12 +45,14 @@ jobs:
         shell: pwsh
         run: python -m pip install -r requirements-test.txt
 
-      - name: Install image tools for regression tests
+      - name: Install image tools and MP3 encoder
         id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          install: mingw-w64-ucrt-x86_64-mtools
+          install: >-
+            mingw-w64-ucrt-x86_64-mtools
+            mingw-w64-ucrt-x86_64-lame
 
       - name: Expose image tools to Python
         shell: pwsh
@@ -63,6 +65,12 @@ jobs:
             if (!(Test-Path -LiteralPath $toolPath)) { throw "Missing Windows image tool: $toolPath" }
           }
           Add-Content $env:GITHUB_PATH $toolDirectory
+
+      - name: Stage MP3 encoder
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: ./scripts/stage_windows_lame.ps1 -SourceDirectory (Join-Path $env:MSYS2_LOCATION 'ucrt64/bin') -Destination "$env:RUNNER_TEMP/aps-lame"
 
       - name: Install HFE test dependency
         shell: pwsh
@@ -78,7 +86,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q --ignore=tests/windows
 
-      - name: Run native Windows image and process tests
+      - name: Run native Windows image, audio, and process tests
         run: python -m pytest -q tests/windows --windows-require-tools
 
       - name: Build portable Windows manual test kit
@@ -87,13 +95,6 @@ jobs:
       - name: Archive portable Windows manual test kit
         shell: pwsh
         run: Compress-Archive -Path dist/windows-test-kit/* -DestinationPath dist/windows-test-kit.zip
-
-      - name: Install LAME
-        shell: pwsh
-        run: |
-          choco install lame -y --no-progress
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-          lame --version
 
       - name: Build Windows EXE
         shell: pwsh
@@ -114,13 +115,10 @@ jobs:
           $gwDirectory = $env:APS_WINDOWS_GW_DIR
           if (!(Test-Path -LiteralPath (Join-Path $gwDirectory 'gw.exe'))) { throw 'Standalone Greaseweazle is missing.' }
           $pyInstallerArgs += @("--add-data", "$gwDirectory;aps_midi_prep_tool_app/bin/greaseweazle")
-          $lameExe = (Get-Command lame.exe -ErrorAction SilentlyContinue).Source
-          if (-not $lameExe) {
-            $lameExe = Get-ChildItem "$env:ChocolateyInstall/lib/lame/tools" -Recurse -Filter lame.exe -ErrorAction SilentlyContinue |
-              Select-Object -First 1 -ExpandProperty FullName
-          }
-          if (-not $lameExe) { throw "LAME was not found after installation." }
-          $pyInstallerArgs += @("--add-binary", "$lameExe;bin")
+          # Package the exact encoder/DLL bundle exercised by native Windows CI.
+          $lameDirectory = $env:APS_WINDOWS_LAME_DIR
+          if (!(Test-Path -LiteralPath (Join-Path $lameDirectory 'lame.exe'))) { throw 'Staged LAME is missing.' }
+          $pyInstallerArgs += @("--add-data", "$lameDirectory;bin")
           pyinstaller @pyInstallerArgs aps_midi_prep_tool.py
 
       - name: Require Windows EXE

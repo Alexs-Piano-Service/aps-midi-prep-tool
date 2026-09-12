@@ -78,9 +78,12 @@ on overflow; round-trip song loss; or recurring temporary-file cleanup errors.
 ## Developer automation
 
 On a Windows development machine, install `requirements-test.txt`, native mtools,
-and the Greaseweazle CLI. Run from the repository root:
+the Greaseweazle CLI, and MSYS2's `mingw-w64-ucrt-x86_64-lame` package. Stage
+the encoder from your MSYS2 installation, then run from the repository root:
 
 ```powershell
+./scripts/stage_windows_lame.ps1 -SourceDirectory C:/msys64/ucrt64/bin -Destination "$env:TEMP/aps-lame"
+$env:APS_WINDOWS_LAME_DIR = "$env:TEMP/aps-lame"
 python -m pytest -q tests/windows --windows-require-tools --junitxml=test-results/windows.xml
 python -m pytest -q --ignore=tests/windows
 python -m scripts.build_windows_test_kit --output dist/windows-test-kit
@@ -93,9 +96,14 @@ temporary bundle layout and removed from PATH during tests. With GW_DIR set,
 the complete Greaseweazle folder is copied too. Otherwise HFE integration uses
 the absolute path of an installed CLI. CI downloads the official standalone
 Greaseweazle 1.23 Windows archive, checks its pinned SHA-256, and uses GW_DIR.
+CI and release builds install LAME through MSYS2 and stage its EXE, runtime DLLs,
+and documentation with the same script. The audio test copies that bundle to a
+path containing spaces and an accented character, removes MSYS2 from PATH, and
+uses the application's export function to encode a real WAV file as MP3. The
+release packages the tested directory at `bin` inside the frozen application.
 These tests exercise source code, not a frozen APS executable.
 
-On Windows the strict option makes missing image tools fail. Without it,
+On Windows the strict option makes missing image tools or staged LAME fail. Without it,
 tool-dependent cases explicitly skip; native handle/process tests still run.
 On other platforms the Windows directory skips. Existing cross-platform tests
 continue to cover catalog reconstruction, retained recovery diagnostics, GUI
