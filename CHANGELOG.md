@@ -31,6 +31,10 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- In-place rename rollback preserves every original in filename chains and
+  swaps, and retains recovery copies with a path manifest if restoration fails.
+  Rename-helper backups use unique names and exclusive creation to protect
+  selected sources, planned outputs, and existing backups from being overwritten.
 - Emulator image set names sanitize Windows device names such as CON, AUX,
   COM1, and names with extensions such as CON.mid before creating output folders.
 - Bulk extraction and emulator image sets share the Windows device-name check,
