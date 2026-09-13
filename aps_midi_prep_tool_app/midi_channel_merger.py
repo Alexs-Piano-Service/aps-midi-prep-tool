@@ -2,6 +2,7 @@ import os
 import uuid
 
 from .midi_type0_converter import (
+    MIDI_ALL_SOUND_OFF_CONTROLLER,
     MIDI_BANK_SELECT_CONTROLLERS,
     MIDI_CHANNEL_MODE_CONTROLLERS,
     _build_raw_midi_track,
@@ -109,7 +110,7 @@ def _merge_track_events(events):
 
         if message_type == 0xB0 and raw[1] in (
             MIDI_BANK_SELECT_CONTROLLERS | MIDI_CHANNEL_MODE_CONTROLLERS
-        ):
+        ) - {MIDI_ALL_SOUND_OFF_CONTROLLER}:
             changed = True
             continue
         if message_type == 0xC0:
@@ -147,7 +148,7 @@ def _is_canonical_channel_merge(format_type, tracks):
                 has_notes = True
             if message_type == 0xB0 and raw[1] in (
                 MIDI_BANK_SELECT_CONTROLLERS | MIDI_CHANNEL_MODE_CONTROLLERS
-            ):
+            ) - {MIDI_ALL_SOUND_OFF_CONTROLLER}:
                 return False
             if message_type == 0xC0:
                 program_events.append((track_index, abs_tick, order, raw))

@@ -8,6 +8,19 @@ def _translations(*values):
 
 
 CONVERSION_REPORT_TRANSLATIONS = {
+    "All Sound Off (CC120) commands were removed; immediate muting may be lost.": _translations(
+        "Se eliminaron comandos All Sound Off (CC120); puede perderse el silenciamiento inmediato.",
+        "Des commandes All Sound Off (CC120) ont été supprimées ; la coupure immédiate du son peut être perdue.",
+        "All Sound Off-Befehle (CC120) wurden entfernt; die sofortige Stummschaltung kann dadurch verloren gehen.",
+        "Sono stati rimossi comandi All Sound Off (CC120); il silenziamento immediato potrebbe andare perso.",
+        "Comandos All Sound Off (CC120) foram removidos; o silenciamento imediato pode ser perdido.",
+        "Команди All Sound Off (CC120) бяха премахнати; незабавното заглушаване може да се загуби.",
+        "All Sound Off-opdrachten (CC120) zijn verwijderd; het onmiddellijk dempen kan verloren gaan.",
+        "Usunięto komunikaty All Sound Off (CC120); natychmiastowe wyciszenie może zostać utracone.",
+        "All Sound Off（CC120）コマンドが削除されたため、音が即座に停止しなくなる可能性があります。",
+        "All Sound Off(CC120) 명령이 제거되어 소리가 즉시 음소거되지 않을 수 있습니다.",
+        "All Sound Off（CC120）命令已被移除，可能无法立即静音。",
+    ),
     "Yamaha pedals on {controllers}: {binary} on/off events added on channel 1; {duplicates} redundant continuous events omitted on channel 3.": _translations(
         "Pedales Yamaha en {controllers}: se añadieron {binary} eventos de activación/desactivación en el canal 1 y se omitieron {duplicates} eventos continuos redundantes en el canal 3.",
         "Pédales Yamaha sur {controllers} : {binary} événements d’activation/désactivation ajoutés sur le canal 1 ; {duplicates} événements continus redondants omis sur le canal 3.",

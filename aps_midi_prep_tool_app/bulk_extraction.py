@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from .bulk_extraction_job import ExtractionJob, serialized_extraction
 from .helpers.atomic_file import atomic_write_bytes
+from .helpers.portable_filename import is_windows_device_name
 
 from .eseq_converter import convert_eseq_file_to_midi_path, is_eseq_file
 from .eseq_pianodir import (
@@ -37,14 +38,6 @@ from .smart_pianosoft import (
 
 
 _INVALID_FOLDER_CHARS = '<>:"/\\|?*'
-_WINDOWS_RESERVED_NAMES = {
-    "CON",
-    "PRN",
-    "AUX",
-    "NUL",
-    *(f"COM{number}" for number in range(1, 10)),
-    *(f"LPT{number}" for number in range(1, 10)),
-}
 
 
 @dataclass(frozen=True)
@@ -98,7 +91,7 @@ def sanitize_output_folder_name(name, fallback="image"):
     if not text:
         text = str(fallback or "image").strip() or "image"
     stem, dot, extension = text.partition(".")
-    if stem.upper() in _WINDOWS_RESERVED_NAMES:
+    if is_windows_device_name(text):
         text = f"{stem} Image{dot}{extension}"
     return text[:150].rstrip(" .") or "image"
 

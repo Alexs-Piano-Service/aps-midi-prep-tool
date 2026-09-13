@@ -10,6 +10,7 @@ from aps_midi_prep_tool_app.eseq_converter import (
     count_eseq_zero_volume_candidates,
 )
 from aps_midi_prep_tool_app.midi_type0_converter import _encode_vlq
+from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translate_text
 from aps_midi_prep_tool_app.xf_stripper import strip_xf_from_midi_bytes
 
 
@@ -220,12 +221,30 @@ def test_report_serialization_keeps_legacy_timing_and_loads_previous_report_sche
     saved.pop("other_channel_payload_changed")
     for field in ("yamaha_pedal_controllers", "pedal_binary_events_added", "pedal_duplicate_events_removed", "expected_channel_events_changed"):
         saved.pop(field)
+    saved.pop("all_sound_off_removed")
     previous = ConversionReport.from_dict(saved)
 
     assert previous.legacy_timing is False
     assert previous.channel_payload_changed is None
+    assert previous.all_sound_off_removed is False
     assert previous.notes_changed and previous.channel_events_changed
     assert "message values are unchanged" not in previous.to_text()
+
+
+@pytest.mark.parametrize("code", [language.code for language in SUPPORTED_LANGUAGES])
+def test_report_explains_lost_all_sound_off_in_every_language(code):
+    before = _midi(_track([(0, b"\x90\x3c\x64"), (384, b"\xb0\x78\x00")], 384))
+    after = _midi(_track([(0, b"\x90\x3c\x64"), (384, b"\x80\x3c\x00")], 384))
+    report = compare_music_bytes(before, after)
+    source = "All Sound Off (CC120) commands were removed; immediate muting may be lost."
+
+    assert report.all_sound_off_removed
+    assert translate_text(source, code) in report.to_text(code)
+    if code != "en":
+        assert source not in report.to_text(code)
+    unchanged = compare_music_bytes(before, before)
+    assert not unchanged.all_sound_off_removed
+    assert translate_text(source, code) not in unchanged.to_text(code)
 
 
 def test_preserved_timing_is_not_described_as_mid2eseq_compatibility():

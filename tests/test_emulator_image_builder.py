@@ -179,7 +179,10 @@ def test_sanitizes_portable_image_set_names():
     assert sanitize_image_prefix("---") == "DSKA"
 
 
-@pytest.mark.parametrize("name", ["CON", "aux", "NUL", "PRN", "COM1", "LPT9", "CON.mid", "AUX.mid", "COM¹"])
+@pytest.mark.parametrize("name", [
+    "CON", "aux", "NUL", "PRN", "COM1", "LPT9", "CON.mid", "AUX.mid",
+    "COM¹", "COM².foo", "COM³", "LPT¹", "LPT²", "LPT³.album", "com².FOO", "CONIN$", "CONOUT$.txt",
+])
 def test_image_set_names_are_portable_windows_device_names(name):
     assert sanitize_image_set_name(name) == "_" + name
 

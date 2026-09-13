@@ -175,6 +175,18 @@ or muted preview channels. Use **Save** to write them or **Edit → Undo** to re
 **Utilities → Merge Channels to Piano...** applies the same merge to one song or
 all listed MIDI songs, including files being edited inside a disk image.
 
+Channel merging and Type 0 piano remapping translate All Notes Off (CC123) and
+the related mode commands (CC124–127) into note releases for their source parts.
+All Sound Off (CC120) instead requires an immediate mute, including sustained
+notes and release tails. APS retains CC120 when no other source part could still
+be sounding. Otherwise, it uses note releases as a lossy approximation and flags
+the removed CC120 in Conversion details; sustain or release tails may continue.
+Because MIDI does not specify a receiver's release duration, a part remains
+potentially sounding after its note-offs until a retained immediate mute or
+recognized system reset. Keep the original channels (including ordinary Type 0
+conversion without piano remapping) when exact source-specific CC120 behavior
+is required. See the [MIDI message definitions](https://midi.org/summary-of-midi-1-0-messages).
+
 Use **Utilities → Render Audio...** to create WAV or MP3 copies. SoundFont
 playback and rendering need optional tools listed below.
 

@@ -390,6 +390,18 @@ def test_sanitize_output_folder_name_is_portable():
     ("LPT1.foo", "LPT1 Image.foo"),
     ("con.TXT", "con Image.TXT"),
     ("PRN.one.two", "PRN Image.one.two"),
+    ("COM¹", "COM¹ Image"),
+    ("COM².foo", "COM² Image.foo"),
+    ("COM³", "COM³ Image"),
+    ("LPT¹", "LPT¹ Image"),
+    ("LPT²", "LPT² Image"),
+    ("LPT³.album", "LPT³ Image.album"),
+    ("com².FOO", "com² Image.FOO"),
+    ("CONIN$", "CONIN$ Image"),
+    ("CONOUT$.txt", "CONOUT$ Image.txt"),
+    ("COM0", "COM0"),
+    ("COM10", "COM10"),
+    ("COM⁴", "COM⁴"),
     ("Concert.txt", "Concert.txt"),
 ])
 def test_reserved_device_names_with_extensions_produce_creatable_folders(tmp_path, name, expected):

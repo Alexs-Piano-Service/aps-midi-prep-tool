@@ -27,7 +27,8 @@ VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE = 18
 VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY = 1
 MIDI_BANK_SELECT_CONTROLLERS = {0, 32}
 MIDI_CHANNEL_MODE_CONTROLLERS = set(range(120, 128))
-MIDI_NOTE_TERMINATION_CONTROLLERS = {120, 123, 124, 125, 126, 127}
+MIDI_ALL_SOUND_OFF_CONTROLLER = 120
+MIDI_NOTE_TERMINATION_CONTROLLERS = {123, 124, 125, 126, 127}
 SUSTAIN_PEDAL_CONTROLLER = 64
 SUSTAIN_PEDAL_ON_THRESHOLD = 64
 DEFAULT_MIDI_TEMPO_US = 500000
@@ -322,14 +323,16 @@ def _is_midi_system_reset(raw):
 def _expand_channel_note_terminations(events):
     """Prepare source note lifetimes before their channels are collapsed.
 
-    Keep every attack, but defer releases of an overlapping pitch until its
-    last source voice ends. Then balance every emitted Note On with a Note Off
-    for receivers that stack repeated notes. CC120 uses note releases because
-    a channel-wide immediate silence would also stop the other merged parts.
+    Keep every attack, but defer ordinary releases of an overlapping pitch
+    until its last source voice ends, balancing Note Ons with Note Offs for
+    receivers that stack repeated notes. Preserve CC120's immediate mute
+    only when no other source part could still sound. Otherwise approximate it
+    with note releases; conversion review flags the removed CC120 as lossy.
     """
     active_notes = Counter()
     active_pitches = Counter()
     deferred_releases = defaultdict(list)
+    possibly_sounding_channels = set()
     seen_notes = set()
     expanded = []
     changed = False
@@ -340,6 +343,18 @@ def _expand_channel_note_terminations(events):
             return []
         return deferred_releases.pop(pitch)
 
+    def release_channel(channel):
+        releases = []
+        for source_channel, note in sorted(active_notes):
+            if source_channel != channel:
+                continue
+            count = active_notes.pop((channel, note))
+            active_pitches[note] -= count
+            releases.extend(
+                release_pitch(note, [bytes([0x80 | channel, note, 0])] * count)
+            )
+        return releases
+
     for event in sorted(events, key=lambda item: item[:-1]):
         raw = event[-1]
         replacements = [raw]
@@ -347,6 +362,7 @@ def _expand_channel_note_terminations(events):
             active_notes.clear()
             active_pitches.clear()
             deferred_releases.clear()
+            possibly_sounding_channels.clear()
         elif len(raw) >= 3 and 0x80 <= raw[0] <= 0xEF:
             message_type = raw[0] & 0xF0
             channel = raw[0] & 0x0F
@@ -356,6 +372,9 @@ def _expand_channel_note_terminations(events):
                 active_notes[key] += 1
                 active_pitches[pitch] += 1
                 seen_notes.add(key)
+                # Neither Note Off nor pedal-up proves silence: a receiver's
+                # release envelope may continue for an unknown duration.
+                possibly_sounding_channels.add(channel)
             elif message_type in (0x80, 0x90):
                 if active_notes[key]:
                     active_notes[key] -= 1
@@ -367,16 +386,21 @@ def _expand_channel_note_terminations(events):
                     # A late individual release after All Notes Off must not
                     # release a different part that now owns this pitch.
                     replacements = []
+            elif message_type == 0xB0 and raw[1] == MIDI_ALL_SOUND_OFF_CONTROLLER:
+                if possibly_sounding_channels <= {channel}:
+                    # This real CC120 also ends sustained and releasing voices.
+                    # Keep it for the remapper and discard pending Note Offs.
+                    active_notes.clear()
+                    active_pitches.clear()
+                    deferred_releases.clear()
+                    possibly_sounding_channels.clear()
+                else:
+                    # A merged CC120 would immediately mute unrelated parts.
+                    # Releases are a lossy fallback, explicitly reported by
+                    # compare_music_bytes when it detects the missing CC120.
+                    replacements = release_channel(channel)
             elif message_type == 0xB0 and raw[1] in MIDI_NOTE_TERMINATION_CONTROLLERS:
-                replacements = []
-                for source_channel, note in sorted(active_notes):
-                    if source_channel != channel:
-                        continue
-                    count = active_notes.pop((channel, note))
-                    active_pitches[note] -= count
-                    replacements.extend(
-                        release_pitch(note, [bytes([0x80 | channel, note, 0])] * count)
-                    )
+                replacements = release_channel(channel)
 
         changed = changed or replacements != [raw]
         for replacement in replacements:
@@ -1366,10 +1390,12 @@ def _remap_merged_events_to_piano_channel0(merged_events):
                 first_note_track = track_index
             has_notes = True
 
-        # Once channels are combined, bank changes and channel-mode commands
-        # from one former part can change the instrument or silence every part.
+        # Only CC120 commands proven safe by the source-channel pass survive.
+        # Other channel modes or bank changes can affect unrelated parts.
         if message_type == 0xB0 and len(raw) >= 3:
-            if raw[1] in MIDI_BANK_SELECT_CONTROLLERS | MIDI_CHANNEL_MODE_CONTROLLERS:
+            if raw[1] in (
+                MIDI_BANK_SELECT_CONTROLLERS | MIDI_CHANNEL_MODE_CONTROLLERS
+            ) - {MIDI_ALL_SOUND_OFF_CONTROLLER}:
                 changed = True
                 continue
 

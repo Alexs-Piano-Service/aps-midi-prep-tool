@@ -33,6 +33,8 @@ with release sections grouped by version and date.
 
 - Emulator image set names sanitize Windows device names such as CON, AUX,
   COM1, and names with extensions such as CON.mid before creating output folders.
+- Bulk extraction and emulator image sets share the Windows device-name check,
+  including superscript COM¹–COM³ and LPT¹–LPT³ names with or without extensions.
 - Windows CI and signed release builds locate mtools using the MSYS2 setup
   action's actual installation directory. The dependency check reports each
   command's path and version, and identifies missing or unusable executables.
@@ -42,8 +44,11 @@ with release sections grouped by version and date.
   Windows tests compare the report's portable path separators and fully delete
   inspection dialogs between tests to avoid Qt shutdown crashes.
 - MIDI channel merging and Type 0 piano remapping preserve note endings from
-  channel-wide stop commands, including notes spread across Type 1 tracks and
-  overlapping pitches, without stopping unrelated parts.
+  All Notes Off and related mode commands, including notes spread across Type 1
+  tracks and overlapping pitches, without stopping unrelated parts.
+- All Sound Off (CC120) retains its immediate mute when no unrelated source
+  part could still sound. Otherwise, channel collapse uses note releases and
+  explicitly reports the lost immediate-mute behavior in Conversion details.
 - Pedal cleanup retains repeated presses after Reset All Controllers and
   recognized GM, GM2, GS, XG, and System Reset messages.
 - Windows image preparation now finds tools in nested bundled directories and

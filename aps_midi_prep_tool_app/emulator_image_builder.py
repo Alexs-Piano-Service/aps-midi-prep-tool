@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass, replace
 
 from .dos83_renamer import build_dos83_filename
+from .helpers.portable_filename import is_windows_device_name
 from .conversion_review import build_conversion_report
 from .eseq_converter import (
     ESEQ_TITLE_LENGTH,
@@ -237,10 +238,7 @@ def sanitize_image_set_name(name, fallback="Emulator Disks"):
     text = (text or fallback)[:120].rstrip(" .") or fallback
     # DOS device names remain reserved with an extension (for example CON.mid).
     # Apply the rule on every OS so exported sets also work when copied to Windows.
-    stem = text.split(".", 1)[0].rstrip(" ").upper()
-    if stem in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or re.fullmatch(
-        r"(?:COM|LPT)[1-9¹²³]", stem,
-    ):
+    if is_windows_device_name(text):
         text = "_" + text
     return text[:120].rstrip(" .")
 

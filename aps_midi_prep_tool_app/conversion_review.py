@@ -6,7 +6,13 @@ import re
 
 from .eseq_converter import ESEQ_MIDI_DIVISION, is_clavinova_mda_eseq_bytes, parse_eseq_bytes
 from .eseq_legacy import is_legacy_eseq_bytes
-from .midi_type0_converter import _MidiTimeMap, _encode_vlq, _parse_track_events, _parse_vlq
+from .midi_type0_converter import (
+    MIDI_ALL_SOUND_OFF_CONTROLLER,
+    _MidiTimeMap,
+    _encode_vlq,
+    _parse_track_events,
+    _parse_vlq,
+)
 from .message_catalog import translate_text
 
 
@@ -58,6 +64,7 @@ class ConversionReport:
     pedal_binary_events_added: int = 0
     pedal_duplicate_events_removed: int = 0
     expected_channel_events_changed: bool | None = None
+    all_sound_off_removed: bool = False
 
     def as_dict(self):
         return asdict(self)
@@ -86,6 +93,7 @@ class ConversionReport:
             int(data.get("pedal_binary_events_added", 0)),
             int(data.get("pedal_duplicate_events_removed", 0)),
             None if data.get("expected_channel_events_changed") is None else bool(data["expected_channel_events_changed"]),
+            bool(data.get("all_sound_off_removed", False)),
         )
 
     def to_text(self, language_code=None):
@@ -131,6 +139,8 @@ class ConversionReport:
             lines.append(tr("Note values, channels, or timing changed."))
         if self.pedals_changed:
             lines.append(tr("Pedal values, channels, or timing changed."))
+        if self.all_sound_off_removed:
+            lines.append(tr("All Sound Off (CC120) commands were removed; immediate muting may be lost."))
         if self.channel_events_changed:
             if self.expected_channel_events_changed is False:
                 lines.append(tr("MIDI channel events match the Yamaha pedal conversion and expected timing."))
@@ -414,6 +424,13 @@ def compare_music_bytes(before_bytes, after_bytes, *, tolerance_seconds=None):
     )
     if yamaha_pedals:
         expected_channels = Counter(raw for _, raw in yamaha_expected)
+
+    def all_sound_off_count(events):
+        return sum(
+            len(raw) >= 3 and (raw[0] & 0xF0) == 0xB0 and raw[1] == MIDI_ALL_SOUND_OFF_CONTROLLER
+            for _, raw in events
+        )
+
     return ConversionReport(
         before, after, dict(removed_labels),
         _events_changed(old_notes, new_notes, tolerance_seconds),
@@ -429,6 +446,7 @@ def compare_music_bytes(before_bytes, after_bytes, *, tolerance_seconds=None):
         pedal_binary_events_added=sum(pedal_counts[controller][0] for controller in yamaha_pedals),
         pedal_duplicate_events_removed=sum(pedal_counts[controller][1] for controller in yamaha_pedals),
         expected_channel_events_changed=expected_changed,
+        all_sound_off_removed=all_sound_off_count(old_channels) > all_sound_off_count(new_channels),
     )
 
 
