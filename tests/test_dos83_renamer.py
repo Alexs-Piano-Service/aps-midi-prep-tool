@@ -11,7 +11,8 @@ from aps_midi_prep_tool_app import dos83_renamer as renamer
 
 
 @pytest.fixture(autouse=True)
-def recovery_locations(monkeypatch):
+def recovery_locations(monkeypatch, tmp_path_factory):
+    monkeypatch.setenv("APS_MIDI_RENAME_RECOVERY_DIR", str(tmp_path_factory.mktemp("rename-recovery")))
     locations = []
     real_mkdtemp = renamer.tempfile.mkdtemp
 
@@ -140,7 +141,8 @@ def _assert_recovery(caught, originals, tmp_path):
     assert {Path(record["source"]): (recovery / record["original_file"]).read_bytes()
             for record in manifest["files"]} == originals
     # The live originals also survive at source, target, or staging paths.
-    live_bytes = [path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()]
+    live_bytes = [path.read_bytes() for path in tmp_path.rglob("*")
+                  if path.is_file() and path.read_bytes() != manifest["id"].encode("ascii")]
     assert sorted(live_bytes) == sorted(originals.values())
     assert all("target" in record and "temporary_path" in record for record in manifest["files"])
 

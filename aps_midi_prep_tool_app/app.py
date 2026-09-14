@@ -59,6 +59,7 @@ def main():
     from PySide6.QtWidgets import QApplication
 
     from .onboarding_dialog import show_first_time_dialog
+    from .rename_recovery_dialog import show_rename_recovery_dialogs
     from .console_log import install_console_capture
     from .main_window import MidiTitleWindow, install_tooltip_delay_style
     from .icon_utils import apply_window_icon, load_app_icon
@@ -107,6 +108,7 @@ def main():
             message.setText(window._t("startup_config.error"))
             message.setInformativeText(str(config_error))
             message.exec()
+        show_rename_recovery_dialogs(window)
         show_first_time_dialog(app_icon, parent=window)
         window.schedule_startup_update_check()
 
