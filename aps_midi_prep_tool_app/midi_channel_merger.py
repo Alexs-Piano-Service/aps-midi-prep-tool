@@ -6,6 +6,7 @@ from .midi_type0_converter import (
     MIDI_BANK_SELECT_CONTROLLERS,
     MIDI_CHANNEL_MODE_CONTROLLERS,
     _build_raw_midi_track,
+    _expand_channel_controller_resets,
     _expand_channel_note_terminations,
     _merge_track_event_groups,
     _parse_track_events,
@@ -88,6 +89,8 @@ def _remap_channel_prefix(raw):
 
 def _merge_track_events(events):
     events, changed = _expand_channel_note_terminations(events)
+    events, reset_changed = _expand_channel_controller_resets(events)
+    changed = changed or reset_changed
     merged = []
     has_notes = False
 

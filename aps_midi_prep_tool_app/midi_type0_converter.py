@@ -28,7 +28,14 @@ VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY = 1
 MIDI_BANK_SELECT_CONTROLLERS = {0, 32}
 MIDI_CHANNEL_MODE_CONTROLLERS = set(range(120, 128))
 MIDI_ALL_SOUND_OFF_CONTROLLER = 120
+MIDI_RESET_ALL_CONTROLLERS = 121
 MIDI_NOTE_TERMINATION_CONTROLLERS = {123, 124, 125, 126, 127}
+# CC121 resets performance controls and parameter selectors, but leaves bank,
+# volume, pan, effects and the selected RPN/NRPN parameter values unchanged.
+MIDI_CONTROLLER_RESET_VALUES = {
+    1: 0, 11: 127, 64: 0, 65: 0, 66: 0, 67: 0,
+}
+MIDI_PARAMETER_SELECT_CONTROLLERS = {98, 99, 100, 101}
 SUSTAIN_PEDAL_CONTROLLER = 64
 SUSTAIN_PEDAL_ON_THRESHOLD = 64
 DEFAULT_MIDI_TEMPO_US = 500000
@@ -403,6 +410,108 @@ def _expand_channel_note_terminations(events):
                 replacements = release_channel(channel)
 
         changed = changed or replacements != [raw]
+        for replacement in replacements:
+            expanded.append(
+                _make_synthetic_event_like(event, event[0], len(expanded), replacement)
+            )
+
+    return (expanded, True) if changed else (events, False)
+
+
+def _channel_controller_reset_data(raw):
+    """Return the CC121 default for a resettable channel voice message."""
+    if not raw or not (0x80 <= raw[0] <= 0xEF):
+        return None
+    message_type = raw[0] & 0xF0
+    if message_type == 0xB0 and len(raw) >= 3:
+        default = MIDI_CONTROLLER_RESET_VALUES.get(raw[1])
+        if default is not None:
+            return bytes([raw[1], default])
+    elif message_type == 0xE0 and len(raw) >= 3:
+        return b"\x00\x40"
+    elif message_type == 0xD0 and len(raw) >= 2:
+        return b"\x00"
+    elif message_type == 0xA0 and len(raw) >= 3:
+        return bytes([raw[1], 0])
+    return None
+
+
+def _expand_channel_controller_resets(events):
+    """Apply source CC121 state changes before collapsing channel identities.
+
+    Ordinary controls retain their chronological, last-event-wins behavior.
+    A reset relinquishes that source's overrides: restore the latest explicit
+    value from another source, or the reset default if none remains. This
+    deliberately avoids a global CC121 clearing unrelated parts on the output.
+    Only controls observed in this timeline need explicit replacement events.
+    """
+    source_values = defaultdict(dict)
+    parameter_values = defaultdict(
+        lambda: dict.fromkeys(MIDI_PARAMETER_SELECT_CONTROLLERS, 127)
+    )
+    parameter_key = (0xB0, None)
+    parameter_default = tuple(
+        bytes([controller, 127]) for controller in (99, 98, 101, 100)
+    )
+    output_values = {}
+    expanded = []
+    changed = False
+
+    for sequence, event in enumerate(sorted(events, key=lambda item: item[:-1])):
+        raw = event[-1]
+        replacements = [raw]
+        if _is_midi_system_reset(raw):
+            source_values.clear()
+            parameter_values.clear()
+            output_values.clear()
+        elif (
+            len(raw) >= 3
+            and (raw[0] & 0xF0) == 0xB0
+            and raw[1] == MIDI_RESET_ALL_CONTROLLERS
+        ):
+            channel = raw[0] & 0x0F
+            replacements = []
+            for key, values in source_values.items():
+                if channel not in values:
+                    continue
+                owner = max(values, key=lambda source: values[source][0])
+                _sequence, _value, default = values.pop(channel)
+                value = max(values.values())[1] if values else default
+                if key == parameter_key:
+                    # Selecting either family changes the active parameter.
+                    # Reset only its owner and restore both pairs together,
+                    # putting the surviving source's active family last.
+                    if owner == channel:
+                        replacements.extend(
+                            bytes([0xB0 | channel]) + data for data in value
+                        )
+                elif output_values[key] != value:
+                    replacements.append(bytes([key[0] | channel]) + value)
+                    output_values[key] = value
+            parameter_values.pop(channel, None)
+            changed = True
+        elif (
+            len(raw) >= 3
+            and (raw[0] & 0xF0) == 0xB0
+            and raw[1] in MIDI_PARAMETER_SELECT_CONTROLLERS
+        ):
+            channel = raw[0] & 0x0F
+            selectors = parameter_values[channel]
+            selectors[raw[1]] = raw[2]
+            controllers = (101, 100, 99, 98) if raw[1] < 100 else (99, 98, 101, 100)
+            value = tuple(
+                bytes([controller, selectors[controller]]) for controller in controllers
+            )
+            source_values[parameter_key][channel] = (sequence, value, parameter_default)
+        else:
+            default = _channel_controller_reset_data(raw)
+            if default is not None:
+                message_type = raw[0] & 0xF0
+                # Controllers and poly pressure each have independent lanes.
+                key = (message_type, raw[1] if message_type in (0xA0, 0xB0) else None)
+                source_values[key][raw[0] & 0x0F] = (sequence, raw[1:], default)
+                output_values[key] = raw[1:]
+
         for replacement in replacements:
             expanded.append(
                 _make_synthetic_event_like(event, event[0], len(expanded), replacement)
@@ -1300,6 +1409,7 @@ def _channel1_acoustic_grand_event():
 
 
 def _disklavier_normalized_event_dedupe_key(abs_tick, raw):
+    """Identify the state being set, so a new value replaces the previous one."""
     if not raw or not (0x80 <= raw[0] <= 0xEF):
         return None
     status = raw[0] & 0xF0
@@ -1310,9 +1420,9 @@ def _disklavier_normalized_event_dedupe_key(abs_tick, raw):
         and channel == DISKLAVIER_PIANO_CHANNEL
         and raw[1] in DISKLAVIER_PEDAL_CONTROLLERS
     ):
-        return abs_tick, raw
+        return abs_tick, raw[0], raw[1]
     if status == 0xC0 and channel == DISKLAVIER_PIANO_CHANNEL:
-        return abs_tick, raw
+        return abs_tick, raw[0]
     return None
 
 
@@ -1340,13 +1450,32 @@ def _normalize_disklavier_merged_events(merged_events):
         and not legacy_pedal_channel_has_notes
         and not channel1_has_pedal_controller
     )
-    for abs_tick, track_index, order, raw in merged_events:
+    routed_pedal_values = {}
+    for abs_tick, track_index, order, raw in sorted(merged_events, key=lambda item: item[:-1]):
         if should_remap_legacy_pedal:
             normalized_raw, event_changed = normalize_disklavier_raw_midi_event(raw)
             changed = changed or event_changed
+            if event_changed:
+                routed_pedal_values[raw[1]] = raw[2]
+            elif _is_midi_system_reset(raw):
+                routed_pedal_values.clear()
         else:
             normalized_raw = raw
         normalized.append((abs_tick, track_index, order, normalized_raw))
+        if (
+            should_remap_legacy_pedal
+            and len(raw) >= 3
+            and raw[0] == (0xB0 | DISKLAVIER_LEGACY_PEDAL_CHANNEL)
+            and raw[1] == MIDI_RESET_ALL_CONTROLLERS
+        ):
+            # Keep the source reset and carry its pedal releases to the piano.
+            # Equal ordering keys place these releases immediately after CC121.
+            for controller, value in routed_pedal_values.items():
+                if value:
+                    release = bytes([0xB0 | DISKLAVIER_PIANO_CHANNEL, controller, 0])
+                    normalized.append((abs_tick, track_index, order, release))
+                    changed = True
+            routed_pedal_values.clear()
 
     if first_channel1_note_tick is not None:
         for abs_tick, _, _, raw in normalized:
@@ -1358,15 +1487,27 @@ def _normalize_disklavier_merged_events(merged_events):
             changed = True
 
     deduped = []
-    seen_channel_events = set()
+    last_channel_events = {}
     for event in sorted(normalized, key=lambda item: (item[0], item[1], item[2])):
         abs_tick, _, _, raw = event
         key = _disklavier_normalized_event_dedupe_key(abs_tick, raw)
         if key is not None:
-            if key in seen_channel_events:
+            if last_channel_events.get(key) == raw:
                 changed = True
                 continue
-            seen_channel_events.add(key)
+            last_channel_events[key] = raw
+        elif raw and (
+            raw[0] in (0xF0, 0xF7)
+            or raw == b"\xFF"
+            or (
+                0x80 <= raw[0] <= 0xEF
+                and (raw[0] & 0x0F) == DISKLAVIER_PIANO_CHANNEL
+            )
+        ):
+            # Notes, bank/channel-mode changes and device messages can make a
+            # repeated value meaningful. Treat them as conservative barriers;
+            # metadata and other channels do not affect this piano state.
+            last_channel_events.clear()
         deduped.append(event)
 
     return deduped, changed
@@ -1374,6 +1515,8 @@ def _normalize_disklavier_merged_events(merged_events):
 
 def _remap_merged_events_to_piano_channel0(merged_events):
     merged_events, changed = _expand_channel_note_terminations(merged_events)
+    merged_events, reset_changed = _expand_channel_controller_resets(merged_events)
+    changed = changed or reset_changed
     remapped = []
     first_note_track = 0
     has_notes = False
@@ -1390,8 +1533,8 @@ def _remap_merged_events_to_piano_channel0(merged_events):
                 first_note_track = track_index
             has_notes = True
 
+        # Source resets and note terminations have already been expanded.
         # Only CC120 commands proven safe by the source-channel pass survive.
-        # Other channel modes or bank changes can affect unrelated parts.
         if message_type == 0xB0 and len(raw) >= 3:
             if raw[1] in (
                 MIDI_BANK_SELECT_CONTROLLERS | MIDI_CHANNEL_MODE_CONTROLLERS
@@ -1449,12 +1592,14 @@ def _convert_midi_bytes_to_type0(
 
     merged_events.sort(key=lambda item: (item[0], item[1], item[2]))
     changed = format_type != 0
+    if remap_all_instruments_to_channel0:
+        # Resolve source resets before changing channel identities. Normalize
+        # afterward so deduplication sees every change on the final channel.
+        merged_events, remap_changed = _remap_merged_events_to_piano_channel0(merged_events)
+        changed = changed or remap_changed
     if normalize_disklavier:
         merged_events, normalization_changed = _normalize_disklavier_merged_events(merged_events)
         changed = changed or normalization_changed
-    if remap_all_instruments_to_channel0:
-        merged_events, remap_changed = _remap_merged_events_to_piano_channel0(merged_events)
-        changed = changed or remap_changed
 
     if not changed:
         return midi_bytes, False
