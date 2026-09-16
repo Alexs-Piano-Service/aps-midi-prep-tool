@@ -49,7 +49,7 @@ from .midi_metadata import (
     update_midi_title_to_path,
 )
 from .additional_formats import electone_mdr_to_midi, pianodisc_system3
-from .subprocess_utils import windows_subprocess_kwargs
+from .subprocess_utils import WindowsProcessTreeWaiter, windows_subprocess_kwargs
 
 
 class FloppyImageError(Exception):
@@ -957,6 +957,12 @@ def _terminate_process(process):
         # A bundled one-file helper can have its own child process. Stopping
         # only its launcher leaves that child holding files in _MEI directories.
         taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+        descendants = None
+        try:
+            descendants = WindowsProcessTreeWaiter(process.pid)
+        except OSError:
+            # Snapshot access can fail; still attempt the existing tree shutdown.
+            pass
         try:
             subprocess.run(
                 [taskkill, "/PID", str(process.pid), "/T", "/F"],
@@ -964,9 +970,16 @@ def _terminate_process(process):
                 **windows_subprocess_kwargs(),
             )
             process.wait(timeout=2)
+            if descendants is not None:
+                # taskkill requests termination but children may still be closing
+                # files after their parent exits. Wait before callers clean up.
+                descendants.wait(timeout=2)
             return
         except Exception:
             pass
+        finally:
+            if descendants is not None:
+                descendants.close()
     try:
         process.terminate()
         process.wait(timeout=2)

@@ -107,6 +107,7 @@ def test_windows_cancellation_targets_the_owned_process_tree(monkeypatch):
 
     commands = []
     waits = []
+    shutdown = []
     process = SimpleNamespace(
         pid=12345, poll=lambda: None, wait=lambda **kwargs: waits.append(kwargs),
         terminate=lambda: pytest.fail("Tree shutdown succeeded"),
@@ -114,10 +115,45 @@ def test_windows_cancellation_targets_the_owned_process_tree(monkeypatch):
     monkeypatch.setattr(floppy_image, "os", SimpleNamespace(
         name="nt", path=ntpath, environ={"SystemRoot": r"C:\Windows"},
     ))
-    monkeypatch.setattr(floppy_image.subprocess, "run", lambda args, **kwargs: commands.append(args))
+    def capture_descendants(pid):
+        assert pid == process.pid
+        shutdown.append("capture")
+        return SimpleNamespace(
+            wait=lambda **kwargs: shutdown.append(("descendants exited", kwargs)),
+            close=lambda: shutdown.append("close handles"),
+        )
+    monkeypatch.setattr(floppy_image, "WindowsProcessTreeWaiter", capture_descendants)
+    monkeypatch.setattr(floppy_image, "windows_subprocess_kwargs", lambda: {})
+    def kill_tree(args, **kwargs):
+        assert shutdown == ["capture"]
+        commands.append(args)
+        shutdown.append("termination requested")
+    monkeypatch.setattr(floppy_image.subprocess, "run", kill_tree)
     floppy_image._terminate_process(process)
     assert commands == [[r"C:\Windows\System32\taskkill.exe", "/PID", "12345", "/T", "/F"]]
     assert waits == [{"timeout": 2}]
+    assert shutdown == ["capture", "termination requested", ("descendants exited", {"timeout": 2}), "close handles"]
+
+
+def test_windows_snapshot_failure_still_uses_taskkill(monkeypatch):
+    import ntpath
+
+    def failed_snapshot(_pid):
+        raise OSError("Snapshot unavailable")
+
+    commands = []
+    process = SimpleNamespace(
+        pid=12345, poll=lambda: None, wait=lambda **kwargs: None,
+        terminate=lambda: pytest.fail("Tree shutdown still succeeds"),
+    )
+    monkeypatch.setattr(floppy_image, "os", SimpleNamespace(
+        name="nt", path=ntpath, environ={"SystemRoot": r"C:\Windows"},
+    ))
+    monkeypatch.setattr(floppy_image, "WindowsProcessTreeWaiter", failed_snapshot)
+    monkeypatch.setattr(floppy_image, "windows_subprocess_kwargs", lambda: {})
+    monkeypatch.setattr(floppy_image.subprocess, "run", lambda args, **kwargs: commands.append(args))
+    floppy_image._terminate_process(process)
+    assert commands == [[r"C:\Windows\System32\taskkill.exe", "/PID", "12345", "/T", "/F"]]
 
 
 @pytest.mark.parametrize("cancellable", [False, True])

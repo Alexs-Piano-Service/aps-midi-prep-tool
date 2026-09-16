@@ -32,6 +32,9 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Windows helper cancellation and timeouts wait for descendant processes to
+  finish terminating before cleaning up their files, avoiding intermittent
+  sharing violations after stopping a process tree.
 - Read Floppy and Bulk Extraction enable descriptive naming for Custom and
   other destinations that do not require 8.3 names, even when an older manual
   8.3 preference is saved. Existing installations receive the new naming
