@@ -19,6 +19,7 @@ PATH_SETTINGS = frozenset({
     "open_folder_location", "open_image_location", "save_as_location",
     "bulk_extraction_source", "bulk_extraction_output", "bulk_extraction_last_job",
     "emulator_image_source", "emulator_image_output", "disk_recovery_image_path",
+    "markiv_backup_source", "markiv_backup_output", "markiv_backup_last_folder",
 })
 BOOLEAN_SETTINGS = frozenset({
     "show_compat_warning", "store_backups", "use_dos83_filenames", "hide_status",
@@ -43,6 +44,7 @@ BOOLEAN_SETTINGS = frozenset({
     "hide_gw_sector_report_write_v1", "hide_gw_sector_report_convert_v1",
     "hide_gw_sector_report_recover_v1",
     "never_ask_for_review",
+    "markiv_backup_convert_eseq", "markiv_backup_keep_originals",
 })
 INTEGER_SETTINGS = frozenset({
     "read_floppy_gw_revs", "read_floppy_gw_retries",

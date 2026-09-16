@@ -12,6 +12,7 @@ from .pending_changes_translations import PENDING_CHANGE_MESSAGES
 from .review_prompt_translations import REVIEW_PROMPT_MESSAGES
 from .recovery_delivery_translations import RECOVERY_DELIVERY_TRANSLATIONS
 from .preparation_preview_translations import PREPARATION_PREVIEW_TRANSLATIONS
+from .markiv_backup_translations import MARKIV_BACKUP_MESSAGES
 
 from .bulgarian_translations import (
     BULGARIAN_MESSAGE_TRANSLATIONS,
@@ -3022,6 +3023,7 @@ COMMON_TEXT_TRANSLATIONS.update(BULK_JOB_TRANSLATIONS)
 
 MESSAGES.update(PENDING_CHANGE_MESSAGES)
 MESSAGES.update(REVIEW_PROMPT_MESSAGES)
+MESSAGES.update(MARKIV_BACKUP_MESSAGES)
 MESSAGES["startup_config.error"] = {
     "en": "The startup configuration could not be loaded. APS will use its saved settings. Correct the file and restart APS to try again.",
     "es": "No se pudo cargar la configuración inicial. APS usará sus ajustes guardados. Corrija el archivo y reinicie APS para volver a intentarlo.",

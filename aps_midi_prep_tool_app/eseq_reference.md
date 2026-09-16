@@ -15,7 +15,7 @@
 
 Emulator-set behavior in v0.8.2:
 
-Unreleased save-preservation correction: catalog generation now replaces only
+v0.8.3 save-preservation correction: catalog generation now replaces only
 the active variant's catalog. In-place image commits retain unknown files, MIDI,
 MNG catalogs, and the opposite E-SEQ variant and catalog unless explicitly
 deleted. Delivery exports opt into content-based pruning of their temporary

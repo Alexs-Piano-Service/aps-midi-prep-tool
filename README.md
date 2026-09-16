@@ -21,7 +21,7 @@
   · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-Current version: `0.8.2`
+Current version: `0.8.3`
 
 APS MIDI Prep Tool is a desktop app for Yamaha Disklavier and other legacy
 player-piano workflows. Use it to recover songs from old floppies, organize your
@@ -119,6 +119,10 @@ see [Windows disk troubleshooting](docs/windows-disk-troubleshooting.md).
 For collections of images, **Utilities → Bulk Extraction...** can keep a local
 progress record. **Resume extraction job...** retries failed items first and
 reuses completed outputs only after checking input and output hashes.
+
+**Utilities → Back Up Mark IV Music...** copies a mounted Mark IV music library
+or copied data folder into named album folders, verifies the originals, and can
+add MIDI copies of legacy E-SEQ songs. See the [Mark IV backup guide](docs/mark-iv-backup.md).
 
 ## Convert and organize your music
 
@@ -274,6 +278,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and test commands.
 ## Guides and support
 
 - [Build a floppy-emulator disk set](docs/emulator-disk-sets.md)
+- [Back up a Mark IV music library](docs/mark-iv-backup.md)
 - [Convert MIDI files and create PIANODIR.FIL](https://www.alexanderpeppe.com/eseq-and-pianodir-fil/)
 - [Extract MIDI files from a Yamaha floppy disk](https://www.alexanderpeppe.com/extracting-midi-files-from-a-yamaha-floppy-disk-with-aps-midi-prep-tool/)
 - [Change MIDI titles on your computer](https://www.alexanderpeppe.com/change-midi-titles-aps-midi-prep-tool/)

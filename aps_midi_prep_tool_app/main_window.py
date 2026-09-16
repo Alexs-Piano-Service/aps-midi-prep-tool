@@ -152,6 +152,7 @@ from .disk_session_worker import (
     EmulatorImageBuildWorker,
 )
 from .icon_utils import apply_window_icon
+from .markiv_backup_dialog import MarkIVBackupDialog
 from .onboarding_dialog import onboarding_text, show_first_time_dialog
 from .pending_changes import PendingChangesMixin, staged_batch
 from .helpers.atomic_file import atomic_write_bytes
@@ -9138,6 +9139,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.diskImageCaptureProgressDialog = None
         self.diskImageCaptureContext = {}
         self.bulkExtractionWorker = None
+        self.markivBackupDialog = None
         self.bulkExtractionProgressDialog = None
         self.bulkExtractionContext = {}
         self.emulatorImageWorker = None
@@ -9871,6 +9873,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         self.utilitiesBulkExtractionAction.triggered.connect(self.show_bulk_extraction_utility)
         self.utilitiesMenu.addAction(self.utilitiesBulkExtractionAction)
+
+        self.utilitiesMarkIVBackupAction = QAction(self._t("markiv.action"), self)
+        self.utilitiesMarkIVBackupAction.setToolTip(self._t("markiv.tooltip"))
+        self.utilitiesMarkIVBackupAction.triggered.connect(self.show_markiv_backup_utility)
+        self.utilitiesMenu.addAction(self.utilitiesMarkIVBackupAction)
 
         self.utilitiesEmulatorImagesAction = QAction(self._t("emulator.action"), self)
         self.utilitiesEmulatorImagesAction.setToolTip(
@@ -10971,6 +10978,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
             {"id": "utilities.render_audio", "category": "Utilities", "label": "Render Audio...", "action": "utilitiesRenderAudioAction", "default": "F5"},
             {"id": "utilities.bulk_extraction", "category": "Utilities", "label": "Bulk Extraction...", "action": "utilitiesBulkExtractionAction", "default": ""},
+            {"id": "utilities.markiv_backup", "category": "Utilities", "label": "Back Up Mark IV Music...", "action": "utilitiesMarkIVBackupAction", "default": ""},
             {"id": "utilities.emulator_images", "category": "Utilities", "label": "Build Emulator Disk Set...", "action": "utilitiesEmulatorImagesAction", "default": ""},
             {"id": "utilities.rename", "category": "Utilities", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
             {"id": "utilities.long_filenames", "category": "Utilities", "label": "Name MIDI Files from Song Titles", "action": "utilitiesLongFilenamesAction", "default": ""},
@@ -11186,6 +11194,21 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if context_path and os.path.isdir(context_path):
             return os.path.abspath(context_path)
         return self._last_save_as_location()
+
+    def show_markiv_backup_utility(self):
+        if self._disk_worker_busy() or not self.choose_button.isEnabled():
+            return
+        if self.markivBackupDialog is not None:
+            self.markivBackupDialog.raise_()
+            self.markivBackupDialog.activateWindow()
+            return
+        dialog = MarkIVBackupDialog(self.settings, self)
+        self.markivBackupDialog = dialog
+        try:
+            self._exec_child_dialog(dialog, resize_to_contents=False)
+        finally:
+            self.markivBackupDialog = None
+            dialog.deleteLater()
 
     def show_bulk_extraction_utility(self):
         if self._disk_worker_busy():
@@ -12729,6 +12752,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if emulator_images_action is not None:
             emulator_images_action.setText(self._t("emulator.action"))
             emulator_images_action.setToolTip(self._t("emulator.description"))
+        markiv_backup_action = getattr(self, "utilitiesMarkIVBackupAction", None)
+        if markiv_backup_action is not None:
+            markiv_backup_action.setText(self._t("markiv.action"))
+            markiv_backup_action.setToolTip(self._t("markiv.tooltip"))
 
     def eventFilter(self, obj, event):
         if isinstance(obj, QDialog) and bool(obj.property("_aps_center_on_parent")):
@@ -16577,6 +16604,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 "Temporary working files will be cleaned up after disk work has stopped.",
             )
             return
+        markiv_dialog = getattr(self, "markivBackupDialog", None)
+        if markiv_dialog is not None and markiv_dialog.is_busy:
+            # The backup dialog owns its worker and closes after cancellation.
+            # Keep its parent and the event loop alive until that has finished.
+            event.ignore()
+            markiv_dialog.reject()
+            return
         if self.is_image_mode() and not self._confirm_discard_image_changes():
             event.ignore()
             return
@@ -18139,6 +18173,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.utilitiesEmulatorImagesAction.setStatusTip(
                 tooltip if enabled else self._t("emulator.busy")
             )
+        if hasattr(self, "utilitiesMarkIVBackupAction"):
+            self.utilitiesMarkIVBackupAction.setEnabled(self.choose_button.isEnabled())
+            self.utilitiesMarkIVBackupAction.setToolTip(self._t("markiv.tooltip"))
 
     def _set_loaded_image_pianodir_metadata(self, metadata=None):
         metadata = metadata or PianodirMetadata()

@@ -132,6 +132,9 @@ Every entry in this table accepts an absolute or relative path string.
 | `bulk_extraction_source` | Bulk Extraction source folder. |
 | `bulk_extraction_output` | Bulk Extraction output folder. |
 | `bulk_extraction_last_job` | Suggested extraction job record file when resuming. |
+| `markiv_backup_source` | Back Up Mark IV Music source drive or copied data folder containing `songs/`. |
+| `markiv_backup_output` | Parent destination folder for new Mark IV music backups. |
+| `markiv_backup_last_folder` | Last Mark IV backup folder, used for opening or verifying a backup. |
 | `emulator_image_source` | Build Emulator Disk Set source folder. |
 | `emulator_image_output` | Build Emulator Disk Set output folder, such as `./Nalbantov`. |
 | `disk_recovery_image_path` | Initial image path in Recover Damaged Image. |
@@ -219,6 +222,16 @@ These are booleans; source, output, and job paths are listed above.
 | `bulk_extraction_trim_title_spaces` | Trim title spaces. |
 | `bulk_extraction_include_eseq_sources` | Include original E-SEQ sources alongside converted songs. |
 | `bulk_extraction_use_album_names` | Use album names for output folders. |
+
+## Mark IV music backup
+
+Source, destination, and last backup paths are listed above. These settings
+preset the [Mark IV backup utility](mark-iv-backup.md); they do not start a backup.
+
+| Setting | Type / purpose |
+| --- | --- |
+| `markiv_backup_convert_eseq` | Boolean: convert supported E-SEQ songs to MIDI during Mark IV backup. Defaults to `false`. |
+| `markiv_backup_keep_originals` | Boolean: keep verified E-SEQ originals alongside converted MIDI files. Defaults to `true`; applies only when conversion is enabled. |
 
 ## Emulator disk sets
 

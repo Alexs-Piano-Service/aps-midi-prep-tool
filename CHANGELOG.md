@@ -9,6 +9,19 @@ with release sections grouped by version and date.
 
 ### Added
 
+- **Utilities → Back Up Mark IV Music...** copies a mounted or copied Mark IV
+  library into named album folders with checksum verification and a manifest.
+  The Details pane shows the selected album's tracks and applicable conversion
+  notes; double-clicking an album opens its full details. Warnings and errors
+  appear in a separate report. Optional
+  E-SEQ-to-MIDI conversion creates verified MIDI files, with a checkbox to keep
+  the originals alongside them. Cancellation and partial failures keep completed
+  files, and existing backups can be verified again from the utility.
+
+## [0.8.3] - 2026-09-15
+
+### Added
+
 - Native Windows tests exercise real IMG/HFE round trips, clean versus ordinary
   E-SEQ saves, bundled mtools without PATH access, capacity failures, reserved
   filenames, locked destinations, and cancellation of helper descendants.
@@ -31,6 +44,12 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Disklavier normalization preserves same-tick pedal and program reversals,
+  repeated settings after note activity or resets, and reset effects on routed
+  legacy pedals. Combined piano merging normalizes the final channel sequence.
+- MIDI channel merging and Type 0 piano remapping apply Reset All Controllers
+  before collapsing source channels, preserving pedal, pitch-bend, and other
+  controller resets while restoring settings still held by another source.
 - In-place rename rollback preserves every original in filename chains and
   swaps, and retains recovery copies with a path manifest if restoration fails.
   Rename-helper backups use unique names and exclusive creation to protect
