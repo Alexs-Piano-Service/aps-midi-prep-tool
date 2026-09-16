@@ -30,6 +30,7 @@ function Resolve-Executable {
 $PyInstallerArgs = @(
     "--noconfirm",
     "--windowed",
+    "--collect-data", "certifi",
     "--name", "APS MIDI Prep Tool",
     "--icon", (Join-Path $RepoRoot "aps_midi_prep_tool_app\aps.ico"),
     "--manifest", (Join-Path $RepoRoot "manifests\main_as_invoker.xml")

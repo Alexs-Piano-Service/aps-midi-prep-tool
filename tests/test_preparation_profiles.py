@@ -115,16 +115,21 @@ def test_chili_retains_both_midi_types_and_uses_hd_dos_media():
 
 
 @pytest.mark.parametrize("key", ("custom", "unsure", "unrecognized-old-profile"))
-def test_custom_and_unknown_profiles_do_not_propose_setting_changes(key):
+def test_custom_and_unknown_profiles_reset_filename_and_title_defaults_only(key):
     profile = get_preparation_profile(key)
-    assert proposed_settings(profile, get_preparation_medium(profile, "")) == {}
+    assert proposed_settings(profile, get_preparation_medium(profile, "")) == {
+        "use_dos83_filenames": False, "long_midi_filenames": True,
+        "eseq_to_midi_long_filenames": True, "read_floppy_long_filenames": True,
+        "bulk_extraction_long_midi_filenames": True, "format_disklavier_screen": False,
+    }
 
 
 def test_no_profile_implies_hardware_testing_or_changes_musical_data():
     allowed = {
         "emulator_image_content", "emulator_image_disk_format", "emulator_image_output_format",
         "emulator_image_prefix", "emulator_image_starting_number", "use_dos83_filenames",
-        "long_midi_filenames", "eseq_to_midi_long_filenames", "read_floppy_long_filenames", SETTING_IMAGE_FORMAT, SETTING_DISK_FORMAT,
+        "long_midi_filenames", "eseq_to_midi_long_filenames", "read_floppy_long_filenames",
+        "bulk_extraction_long_midi_filenames", "format_disklavier_screen", SETTING_IMAGE_FORMAT, SETTING_DISK_FORMAT,
     }
     for profile in PIANO_PROFILES:
         assert profile.evidence_level in {"documented", "unverified"}
@@ -250,7 +255,7 @@ def test_dialog_shows_proposals_without_mutating_settings(application):
             for row in range(dialog.changes_table.rowCount())
         ]
         assert "HFE" in proposed_values
-        assert dialog.changes_table.rowCount() == 4
+        assert dialog.changes_table.rowCount() == 5
         assert settings.values == original
         dialog.buttons.button(QDialogButtonBox.Apply).click()
         assert dialog.result() == QDialog.Accepted
@@ -267,9 +272,9 @@ def test_dialog_restricts_media_when_switching_to_modern_usb_controller(applicat
         assert dialog.medium_combo.count() == 1
         assert dialog.medium_combo.currentData() == "usb"
         assert dialog.changes_table.item(0, 2).text() == "MIDI"
-        assert dialog.changes_table.rowCount() == 2
+        assert dialog.changes_table.rowCount() == 3
         dialog.profile_combo.setCurrentIndex(dialog.profile_combo.findData("custom"))
-        assert dialog.changes_table.rowCount() == 0
+        assert dialog.changes_table.rowCount() == 2
     finally:
         dialog.close()
 
@@ -304,9 +309,10 @@ def test_apply_sets_export_defaults_and_keeps_staged_work():
     manual_settings = dict(settings.values)
     custom = get_preparation_profile("custom")
     MidiTitleWindow._apply_preparation_profile(window, custom, get_preparation_medium(custom, ""))
+    reset_defaults = proposed_settings(custom, get_preparation_medium(custom, ""))
     for key, value in manual_settings.items():
         if key not in {SETTING_PROFILE, SETTING_MEDIUM}:
-            assert settings.values[key] == value
+            assert settings.values[key] == reset_defaults.get(key, value)
     assert MidiTitleWindow._preparation_export_defaults(window) == {}
 
 

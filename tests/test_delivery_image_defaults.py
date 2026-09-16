@@ -87,7 +87,7 @@ def test_active_medium_wins_stale_settings_source_and_new_image_defaults(
     window.show_emulator_image_utility()
 
 
-def test_unsure_applies_only_explicit_delivery_and_reviews_it(window):
+def test_unsure_keeps_manual_conversion_and_reviews_delivery_and_filename_defaults(window):
     window.settings.setValue("emulator_image_content", "midi")
     window.settings.setValue("use_dos83_filenames", False)
     window.settings.setValue("emulator_image_disk_format", "ibm.1440")
@@ -102,13 +102,19 @@ def test_unsure_applies_only_explicit_delivery_and_reviews_it(window):
     changes = proposed_settings(profile, get_preparation_medium(profile, "flashfloppy_hfe"))
     assert set(changes) == {
         SETTING_IMAGE_FORMAT, "emulator_image_output_format", "emulator_image_prefix", "emulator_image_starting_number",
+        "use_dos83_filenames", "long_midi_filenames", "eseq_to_midi_long_filenames",
+        "read_floppy_long_filenames", "bulk_extraction_long_midi_filenames", "format_disklavier_screen",
     }
     dialog = PreparationProfileDialog(window.settings, "unsure", "flashfloppy_hfe")
     try:
         assert dialog.selection()[1].key == "flashfloppy_hfe"
         rows = [[dialog.changes_table.item(row, column).text() for column in range(3)]
                 for row in range(dialog.changes_table.rowCount())]
-        assert rows == [["Image type", "HFE", "HFE"]]
+        assert rows == [
+            ["Image type", "HFE", "HFE"],
+            ["Filenames", "Descriptive filenames", "Descriptive filenames"],
+            ["Format for Disklavier screen", "Off", "Off"],
+        ]
     finally:
         dialog.deleteLater()
 

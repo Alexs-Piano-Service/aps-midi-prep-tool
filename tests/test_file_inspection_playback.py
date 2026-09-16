@@ -331,13 +331,15 @@ class FileInspectionPlaybackTests(unittest.TestCase):
         self.assertEqual(dialog.displayed_position, 16000)
         self.assertEqual(dialog.player.play_calls, 1)
 
-    def test_audio_playback_prefers_realtime_fluidsynth(self):
+    def test_audio_playback_renders_once_instead_of_restarting_fluidsynth(self):
         class _Dialog:
             def __init__(self):
                 self.visible_notes = [object()]
                 self.preview_render_worker = None
                 self.live_starts = 0
                 self.render_starts = 0
+                self.preview_audio_path = ""
+                self._preview_audio_stale = False
 
             def _using_midi_output(self):
                 return False
@@ -355,8 +357,8 @@ class FileInspectionPlaybackTests(unittest.TestCase):
         dialog = _Dialog()
         FileInspectionDialog._play_current_file(dialog)
 
-        self.assertEqual(dialog.live_starts, 1)
-        self.assertEqual(dialog.render_starts, 0)
+        self.assertEqual(dialog.live_starts, 0)
+        self.assertEqual(dialog.render_starts, 1)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,36 @@ with release sections grouped by version and date.
   the originals alongside them. Cancellation and partial failures keep completed
   files, and existing backups can be verified again from the utility.
 
+### Changed
+
+- View visibility actions consistently say **Show**, with checked meaning
+  visible. The **Preparing for...** row is shown on new installations.
+- Preparation defaults select descriptive MIDI filenames unless the destination
+  requires DOS 8.3 names. Long filenames also work without E-SEQ conversion.
+  Disklavier screen formatting defaults on for Mark I, Mark II, and Mark III,
+  and off for other profiles, including Custom.
+
+### Fixed
+
+- Read Floppy and Bulk Extraction enable descriptive naming for Custom and
+  other destinations that do not require 8.3 names, even when an older manual
+  8.3 preference is saved. Existing installations receive the new naming
+  default once; later unchecked choices remain saved. Unchecking naming still
+  reads every file and preserves the original filenames.
+- Overlong titles use the normal table font and are identified in the Long
+  column. The title editor starts with 32 characters when Disklavier screen
+  formatting is enabled, allowing an overlong title to be corrected.
+- Audio previews reuse completed renders across Play clicks and inspection
+  sessions, with cache invalidation for changed songs, preview settings,
+  SoundFonts, and rendering tools.
+- Floppy drive discovery runs in the background with cancellation and a bounded
+  wait, so a stalled capacity, geometry, or volume-label query cannot freeze the
+  interface before the drive chooser opens.
+- SoundFont downloads supplement system certificate roots with bundled Mozilla
+  roots while retaining HTTPS verification.
+- Mark IV device-source resolution recognizes POSIX device paths on Windows;
+  cross-platform tests compare resolved mount paths consistently.
+
 ## [0.8.3] - 2026-09-15
 
 ### Added

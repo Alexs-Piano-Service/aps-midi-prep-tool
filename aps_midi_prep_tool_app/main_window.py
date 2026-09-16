@@ -61,11 +61,9 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QToolButton,
     QToolTip,
-    QStyledItemDelegate,
     QStyle,
     QStyleHintReturn,
     QStyleOption,
-    QStyleOptionViewItem,
     QComboBox,
     QCompleter,
     QSlider,
@@ -141,6 +139,7 @@ from .ui_utils import (
     pixmap_from_base64,
 )
 from .drop_table_widget import DropTableWidget
+from .disk_device_discovery import discover_floppy_devices
 from .disk_session_worker import (
     BulkExtractionWorker,
     DiskImageCaptureWorker,
@@ -156,6 +155,8 @@ from .markiv_backup_dialog import MarkIVBackupDialog
 from .onboarding_dialog import onboarding_text, show_first_time_dialog
 from .pending_changes import PendingChangesMixin, staged_batch
 from .helpers.atomic_file import atomic_write_bytes
+from .preview_audio_cache import PreviewAudioCache, file_identity, preview_cache_key
+from .soundfont_network import open_soundfont_url
 from .helpers.file_batch import FileBatchWriteError, publish_file_batch
 from .console_log import ConsoleLogDialog, get_console_log_bus
 from .additional_formats import (
@@ -761,60 +762,6 @@ def _build_dark_palette():
     _set_optional_palette_color(palette, "PlaceholderText", "#69737C", group=QPalette.Disabled)
     _set_optional_palette_color(palette, "Accent", "#56616D", group=QPalette.Disabled)
     return palette
-
-
-class TitleOverflowDelegate(QStyledItemDelegate):
-    RAW_TITLE_ROLE = Qt.UserRole + 1
-
-    def __init__(self, limit, parent=None):
-        super().__init__(parent)
-        self.limit = limit
-        self.warning_color = QColor("#F5B041")
-        self.highlight_enabled = True
-
-    def set_highlight_enabled(self, enabled):
-        self.highlight_enabled = bool(enabled)
-
-    def paint(self, painter, option, index):
-        text = index.data(Qt.DisplayRole) or ""
-        raw_text = index.data(self.RAW_TITLE_ROLE)
-        measured_text = str(raw_text) if raw_text is not None else text
-        if (
-            not self.highlight_enabled
-            or index.column() != 4
-            or len(measured_text) <= self.limit
-            or len(text) <= self.limit
-            or option.state & QStyle.State_Selected
-        ):
-            super().paint(painter, option, index)
-            return
-
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        full_text = opt.text
-        normal_text = full_text[:self.limit]
-        overflow_text = full_text[self.limit:]
-
-        opt.text = ""
-        style = opt.widget.style() if opt.widget else QApplication.style()
-        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
-        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, opt.widget).adjusted(4, 0, -2, 0)
-        if text_rect.width() <= 0:
-            return
-
-        painter.save()
-        painter.setClipRect(text_rect)
-        fm = opt.fontMetrics
-        baseline = text_rect.top() + (text_rect.height() + fm.ascent() - fm.descent()) // 2
-        x = text_rect.left()
-
-        painter.setPen(opt.palette.color(QPalette.Text))
-        painter.drawText(x, baseline, normal_text)
-        x += fm.horizontalAdvance(normal_text)
-
-        painter.setPen(self.warning_color)
-        painter.drawText(x, baseline, overflow_text)
-        painter.restore()
 
 
 class DisklavierScreenLineEdit(QWidget):
@@ -2986,6 +2933,20 @@ def _deprioritize_preview_process(process):
         pass
 
 
+def _preview_renderer_identity(soundfont_path):
+    return [
+        file_identity(soundfont_path or _find_preview_soundfont()),
+        file_identity(_find_fluidsynth_command()),
+    ]
+
+
+def _preview_audio_cache():
+    root = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
+    if not root:
+        root = os.path.join(tempfile.gettempdir(), "aps-midi-prep-tool-cache")
+    return PreviewAudioCache(os.path.join(root, "audio-previews"))
+
+
 class MidiPreviewRenderWorker(QThread):
     progressChanged = Signal(int, int, str)
     previewReady = Signal(str, str)
@@ -2998,6 +2959,7 @@ class MidiPreviewRenderWorker(QThread):
         self.duration = float(duration or 0.0)
         self.output_path = output_path
         self.soundfont_path = str(soundfont_path or "")
+        self.renderer_identity = None
         self._process = None
 
     def cancel(self):
@@ -3072,18 +3034,38 @@ class MidiPreviewRenderWorker(QThread):
         midi_path = ""
         try:
             self._emit_progress(5, 100, "Preparing MIDI preview...")
+            soundfont_path = self.soundfont_path or _find_preview_soundfont()
+            self.renderer_identity = _preview_renderer_identity(soundfont_path)
+            cache = _preview_audio_cache()
+            cache_key = preview_cache_key(
+                self.midi_bytes, self.notes, self.duration, self.renderer_identity,
+            )
+            cached_engine = cache.restore(cache_key, self.output_path)
+            if cached_engine is not None:
+                self._emit_progress(100, 100, "Preview ready.")
+                self.previewReady.emit(self.output_path, cached_engine)
+                return
+            # A restored output may be linked to the cache. Never render into
+            # that inode if this worker's destination is subsequently reused.
+            try:
+                os.unlink(self.output_path)
+            except FileNotFoundError:
+                pass
             midi_handle, midi_path = tempfile.mkstemp(prefix="aps_preview_", suffix=".mid")
             with os.fdopen(midi_handle, "wb") as handle:
                 handle.write(self.midi_bytes)
 
-            soundfont_path = self.soundfont_path or _find_preview_soundfont()
             rendered = False
             engine_label = ""
+            cacheable_render = True
             try:
                 rendered, engine_label = self._render_with_fluidsynth(midi_path, soundfont_path)
             except Exception as exc:
                 if "cancelled" in str(exc).lower():
                     raise
+                # A temporary FluidSynth error must not permanently substitute
+                # the built-in piano for the user's selected SoundFont.
+                cacheable_render = False
                 self._emit_progress(
                     10,
                     100,
@@ -3108,6 +3090,8 @@ class MidiPreviewRenderWorker(QThread):
             if not os.path.isfile(self.output_path) or os.path.getsize(self.output_path) <= 0:
                 raise RuntimeError("Preview WAV was not created.")
             self._emit_progress(100, 100, "Preview ready.")
+            if cacheable_render:
+                cache.store(cache_key, self.output_path, engine_label)
             self.previewReady.emit(self.output_path, engine_label)
         except Exception as exc:
             if os.path.exists(self.output_path):
@@ -4161,7 +4145,7 @@ class SoundFontCatalogWorker(QThread):
                     "User-Agent": "APS MIDI Prep Tool SoundFont Manager",
                 },
             )
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with open_soundfont_url(request, timeout=10) as response:
                 payload = response.read(512 * 1024)
             data = json.loads(payload.decode("utf-8", errors="replace"))
             self.catalogLoaded.emit(_normalize_soundfont_catalog(data, self.url))
@@ -4420,7 +4404,7 @@ class SoundFontDownloadWorker(QThread):
                 url,
                 headers={"User-Agent": "APS MIDI Prep Tool SoundFont Manager"},
             )
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with open_soundfont_url(request, timeout=30) as response:
                 total = int(response.headers.get("Content-Length") or 0)
                 done = 0
                 hasher = hashlib.sha256()
@@ -4436,6 +4420,8 @@ class SoundFontDownloadWorker(QThread):
                         hasher.update(chunk)
                         done += len(chunk)
                         self.downloadProgress.emit(done, total, os.path.basename(output_path))
+            if total and done != total:
+                raise RuntimeError("The SoundFont download was incomplete. Please try again.")
             expected_hash = str(self.entry.get("sha256") or "").strip().lower()
             if expected_hash and hasher.hexdigest().lower() != expected_hash:
                 raise RuntimeError("The downloaded SoundFont did not match the expected SHA-256 hash.")
@@ -5828,6 +5814,7 @@ class FileInspectionDialog(QDialog):
         self.live_synth_process = None
         self.preview_engine_label = ""
         self._rendered_tempo_percent = 100
+        self._preview_renderer_identity = None
         self._last_tempo_percent = 100
         self._preview_rebuild_pending = False
         self._preview_render_autoplay = False
@@ -6698,6 +6685,7 @@ class FileInspectionDialog(QDialog):
         self.preview_audio_path = ""
         self.preview_engine_label = ""
         self._preview_audio_stale = False
+        self._preview_renderer_identity = None
         self._rendered_tempo_percent = self._preview_tempo_percent()
 
     def _set_preview_rendering(self, rendering):
@@ -7479,9 +7467,12 @@ class FileInspectionDialog(QDialog):
         if self._using_midi_output():
             self._start_midi_output_playback()
             return
-        if self._can_use_live_fluidsynth():
-            self._start_live_fluidsynth_playback()
-            return
+        # Render once, then reuse the WAV instead of starting/loading FluidSynth
+        # on every Play (especially costly for compressed SoundFonts on Windows).
+        if self.preview_audio_path and self._preview_renderer_identity != _preview_renderer_identity(
+            self.soundfont_combo.currentData() or ""
+        ):
+            self._preview_audio_stale = True
         if self._preview_audio_stale:
             self._clear_preview_audio()
         if self.preview_audio_path and os.path.exists(self.preview_audio_path):
@@ -7817,6 +7808,7 @@ class FileInspectionDialog(QDialog):
                 except OSError:
                     pass
             return
+        self._preview_renderer_identity = worker.renderer_identity
         current_tempo = self._preview_tempo_percent()
         old_path = self.preview_audio_path
         old_rendered_tempo = self._rendered_tempo_percent
@@ -8921,7 +8913,7 @@ class BulkExtractionProgressDialog(QDialog):
 class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
-    TITLE_RAW_ROLE = TitleOverflowDelegate.RAW_TITLE_ROLE
+    TITLE_RAW_ROLE = Qt.UserRole + 1
     CENTERED_TITLE_DISK_THRESHOLD = 3
     SETTINGS_ORG = APP_SETTINGS_ORG
     SETTINGS_APP = APP_SETTINGS_APP
@@ -8941,9 +8933,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG = "hide_save_as_image_complete_dialog"
     SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT = "skip_eseq_to_midi_conversion_prompt"
     SETTING_LONG_MIDI_FILENAMES = "long_midi_filenames"
+    SETTING_FILENAME_DEFAULTS_VERSION = "filename_defaults_version"
+    FILENAME_DEFAULTS_VERSION = 1
     SETTING_ESEQ_TO_MIDI_LONG_FILENAMES = "eseq_to_midi_long_filenames"
     SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES = "eseq_to_midi_trim_title_spaces"
-    DEFAULT_LONG_MIDI_FILENAMES = False
+    DEFAULT_LONG_MIDI_FILENAMES = True
     SETTING_ALLOW_FLOPPY_SAVE = "allow_floppy_save"
     SETTING_CONFIRM_IMAGE_SAVE = "confirm_image_save"
     SETTING_AUTO_WRITE_PROTECT_ON_LOAD = "auto_write_protect_on_load"
@@ -9165,7 +9159,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 self.settings.remove(SETTING_DISK_FORMAT)
         if profile.song_format and medium.key in {"nalbantov", "flashfloppy_img", "flashfloppy_hfe"}:
             self.settings.setValue("emulator_image_starting_number", 0)
+        for key in (self.SETTING_USE_DOS83_FILENAMES, self.SETTING_FORMAT_DISKLAVIER_SCREEN):
+            if not self.settings.contains(key):
+                self.settings.setValue(key, proposed_settings(profile, medium)[key])
         self._reset_user_hide_choices_if_needed()
+        self._migrate_filename_defaults_if_needed()
         self._reset_gw_sector_report_hide_choices_if_needed()
         # Deployment choices take precedence over migrations, including the
         # first-run resets of remembered dialogs and emulator numbering.
@@ -9292,8 +9290,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.table.cellClicked.connect(self.handle_cell_clicked)
         self.table.cellDoubleClicked.connect(self.handle_cell_double_clicked)
         self.table.itemSelectionChanged.connect(self._refresh_eseq_reorder_buttons)
-        self.title_delegate = TitleOverflowDelegate(self.TITLE_COMPAT_LIMIT, self.table)
-        self.table.setItemDelegateForColumn(4, self.title_delegate)
         header_tooltips = {
             0: "Remove this row from the list (does not delete the file on disk).",
             1: "Internal full file path (hidden).",
@@ -9399,10 +9395,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.compat_warning_checkbox = QCheckBox("Long title warning")
         self.compat_warning_checkbox.setChecked(show_compat_warning)
         self.compat_warning_checkbox.setToolTip(
-            "Highlight title characters beyond the 32-character legacy compatibility limit."
+            "Show the Long column for titles beyond the 32-character legacy compatibility limit."
         )
         self.compat_warning_checkbox.toggled.connect(self.toggle_compat_warnings)
-        self.title_delegate.set_highlight_enabled(show_compat_warning)
         options_grid.addWidget(self.compat_warning_checkbox, 0, 0, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
         format_disklavier_screen = self.settings.value(
@@ -9785,7 +9780,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.viewLongTitleWarningAction.setCheckable(True)
         self.viewLongTitleWarningAction.setChecked(self.compat_warning_checkbox.isChecked())
         self.viewLongTitleWarningAction.setToolTip(
-            "Highlight title characters beyond the 32-character legacy compatibility limit."
+            "Show the Long column for titles beyond the 32-character legacy compatibility limit."
         )
         self.viewLongTitleWarningAction.toggled.connect(self.compat_warning_checkbox.setChecked)
         self.viewMenu.addAction(self.viewLongTitleWarningAction)
@@ -9800,34 +9795,34 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.viewMenu.addAction(self.viewFormatDisklavierScreenAction)
 
         self.viewMenu.addSeparator()
-        self.viewHideStatusAction = QAction("Hide Status", self)
-        self.viewHideStatusAction.setCheckable(True)
-        self.viewHideStatusAction.setChecked(
-            self.settings.value(self.SETTING_HIDE_STATUS, True, type=bool)
+        self.viewShowStatusAction = QAction("Show Status", self)
+        self.viewShowStatusAction.setCheckable(True)
+        self.viewShowStatusAction.setChecked(
+            not self.settings.value(self.SETTING_HIDE_STATUS, True, type=bool)
         )
-        self.viewHideStatusAction.setToolTip("Hide the operation status text beneath the file list.")
-        self.viewHideStatusAction.toggled.connect(self.toggle_hide_status)
-        self.viewMenu.addAction(self.viewHideStatusAction)
+        self.viewShowStatusAction.setToolTip("Show the operation status text beneath the file list.")
+        self.viewShowStatusAction.toggled.connect(self.toggle_show_status)
+        self.viewMenu.addAction(self.viewShowStatusAction)
 
-        self.viewHideQuickPanelAction = QAction("Hide Quick Panel", self)
-        self.viewHideQuickPanelAction.setCheckable(True)
-        self.viewHideQuickPanelAction.setChecked(
-            self.settings.value(self.SETTING_HIDE_QUICK_PANEL, False, type=bool)
+        self.viewShowQuickPanelAction = QAction("Show Quick Panel", self)
+        self.viewShowQuickPanelAction.setCheckable(True)
+        self.viewShowQuickPanelAction.setChecked(
+            not self.settings.value(self.SETTING_HIDE_QUICK_PANEL, False, type=bool)
         )
-        self.viewHideQuickPanelAction.setToolTip("Hide the Options, Utilities, and File Actions panel.")
-        self.viewHideQuickPanelAction.toggled.connect(self.toggle_hide_quick_panel)
-        self.viewMenu.addAction(self.viewHideQuickPanelAction)
+        self.viewShowQuickPanelAction.setToolTip("Show the Options, Utilities, and File Actions panel.")
+        self.viewShowQuickPanelAction.toggled.connect(self.toggle_show_quick_panel)
+        self.viewMenu.addAction(self.viewShowQuickPanelAction)
 
-        self.viewHideAlbumMetadataAction = QAction("Hide Album Info", self)
-        self.viewHideAlbumMetadataAction.setCheckable(True)
-        self.viewHideAlbumMetadataAction.setChecked(
-            self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
+        self.viewShowAlbumMetadataAction = QAction("Show Album Info", self)
+        self.viewShowAlbumMetadataAction.setCheckable(True)
+        self.viewShowAlbumMetadataAction.setChecked(
+            not self.settings.value(self.SETTING_HIDE_ALBUM_METADATA, False, type=bool)
         )
-        self.viewHideAlbumMetadataAction.setToolTip(
-            self._lt("Hide the Album Info panel, including Album Title, Catalog Number, and Create Album Subfolder.")
+        self.viewShowAlbumMetadataAction.setToolTip(
+            self._lt("Show the Album Info panel, including Album Title, Catalog Number, and Create Album Subfolder.")
         )
-        self.viewHideAlbumMetadataAction.toggled.connect(self.toggle_hide_album_metadata)
-        self.viewMenu.addAction(self.viewHideAlbumMetadataAction)
+        self.viewShowAlbumMetadataAction.toggled.connect(self.toggle_show_album_metadata)
+        self.viewMenu.addAction(self.viewShowAlbumMetadataAction)
 
         self.viewShowSaveDestinationAction = QAction(self._lt("Show Save Destination"), self)
         self.viewShowSaveDestinationAction.setCheckable(True)
@@ -10503,6 +10498,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             profile, settings.value(SETTING_MEDIUM, "") if settings is not None else ""
         )
 
+    def _preparation_requires_dos83_filenames(self):
+        return proposed_settings(
+            MidiTitleWindow._preparation_profile(self),
+            MidiTitleWindow._preparation_medium(self),
+        )["use_dos83_filenames"]
+
     def _preparation_export_defaults(self):
         profile = MidiTitleWindow._preparation_profile(self)
         medium = MidiTitleWindow._preparation_medium(self)
@@ -10854,6 +10855,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if "use_dos83_filenames" in changes:
             self.toggle_dos83_filenames(changes["use_dos83_filenames"])
             self._set_long_midi_filenames_enabled(changes["long_midi_filenames"])
+        toggle_screen = getattr(self, "toggle_format_disklavier_screen", None)
+        if callable(toggle_screen):
+            toggle_screen(changes["format_disklavier_screen"])
         self._refresh_preparation_ui()
         prepare = getattr(self, "_prepare_for_destination", None)
         if callable(prepare):
@@ -10968,9 +10972,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             {"id": "file.create_metadata_summary", "category": "File", "label": "Create Metadata Summary When Saving", "action": "fileCreateMetadataSummaryAction", "default": "Ctrl+Shift+Y"},
             {"id": "view.long_title_warning", "category": "View", "label": "Long title warning", "action": "viewLongTitleWarningAction", "default": "Ctrl+Alt+W"},
             {"id": "view.format_disklavier_screen", "category": "View", "label": "Format for Disklavier screen", "action": "viewFormatDisklavierScreenAction", "default": "Ctrl+Alt+D"},
-            {"id": "view.hide_status", "category": "View", "label": "Hide Status", "action": "viewHideStatusAction", "default": "Ctrl+Alt+S"},
-            {"id": "view.hide_quick_panel", "category": "View", "label": "Hide Quick Panel", "action": "viewHideQuickPanelAction", "default": "Ctrl+Alt+Q"},
-            {"id": "view.hide_album_metadata", "category": "View", "label": "Hide Album Info", "action": "viewHideAlbumMetadataAction", "default": "Ctrl+Alt+A"},
+            {"id": "view.hide_status", "category": "View", "label": "Show Status", "action": "viewShowStatusAction", "default": "Ctrl+Alt+S"},
+            {"id": "view.hide_quick_panel", "category": "View", "label": "Show Quick Panel", "action": "viewShowQuickPanelAction", "default": "Ctrl+Alt+Q"},
+            {"id": "view.hide_album_metadata", "category": "View", "label": "Show Album Info", "action": "viewShowAlbumMetadataAction", "default": "Ctrl+Alt+A"},
             {"id": "view.show_save_destination", "category": "View", "label": "Show Save Destination", "action": "viewShowSaveDestinationAction", "default": ""},
             {"id": "view.show_preparation_row", "category": "View", "label": "Show Preparation Row", "action": "viewShowPreparationRowAction", "default": ""},
             {"id": "view.logs", "category": "View", "label": "View Logs...", "action": "viewLogsAction", "default": "F8"},
@@ -11315,10 +11319,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         long_name_checkbox.setChecked(
             self.settings.value(
                 self.SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES,
-                False,
+                self._long_midi_filenames_enabled(),
                 type=bool,
             )
         )
+        if self._preparation_requires_dos83_filenames():
+            long_name_checkbox.setChecked(False)
+            long_name_checkbox.setEnabled(False)
         trim_title_spaces_checkbox.setChecked(
             self.settings.value(
                 self.SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES,
@@ -12698,9 +12705,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             ("fileWriteProtectOriginalAction", "Write-Protect Original", "O"),
             ("viewLongTitleWarningAction", "Long title warning", "L"),
             ("viewFormatDisklavierScreenAction", "Format for Disklavier screen", "F"),
-            ("viewHideStatusAction", "Hide Status", "S"),
-            ("viewHideQuickPanelAction", "Hide Quick Panel", "Q"),
-            ("viewHideAlbumMetadataAction", "Hide Album Info", "A"),
+            ("viewShowStatusAction", "Show Status", "S"),
+            ("viewShowQuickPanelAction", "Show Quick Panel", "Q"),
+            ("viewShowAlbumMetadataAction", "Show Album Info", "A"),
             ("viewShowSaveDestinationAction", "Show Save Destination", "D"),
             ("viewShowPreparationRowAction", "Show Preparation Row", "P"),
             ("viewLogsAction", "View Logs...", "V"),
@@ -13359,6 +13366,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
 
         self._apply_pending_floppy_read_title_trim()
+        self._apply_pending_floppy_read_long_filenames()
         counts = self._log_listing_counts(listing)
         self._log_event(
             "Disk",
@@ -15224,6 +15232,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         capture_path = getattr(capture, "capture_path", "")
         if not isinstance(gw_source, GreaseweazleFloppySource) or not capture_path:
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
             self._show_operation_error(
                 "Greaseweazle Capture Failed",
@@ -15247,6 +15256,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if not output_path:
             capture.cleanup()
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
             self.status_label.setText(self._lt("Greaseweazle capture was not saved; opening cancelled."))
             return
@@ -15259,6 +15269,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         except Exception as exc:
             capture.cleanup()
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
             self._show_operation_error(
                 "SCP Save Failed",
@@ -15493,6 +15504,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._exec_child_dialog(dialog)
         if dialog.clickedButton() is not save_button:
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
             self.status_label.setText(self._lt("Greaseweazle conversion stopped; the source image was not changed."))
             return
@@ -15507,6 +15519,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         if not output_path:
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
             self.status_label.setText(self._lt("Greaseweazle conversion stopped; no converted image was saved."))
             return
@@ -15514,6 +15527,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             output_path = f"{output_path}.img"
 
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
         self._start_floppy_image_capture_worker(
             "image_convert",
@@ -15532,6 +15546,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if disk_format is not None:
             format_note = f"\n\n{self._lt('Detected format:')} {disk_format.label}."
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
         self.pendingDiskRecoveryRequest = None
         self.status_label.setText(self._lt("{filename} appears to be blank or unformatted.", filename=filename))
@@ -15563,6 +15578,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         capture_path = details.get("capture_path") or ""
         if not capture_path or not os.path.isfile(capture_path):
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
             self._show_operation_error(
                 "Greaseweazle Conversion Failed",
@@ -15574,6 +15590,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         retry_format = self._choose_greaseweazle_retry_format(details)
         if retry_format is None:
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
             self.status_label.setText(self._lt(
                 "Greaseweazle conversion stopped. Raw capture saved at {path}.", path=capture_path,
@@ -15615,6 +15632,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         self.status_label.setText(self._lt("Disk operation cancelled."))
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
         self.pendingDiskRecoveryRequest = None
         self.pendingGwConversionDetails = None
@@ -15681,12 +15699,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 request.get("message", ""),
             )
             self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
             self.diskLoadContext = {}
             return
         if request.get("load_kind") == "floppy_usb":
             source = self._wrap_floppy_recovery_source_with_format(request.get("source"))
             if source is None or not isinstance(source, FloppyRecoverySource):
+                self.pendingFloppyReadConvertToMidi = False
+                self.pendingFloppyReadLongFilenames = False
+                self.pendingFloppyReadTrimTitles = False
                 self.diskLoadContext = {}
                 return
             request = dict(request)
@@ -15886,6 +15908,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
         self._apply_pending_floppy_read_title_trim()
+        self._apply_pending_floppy_read_long_filenames()
 
         song_count = sum(1 for entry in listing.entries if not is_pianodir_path(entry.path))
         self._log_event(
@@ -15947,6 +15970,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         self._offer_partial_recovery_capture()
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
 
     def _on_disk_recovery_cancelled(self, _message):
@@ -15963,6 +15987,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.status_label.setText(self._lt("Disk recovery cancelled."))
         self._offer_partial_recovery_capture()
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
 
     def _on_disk_recovery_finished(self):
@@ -15973,6 +15998,21 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self.diskRecoveryWorker is not None:
             self.diskRecoveryWorker.deleteLater()
             self.diskRecoveryWorker = None
+
+    def _migrate_filename_defaults_if_needed(self):
+        """Apply the new defaults once, including existing installations.
+
+        Older versions persisted unchecked defaults and a manual 8.3 choice
+        even for Custom. Keep later user choices, including opting out of
+        descriptive names, rather than resetting them on every launch.
+        """
+        if self.settings.value(self.SETTING_FILENAME_DEFAULTS_VERSION, 0, type=int) >= self.FILENAME_DEFAULTS_VERSION:
+            return
+        use_dos83 = self._preparation_requires_dos83_filenames()
+        self.settings.setValue(self.SETTING_USE_DOS83_FILENAMES, use_dos83)
+        self._set_long_midi_filenames_enabled(not use_dos83)
+        self.settings.setValue(self.SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES, not use_dos83)
+        self.settings.setValue(self.SETTING_FILENAME_DEFAULTS_VERSION, self.FILENAME_DEFAULTS_VERSION)
 
     def _reset_user_hide_choices_if_needed(self):
         had_eseq_filename_choice = self.settings.contains(
@@ -15987,8 +16027,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 )
                 if self.settings.contains(key)
             ]
+            use_dos83 = self.settings.value(
+                getattr(self, "SETTING_USE_DOS83_FILENAMES", "use_dos83_filenames"), False, type=bool
+            )
             self._set_long_midi_filenames_enabled(
-                any(legacy_choices) if legacy_choices else self.DEFAULT_LONG_MIDI_FILENAMES
+                not use_dos83 and (any(legacy_choices) if legacy_choices else self.DEFAULT_LONG_MIDI_FILENAMES)
             )
         if not had_eseq_filename_choice:
             # Existing users may have hidden the older confirmation before it
@@ -16028,6 +16071,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.settings.setValue(self.SETTING_HIDE_CHOICES_RESET_VERSION, self.HIDE_CHOICES_RESET_VERSION)
 
     def _long_midi_filenames_enabled(self):
+        if MidiTitleWindow._preparation_requires_dos83_filenames(self):
+            return False
         dos83_setting_key = getattr(self, "SETTING_USE_DOS83_FILENAMES", "")
         if dos83_setting_key and self.settings.value(
             dos83_setting_key,
@@ -16947,23 +16992,23 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._lt("Long filenames are enabled. Existing pending names were left unchanged.")
         )
 
-    def toggle_hide_status(self, state):
-        hidden = bool(state)
+    def toggle_show_status(self, state):
+        hidden = not bool(state)
         self.settings.setValue(self.SETTING_HIDE_STATUS, hidden)
         if hasattr(self, "statusWidget"):
             self.statusWidget.setVisible(not hidden)
-        action = getattr(self, "viewHideStatusAction", None)
-        if action is not None and action.isChecked() != hidden:
-            action.setChecked(hidden)
+        action = getattr(self, "viewShowStatusAction", None)
+        if action is not None and action.isChecked() == hidden:
+            action.setChecked(not hidden)
 
-    def toggle_hide_quick_panel(self, state):
-        hidden = bool(state)
+    def toggle_show_quick_panel(self, state):
+        hidden = not bool(state)
         self.settings.setValue(self.SETTING_HIDE_QUICK_PANEL, hidden)
         if hasattr(self, "quickPanelWidget"):
             self.quickPanelWidget.setVisible(not hidden)
-        action = getattr(self, "viewHideQuickPanelAction", None)
-        if action is not None and action.isChecked() != hidden:
-            action.setChecked(hidden)
+        action = getattr(self, "viewShowQuickPanelAction", None)
+        if action is not None and action.isChecked() == hidden:
+            action.setChecked(not hidden)
 
     def toggle_show_preparation_row(self, state):
         visible = bool(state)
@@ -16981,13 +17026,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if action is not None and action.isChecked() != visible:
             action.setChecked(visible)
 
-    def toggle_hide_album_metadata(self, state):
-        hidden = bool(state)
+    def toggle_show_album_metadata(self, state):
+        hidden = not bool(state)
         self.settings.setValue(self.SETTING_HIDE_ALBUM_METADATA, hidden)
         self._update_image_pianodir_metadata_ui()
-        action = getattr(self, "viewHideAlbumMetadataAction", None)
-        if action is not None and action.isChecked() != hidden:
-            action.setChecked(hidden)
+        action = getattr(self, "viewShowAlbumMetadataAction", None)
+        if action is not None and action.isChecked() == hidden:
+            action.setChecked(not hidden)
 
     def _original_write_setting_key(self):
         if self.is_floppy_mode():
@@ -17620,15 +17665,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 action.setToolTip(tooltip)
                 action.setStatusTip(tooltip)
             self.table.setColumnHidden(5, True)
-            self.title_delegate.set_highlight_enabled(False)
         else:
-            tooltip = self._lt("Highlight title characters beyond the 32-character legacy compatibility limit.")
+            tooltip = self._lt("Show the Long column for titles beyond the 32-character legacy compatibility limit.")
             self.compat_warning_checkbox.setToolTip(tooltip)
             if action is not None:
                 action.setToolTip(tooltip)
                 action.setStatusTip(tooltip)
             self.table.setColumnHidden(5, not self.compat_warning_checkbox.isChecked())
-            self.title_delegate.set_highlight_enabled(self.compat_warning_checkbox.isChecked())
         self.table.viewport().update()
 
     def _apply_table_selection_style(self):
@@ -18131,16 +18174,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.viewFormatDisklavierScreenAction.setStatusTip(
                 "Use the Disklavier's two 16-character screen rows when editing titles."
             )
-        if hasattr(self, "viewHideStatusAction"):
-            self.viewHideStatusAction.setStatusTip("Hide or show the operation status text beneath the file list.")
-        if hasattr(self, "viewHideQuickPanelAction"):
-            self.viewHideQuickPanelAction.setStatusTip("Hide or show the Options, Utilities, and File Actions panel.")
-        if hasattr(self, "viewHideAlbumMetadataAction"):
+        if hasattr(self, "viewShowStatusAction"):
+            self.viewShowStatusAction.setStatusTip("Show the operation status text beneath the file list.")
+        if hasattr(self, "viewShowQuickPanelAction"):
+            self.viewShowQuickPanelAction.setStatusTip("Show the Options, Utilities, and File Actions panel.")
+        if hasattr(self, "viewShowAlbumMetadataAction"):
             album_info_tip = self._lt(
-                "Hide the Album Info panel, including Album Title, Catalog Number, and Create Album Subfolder."
+                "Show the Album Info panel, including Album Title, Catalog Number, and Create Album Subfolder."
             )
-            self.viewHideAlbumMetadataAction.setToolTip(album_info_tip)
-            self.viewHideAlbumMetadataAction.setStatusTip(album_info_tip)
+            self.viewShowAlbumMetadataAction.setToolTip(album_info_tip)
+            self.viewShowAlbumMetadataAction.setStatusTip(album_info_tip)
         if hasattr(self, "viewLogsAction"):
             self.viewLogsAction.setEnabled(True)
             self.viewLogsAction.setStatusTip("Open a live view of console output from this session.")
@@ -20481,6 +20524,29 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.pendingFloppyReadTrimTitles = False
         return self._stage_trim_title_spaces_for_all(show_summary=False)
 
+    @staged_batch
+    def _apply_pending_floppy_read_long_filenames(self):
+        """Stage descriptive folder-export names for songs already stored as MIDI."""
+        if not getattr(self, "pendingFloppyReadLongFilenames", False):
+            return 0
+        if not self.pendingFloppyReadConvertToMidi:
+            self.pendingFloppyReadLongFilenames = False
+        if not self.is_image_mode() or self._preparation_requires_dos83_filenames():
+            return 0
+        midi_rows = [
+            row for row in range(self.table.rowCount())
+            if not self._is_special_pianodir_row(row)
+            and self.table.item(row, 1) is not None
+            and self._image_path_is_midi(self.table.item(row, 1).text())
+        ]
+        for number, row in enumerate(midi_rows, start=1):
+            source_path = self.table.item(row, 1).text()
+            self.pendingImageExportFilenames[source_path] = self._long_midi_filename_for_row(
+                row, number, len(midi_rows)
+            )
+            self._refresh_image_filename_display(row)
+        return len(midi_rows)
+
     def _image_mode_file_counts(self):
         midi_count = 0
         eseq_count = 0
@@ -21520,9 +21586,34 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 exc,
             )
 
+    def _discover_floppy_devices(self, *, include_greaseweazle=True):
+        result = discover_floppy_devices(
+            self,
+            floppy_probe=list_floppy_drives,
+            greaseweazle_probe=list_greaseweazle_devices if include_greaseweazle else None,
+            prepare_dialog=self._prepare_progress_dialog,
+            translate=self._lt,
+        )
+        if result is None:
+            return None
+        floppy_drives, greaseweazle_devices, issues = result
+        if issues:
+            QMessageBox.warning(
+                self,
+                self._lt("Drive Detection Incomplete"),
+                "\n".join(issues) + "\n\n" + " ".join(self._lt(text) for text in (
+                    "Check that a disk is inserted, reconnect an unresponsive USB drive, then try again.",
+                    "Any drives that responded are still available.",
+                    "If the system is still waiting for the device, restart APS.",
+                )),
+            )
+        return floppy_drives, greaseweazle_devices
+
     def _choose_format_floppy_options(self):
-        floppy_drives = list_floppy_drives()
-        greaseweazle_devices = list_greaseweazle_devices()
+        devices = self._discover_floppy_devices()
+        if devices is None:
+            return None
+        floppy_drives, greaseweazle_devices = devices
 
         dialog = QDialog(self)
         apply_window_icon(dialog)
@@ -21853,8 +21944,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 return
 
     def _choose_floppy_image_capture_options(self):
-        floppy_drives = list_floppy_drives()
-        greaseweazle_devices = list_greaseweazle_devices()
+        devices = self._discover_floppy_devices()
+        if devices is None:
+            return None
+        floppy_drives, greaseweazle_devices = devices
 
         dialog = QDialog(self)
         apply_window_icon(dialog)
@@ -22154,8 +22247,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
 
     def _choose_floppy_read_options(self, *, default_recovery=False):
-        floppy_drives = list_floppy_drives()
-        greaseweazle_devices = list_greaseweazle_devices()
+        devices = self._discover_floppy_devices()
+        if devices is None:
+            return None
+        floppy_drives, greaseweazle_devices = devices
 
         dialog = QDialog(self)
         apply_window_icon(dialog)
@@ -22376,8 +22471,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         long_name_checkbox.setToolTip(
             self._t("filename_policy.long_read_floppy.tooltip")
         )
-        long_name_checkbox.setEnabled(convert_to_midi_checkbox.isChecked())
-        convert_to_midi_checkbox.toggled.connect(long_name_checkbox.setEnabled)
+        long_name_checkbox.setEnabled(not self._preparation_requires_dos83_filenames())
         convert_layout.addWidget(long_name_checkbox, 1, 1)
         if conversion_restriction:
             conversion_hint = QLabel(conversion_restriction)
@@ -22877,7 +22971,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         ) == QMessageBox.Yes
 
     def _choose_save_to_floppy_drive(self):
-        floppy_drives = list_floppy_drives()
+        devices = self._discover_floppy_devices(include_greaseweazle=False)
+        if devices is None:
+            return None
+        floppy_drives, _greaseweazle_devices = devices
         disk_format = self.image_session.disk_format if self.image_session is not None else None
 
         dialog = QDialog(self)
@@ -22934,8 +23031,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         }
 
     def _choose_write_image_floppy_target(self):
-        floppy_drives = list_floppy_drives()
-        greaseweazle_devices = list_greaseweazle_devices()
+        devices = self._discover_floppy_devices()
+        if devices is None:
+            return None
+        floppy_drives, greaseweazle_devices = devices
         disk_format = self.image_session.disk_format if self.image_session is not None else None
 
         dialog = QDialog(self)
@@ -23792,6 +23891,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
 
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
         self._start_disk_load_worker(
             load_kind="image",
@@ -28462,6 +28562,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             and self.format_disklavier_checkbox.isChecked()
         )
 
+        screen_title = current_title[:self.TITLE_COMPAT_LIMIT] if use_screen_format else current_title
         prompt = self._make_dialog_form_label("Song title:")
 
         title_field_font = self._make_scaled_font("Courier New", style_hint=QFont.Monospace)
@@ -28628,7 +28729,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         def composed_title():
             if use_screen_format:
                 if not screen_fields_changed():
-                    return current_title
+                    return screen_title
                 return first_field.text()[:16].rstrip() + second_field.text()[:16].rstrip()
             return editor.text()
 
@@ -28661,7 +28762,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         buttons.rejected.connect(dialog.reject)
 
         if use_screen_format:
-            field_one, field_two = self._split_title_for_screen_fields(current_title)
+            field_one, field_two = self._split_title_for_screen_fields(screen_title)
             first_field.setText(field_one)
             second_field.setText(field_two)
             initial_screen_fields[0] = first_field.text()[:16]

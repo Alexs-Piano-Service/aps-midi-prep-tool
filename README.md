@@ -72,7 +72,15 @@ prepared for the selected controller.
 The destination row highlights an active profile. **Custom** turns off automatic
 preparation while keeping changes already staged for review.
 **View → Show Preparation Row** controls its visibility; preparation stays active
-when the row is hidden.
+when the row is hidden. The row is visible by default. View menu visibility
+options use **Show** labels, with a checkmark when the corresponding area is shown.
+Destinations that require DOS 8.3 names select short filenames; other destinations
+default to descriptive MIDI filenames, independently of E-SEQ
+conversion. Unchecking **Name MIDI files by track number and song title** still
+reads all files and keeps their original names. Disklavier screen formatting
+defaults on for Mark I, Mark II, and
+Mark III, and off for other controllers. When enabled, opening the title editor
+truncates its editable title to 32 characters; cancelling keeps the original.
 E-SEQ destinations disable conversion to MIDI, and MIDI destinations disable
 conversion to E-SEQ, with an explanation. **Nalbantov** is available for
 floppy-capable Disklavier profiles, including Mark III, and prepares HFE images
@@ -164,6 +172,9 @@ Open **Utilities → File Inspection...** to view notes, channels, instruments,
 tempo, and pedals on a piano roll. Mute channels, adjust the preview mix or
 tempo, and listen with a basic piano sound, a SoundFont, or a connected MIDI
 device. A SoundFont supplies instrument sounds for playback.
+The first audio preview renders the song; subsequent Play clicks reuse that
+audio. Completed previews are cached across inspection sessions, with automatic
+replacement when the song, preview mix, SoundFont, or renderer changes.
 
 For E-SEQ songs, **File details** includes the original header's startup tempo,
 tempo factors, meter, pedal and channel flags, write protection, and display
@@ -263,13 +274,13 @@ package.
 ## Run from source
 
 Packaged releases are the easiest way to get started. To run from source, use
-Python 3.10 or newer and PySide6. On Linux, run these commands from the project
+Python 3.10 or newer, PySide6, and certifi. On Linux, run these commands from the project
 folder:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install PySide6
+pip install PySide6 certifi
 python3 aps_midi_prep_tool.py
 ```
 

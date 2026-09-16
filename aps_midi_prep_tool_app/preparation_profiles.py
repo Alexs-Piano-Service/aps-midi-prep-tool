@@ -60,7 +60,7 @@ PIANO_PROFILES = (
         "unsure", "I'm not sure", category="general",
         media=("custom", "original", "flashfloppy_img", "flashfloppy_hfe", "emulator_custom", "usb"),
     ),
-    PianoProfile("custom", "Custom", caution="Keep the current manual preparation settings.", category="general"),
+    PianoProfile("custom", "Custom", caution="Keep manual conversion settings; use descriptive filenames and standard title editing.", category="general"),
     PianoProfile(
         "mark_i", "Mark I — MX100A/B, DKW10, DKC5R", "eseq", ("eseq",), (),
         "ibm.720", FLOPPY_MEDIA, "original", "documented",
@@ -211,15 +211,17 @@ def proposed_settings(profile, medium):
     """Return only defaults the user can review before applying this profile."""
     medium = get_preparation_medium(profile, medium.key)
     floppy = medium.key in FLOPPY_MEDIA
-    changes = {}
+    use_dos83 = floppy and profile.song_format is not None
+    changes = {
+        "use_dos83_filenames": use_dos83,
+        "long_midi_filenames": not use_dos83,
+        "eseq_to_midi_long_filenames": not use_dos83,
+        "read_floppy_long_filenames": not use_dos83,
+        "bulk_extraction_long_midi_filenames": not use_dos83,
+        "format_disklavier_screen": profile.key in {"mark_i", "mark_ii", "mark_ii_xg", "mark_iii"},
+    }
     if profile.song_format is not None:
-        changes.update({
-            "emulator_image_content": profile.song_format,
-            "use_dos83_filenames": floppy,
-            "long_midi_filenames": not floppy,
-            "eseq_to_midi_long_filenames": not floppy,
-            "read_floppy_long_filenames": not floppy,
-        })
+        changes["emulator_image_content"] = profile.song_format
     if floppy and profile.disk_format_key:
         changes["emulator_image_disk_format"] = profile.disk_format_key
         changes[SETTING_DISK_FORMAT] = profile.disk_format_key
@@ -239,6 +241,8 @@ SETTING_LABELS = {
     "long_midi_filenames": "Descriptive MIDI export filenames",
     "eseq_to_midi_long_filenames": "Descriptive E-SEQ to MIDI filenames",
     "read_floppy_long_filenames": "Descriptive floppy MIDI export filenames",
+    "bulk_extraction_long_midi_filenames": "Descriptive MIDI export filenames",
+    "format_disklavier_screen": "Format for Disklavier screen",
     "emulator_image_disk_format": "Disk-set capacity",
     SETTING_DISK_FORMAT: "New image / Save As Image capacity",
     "emulator_image_output_format": "Disk-set image type",

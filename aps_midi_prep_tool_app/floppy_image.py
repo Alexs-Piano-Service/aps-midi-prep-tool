@@ -1253,6 +1253,7 @@ def _list_linux_floppy_drives():
             "-o",
             "NAME,PATH,SIZE,RM,RO,TYPE,TRAN,MOUNTPOINTS,LABEL,MODEL",
         ],
+        timeout=5.0,
         text=True,
         capture_output=True,
         check=False,
@@ -1654,13 +1655,18 @@ $items = Get-CimInstance Win32_PnPEntity |
     }}
 @($items) | ConvertTo-Json -Depth 4 -Compress
 """
-    result = subprocess.run(
-        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        text=True,
-        capture_output=True,
-        check=False,
-        **windows_subprocess_kwargs(),
-    )
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5.0,
+            **windows_subprocess_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # Registry discovery can still work when WMI or PowerShell is stuck.
+        return []
     if result.returncode != 0:
         return []
     try:
@@ -1797,6 +1803,7 @@ def list_greaseweazle_devices():
 
     result = subprocess.run(
         [gw, "info"],
+        timeout=5.0,
         text=True,
         capture_output=True,
         check=False,

@@ -21,9 +21,11 @@ removed, or you choose **Custom**.
 The destination row highlights active preparation. Click **Custom** in that row
 to turn off automatic preparation and allow conversion to either format. Changes
 already staged stay available for review. **Custom** and **I'm not sure** keep
-manual settings.
+manual conversion settings, default to long MIDI filenames, and turn off
+Disklavier screen formatting. You can then adjust those choices manually.
 
-Use **View → Show Preparation Row** to hide or show that row. Hiding it keeps
+The preparation row is visible by default. Use **View → Show Preparation Row**
+to hide or show it. Hiding it keeps
 the selected preparation active; **Settings → Preparing for...** remains available.
 The preparation dialog links to the selected controller's evidence: the **APS
 Disklavier Compatibility Table** for Disklavier and General choices, or the
@@ -32,6 +34,13 @@ Disklavier Compatibility Table** for Disklavier and General choices, or the
 Floppy and emulator preparation also stages unique DOS 8.3 names for songs whose
 current filenames are incompatible. Existing valid names remain unchanged;
 USB and app folder preparation keep descriptive filenames.
+Long MIDI filenames use the track number and song title and do not require converting
+E-SEQ songs to MIDI. Disklavier screen formatting defaults on for Mark I,
+Mark II (including XG), and Mark III profiles, and off for all other profiles.
+With screen formatting enabled, opening the title editor starts with the first
+32 characters so an overlong title can be corrected. Cancelling leaves the title
+unchanged. The **Long** column marks overlong titles without highlighting their
+characters.
 Clavinova MDA songs are staged as Disklavier FIL through a MIDI intermediate;
 the review identifies this container conversion. Files that cannot be converted
 remain visible as unprepared, with an error, and their originals stay intact.

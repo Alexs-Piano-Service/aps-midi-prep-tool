@@ -14,6 +14,12 @@ to include the exact operation and log when reporting a failure.
 
 ## Changes for stalled operations
 
+- Drive detection runs in the background with a Cancel button. If a capacity,
+  label, or device query does not finish within ten seconds, APS reports it and
+  still offers any completed detection results. Reconnect an unresponsive USB
+  drive and retry. Retrying reuses an outstanding query so stuck drivers cannot
+  create more background threads. A stalled detection query does not prevent
+  APS from closing; restarting APS can help when Windows never releases it.
 - Image tools such as mformat, mcopy, and the Greaseweazle format converter stop
   after two minutes per command and report which tool timed out. They receive
   no console input, so an unseen command-line question cannot hold up the app.
@@ -49,7 +55,8 @@ shutdown, restart Windows and send the error text and APS log with a bug report.
 See PyInstaller's documentation on [subprocess lifetime and single-file cleanup](https://pyinstaller.org/en/stable/common-issues-and-pitfalls.html#using-sys-executable-to-spawn-subprocesses-that-outlive-the-application-process-implementing-application-restart)
 and its [Windows cleanup issue](https://github.com/pyinstaller/pyinstaller/issues/8701).
 
-These fixes have automated tests for tool discovery, command timeout/cancellation,
+These fixes have automated tests for responsive drive detection, its timeout and
+cancellation, tool discovery, command timeout/cancellation,
 a simulated read stalled at 25%, and resource retention during shutdown. A real
 Windows executable and the affected disks still need validation; these tests
 cannot determine the physical condition or format of a customer's disk.

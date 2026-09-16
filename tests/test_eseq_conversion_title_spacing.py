@@ -101,7 +101,7 @@ class EseqConversionTitleSpacingTests(unittest.TestCase):
 
         self.assertEqual(result, (True, True, True))
 
-    def test_long_filename_choice_defaults_short_and_is_shared_between_dialogs(self):
+    def test_long_filename_choice_defaults_long_and_is_shared_between_dialogs(self):
         class FakeWindow:
             SETTING_LONG_MIDI_FILENAMES = MidiTitleWindow.SETTING_LONG_MIDI_FILENAMES
             SETTING_ESEQ_TO_MIDI_LONG_FILENAMES = (
@@ -119,7 +119,7 @@ class EseqConversionTitleSpacingTests(unittest.TestCase):
         window = FakeWindow()
         window.settings = _FakeSettings()
 
-        self.assertFalse(window._long_midi_filenames_enabled())
+        self.assertTrue(window._long_midi_filenames_enabled())
 
         window._set_long_midi_filenames_enabled(True)
 

@@ -162,6 +162,12 @@ class PreparationProfileDialog(QDialog):
                     "Convert songs", str(self.song_counts["clavinova"]),
                     self.t("{source} → {target} (staged)", source="Clavinova MDA", target="Disklavier E-SEQ"),
                 ))
+        if not profile.song_format:
+            rows.append(("Filenames", self._current_filenames(), "Descriptive filenames"))
+        rows.append((
+            "Format for Disklavier screen", self._current_value("format_disklavier_screen"),
+            display_setting(changes["format_disklavier_screen"]),
+        ))
         self.changes_table.setRowCount(len(rows))
         for row, values in enumerate(rows):
             for column, text in enumerate(values):
@@ -188,7 +194,12 @@ class PreparationProfileDialog(QDialog):
 
     def _current_value(self, *keys):
         values = {str(self.settings.value(key, "")) for key in keys} - {""}
-        return display_setting(next(iter(values))) if len(values) == 1 else "Mixed" if values else "Current default"
+        if len(values) == 1:
+            value = next(iter(values))
+            if keys == ("format_disklavier_screen",):
+                return display_setting(value.lower() == "true")
+            return display_setting(value)
+        return "Mixed" if values else "Current default"
 
     def _current_filenames(self):
         values = set()

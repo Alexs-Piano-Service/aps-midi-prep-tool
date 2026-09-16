@@ -165,6 +165,26 @@ def test_instrument_uses_its_default_medium_and_clears_old_image_overrides(setti
     assert not settings.contains("preparation_disk_format")
 
 
+def test_explicit_filename_opt_out_overrides_upgrade_defaults(application, monkeypatch, settings):
+    settings.setValue("preparation_profile", "custom")
+    settings.setValue("use_dos83_filenames", True)
+    settings.setValue("long_midi_filenames", False)
+    monkeypatch.setattr(main_window, "QSettings", lambda *_args: settings)
+    window = main_window.MidiTitleWindow(initial_settings={
+        "preparation_profile": "custom",
+        "long_midi_filenames": False,
+        "bulk_extraction_long_midi_filenames": False,
+    })
+    try:
+        assert not window._preparation_requires_dos83_filenames()
+        assert not window._dos83_filenames_enabled()
+        assert not window._long_midi_filenames_enabled()
+        assert not settings.value("bulk_extraction_long_midi_filenames", type=bool)
+        assert settings.value("filename_defaults_version", type=int) == window.FILENAME_DEFAULTS_VERSION
+    finally:
+        window.close()
+
+
 def test_config_reaches_ui_and_onboarding_after_first_run_migrations(
     application, monkeypatch, tmp_path, settings,
 ):

@@ -50,6 +50,7 @@ INTEGER_SETTINGS = frozenset({
     "read_floppy_gw_revs", "read_floppy_gw_retries",
     "emulator_image_starting_number", "emulator_image_safety_margin_kib",
     "hide_choices_reset_version", "gw_sector_report_hide_version",
+    "filename_defaults_version",
     "successful_disk_reads", "review_prompt_after_reads",
 })
 STRING_SETTINGS = PATH_SETTINGS | frozenset({

@@ -240,6 +240,7 @@ def test_summary_combines_related_defaults_and_keeps_required_counts(application
             ("Disk size", "1.44 MB (2HD)", "720 KB (2DD)"),
             ("Image type", "IMG", "HFE"),
             ("Convert songs", "3", "MIDI → E-SEQ (staged)"),
+            ("Format for Disklavier screen", "Current default", "On"),
         ]
         assert {key: settings.value(key) for key in settings.allKeys()} == before
         labels = [label.text() for label in dialog.findChildren(QLabel)]
@@ -256,7 +257,7 @@ def test_emulator_summary_omits_numbering_row(application, tmp_path, medium_key)
     settings.setValue("emulator_image_starting_number", 12)
     dialog = PreparationProfileDialog(settings, "mark_ii", medium_key)
     try:
-        assert [row[0] for row in _rows(dialog)] == ["Song format", "Filenames", "Disk size", "Image type"]
+        assert [row[0] for row in _rows(dialog)] == ["Song format", "Filenames", "Disk size", "Image type", "Format for Disklavier screen"]
         assert not any("First image" in cell or "DSKA" in cell for row in _rows(dialog) for cell in row)
         assert settings.value("emulator_image_starting_number", type=int) == 12
     finally:
@@ -277,7 +278,7 @@ def test_summary_represents_mixed_existing_defaults_once(application, tmp_path):
         assert rows["Disk size"] == ("Mixed", "1.44 MB (2HD)")
         assert rows["Image type"] == ("Mixed", "IMG")
         assert rows["Filenames"] == ("Mixed", "DOS 8.3")
-        assert len(rows) == 4
+        assert len(rows) == 5
     finally:
         dialog.close()
 
@@ -286,12 +287,11 @@ def test_usb_summary_omits_disk_defaults_but_shows_required_eseq_conversion(appl
     settings = QSettings(str(tmp_path / "profile.ini"), QSettings.IniFormat)
     dialog = PreparationProfileDialog(settings, "enspire", "usb", song_counts={"eseq": 2})
     try:
-        assert [row[0] for row in _rows(dialog)] == ["Song format", "Filenames", "Convert songs"]
-        assert _rows(dialog)[-1] == ("Convert songs", "2", "E-SEQ → MIDI (staged)")
+        assert [row[0] for row in _rows(dialog)] == ["Song format", "Filenames", "Convert songs", "Format for Disklavier screen"]
+        assert _rows(dialog)[-2] == ("Convert songs", "2", "E-SEQ → MIDI (staged)")
         dialog.profile_combo.setCurrentIndex(dialog.profile_combo.findData("custom"))
-        assert dialog.changes_table.isHidden()
-        assert not dialog.manual_label.isHidden()
-        assert dialog.manual_label.text() == "Keep current settings"
+        assert not dialog.changes_table.isHidden()
+        assert [row[0] for row in _rows(dialog)] == ["Filenames", "Format for Disklavier screen"]
         assert not dialog.source_label.isHidden()
         assert COMPATIBILITY_SOURCE in dialog.source_label.text()
         assert "APS Disklavier Compatibility Table" in dialog.source_label.text()
@@ -306,7 +306,7 @@ def test_summary_retains_separate_required_clavinova_container_conversion(applic
     settings = QSettings(str(tmp_path / "profile.ini"), QSettings.IniFormat)
     dialog = PreparationProfileDialog(settings, "mark_ii", "original", song_counts={"clavinova": 1})
     try:
-        assert _rows(dialog)[-1] == ("Convert songs", "1", "Clavinova MDA → Disklavier E-SEQ (staged)")
-        assert dialog.changes_table.rowCount() == 5
+        assert _rows(dialog)[-2] == ("Convert songs", "1", "Clavinova MDA → Disklavier E-SEQ (staged)")
+        assert dialog.changes_table.rowCount() == 6
     finally:
         dialog.close()

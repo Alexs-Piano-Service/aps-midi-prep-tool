@@ -260,6 +260,7 @@ mkdir -p "$PYINSTALLER_BUILD_DIR" "$APPDIR/usr/bin" "$OUT_DIR"
     --noconfirm \
     --clean \
     --windowed \
+    --collect-data certifi \
     --name "$APP_BIN" \
     --icon "$APP_ICON_ICO" \
     --distpath "$ROOT_DIR/dist" \

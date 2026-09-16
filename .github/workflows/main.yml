@@ -107,6 +107,7 @@ jobs:
             "--noconfirm",
             "--onefile",
             "--windowed",
+            "--collect-data", "certifi",
             "--name", "APSMIDIPrepTool",
             "--icon", "aps_midi_prep_tool_app/aps.ico",
             "--manifest", "manifests/main_as_invoker.xml"

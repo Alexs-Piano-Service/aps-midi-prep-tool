@@ -307,6 +307,13 @@ class PendingChangesMixin:
 
     def _refresh_after_pending_restore(self):
         self._refresh_preparation_ui()
+        screen_format = self.settings.value(self.SETTING_FORMAT_DISKLAVIER_SCREEN, False, type=bool)
+        for name in ("format_disklavier_checkbox", "viewFormatDisklavierScreenAction"):
+            control = getattr(self, name, None)
+            if control is not None:
+                blocked = control.blockSignals(True)
+                control.setChecked(screen_format)
+                control.blockSignals(blocked)
         action = getattr(self, "settingsUseDos83FilenamesAction", None)
         if action is not None:
             blocked = action.blockSignals(True)

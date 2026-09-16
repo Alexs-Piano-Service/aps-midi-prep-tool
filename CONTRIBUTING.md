@@ -22,7 +22,7 @@ Thanks for helping improve APS MIDI Prep Tool.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install PySide6
+pip install PySide6 certifi
 python3 aps_midi_prep_tool.py
 ```
 

@@ -117,7 +117,8 @@ entries from an invalid file are applied. The file can be read-only.
 Nalbantov and FlashFloppy are offered for the floppy-capable Disklavier profiles
 (`mark_i` through `mark_iv` above, including `dsr1`). PianoDisc floppy models
 and QRS Chili offer `original` and `emulator_custom`. USB-only profiles use
-`usb`; Prodigy uses `pianodisc_app`. `custom` keeps manual settings. See
+`usb`; Prodigy uses `pianodisc_app`. `custom` keeps manual conversion settings,
+defaults to long MIDI filenames, and turns off Disklavier screen formatting. See
 [preparation profiles](preparation-profiles.md) for controller behavior.
 
 ## Remembered paths
@@ -150,9 +151,9 @@ Every entry in this table accepts an absolute or relative path string.
 | `hide_quick_panel` | Boolean: hide the quick controls. |
 | `hide_album_metadata` | Boolean: hide album metadata controls. |
 | `show_save_destination` | Boolean: show the save location. |
-| `show_preparation_row` | Boolean: show the active preparation row. |
+| `show_preparation_row` | Boolean: show the active preparation row; defaults to `true`. |
 | `show_compat_warning` | Boolean: show title compatibility warnings. |
-| `format_disklavier_screen` | Boolean: format the title display for the Disklavier screen. |
+| `format_disklavier_screen` | Boolean: format the title display for the Disklavier screen; profile defaults enable it for Mark I, Mark II, and Mark III. |
 | `check_updates_at_startup` | Boolean: check for updates automatically. |
 | `skip_update_reminders` | Boolean: suppress update reminders. Set this to `true` and `check_updates_at_startup` to `false` for an offline deployment. |
 
@@ -193,7 +194,7 @@ leave image mode. A destination is still selected through the usual dialog.
 | --- | --- |
 | `store_backups` | Back up before saving. |
 | `use_dos83_filenames` | Use DOS 8.3 filenames for new changes; takes precedence over descriptive filenames. |
-| `long_midi_filenames` | Use descriptive MIDI export filenames. |
+| `long_midi_filenames` | Use track number and song title in MIDI export filenames; defaults on unless DOS 8.3 names are required. |
 | `eseq_to_midi_long_filenames` | Legacy per-dialog descriptive filename preference. |
 | `read_floppy_long_filenames` | Legacy per-dialog descriptive filename preference. |
 | `eseq_to_midi_trim_title_spaces` | Trim title spaces during E-SEQ-to-MIDI conversion. |
@@ -210,6 +211,10 @@ Prefer `long_midi_filenames` when making a new file. The two legacy filename
 keys remain supported for compatibility; when the current key exists, it
 controls the shared choice. Existing save/format/write confirmations and
 destination constraints continue to work as they do for settings chosen in APS.
+An upgrade applies the selected destination's filename defaults once to clear
+older unchecked defaults and obsolete 8.3 preferences. Later manual choices,
+including turning descriptive naming off, are remembered. Explicit startup
+configuration entries apply after this migration.
 
 ## Bulk extraction
 
@@ -290,6 +295,7 @@ An empty string disables that shortcut. Action IDs are listed in
 Keyboard Shortcuts to review the resulting assignments.
 
 For completeness, the saved integer migration markers
-`hide_choices_reset_version` and `gw_sector_report_hide_version` are accepted.
-Normally omit them: configured dialog choices already apply after migrations,
+`hide_choices_reset_version`, `gw_sector_report_hide_version`, and
+`filename_defaults_version` are accepted.
+Normally omit them: configured choices already apply after migrations,
 so a new USB deployment does not need internal version numbers.

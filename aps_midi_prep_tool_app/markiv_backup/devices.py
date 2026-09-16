@@ -108,7 +108,9 @@ def discover_devices(*, include_system: bool = False) -> list[MountedDevice]:
 def resolve_source(value: str | Path) -> Path:
     """Accept a mounted directory or the device node for a mounted partition."""
     source = Path(value).expanduser()
-    if str(source).startswith("/dev/"):
+    # Windows Path uses backslashes even when given a POSIX device node. Keep
+    # the device check independent of the host's path separator.
+    if source.as_posix().startswith("/dev/"):
         canonical = source.resolve()
         for mount in discover_devices(include_system=True):
             if Path(mount.device).resolve() == canonical:

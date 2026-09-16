@@ -69,7 +69,7 @@ def test_profile_dialog_uses_selected_language_for_controls_and_compact_summary(
         assert dialog.changes_table.item(1, 2).text() == translate_text("DOS 8.3 · {count} to rename", language, count=1)
         assert not hasattr(dialog, "guidance_label")
         assert not hasattr(dialog, "evidence_label")
-        assert dialog.changes_table.rowCount() == 5
+        assert dialog.changes_table.rowCount() == 6
         assert "2026-09-07" not in dialog.source_label.text()
         assert translate_text("APS Disklavier Compatibility Table", language) in dialog.source_label.text()
         assert settings.allKeys() == []
@@ -135,7 +135,7 @@ def test_rendered_preparation_dialog_covers_every_profile_and_delivery_option(tm
         dialog.show()
         app.processEvents()
         visible_labels = {label.text() for label in dialog.findChildren(QLabel) if label.isVisible()}
-        for source in ("Piano / controller:", "Drive / delivery:", "Keep current settings"):
+        for source in ("Piano / controller:", "Drive / delivery:"):
             assert translate_text(source, language) in visible_labels
         assert dialog.buttons.button(QDialogButtonBox.Apply).text() == translate_text("Apply and Prepare", language)
         assert dialog.buttons.button(QDialogButtonBox.Cancel).text() == translate_text("Cancel", language)
