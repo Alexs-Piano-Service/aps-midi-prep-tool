@@ -1,6 +1,10 @@
 name: Release Windows (Signed)
 
 on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
   workflow_dispatch:
   release:
     types: [published]
@@ -11,11 +15,21 @@ permissions:
 
 jobs:
   build-sign-upload:
+    # Automatically sign only successful main-branch pushes in the public repo.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.repository == 'Alexs-Piano-Service/aps-midi-prep-tool' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success')
     runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # main may have advanced while CI ran; package the commit CI tested.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5

@@ -9,6 +9,9 @@ with release sections grouped by version and date.
 
 ### Added
 
+- Pushes to the public repository's `main` branch automatically build a signed
+  Windows EXE after Linux and Windows CI pass for the same commit. The EXE and
+  Windows manual test kit are available as a workflow artifact.
 - **Utilities → Back Up Mark IV Music...** copies a mounted or copied Mark IV
   library into named album folders with checksum verification and a manifest.
   The Details pane shows the selected album's tracks and applicable conversion

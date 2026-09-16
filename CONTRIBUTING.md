@@ -66,6 +66,14 @@ regression tests exercise actual images. Linux also installs the Qt Multimedia
 runtime dependencies, including `libpulse0`. Configure branch protection to require **Tests
 (ubuntu-latest)** and **Tests (windows-latest)** before merging.
 
+In `Alexs-Piano-Service/aps-midi-prep-tool`, successful push CI on `main`
+automatically starts **Release Windows (Signed)** for the same commit. Download
+`APSMIDIPrepTool-windows-signed` from that run's Artifacts section for the signed
+EXE and Windows manual test kit. This uses the public repository's Azure signing
+variables and secret; automatic signing is skipped in other repositories and
+for pull requests. Manual runs and published releases still trigger packaging,
+and published releases receive the signed EXE and test kit as release assets.
+
 Before tagging a release, commit the version/documentation changes, push that
 exact commit to the repository that will publish the release, and wait for
 both CI jobs to pass. Create the tag with the checked helper:
