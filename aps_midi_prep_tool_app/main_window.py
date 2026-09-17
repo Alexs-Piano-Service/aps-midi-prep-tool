@@ -21610,11 +21610,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return floppy_drives, greaseweazle_devices
 
     def _add_floppy_drive_refresh(self, dialog, buttons, drive_combo, refresh_state, *,
-                                 gw_device_combo=None, source_combo=None):
-        """Rescan in place, retaining device selections and other dialog options."""
+                                 gw_device_combo=None):
+        """Retain available devices; require a choice when a selection is lost."""
         refresh_button = buttons.addButton(self._lt("Refresh"), QDialogButtonBox.ActionRole)
         refresh_button.setObjectName("refreshFloppyDrives")
         refresh_button.setAutoDefault(False)
+        drive_combo.setPlaceholderText(self._lt("Select a drive..."))
+        drive_combo.currentIndexChanged.connect(refresh_state)
+        if gw_device_combo is not None:
+            gw_device_combo.setPlaceholderText(self._lt("Select a device..."))
+            gw_device_combo.currentIndexChanged.connect(refresh_state)
 
         def populate(combo, devices, empty_text):
             previous = combo.currentData()
@@ -21626,10 +21631,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     combo.addItem(device.display_name, device)
                 if devices:
                     combo.setCurrentIndex(next(
-                        (index for index, device in enumerate(devices) if device.path == previous_path), 0,
+                        (index for index, device in enumerate(devices) if device.path == previous_path), -1,
                     ))
                 else:
                     combo.addItem(self._lt(empty_text), None)
+                    combo.setCurrentIndex(0)
                 combo.setEnabled(bool(devices))
             finally:
                 combo.blockSignals(blocked)
@@ -21658,14 +21664,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 populate(drive_combo, floppy_drives, "No supported floppy drive detected")
                 if gw_device_combo is not None:
                     populate(gw_device_combo, greaseweazle_devices, "No Greaseweazle device detected")
-                if source_combo is not None:
-                    selected_devices = (greaseweazle_devices if source_combo.currentData() == "floppy_gw"
-                                        else floppy_drives)
-                    if not selected_devices:
-                        self._restore_read_floppy_source_selection(
-                            source_combo, has_floppy_drives=bool(floppy_drives),
-                            has_greaseweazle_devices=bool(greaseweazle_devices),
-                        )
             finally:
                 refresh_button.setEnabled(True)
                 refresh_state()
@@ -21798,7 +21796,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         target_combo.currentIndexChanged.connect(refresh_target_state)
         self._add_floppy_drive_refresh(
             dialog, buttons, drive_combo, refresh_target_state,
-            gw_device_combo=gw_device_combo, source_combo=target_combo,
+            gw_device_combo=gw_device_combo,
         )
         refresh_target_state()
         resize_dialog_to_content()
@@ -22192,7 +22190,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         source_combo.currentIndexChanged.connect(refresh_source_state)
         self._add_floppy_drive_refresh(
             dialog, buttons, drive_combo, refresh_source_state,
-            gw_device_combo=gw_device_combo, source_combo=source_combo,
+            gw_device_combo=gw_device_combo,
         )
         refresh_drive_disk_size()
         refresh_source_state()
@@ -22628,7 +22626,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         recovery_checkbox.toggled.connect(refresh_dialog_state)
         self._add_floppy_drive_refresh(
             dialog, buttons, drive_combo, refresh_dialog_state,
-            gw_device_combo=gw_device_combo, source_combo=source_combo,
+            gw_device_combo=gw_device_combo,
         )
         refresh_dialog_state()
         resize_dialog_to_content()
@@ -23207,7 +23205,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         target_combo.currentIndexChanged.connect(refresh_target_state)
         self._add_floppy_drive_refresh(
             dialog, buttons, drive_combo, refresh_target_state,
-            gw_device_combo=gw_device_combo, source_combo=target_combo,
+            gw_device_combo=gw_device_combo,
         )
         refresh_target_state()
         resize_dialog_to_content()

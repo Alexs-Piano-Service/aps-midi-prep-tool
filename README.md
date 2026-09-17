@@ -54,6 +54,8 @@ irreplaceable, make a disk image before working on it.
 
 If a floppy drive is missing from a dialog, connect it, insert a disk, and choose
 **Refresh**. The drive list updates without reopening the dialog.
+If your selected drive disappears, choose a drive explicitly before continuing;
+Refresh keeps the action disabled until you make that choice.
 
 Use **Edit → Review Changes** to compare original and proposed filenames,
 titles, and conversions or discard selected songs' edits. **Edit → Undo**

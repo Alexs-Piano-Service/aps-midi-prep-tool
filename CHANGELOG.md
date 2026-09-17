@@ -64,6 +64,9 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Floppy Refresh leaves a missing target unselected and preserves the chosen
+  connection type. Select a drive explicitly before continuing, even when
+  another drive is available or a disconnected drive reappears.
 - Windows package smoke tests read UTF-8 reports explicitly, preserving accented
   paths when the system's default text encoding differs.
 - Type 0 batch conversion, renaming, and GUI save backups share collision-safe

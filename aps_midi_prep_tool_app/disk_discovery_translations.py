@@ -11,6 +11,8 @@ def _add(source, translations):
     DISK_DISCOVERY_TRANSLATIONS[source] = dict(zip(_LANGUAGES, values))
 
 
+_add("Select a drive...", "Seleccione una unidad...|Sélectionnez un lecteur...|Laufwerk auswählen...|Seleziona un'unità...|Selecione uma unidade...|Изберете устройство...|Selecteer een station...|Wybierz napęd...|ドライブを選択...|드라이브 선택...|选择驱动器...")
+_add("Select a device...", "Seleccione un dispositivo...|Sélectionnez un périphérique...|Gerät auswählen...|Seleziona un dispositivo...|Selecione um dispositivo...|Изберете устройство...|Selecteer een apparaat...|Wybierz urządzenie...|デバイスを選択...|장치 선택...|选择设备...")
 _add("Detecting floppy drives...", "Detectando unidades de disquete...|Détection des lecteurs de disquettes...|Diskettenlaufwerke werden gesucht...|Rilevamento delle unità floppy...|Detectando unidades de disquete...|Откриване на флопи устройства...|Diskettestations zoeken...|Wykrywanie napędów dyskietek...|フロッピードライブを検出中...|플로피 드라이브 검색 중...|正在检测软盘驱动器...")
 _add("Detecting Floppy Drives", "Detección de unidades de disquete|Détection des lecteurs de disquettes|Diskettenlaufwerke suchen|Rilevamento unità floppy|Detecção de unidades de disquete|Откриване на флопи устройства|Diskettestations zoeken|Wykrywanie napędów dyskietek|フロッピードライブの検出|플로피 드라이브 검색|检测软盘驱动器")
 _add("Drive Detection Incomplete", "Detección de unidades incompleta|Détection des lecteurs incomplète|Laufwerkserkennung unvollständig|Rilevamento unità incompleto|Detecção de unidades incompleta|Незавършено откриване на устройства|Detectie van stations onvolledig|Wykrywanie napędów nieukończone|ドライブの検出が完了していません|드라이브 검색 미완료|驱动器检测未完成")

@@ -1,6 +1,7 @@
 """Drive choosers can rediscover devices without discarding the open dialog."""
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -23,6 +24,13 @@ CHOOSERS = (
     "_choose_format_floppy_options",
     "_choose_save_to_floppy_drive",
     "_choose_write_image_floppy_target",
+)
+GREASEWEAZLE_CHOOSERS = tuple(
+    method for method in CHOOSERS if method != "_choose_save_to_floppy_drive"
+)
+DEVICE_CHOOSERS = (
+    [(method, "floppy_usb") for method in CHOOSERS]
+    + [(method, "floppy_gw") for method in GREASEWEAZLE_CHOOSERS]
 )
 
 
@@ -49,6 +57,34 @@ def _floppy_combo(dialog):
 
 def _ok_button(dialog):
     return dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok)
+
+
+def _greaseweazle_combo(dialog):
+    return next(
+        combo for combo in dialog.findChildren(QComboBox)
+        if isinstance(combo.itemData(0), GreaseweazleDeviceInfo)
+        or combo.itemText(0) == "No Greaseweazle device detected"
+    )
+
+
+def _source_combo(dialog):
+    return next(
+        combo for combo in dialog.findChildren(QComboBox)
+        if combo.findData("floppy_gw") >= 0
+    )
+
+
+def _assert_requires_selection(dialog, combo):
+    assert combo.isEnabled()
+    assert combo.currentIndex() == -1
+    assert combo.currentData() is None
+    assert combo.placeholderText() == (
+        "Select a device..." if isinstance(combo.itemData(0), GreaseweazleDeviceInfo)
+        else "Select a drive..."
+    )
+    assert not _ok_button(dialog).isEnabled()
+    _ok_button(dialog).click()
+    assert dialog.result() == QDialog.Rejected
 
 
 def _refresh_button(dialog):
@@ -84,6 +120,8 @@ def test_refresh_finds_new_drive_and_allows_using_it(window, monkeypatch, method
         assert len(calls) == 2
         assert combo.isEnabled()
         assert combo.count() == 1
+        _assert_requires_selection(dialog, combo)
+        combo.setCurrentIndex(0)
         assert combo.currentData() == drive
         assert _ok_button(dialog).isEnabled()
         assert dialog.result() == QDialog.Rejected
@@ -135,7 +173,7 @@ def test_cancelling_refresh_preserves_choices_and_options(window, monkeypatch, m
 
 
 @pytest.mark.parametrize("method_name", CHOOSERS)
-def test_refresh_disables_removed_drive_until_it_returns(window, monkeypatch, method_name):
+def test_refresh_requires_reselection_after_removed_drive_returns(window, monkeypatch, method_name):
     drive = FloppyDriveInfo("/dev/fd0", 737280)
     _discovery_results(window, monkeypatch, ([drive], []), ([], []), ([drive], []))
 
@@ -151,6 +189,8 @@ def test_refresh_disables_removed_drive_until_it_returns(window, monkeypatch, me
         assert not _ok_button(dialog).isEnabled()
         assert refresh.isEnabled()
         refresh.click()
+        _assert_requires_selection(dialog, combo)
+        combo.setCurrentIndex(0)
         assert combo.currentData() == drive
         assert combo.isEnabled()
         assert _ok_button(dialog).isEnabled()
@@ -182,28 +222,135 @@ def test_refresh_preserves_selected_path_when_drives_reorder(window, monkeypatch
     assert result.get("source", result.get("target")) == updated
 
 
-def test_refresh_finds_greaseweazle_for_selected_read_source(window, monkeypatch):
+@pytest.mark.parametrize("method_name", GREASEWEAZLE_CHOOSERS)
+def test_refresh_finds_greaseweazle_for_selected_source(window, monkeypatch, method_name):
     device = GreaseweazleDeviceInfo("COM4", "Greaseweazle")
     _discovery_results(window, monkeypatch, ([], []), ([], [device]))
+    monkeypatch.setattr(window, "image_session", SimpleNamespace(disk_format=DISK_FORMAT_BY_KEY["ibm.720"]))
 
     def inspect(dialog):
-        source_combo = next(combo for combo in dialog.findChildren(QComboBox)
-                            if combo.findData("floppy_gw") >= 0)
+        source_combo = _source_combo(dialog)
         source_combo.setCurrentIndex(source_combo.findData("floppy_gw"))
-        device_combo = next(combo for combo in dialog.findChildren(QComboBox)
-                            if combo.currentText() == "No Greaseweazle device detected")
+        device_combo = _greaseweazle_combo(dialog)
         assert not device_combo.isEnabled()
         assert not _ok_button(dialog).isEnabled()
         _refresh_button(dialog).click()
         assert source_combo.currentData() == "floppy_gw"
+        _assert_requires_selection(dialog, device_combo)
+        device_combo.setCurrentIndex(0)
         assert device_combo.currentData() == device
         assert device_combo.isEnabled()
         assert _ok_button(dialog).isEnabled()
-        return QDialog.Accepted
+        _ok_button(dialog).click()
+        return dialog.result()
 
     monkeypatch.setattr(window, "_exec_child_dialog", inspect)
-    result = window._choose_floppy_read_options()
-    assert result["source"].device_path == device.path
+    result = getattr(window, method_name)()
+    assert result.get("source", result.get("target")).device_path == device.path
+
+
+@pytest.mark.parametrize("method_name, source_kind", DEVICE_CHOOSERS)
+def test_refresh_requires_explicit_replacement_when_selected_device_disappears(
+    window, monkeypatch, method_name, source_kind,
+):
+    is_gw = source_kind == "floppy_gw"
+    first, selected = (
+        [GreaseweazleDeviceInfo("COM4", "First"), GreaseweazleDeviceInfo("COM5", "Selected")]
+        if is_gw else [FloppyDriveInfo("/dev/fd0", 737280), FloppyDriveInfo("/dev/fd1", 737280)]
+    )
+    initial = ([], [first, selected]) if is_gw else ([first, selected], [])
+    refreshed = ([], [first]) if is_gw else ([first], [])
+    _discovery_results(window, monkeypatch, initial, refreshed, refreshed)
+    monkeypatch.setattr(window, "image_session", SimpleNamespace(disk_format=DISK_FORMAT_BY_KEY["ibm.720"]))
+
+    def inspect(dialog):
+        combo = _greaseweazle_combo(dialog) if is_gw else _floppy_combo(dialog)
+        combo.setCurrentIndex(1)
+        assert combo.currentData() == selected
+        assert _ok_button(dialog).isEnabled()
+        for _ in range(2):
+            _refresh_button(dialog).click()
+            assert combo.count() == 1
+            assert combo.itemData(0) == first
+            _assert_requires_selection(dialog, combo)
+        combo.setCurrentIndex(0)
+        assert combo.currentData() == first
+        assert _ok_button(dialog).isEnabled()
+        _ok_button(dialog).click()
+        return dialog.result()
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect)
+    result = getattr(window, method_name)()
+    chosen = result.get("source", result.get("target"))
+    assert (chosen.device_path if is_gw else chosen.path) == first.path
+
+
+@pytest.mark.parametrize("method_name, source_kind", DEVICE_CHOOSERS)
+def test_cancelling_refresh_keeps_missing_device_unselected(
+    window, monkeypatch, method_name, source_kind,
+):
+    is_gw = source_kind == "floppy_gw"
+    first, selected = (
+        [GreaseweazleDeviceInfo("COM4", "First"), GreaseweazleDeviceInfo("COM5", "Selected")]
+        if is_gw else [FloppyDriveInfo("/dev/fd0", 737280), FloppyDriveInfo("/dev/fd1", 737280)]
+    )
+    initial = ([], [first, selected]) if is_gw else ([first, selected], [])
+    refreshed = ([], [first]) if is_gw else ([first], [])
+    _discovery_results(window, monkeypatch, initial, refreshed, None)
+
+    def inspect(dialog):
+        combo = _greaseweazle_combo(dialog) if is_gw else _floppy_combo(dialog)
+        combo.setCurrentIndex(1)
+        _refresh_button(dialog).click()
+        _assert_requires_selection(dialog, combo)
+        _refresh_button(dialog).click()
+        assert combo.count() == 1
+        assert combo.itemData(0) == first
+        _assert_requires_selection(dialog, combo)
+        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Cancel).click()
+        return dialog.result()
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect)
+    assert getattr(window, method_name)() is None
+
+
+@pytest.mark.parametrize("method_name", GREASEWEAZLE_CHOOSERS)
+@pytest.mark.parametrize("source_kind", ("floppy_usb", "floppy_gw"))
+def test_refresh_does_not_switch_interfaces_when_selected_interface_disappears(
+    window, monkeypatch, method_name, source_kind,
+):
+    floppy = FloppyDriveInfo("/dev/fd0", 737280)
+    gw_device = GreaseweazleDeviceInfo("COM4", "Greaseweazle")
+    is_gw = source_kind == "floppy_gw"
+    refreshed = ([floppy], []) if is_gw else ([], [gw_device])
+    _discovery_results(window, monkeypatch, ([floppy], [gw_device]), refreshed)
+    monkeypatch.setattr(window, "image_session", SimpleNamespace(disk_format=DISK_FORMAT_BY_KEY["ibm.720"]))
+
+    def inspect(dialog):
+        source_combo = _source_combo(dialog)
+        source_combo.setCurrentIndex(source_combo.findData(source_kind))
+        combo = _greaseweazle_combo(dialog) if is_gw else _floppy_combo(dialog)
+        assert _ok_button(dialog).isEnabled()
+        _refresh_button(dialog).click()
+        assert source_combo.currentData() == source_kind
+        assert combo.currentData() is None
+        assert combo.currentText() == (
+            "No Greaseweazle device detected" if is_gw else "No supported floppy drive detected"
+        )
+        assert not combo.isEnabled()
+        assert not _ok_button(dialog).isEnabled()
+        _ok_button(dialog).click()
+        assert dialog.result() == QDialog.Rejected
+        replacement_kind = "floppy_usb" if is_gw else "floppy_gw"
+        source_combo.setCurrentIndex(source_combo.findData(replacement_kind))
+        assert _ok_button(dialog).isEnabled()
+        _ok_button(dialog).click()
+        return dialog.result()
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect)
+    result = getattr(window, method_name)()
+    chosen = result.get("source", result.get("target"))
+    assert (chosen.path if is_gw else chosen.device_path) == (floppy.path if is_gw else gw_device.path)
 
 
 @pytest.mark.parametrize("refreshed_size, expected_format", (
