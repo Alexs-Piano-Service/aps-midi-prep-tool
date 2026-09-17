@@ -29,7 +29,7 @@ from array import array
 from math import exp, pi, sin
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QProcess, QRectF, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
+from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QProcess, QRectF, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QPolygonF, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -47,7 +47,6 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
     QLineEdit,
     QFileDialog,
-    QMessageBox as QtQMessageBox,
     QHeaderView,
     QSizePolicy,
     QProgressDialog,
@@ -127,7 +126,7 @@ from .midi_type0_converter import (
 )
 from .midi_channel_merger import merge_midi_channels_to_channel0_path
 from .xf_stripper import XF_CLEANUP_BROAD, XF_CLEANUP_TARGETED, strip_xf_from_midi_path
-from .conversion_review import build_staged_conversion_details, inspect_music_bytes
+from .conversion_review import build_staged_conversion_details, inspect_music_bytes, localize_music_error
 from .eseq_inspection_report import format_eseq_header_details
 from .bulk_extraction_job import localize_extraction_job_error, read_extraction_job
 from .eseq_converter import CC7_POLICY_PRESERVE, CC7_POLICY_PLAYBACK_FIX_100, count_eseq_zero_volume_candidates
@@ -239,6 +238,7 @@ from .app_info import (
     UPDATE_CHECK_URL,
 )
 from .subprocess_utils import windows_subprocess_kwargs
+from .localized_dialogs import QMessageBox, _message_parent_language, install_qt_translations
 from .message_catalog import (
     DEFAULT_LANGUAGE,
     guidance_for_error_detail,
@@ -248,156 +248,6 @@ from .message_catalog import (
     tr as catalog_tr,
     translate_text,
 )
-
-
-def _message_parent_language(parent):
-    widget = parent
-    for _ in range(8):
-        if widget is None:
-            break
-        language_method = getattr(widget, "_language_code", None)
-        if callable(language_method):
-            return language_method()
-        parent_method = getattr(widget, "parent", None)
-        widget = parent_method() if callable(parent_method) else None
-    return DEFAULT_LANGUAGE
-
-
-def _translate_for_parent(parent, text):
-    return translate_text(text, _message_parent_language(parent))
-
-
-def _translate_message_box_buttons(message_box, language=None):
-    language = normalize_language_code(language)
-    button_labels = {
-        QtQMessageBox.Ok: "OK",
-        QtQMessageBox.Cancel: "Cancel",
-        QtQMessageBox.Close: "Close",
-        QtQMessageBox.Yes: "Yes",
-        QtQMessageBox.No: "No",
-        QtQMessageBox.Save: "Save",
-    }
-    for standard_button, label in button_labels.items():
-        button = message_box.button(standard_button)
-        if button is not None:
-            button.setText(translate_text(label, language))
-
-
-class QMessageBox(QtQMessageBox):
-    def setDetailedText(self, text):
-        super().setDetailedText(text)
-        self._translate_details_button()
-
-    def _translate_details_button(self):
-        language = _message_parent_language(self.parent())
-        for button in self.buttons():
-            source = button.text().replace("&", "")
-            if source not in {"Show Details...", "Hide Details..."}:
-                continue
-            button.setText(translate_text(source, language))
-            if not button.property("_aps_details_translation"):
-                # Qt changes the caption itself when the details are toggled.
-                button.clicked.connect(self._translate_details_button)
-                button.setProperty("_aps_details_translation", True)
-
-    def setWindowTitle(self, title):
-        super().setWindowTitle(_translate_for_parent(self.parent(), title))
-
-    def setText(self, text):
-        super().setText(_translate_for_parent(self.parent(), text))
-
-    def setInformativeText(self, text):
-        super().setInformativeText(_translate_for_parent(self.parent(), text))
-
-    def setStandardButtons(self, buttons):
-        super().setStandardButtons(buttons)
-        _translate_message_box_buttons(self, _message_parent_language(self.parent()))
-
-    @staticmethod
-    def _exec_static(parent, icon, title, text, buttons, defaultButton):
-        box = QMessageBox(parent)
-        apply_window_icon(box)
-        box.setIcon(icon)
-        box.setWindowTitle(title)
-        box.setText(text)
-        box.setStandardButtons(buttons)
-        if defaultButton != QtQMessageBox.StandardButton.NoButton:
-            box.setDefaultButton(defaultButton)
-        _translate_message_box_buttons(box, _message_parent_language(parent))
-        if hasattr(parent, "_center_child_dialog"):
-            parent._center_child_dialog(box)
-        else:
-            center_dialog_on_parent(box, parent)
-            QTimer.singleShot(0, lambda: center_dialog_on_parent(box, parent))
-        return box.exec()
-
-    @staticmethod
-    def information(
-        parent,
-        title,
-        text,
-        buttons=QtQMessageBox.StandardButton.Ok,
-        defaultButton=QtQMessageBox.StandardButton.NoButton,
-    ):
-        return QMessageBox._exec_static(
-            parent,
-            QtQMessageBox.Information,
-            title,
-            text,
-            buttons,
-            defaultButton,
-        )
-
-    @staticmethod
-    def warning(
-        parent,
-        title,
-        text,
-        buttons=QtQMessageBox.StandardButton.Ok,
-        defaultButton=QtQMessageBox.StandardButton.NoButton,
-    ):
-        return QMessageBox._exec_static(
-            parent,
-            QtQMessageBox.Warning,
-            title,
-            text,
-            buttons,
-            defaultButton,
-        )
-
-    @staticmethod
-    def critical(
-        parent,
-        title,
-        text,
-        buttons=QtQMessageBox.StandardButton.Ok,
-        defaultButton=QtQMessageBox.StandardButton.NoButton,
-    ):
-        return QMessageBox._exec_static(
-            parent,
-            QtQMessageBox.Critical,
-            title,
-            text,
-            buttons,
-            defaultButton,
-        )
-
-    @staticmethod
-    def question(
-        parent,
-        title,
-        text,
-        buttons=QtQMessageBox.StandardButton.Yes | QtQMessageBox.StandardButton.No,
-        defaultButton=QtQMessageBox.StandardButton.NoButton,
-    ):
-        return QMessageBox._exec_static(
-            parent,
-            QtQMessageBox.Question,
-            title,
-            text,
-            buttons,
-            defaultButton,
-        )
 
 
 class SingleLineElidedLabel(QLabel):
@@ -4184,7 +4034,7 @@ class InstrumentComboBox(QComboBox):
                 family_item.setFont(family_font)
             family_start = family_index * 8
             for program in range(family_start, family_start + 8):
-                label = f"{program + 1}: {GM_PROGRAM_NAMES[program]}"
+                label = f"{program + 1}: {translate(GM_PROGRAM_NAMES[program])}"
                 self.addItem(label, program)
                 completion_labels.append(label)
                 self._completion_programs[label.casefold()] = program
@@ -4247,8 +4097,9 @@ class InstrumentComboBox(QComboBox):
         if exact_program is None:
             matches = []
             for program, name in enumerate(GM_PROGRAM_NAMES):
-                numbered_name = f"{program + 1}: {name}"
-                if folded in name.casefold() or folded in numbered_name.casefold():
+                names = (name, self._translate(name))
+                if any(folded in candidate.casefold() or folded in f"{program + 1}: {candidate}".casefold()
+                       for candidate in names):
                     matches.append(program)
             exact_program = matches[0] if len(matches) == 1 else None
         if exact_program is not None:
@@ -8606,7 +8457,7 @@ class WriteProtectToggle(QToolButton):
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(30, 50)
-        self.setAccessibleName("Allow saving to original media")
+        self.setAccessibleName(translate_text("Allow saving to original media", _message_parent_language(self.parent())))
         self.setFocusPolicy(Qt.StrongFocus)
         self.toggled.connect(self._refresh_tooltip)
         self._refresh_tooltip()
@@ -8616,13 +8467,16 @@ class WriteProtectToggle(QToolButton):
         self._refresh_tooltip()
 
     def _refresh_tooltip(self):
+        language = _message_parent_language(self.parent())
+        self.setAccessibleName(translate_text("Allow saving to original media", language))
+        target = translate_text(self._target_label, language)
         if self.isChecked():
             self.setToolTip(
-                f"Write enabled for this {self._target_label}. Save will modify the original."
+                translate_text("Write enabled for this {target}. Save will modify the original.", language, target=target)
             )
         else:
             self.setToolTip(
-                f"Write protected for this {self._target_label}. Use Save As or Save As Image instead."
+                translate_text("Write protected for this {target}. Use Save As or Save As Image instead.", language, target=target)
             )
 
     def paintEvent(self, _event):
@@ -9215,27 +9069,21 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.choose_button = QPushButton(self._lt("Open MIDI Folder"))
         self.choose_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.choose_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
-        self.choose_button.setToolTip(
-            "Select a folder to scan for .mid and .midi files."
-        )
+        self._set_static_tooltip(self.choose_button, 'Select a folder to scan for .mid and .midi files.')
         self.choose_button.clicked.connect(self.browse_directory)
         source_layout.addWidget(self.choose_button, stretch=1)
 
         self.open_image_button = QPushButton(self._lt("Open Image"))
         self.open_image_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.open_image_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
-        self.open_image_button.setToolTip(
-            "Open a floppy image file for editing in Image Mode."
-        )
+        self._set_static_tooltip(self.open_image_button, 'Open a floppy image file for editing in Image Mode.')
         self.open_image_button.clicked.connect(self.open_image_dialog)
         source_layout.addWidget(self.open_image_button, stretch=1)
 
         self.read_floppy_button = QPushButton(self._lt("Read Floppy"))
         self.read_floppy_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.read_floppy_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
-        self.read_floppy_button.setToolTip(
-            "Read a floppy from a floppy drive or from a Greaseweazle-connected drive."
-        )
+        self._set_static_tooltip(self.read_floppy_button, 'Read a floppy from a floppy drive or from a Greaseweazle-connected drive.')
         self.read_floppy_button.clicked.connect(self.load_floppy_drive)
         source_layout.addWidget(self.read_floppy_button, stretch=1)
 
@@ -9269,9 +9117,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.table = DropTableWidget(0, 7)
         self._apply_table_selection_style()
         self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
-        self.table.setToolTip(
-            "Drop MIDI, E-SEQ, or disk image files here. Click a Title cell to edit."
-        )
+        self._set_static_tooltip(self.table, 'Drop MIDI, E-SEQ, or disk image files here. Click a Title cell to edit.')
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setMinimumSectionSize(self._scaled_int(40, minimum=32))
@@ -9318,8 +9164,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         usage_bars_layout.setSpacing(self._scaled_int(3, minimum=1))
         self.diskUsageBar = VerticalUsageBar(self.diskUsageBarsWidget)
         self.eseqCountBar = SegmentedEseqCountBar(self.ESEQ_FILE_LIMIT, self.diskUsageBarsWidget)
-        self.diskUsageBar.setToolTip("Floppy image space used.")
-        self.eseqCountBar.setToolTip("Yamaha E-SEQ file slots used.")
+        self._set_static_tooltip(self.diskUsageBar, 'Floppy image space used.')
+        self._set_static_tooltip(self.eseqCountBar, 'Yamaha E-SEQ file slots used.')
         usage_bars_layout.addWidget(self.diskUsageBar)
         usage_bars_layout.addWidget(self.eseqCountBar)
         self.diskUsageBarsWidget.setVisible(False)
@@ -9335,14 +9181,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self.moveEseqUpButton = QToolButton()
         self.moveEseqUpButton.setArrowType(Qt.UpArrow)
-        self.moveEseqUpButton.setToolTip("Move the selected Yamaha E-SEQ file earlier in the directory order.")
+        self._set_static_tooltip(self.moveEseqUpButton, 'Move the selected Yamaha E-SEQ file earlier in the directory order.')
         self.moveEseqUpButton.setFixedSize(self._scaled_size(34, 28, minimum_width=28, minimum_height=24))
         self.moveEseqUpButton.clicked.connect(lambda: self.move_selected_eseq_row(-1))
         reorder_layout.addWidget(self.moveEseqUpButton)
 
         self.moveEseqDownButton = QToolButton()
         self.moveEseqDownButton.setArrowType(Qt.DownArrow)
-        self.moveEseqDownButton.setToolTip("Move the selected Yamaha E-SEQ file later in the directory order.")
+        self._set_static_tooltip(self.moveEseqDownButton, 'Move the selected Yamaha E-SEQ file later in the directory order.')
         self.moveEseqDownButton.setFixedSize(self._scaled_size(34, 28, minimum_width=28, minimum_height=24))
         self.moveEseqDownButton.clicked.connect(lambda: self.move_selected_eseq_row(1))
         reorder_layout.addWidget(self.moveEseqDownButton)
@@ -9362,7 +9208,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumHeight(self._scaled_int(42, minimum=32))
         self.status_label.setContentsMargins(*self._scaled_margins((24, 0, 24, 0)))
-        self.status_label.setToolTip("Operation status, warnings, and progress messages.")
+        self._set_static_tooltip(self.status_label, 'Operation status, warnings, and progress messages.')
         status_layout.addWidget(self.status_label, 0, 0)
 
         self.statusClearButton = QToolButton(self.statusWidget)
@@ -9371,7 +9217,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.statusClearButton.setFixedSize(self._scaled_size(18, 18, minimum_width=16, minimum_height=16))
         self.statusClearButton.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
         self.statusClearButton.setIconSize(self._scaled_size(10, 10, minimum_width=8, minimum_height=8))
-        self.statusClearButton.setToolTip("Clear status message.")
+        self._set_static_tooltip(self.statusClearButton, 'Clear status message.')
         self.statusClearButton.clicked.connect(self.status_label.clear)
         status_layout.addWidget(self.statusClearButton, 0, 0, Qt.AlignRight | Qt.AlignVCenter)
         self.status_label.set_clear_button(self.statusClearButton)
@@ -9389,15 +9235,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         options_group = QGroupBox("Options")
         self.optionsGroup = options_group
-        options_group.setToolTip("Display and compatibility preferences for the file list.")
+        self._set_static_tooltip(options_group, 'Display and compatibility preferences for the file list.')
         options_grid = self._build_control_panel_grid(options_group)
 
         show_compat_warning = self.settings.value(self.SETTING_SHOW_COMPAT_WARNING, True, type=bool)
         self.compat_warning_checkbox = QCheckBox("Long title warning")
         self.compat_warning_checkbox.setChecked(show_compat_warning)
-        self.compat_warning_checkbox.setToolTip(
-            "Show the Long column for titles beyond the 32-character legacy compatibility limit."
-        )
+        self._set_static_tooltip(self.compat_warning_checkbox, 'Show the Long column for titles beyond the 32-character legacy compatibility limit.')
         self.compat_warning_checkbox.toggled.connect(self.toggle_compat_warnings)
         options_grid.addWidget(self.compat_warning_checkbox, 0, 0, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
@@ -9406,18 +9250,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         self.format_disklavier_checkbox = QCheckBox("Format for Disklavier screen")
         self.format_disklavier_checkbox.setChecked(format_disklavier_screen)
-        self.format_disklavier_checkbox.setToolTip(
-            "When editing titles, use the Disklavier's two 16-character screen rows."
-        )
+        self._set_static_tooltip(self.format_disklavier_checkbox, "When editing titles, use the Disklavier's two 16-character screen rows.")
         self.format_disklavier_checkbox.toggled.connect(self.toggle_format_disklavier_screen)
         options_grid.addWidget(self.format_disklavier_checkbox, 1, 0, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
         store_backups = self.settings.value(self.SETTING_STORE_BACKUPS, True, type=bool)
         self.backup_checkbox = QCheckBox("Back up before saving")
         self.backup_checkbox.setChecked(store_backups)
-        self.backup_checkbox.setToolTip(
-            "Before overwriting, back up images beside the image and individual files into a backup folder."
-        )
+        self._set_static_tooltip(self.backup_checkbox, 'Before overwriting, back up images beside the image and individual files into a backup folder.')
         self.backup_checkbox.toggled.connect(self.toggle_store_backups)
         options_grid.addWidget(self.backup_checkbox, 2, 0, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
@@ -9426,11 +9266,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         mode_font = self._make_scaled_font("Helvetica", 14, QFont.Bold)
         self.modeBannerLabel.setFont(mode_font)
         self.modeBannerLabel.setWordWrap(True)
-        self.modeBannerLabel.setToolTip("Shows the current editing mode and active source.")
+        self._set_static_tooltip(self.modeBannerLabel, 'Shows the current editing mode and active source.')
 
         utilities_group = QGroupBox("Utilities")
         self.utilitiesGroup = utilities_group
-        utilities_group.setToolTip("Batch tools that run across every listed file immediately.")
+        self._set_static_tooltip(utilities_group, 'Batch tools that run across every listed file immediately.')
         utilities_buttons_layout = self._build_control_panel_grid(utilities_group)
 
         utilities_hint = QLabel("Apply to all listed files:")
@@ -9442,33 +9282,25 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.renameAllButton = QPushButton("Rename 8.3")
         self.renameAllButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.renameAllButton.setMinimumHeight(self._scaled_int(36, minimum=28))
-        self.renameAllButton.setToolTip(
-            "Utility: queue DOS 8.3 names for every listed file (00..., 01..., preserving extensions)."
-        )
+        self._set_static_tooltip(self.renameAllButton, 'Utility: queue DOS 8.3 names for every listed file (00..., 01..., preserving extensions).')
         self.renameAllButton.clicked.connect(self.rename_all_for_disk)
 
         self.convertType0Button = QPushButton("SMF1 -> SMF0")
         self.convertType0Button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.convertType0Button.setMinimumHeight(self._scaled_int(36, minimum=28))
-        self.convertType0Button.setToolTip(
-            "Utility: convert every listed file to MIDI Type 0 (single-track)."
-        )
+        self._set_static_tooltip(self.convertType0Button, 'Utility: convert every listed file to MIDI Type 0 (single-track).')
         self.convertType0Button.clicked.connect(self.convert_all_to_type0)
 
         self.convertEseqToMidiButton = QPushButton("E-SEQ -> MIDI")
         self.convertEseqToMidiButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.convertEseqToMidiButton.setMinimumHeight(self._scaled_int(36, minimum=28))
-        self.convertEseqToMidiButton.setToolTip(
-            "Image/Floppy Mode utility: queue conversion of listed E-SEQ files to SMF MIDI."
-        )
+        self._set_static_tooltip(self.convertEseqToMidiButton, 'Image/Floppy Mode utility: queue conversion of listed E-SEQ files to SMF MIDI.')
         self.convertEseqToMidiButton.clicked.connect(self.convert_all_eseq_to_midi)
 
         self.convertMidiToEseqButton = QPushButton("MIDI -> E-SEQ")
         self.convertMidiToEseqButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.convertMidiToEseqButton.setMinimumHeight(self._scaled_int(36, minimum=28))
-        self.convertMidiToEseqButton.setToolTip(
-            "Image/Floppy Mode utility: queue conversion of listed MIDI files to Yamaha E-SEQ."
-        )
+        self._set_static_tooltip(self.convertMidiToEseqButton, 'Image/Floppy Mode utility: queue conversion of listed MIDI files to Yamaha E-SEQ.')
         self.convertMidiToEseqButton.clicked.connect(self.convert_all_midi_to_eseq)
 
         self._apply_compact_button_labels()
@@ -9480,7 +9312,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         actions_group = QGroupBox("File Actions")
         self.actionsGroup = actions_group
-        actions_group.setToolTip("Save files, create images, or clear the current list.")
+        self._set_static_tooltip(actions_group, 'Save files, create images, or clear the current list.')
         actions_buttons_layout = self._build_control_panel_grid(actions_group)
 
         # Clear button (styled to match Save button)
@@ -9489,7 +9321,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.clearButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.clearButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clearButton.setMinimumHeight(self._scaled_int(36, minimum=28))
-        self.clearButton.setToolTip("Remove all files from the current list.")
+        self._set_static_tooltip(self.clearButton, 'Remove all files from the current list.')
         self.clearButton.clicked.connect(self.clear_list)
 
         self.saveButton = QToolButton()
@@ -9504,7 +9336,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.saveAsButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.saveAsButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.saveAsButton.setMinimumHeight(self._scaled_int(36, minimum=28))
-        self.saveAsButton.setToolTip("Save copies with current titles to a selected destination folder.")
+        self._set_static_tooltip(self.saveAsButton, 'Save copies with current titles to a selected destination folder.')
         self.saveAsButton.clicked.connect(self.save_as_changes)
 
         self.saveAsImageButton = QToolButton()
@@ -9512,7 +9344,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.saveAsImageButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
         self.saveAsImageButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.saveAsImageButton.setMinimumHeight(self._scaled_int(36, minimum=28))
-        self.saveAsImageButton.setToolTip("Create one or more floppy images from the currently listed files.")
+        self._set_static_tooltip(self.saveAsImageButton, 'Create one or more floppy images from the currently listed files.')
         self.saveAsImageButton.clicked.connect(self.save_as_image)
         self._apply_compact_button_labels()
 
@@ -9545,9 +9377,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
 
         self.imagePianodirMetadataWidget = QWidget()
-        self.imagePianodirMetadataWidget.setToolTip(
-            "Album title and catalog number stored in the Yamaha E-SEQ directory file."
-        )
+        self._set_static_tooltip(self.imagePianodirMetadataWidget, 'Album title and catalog number stored in the Yamaha E-SEQ directory file.')
         pianodir_meta_layout = QHBoxLayout(self.imagePianodirMetadataWidget)
         self.pianodirMetaLayout = pianodir_meta_layout
         pianodir_meta_layout.setContentsMargins(0, 0, 0, 0)
@@ -9555,33 +9385,25 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         album_title_label = QLabel("Album Title")
         self.albumTitleLabel = album_title_label
-        album_title_label.setToolTip(
-            "Album title stored in the Yamaha E-SEQ directory file when supported."
-        )
+        self._set_static_tooltip(album_title_label, 'Album title stored in the Yamaha E-SEQ directory file when supported.')
         pianodir_meta_layout.addWidget(album_title_label)
 
         self.imagePianodirTitleEdit = QLineEdit()
         self.imagePianodirTitleEdit.setPlaceholderText("Album title")
         self.imagePianodirTitleEdit.setMaxLength(PIANODIR_DISK_METADATA_SIZE)
-        self.imagePianodirTitleEdit.setToolTip(
-            "Album title stored in the Yamaha E-SEQ directory file when supported."
-        )
+        self._set_static_tooltip(self.imagePianodirTitleEdit, 'Album title stored in the Yamaha E-SEQ directory file when supported.')
         self.imagePianodirTitleEdit.textChanged.connect(self._update_image_pianodir_metadata_ui)
         pianodir_meta_layout.addWidget(self.imagePianodirTitleEdit, stretch=3)
 
         catalog_label = QLabel("Catalog Number")
         self.catalogNumberLabel = catalog_label
-        catalog_label.setToolTip(
-            "Catalog number stored in the Yamaha E-SEQ directory file when supported."
-        )
+        self._set_static_tooltip(catalog_label, 'Catalog number stored in the Yamaha E-SEQ directory file when supported.')
         pianodir_meta_layout.addWidget(catalog_label)
 
         self.imagePianodirCatalogEdit = QLineEdit()
         self.imagePianodirCatalogEdit.setPlaceholderText("Catalog number")
         self.imagePianodirCatalogEdit.setMaxLength(PIANODIR_DISK_METADATA_SIZE)
-        self.imagePianodirCatalogEdit.setToolTip(
-            "Catalog number stored in the Yamaha E-SEQ directory file when supported."
-        )
+        self._set_static_tooltip(self.imagePianodirCatalogEdit, 'Catalog number stored in the Yamaha E-SEQ directory file when supported.')
         self.imagePianodirCatalogEdit.textChanged.connect(self._update_image_pianodir_metadata_ui)
         self.imagePianodirCatalogEdit.editingFinished.connect(self._normalize_pianodir_catalog_field)
         self._connect_staged_metadata_edits()
@@ -9626,9 +9448,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.fileReadFloppyAction.triggered.connect(self.load_floppy_drive)
 
         self.fileImageFloppyAction = QAction("Image Floppy...", self)
-        self.fileImageFloppyAction.setToolTip(
-            "Copy a physical floppy to an image file without opening or scanning its contents."
-        )
+        self._set_static_tooltip(self.fileImageFloppyAction, 'Copy a physical floppy to an image file without opening or scanning its contents.')
         self.fileImageFloppyAction.triggered.connect(self.image_floppy_disk)
 
         self.fileSaveAction = QAction("Save", self)
@@ -9672,54 +9492,39 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.fileCreateTagSidecarsAction = QAction("Create Tag Sidecars When Saving", self)
         self.fileCreateTagSidecarsAction.setCheckable(True)
         self.fileCreateTagSidecarsAction.setChecked(self._tag_sidecars_enabled())
-        self.fileCreateTagSidecarsAction.setToolTip(
-            "When saving local MIDI or E-SEQ files to folders, create one .tags.txt ID3 tag sidecar next to each song. "
-            "This option is not used for Image Mode or Floppy Mode saves."
-        )
+        self._set_static_tooltip(self.fileCreateTagSidecarsAction, 'When saving local MIDI or E-SEQ files to folders, create one .tags.txt ID3 tag sidecar next to each song. This option is not used for Image Mode or Floppy Mode saves.')
         self.fileCreateTagSidecarsAction.toggled.connect(self.toggle_tag_sidecar_writing)
 
         self.fileCreateMetadataSummaryAction = QAction("Create Metadata Summary When Saving", self)
         self.fileCreateMetadataSummaryAction.setCheckable(True)
         self.fileCreateMetadataSummaryAction.setChecked(self._metadata_summary_enabled())
-        self.fileCreateMetadataSummaryAction.setToolTip(
-            "When saving MIDI files to a folder, create metadata_summary.txt with each saved MIDI file and its metadata."
-        )
+        self._set_static_tooltip(self.fileCreateMetadataSummaryAction, 'When saving MIDI files to a folder, create metadata_summary.txt with each saved MIDI file and its metadata.')
         self.fileCreateMetadataSummaryAction.toggled.connect(self.toggle_metadata_summary_writing)
 
         self.fileSaveAsImageAction = QAction("Save As Image...", self)
         self.fileSaveAsImageAction.triggered.connect(self.save_as_image)
 
         self.fileSaveToFloppyAction = QAction("Save To Floppy...", self)
-        self.fileSaveToFloppyAction.setToolTip(
-            "Save the current listed files directly to a formatted floppy drive without rewriting the whole disk image."
-        )
+        self._set_static_tooltip(self.fileSaveToFloppyAction, 'Save the current listed files directly to a formatted floppy drive without rewriting the whole disk image.')
         self.fileSaveToFloppyAction.triggered.connect(self.save_to_floppy)
 
         self.fileWriteImageToFloppyAction = QAction("Write Current Image to Floppy...", self)
-        self.fileWriteImageToFloppyAction.setToolTip(
-            "Write the currently loaded image or floppy session to a physical floppy disk."
-        )
+        self._set_static_tooltip(self.fileWriteImageToFloppyAction, 'Write the currently loaded image or floppy session to a physical floppy disk.')
         self.fileWriteImageToFloppyAction.triggered.connect(self.write_image_to_floppy)
 
         self.fileAutoWriteProtectAction = QAction("Auto Write-Protect", self)
         self.fileAutoWriteProtectAction.setCheckable(True)
         self.fileAutoWriteProtectAction.setChecked(self._auto_write_protect_on_load())
-        self.fileAutoWriteProtectAction.setToolTip(
-            "When enabled, newly read floppies and newly opened images start with original writes protected."
-        )
+        self._set_static_tooltip(self.fileAutoWriteProtectAction, 'When enabled, newly read floppies and newly opened images start with original writes protected.')
         self.fileAutoWriteProtectAction.toggled.connect(self.toggle_auto_write_protect_on_load)
         self.fileWriteProtectOriginalAction = QAction("Write-Protect Original", self)
         self.fileWriteProtectOriginalAction.setCheckable(True)
-        self.fileWriteProtectOriginalAction.setToolTip(
-            "Protect the currently open image or floppy from being overwritten by Save."
-        )
+        self._set_static_tooltip(self.fileWriteProtectOriginalAction, 'Protect the currently open image or floppy from being overwritten by Save.')
         self.fileWriteProtectOriginalAction.toggled.connect(self.toggle_original_write_protection)
         self.fileBackUpBeforeSavingAction = QAction("Back up before Saving", self)
         self.fileBackUpBeforeSavingAction.setCheckable(True)
         self.fileBackUpBeforeSavingAction.setChecked(self.backup_checkbox.isChecked())
-        self.fileBackUpBeforeSavingAction.setToolTip(
-            "Before overwriting, back up images beside the image and individual files into a backup folder."
-        )
+        self._set_static_tooltip(self.fileBackUpBeforeSavingAction, 'Before overwriting, back up images beside the image and individual files into a backup folder.')
         self.fileBackUpBeforeSavingAction.toggled.connect(self.backup_checkbox.setChecked)
 
         self.fileMenu.addAction(self.fileNewImageAction)
@@ -9780,18 +9585,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.viewLongTitleWarningAction = QAction("Long title warning", self)
         self.viewLongTitleWarningAction.setCheckable(True)
         self.viewLongTitleWarningAction.setChecked(self.compat_warning_checkbox.isChecked())
-        self.viewLongTitleWarningAction.setToolTip(
-            "Show the Long column for titles beyond the 32-character legacy compatibility limit."
-        )
+        self._set_static_tooltip(self.viewLongTitleWarningAction, 'Show the Long column for titles beyond the 32-character legacy compatibility limit.')
         self.viewLongTitleWarningAction.toggled.connect(self.compat_warning_checkbox.setChecked)
         self.viewMenu.addAction(self.viewLongTitleWarningAction)
 
         self.viewFormatDisklavierScreenAction = QAction("Format for Disklavier screen", self)
         self.viewFormatDisklavierScreenAction.setCheckable(True)
         self.viewFormatDisklavierScreenAction.setChecked(self.format_disklavier_checkbox.isChecked())
-        self.viewFormatDisklavierScreenAction.setToolTip(
-            "When editing titles, use the Disklavier's two 16-character screen rows."
-        )
+        self._set_static_tooltip(self.viewFormatDisklavierScreenAction, "When editing titles, use the Disklavier's two 16-character screen rows.")
         self.viewFormatDisklavierScreenAction.toggled.connect(self.format_disklavier_checkbox.setChecked)
         self.viewMenu.addAction(self.viewFormatDisklavierScreenAction)
 
@@ -9801,7 +9602,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.viewShowStatusAction.setChecked(
             not self.settings.value(self.SETTING_HIDE_STATUS, True, type=bool)
         )
-        self.viewShowStatusAction.setToolTip("Show the operation status text beneath the file list.")
+        self._set_static_tooltip(self.viewShowStatusAction, 'Show the operation status text beneath the file list.')
         self.viewShowStatusAction.toggled.connect(self.toggle_show_status)
         self.viewMenu.addAction(self.viewShowStatusAction)
 
@@ -9810,7 +9611,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.viewShowQuickPanelAction.setChecked(
             not self.settings.value(self.SETTING_HIDE_QUICK_PANEL, False, type=bool)
         )
-        self.viewShowQuickPanelAction.setToolTip("Show the Options, Utilities, and File Actions panel.")
+        self._set_static_tooltip(self.viewShowQuickPanelAction, 'Show the Options, Utilities, and File Actions panel.')
         self.viewShowQuickPanelAction.toggled.connect(self.toggle_show_quick_panel)
         self.viewMenu.addAction(self.viewShowQuickPanelAction)
 
@@ -9843,7 +9644,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self.viewMenu.addSeparator()
         self.viewLogsAction = QAction("View Logs...", self)
-        self.viewLogsAction.setToolTip("Open a live view of console output from this session.")
+        self._set_static_tooltip(self.viewLogsAction, 'Open a live view of console output from this session.')
         self.viewLogsAction.triggered.connect(self.show_console_log_window)
         self.viewMenu.addAction(self.viewLogsAction)
 
@@ -9857,9 +9658,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.utilitiesMenu.addAction(self.utilitiesFileInspectionAction)
 
         self.utilitiesRenderAudioAction = QAction("Render Audio...", self)
-        self.utilitiesRenderAudioAction.setToolTip(
-            "Render all currently listed MIDI or E-SEQ files to WAV or MP3 using a selected SoundFont."
-        )
+        self._set_static_tooltip(self.utilitiesRenderAudioAction, 'Render all currently listed MIDI or E-SEQ files to WAV or MP3 using a selected SoundFont.')
         self.utilitiesRenderAudioAction.triggered.connect(self.show_audio_render_tool)
         self.utilitiesMenu.addAction(self.utilitiesRenderAudioAction)
 
@@ -9889,16 +9688,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.utilitiesMenu.addAction(self.utilitiesRenameAction)
 
         self.utilitiesLongFilenamesAction = QAction("Name MIDI Files from Song Titles", self)
-        self.utilitiesLongFilenamesAction.setToolTip(
-            "Create filenames such as 01 - Moon River.mid from track order and song titles."
-        )
+        self._set_static_tooltip(self.utilitiesLongFilenamesAction, 'Create filenames such as 01 - Moon River.mid from track order and song titles.')
         self.utilitiesLongFilenamesAction.triggered.connect(self.create_long_midi_filenames)
         self.utilitiesMenu.addAction(self.utilitiesLongFilenamesAction)
 
         self.utilitiesTrimTitleSpacesAction = QAction("Trim Title Spaces", self)
-        self.utilitiesTrimTitleSpacesAction.setToolTip(
-            "Trim leading/trailing title spaces and collapse repeated spaces for all listed titles."
-        )
+        self._set_static_tooltip(self.utilitiesTrimTitleSpacesAction, 'Trim leading/trailing title spaces and collapse repeated spaces for all listed titles.')
         self.utilitiesTrimTitleSpacesAction.triggered.connect(self.trim_title_spaces_for_all)
         self.utilitiesMenu.addAction(self.utilitiesTrimTitleSpacesAction)
 
@@ -9941,9 +9736,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.utilitiesConvertMenu.addAction(self.utilitiesMidiToEseqAction)
 
         self.utilitiesFormatFloppyAction = QAction("Format Floppy Disk...", self)
-        self.utilitiesFormatFloppyAction.setToolTip(
-            "Format a physical floppy disk for Yamaha Disklavier use."
-        )
+        self._set_static_tooltip(self.utilitiesFormatFloppyAction, 'Format a physical floppy disk for Yamaha Disklavier use.')
         self.utilitiesFormatFloppyAction.triggered.connect(self.format_disklavier_floppy)
         self.diskMenu.addSeparator()
         self.diskMenu.addAction(self.utilitiesFormatFloppyAction)
@@ -10036,15 +9829,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.helpCheckUpdatesAtStartupAction.toggled.connect(self.toggle_update_checks_at_startup)
 
         self.helpReportBugAction = QAction("Report a Bug...", self)
-        self.helpReportBugAction.setToolTip(
-            "Send a bug report with app details and optional recent console logs."
-        )
+        self._set_static_tooltip(self.helpReportBugAction, 'Send a bug report with app details and optional recent console logs.')
         self.helpReportBugAction.triggered.connect(self.show_bug_report_dialog)
 
         self.helpFeedbackAction = QAction("Send Feedback...", self)
-        self.helpFeedbackAction.setToolTip(
-            "Send feedback with app details and optional recent console logs."
-        )
+        self._set_static_tooltip(self.helpFeedbackAction, 'Send feedback with app details and optional recent console logs.')
         self.helpFeedbackAction.triggered.connect(self.show_feedback_dialog)
 
         self.helpWelcomeAction = QAction("Show Welcome Screen", self)
@@ -12597,7 +12386,17 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _menu_action_text(self, text, mnemonic=""):
         return self._with_mnemonic(self._lt(text), mnemonic)
 
+    def _set_static_tooltip(self, widget, source):
+        """Remember fixed tooltips so changing language updates existing controls."""
+        if not hasattr(self, "_static_tooltips"):
+            self._static_tooltips = []
+        self._static_tooltips.append((widget, source))
+        widget.setToolTip(self._lt(source))
+
     def _refresh_translated_ui(self):
+        install_qt_translations(self._language_code())
+        for widget, source in getattr(self, "_static_tooltips", ()):
+            widget.setToolTip(self._lt(source))
         self._refresh_settings_menu_text()
         self._refresh_preparation_ui()
         if hasattr(self, "fileMenu"):
@@ -12666,6 +12465,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     self._populate_regular_pianodir_row(pianodir_row)
             finally:
                 self.table.blockSignals(was_blocked)
+        was_sorting = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
         was_blocked = self.table.blockSignals(True)
         try:
             for row in range(self.table.rowCount()):
@@ -12679,12 +12480,46 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 item.setToolTip(self._type_column_tooltip(
                     item.text(), image_mode=self.is_image_mode(), is_midi=info.get("is_midi", False),
                 ))
+                self._refresh_row_tooltips(row, path_item.text(), info)
         finally:
+            self.table.setSortingEnabled(was_sorting)
             self.table.blockSignals(was_blocked)
         self._refresh_static_action_text()
         self._update_compat_warning_ui()
         self._update_floppy_save_option_ui()
         self._update_menu_actions()
+
+    def _refresh_row_tooltips(self, row, source_path, info):
+        """Retranslate labels around a song without modifying its metadata."""
+        image_mode = self.is_image_mode()
+        delete_source = (
+            ("Cancel this pending addition." if source_path in self.pendingImageAdditions
+             else "Remove this file from the image on Save.")
+            if image_mode else "Remove this file from the list."
+        )
+        for column, source in ((0, delete_source), (2, "Copy filename to clipboard.")):
+            item = self.table.item(row, column)
+            if item is not None:
+                item.setToolTip(self._lt(source))
+        filename_item = self.table.item(row, 3)
+        if image_mode:
+            self._refresh_image_filename_display(row)
+        elif filename_item is not None:
+            if source_path in self.pendingRegularConversions:
+                source = "Pending converted filename. Use Save, Save As, or Save As Image to write it."
+            elif source_path in self.pendingRegularRenames:
+                source = "Pending filename. Use Save to rename the original file, or Save As to write a renamed copy."
+            else:
+                source = "Double-click to rename this file."
+            filename_item.setToolTip(self._lt(source))
+        title_item = self.table.item(row, 4)
+        if title_item is not None:
+            if info.get("title_source") == "smart_pianosoft_catalog":
+                tooltip = self._lt("Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. The MIDI track-name event is left unchanged.")
+            else:
+                tooltip = self._title_item_tooltip(info.get("title_mode", ""))
+            title_item.setToolTip(tooltip)
+        self._update_compat_indicator(row, self._row_raw_title(row))
 
     def _refresh_static_action_text(self):
         action_texts = (
@@ -13130,7 +12965,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         else:
             message = self._ensure_sentence(self._lt(summary))
             if detail_text:
-                message += f"\n\n{self._t('error.details_label')}: {detail_text}"
+                message += f"\n\n{self._t('error.details_label')}: {localize_music_error(detail_text, self._language_code())}"
             guidance_text = self._lt(guidance) if guidance is not None else self._guidance_for_error_detail(detail_text)
             if guidance_text:
                 message += f"\n\n{self._ensure_sentence(guidance_text)}"
@@ -13154,7 +12989,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return preview or self._t("error.no_detail")
 
     def _show_error_list(self, title, summary, errors, *, max_rows=10, warning=False, guidance=""):
-        details = self._limited_message_list(errors, max_rows=max_rows)
+        raw_details = self._limited_message_list(errors, max_rows=max_rows)
+        details = self._limited_message_list(
+            [localize_music_error(error, self._language_code()) for error in errors], max_rows=max_rows,
+        )
         if any(is_missing_source_file_error(error) for error in errors or ()):
             message = self._source_files_missing_error_message(details, guidance=guidance or None)
         else:
@@ -13167,7 +13005,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             str(title or "Operation issue"),
             summary=summary,
             count=len(errors or ()),
-            detail=details,
+            detail=raw_details,
         )
         if warning:
             QMessageBox.warning(self, self._lt(title), message)
@@ -13432,8 +13270,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._reset_image_state()
 
         status = (
-            f"Decoded {len(midi_paths)} PianoDisc System 3 song(s) from {source_name}.\n"
-            "The source image was not modified. Use Save As to choose a permanent folder."
+            self._lt('Decoded {count} PianoDisc System 3 song(s) from {source_name}.\nThe source image was not modified. Use Save As to choose a permanent folder.', count=len(midi_paths), source_name=source_name)
         )
         if use_long_filenames:
             status += "\nMIDI filenames use track numbers and song titles."
@@ -13757,7 +13594,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     guidance="The source files were not modified",
                 )
             elif cancelled:
-                self.status_label.setText("V50/SY77 conversion cancelled. No files were changed.")
+                self.status_label.setText(self._lt('V50/SY77 conversion cancelled. No files were changed.'))
             else:
                 QMessageBox.information(
                     self,
@@ -13771,9 +13608,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if reset_current_image and self.image_session is not None:
             self._reset_image_state()
         status_text = (
-            f"Converted {converted_count} MIDI file(s) from {slot_count} V50/SY77 sequence(s) in {source_name} "
-            "with routed channels and program changes.\n"
-            "The source files were not modified. Use Save As to choose a permanent folder."
+            self._lt('Converted {converted_count} MIDI file(s) from {slot_count} V50/SY77 sequence(s) in {source_name} with routed channels and program changes.\nThe source files were not modified. Use Save As to choose a permanent folder.', converted_count=converted_count, slot_count=slot_count, source_name=source_name)
         )
         if cancelled:
             status_text += "\nConversion was cancelled after the files listed above were created."
@@ -14165,8 +14000,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 )
             elif cancelled:
                 self.status_label.setText(
-                    "PSR-600 Page Memory conversion cancelled. "
-                    "No files were changed."
+                    self._lt('PSR-600 Page Memory conversion cancelled. No files were changed.')
                 )
             return False
 
@@ -14588,7 +14422,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     guidance="The source files were not modified",
                 )
             elif cancelled:
-                self.status_label.setText("Electone MDR conversion cancelled. No files were changed.")
+                self.status_label.setText(self._lt('Electone MDR conversion cancelled. No files were changed.'))
             return False
 
         if reset_current_image and self.image_session is not None:
@@ -15031,7 +14865,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     guidance="The source files were not modified",
                 )
             elif cancelled:
-                self.status_label.setText("MPC sequence conversion cancelled. No files were changed.")
+                self.status_label.setText(self._lt('MPC sequence conversion cancelled. No files were changed.'))
             return False
 
         if reset_current_image and self.image_session is not None:
@@ -17707,7 +17541,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.writeProtectToggle.setVisible(show_original_write_toggle)
             self.writeProtectToggle.setEnabled(show_original_write_toggle)
             if show_original_write_toggle:
-                target_label = "floppy" if is_floppy else "image"
+                target_label = "floppy disk" if is_floppy else "image"
                 self.writeProtectToggle.set_target_label(target_label)
                 self.writeProtectToggle.blockSignals(True)
                 self.writeProtectToggle.setChecked(self._original_write_is_allowed())
@@ -17715,11 +17549,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 self.writeProtectToggle._refresh_tooltip()
         if hasattr(self, "fileWriteProtectOriginalAction"):
             protected = not self._original_write_is_allowed() if show_original_write_toggle else True
-            target_label = "floppy" if is_floppy else ("image" if is_image else "original")
+            target_label = "floppy disk" if is_floppy else ("image" if is_image else "original")
             tooltip = (
-                f"Write protected for this {target_label}. Use Save As or Save As Image instead."
+                self._lt("Write protected for this {target}. Use Save As or Save As Image instead.", target=self._lt(target_label))
                 if protected else
-                f"Write enabled for this {target_label}. Save will modify the original."
+                self._lt("Write enabled for this {target}. Save will modify the original.", target=self._lt(target_label))
             )
             self.fileWriteProtectOriginalAction.setEnabled(show_original_write_toggle)
             self.fileWriteProtectOriginalAction.blockSignals(True)
@@ -17946,8 +17780,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 "Please wait for the current operation to finish before imaging a floppy disk."
             )
             self.fileImageFloppyAction.setEnabled(open_enabled)
-            self.fileImageFloppyAction.setToolTip(capture_tooltip)
-            self.fileImageFloppyAction.setStatusTip(capture_tooltip)
+            self.fileImageFloppyAction.setToolTip(self._lt(capture_tooltip))
+            self.fileImageFloppyAction.setStatusTip(self._lt(capture_tooltip))
 
         self.fileSaveAction.setText(self._menu_action_text("Save", "S"))
         self.fileSaveAction.setEnabled(self.saveButton.isEnabled())
@@ -18169,16 +18003,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.fileWriteProtectOriginalAction.setEnabled(enabled)
             if not enabled and self._original_write_setting_key() is None:
                 self.fileWriteProtectOriginalAction.setStatusTip(
-                    "Open an image or floppy session before changing current write protection."
+                    self._lt('Open an image or floppy session before changing current write protection.')
                 )
         if hasattr(self, "viewFormatDisklavierScreenAction"):
             self.viewFormatDisklavierScreenAction.setStatusTip(
-                "Use the Disklavier's two 16-character screen rows when editing titles."
+                self._lt("Use the Disklavier's two 16-character screen rows when editing titles.")
             )
         if hasattr(self, "viewShowStatusAction"):
-            self.viewShowStatusAction.setStatusTip("Show the operation status text beneath the file list.")
+            self.viewShowStatusAction.setStatusTip(self._lt('Show the operation status text beneath the file list.'))
         if hasattr(self, "viewShowQuickPanelAction"):
-            self.viewShowQuickPanelAction.setStatusTip("Show the Options, Utilities, and File Actions panel.")
+            self.viewShowQuickPanelAction.setStatusTip(self._lt('Show the Options, Utilities, and File Actions panel.'))
         if hasattr(self, "viewShowAlbumMetadataAction"):
             album_info_tip = self._lt(
                 "Show the Album Info panel, including Album Title, Catalog Number, and Create Album Subfolder."
@@ -18187,7 +18021,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.viewShowAlbumMetadataAction.setStatusTip(album_info_tip)
         if hasattr(self, "viewLogsAction"):
             self.viewLogsAction.setEnabled(True)
-            self.viewLogsAction.setStatusTip("Open a live view of console output from this session.")
+            self.viewLogsAction.setStatusTip(self._lt('Open a live view of console output from this session.'))
 
         has_listed_files = self.choose_button.isEnabled() and any(
             self.table.item(row, 1) is not None and not self._is_special_pianodir_row(row)
@@ -18675,7 +18509,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _disk_mode_banner_headline(self):
         if self.image_session is None:
             return "Image Mode"
-        return f"{self.image_session.mode_name} ({self._disk_content_label()})"
+        return self._lt("{mode} ({content})", mode=self._lt(self.image_session.mode_name), content=self._disk_content_label())
 
     def _clear_regular_list_state(self):
         self._clear_staging_history()
@@ -18902,12 +18736,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         if export_filename:
             filename_item.setToolTip(
-                f"Save As folder filename: {export_filename}\n"
-                f"Disk/image filename: {disk_filename}\n\n"
-                "Double-click to rename the file inside the disk/image."
+                self._lt('Save As folder filename: {export_filename}\nDisk/image filename: {disk_filename}\n\nDouble-click to rename the file inside the disk/image.', export_filename=export_filename, disk_filename=disk_filename)
             )
         else:
-            filename_item.setToolTip("Double-click to rename this file inside the disk/image.")
+            filename_item.setToolTip(self._lt('Double-click to rename this file inside the disk/image.'))
 
     @staticmethod
     def _song_list_display_text(value, fallback=""):
@@ -19445,7 +19277,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     break
         self._refresh_eseq_reorder_buttons()
         direction_text = "earlier" if direction < 0 else "later"
-        self.status_label.setText(f"Moved the selected E-SEQ file {direction_text} in the playback order.")
+        self.status_label.setText(self._lt('Moved the selected E-SEQ file {direction_text} in the playback order.', direction_text=self._lt(direction_text)))
 
     def _image_song_file_count(self):
         count = 0
@@ -20060,16 +19892,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         status_parts = []
         if added_count:
-            status_parts.append(f"Added {added_count} file(s).")
+            status_parts.append(self._lt('Added {added_count} file(s).', added_count=added_count))
         if converted_count:
-            status_parts.append(f"Staged {converted_count} dropped file(s) for automatic conversion.")
-            status_parts.append("Use Save, Save As, or Save As Image to write the converted files.")
+            status_parts.append(self._lt('Staged {converted_count} dropped file(s) for automatic conversion.', converted_count=converted_count))
+            status_parts.append(self._lt('Use Save, Save As, or Save As Image to write the converted files.'))
         if skipped_count:
-            status_parts.append(f"Skipped {skipped_count} file(s).")
+            status_parts.append(self._lt('Skipped {skipped_count} file(s).', skipped_count=skipped_count))
         if cancelled_count:
-            status_parts.append("Drop cancelled.")
+            status_parts.append(self._lt('Drop cancelled.'))
         if errors:
-            status_parts.append(f"{len(errors)} file(s) could not be added.")
+            status_parts.append(self._lt('{count} file(s) could not be added.', count=len(errors)))
         if status_parts:
             pianodir_count = sum(
                 1
@@ -20077,7 +19909,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 if result.get("status") == "added" and result.get("kind") == "pianodir"
             )
             if pianodir_count:
-                status_parts.append(f"Loaded {self._eseq_directory_filename(self.regularEseqVariant)}.")
+                status_parts.append(self._lt('Loaded {filename}.', filename=self._eseq_directory_filename(self.regularEseqVariant)))
             self.status_label.setText("\n".join(status_parts))
         if accepted_paths:
             self._auto_fit_table_columns_after_batch_change()
@@ -20445,8 +20277,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         if self.is_image_mode() and self._image_title_is_smart_pianosoft_catalog_backed(path):
             title_item.setToolTip(
-                "Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. "
-                "The MIDI track-name event is left unchanged."
+                self._lt('Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. The MIDI track-name event is left unchanged.')
             )
         self.table.setItem(row, 4, title_item)
         self._update_compat_indicator(row, new_title)
@@ -20484,7 +20315,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 self._reapply_regular_centered_title_assumption()
                 write_hint = "Use Save, Save As, or Save As Image to write the updated titles."
             self.status_label.setText(
-                f"Staged title spacing cleanup for {changed_count} file(s). {write_hint}"
+                self._lt('Staged title spacing cleanup for {changed_count} file(s). {write_hint}', changed_count=changed_count, write_hint=self._lt(write_hint))
             )
         elif show_summary and not errors:
             QMessageBox.information(
@@ -20922,7 +20753,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _apply_midi_mode_ui(self):
         self._apply_compact_button_labels()
         self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
-        self.table.horizontalHeaderItem(3).setToolTip("Filename on disk. Double-click to rename.")
+        self.table.horizontalHeaderItem(3).setToolTip(self._lt('Filename on disk. Double-click to rename.'))
         self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(self._lt("Select a folder to scan for .mid and .midi files."))
         self.open_image_button.setEnabled(True)
@@ -20962,9 +20793,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         mode_label = self._eseq_mode_label(self.regularEseqVariant)
         directory_name = self._eseq_directory_filename(self.regularEseqVariant)
         self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
-        self.table.horizontalHeaderItem(3).setToolTip("Filename on disk. Double-click to rename.")
+        self.table.horizontalHeaderItem(3).setToolTip(self._lt('Filename on disk. Double-click to rename.'))
         self.choose_button.setText(self._lt("Open MIDI Folder"))
-        self.choose_button.setToolTip(f"Leave {mode_label} Mode and select a folder to scan for .mid and .midi files.")
+        self.choose_button.setToolTip(self._lt('Leave {mode_label} Mode and select a folder to scan for .mid and .midi files.', mode_label=mode_label))
         self.open_image_button.setEnabled(True)
         self.open_image_button.setText(self._lt("Open Image"))
         self.open_image_button.setToolTip(self._lt("Open a floppy image file for editing in Image Mode."))
@@ -20974,7 +20805,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._lt("Read a floppy from a floppy drive or from a Greaseweazle-connected drive.")
         )
         self.table.setToolTip(
-            f"{mode_label} Mode: edit local MIDI and E-SEQ titles, and manage the local {directory_name} row."
+            self._lt('{mode_label} Mode: edit local MIDI and E-SEQ titles, and manage the local {directory_name} row.', mode_label=mode_label, directory_name=directory_name)
         )
         self._set_rename_all_enabled(self._regular_file_count() > 0)
         self._set_type0_enabled(False, "SMF1 -> SMF0 is available for MIDI folders only.")
@@ -20985,11 +20816,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.saveButton.setVisible(True)
         self.saveAsButton.setVisible(True)
         self.saveAsImageButton.setVisible(True)
-        self.saveButton.setToolTip(f"Write pending title edits to the currently listed local files and update {directory_name}.")
-        self.saveAsButton.setToolTip(f"Save local E-SEQ files and {directory_name} to a selected destination folder.")
+        self.saveButton.setToolTip(self._lt('Write pending title edits to the currently listed local files and update {directory_name}.', directory_name=directory_name))
+        self.saveAsButton.setToolTip(self._lt('Save local E-SEQ files and {directory_name} to a selected destination folder.', directory_name=directory_name))
         self.saveAsImageButton.setToolTip(self._lt("Create one or more floppy images from the currently listed files."))
         self.clearButton.setToolTip(self._lt("Remove all files from the current E-SEQ list."))
-        self._set_mode_banner(f"{mode_label} Mode", self._regular_mode_context_label())
+        self._set_mode_banner(self._lt("{mode} Mode", mode=mode_label), self._regular_mode_context_label())
         self._update_compat_warning_ui()
         self._update_floppy_save_option_ui()
         self._update_image_pianodir_metadata_ui()
@@ -21032,10 +20863,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         mode_banner = self._disk_mode_banner_headline()
         self._set_table_headers(["X", "ImagePath", "📋", "Filename", "Title", "Long", "Type"])
         self.table.horizontalHeaderItem(3).setToolTip(
-            "Filename inside the disk/image. A different Save As export name is shown when one is staged."
+            self._lt('Filename inside the disk/image. A different Save As export name is shown when one is staged.')
         )
         self.choose_button.setText(self._lt("Open MIDI Folder"))
-        self.choose_button.setToolTip(f"Leave {mode_name} and select a folder to scan for .mid and .midi files.")
+        self.choose_button.setToolTip(self._lt('Leave {mode_name} and select a folder to scan for .mid and .midi files.', mode_name=self._lt(mode_name)))
         self.open_image_button.setEnabled(True)
         self.open_image_button.setText(self._lt("Open Image"))
         self.open_image_button.setToolTip(self._lt("Open another floppy image file for editing in Image Mode."))
@@ -21045,7 +20876,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._lt("Read another floppy from a floppy drive or a Greaseweazle-connected drive.")
         )
         self.table.setToolTip(
-            f"{mode_banner}: edit titles, rename files, remove rows to delete files on Save, or drop files to add them."
+            self._lt('{mode_banner}: edit titles, rename files, remove rows to delete files on Save, or drop files to add them.', mode_banner=mode_banner)
         )
         self._set_rename_all_enabled(False, "Add files before using Rename 8.3.")
         self._set_type0_enabled(False, "SMF1 -> SMF0 is available for MIDI folders only.")
@@ -21062,11 +20893,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.saveButton.setVisible(True)
         self.saveAsButton.setVisible(True)
         self.saveAsButton.setToolTip(
-            f"Save the current {mode_name.lower()}'s listed files to a destination folder and leave {mode_name}."
+            self._lt("Save the current {mode_name}'s listed files to a destination folder and leave {mode_name}.", mode_name=self._lt(mode_name))
         )
         self.saveAsImageButton.setVisible(True)
         self.saveAsImageButton.setText(self._lt("Save As Image"))
-        self.saveAsImageButton.setToolTip(f"Save the current {mode_name.lower()} as a separate image file.")
+        self.saveAsImageButton.setToolTip(self._lt('Save the current {mode_name} as a separate image file.', mode_name=self._lt(mode_name)))
         self._set_mode_banner(mode_banner, self.image_session.source_name if self.image_session is not None else "")
         self._update_compat_warning_ui()
         self._update_floppy_save_option_ui()
@@ -21080,10 +20911,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self.image_session is None:
             return ""
         listing = self.image_session.list_entries()
-        return (
-            f"{self._disk_mode_banner_headline()}: {self.image_session.source_name} "
-            f"({self.image_session.disk_format.label}, {display_bytes(self.image_session.disk_format.size_bytes)}). "
-            f"{len(listing.entries)} file(s), {display_bytes(listing.free_space)} free."
+        return self._lt(
+            "{mode}: {source} ({format}, {size}). {count} file(s), {free} free.",
+            mode=self._disk_mode_banner_headline(), source=self.image_session.source_name,
+            format=self.image_session.disk_format.label,
+            size=display_bytes(self.image_session.disk_format.size_bytes),
+            count=len(listing.entries), free=display_bytes(listing.free_space),
         )
 
     def _image_info_for_path(self, image_path):
@@ -21428,6 +21261,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             button = button_box.button(standard_button)
             if button is not None:
                 default_labels = {translate_text(label, option.code).replace("&", "") for option in language_options()}
+                default_labels.add(QCoreApplication.translate("QPlatformTheme", label).replace("&", ""))
                 if button.text().replace("&", "") in default_labels:
                     button.setText(self._lt(label))
 
@@ -21714,7 +21548,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         eseq_checkbox = QCheckBox("Create E-SEQ disk with empty PIANODIR.FIL")
         eseq_checkbox.setToolTip(
-            "Adds an empty Yamaha PIANODIR.FIL so the formatted disk opens in E-SEQ mode."
+            self._lt('Adds an empty Yamaha PIANODIR.FIL so the formatted disk opens in E-SEQ mode.')
         )
 
         common_grid = self._make_dialog_form_grid()
@@ -22131,7 +21965,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             default_ext=self._saved_greaseweazle_image_type(default_ext="hfe"),
         )
         gw_image_type_combo.setToolTip(
-            "Choose SCP for a raw flux capture. Other image types are decoded using the selected disk format."
+            self._lt('Choose SCP for a raw flux capture. Other image types are decoded using the selected disk format.')
         )
 
         gw_device_label = self._add_dialog_form_row(gw_grid, 0, "Greaseweazle device:", gw_device_combo)
@@ -22444,7 +22278,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         revs_spin.setValue(
             max(0, min(20, self.settings.value(self.SETTING_READ_FLOPPY_GW_REVS, 0, type=int)))
         )
-        revs_spin.setToolTip("Number of revolutions to read per track. Use 0 for Greaseweazle's default.")
+        revs_spin.setToolTip(self._lt("Number of revolutions to read per track. Use 0 for Greaseweazle's default."))
         gw_layout.addWidget(revs_label, 3, 0)
         gw_layout.addWidget(revs_spin, 3, 1)
 
@@ -22457,7 +22291,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             max(0, min(20, self.settings.value(self.SETTING_READ_FLOPPY_GW_RETRIES, 3, type=int)))
         )
         retries_spin.setSpecialValueText("CLI default")
-        retries_spin.setToolTip("Number of retries per seek-retry. Use 0 for Greaseweazle's default.")
+        retries_spin.setToolTip(self._lt("Number of retries per seek-retry. Use 0 for Greaseweazle's default."))
         gw_layout.addWidget(retries_label, 4, 0)
         gw_layout.addWidget(retries_spin, 4, 1)
 
@@ -22471,7 +22305,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             include_none=True,
         )
         gw_image_type_combo.setToolTip(
-            "Choose the image type to offer after the disk opens. SCP reads as raw flux first; other types use the selected disk format."
+            self._lt('Choose the image type to offer after the disk opens. SCP reads as raw flux first; other types use the selected disk format.')
         )
         gw_layout.addWidget(gw_image_type_label, 5, 0)
         gw_layout.addWidget(gw_image_type_combo, 5, 1)
@@ -22517,7 +22351,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             )
         )
         convert_to_midi_checkbox.setToolTip(
-            "After the floppy opens, queue detected Yamaha E-SEQ songs for Standard MIDI conversion."
+            self._lt('After the floppy opens, queue detected Yamaha E-SEQ songs for Standard MIDI conversion.')
         )
         conversion_restriction = self._preparation_conversion_restriction("midi")
         if conversion_restriction:
@@ -23903,7 +23737,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     confirm_image_exit=False,
                 )
             else:
-                self.status_label.setText("Electone MDR conversion skipped.")
+                self.status_label.setText(self._lt('Electone MDR conversion skipped.'))
             return
 
         psr600_summary = self._psr600_blk_summary_for_paths([image_path])
@@ -23930,7 +23764,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 )
             else:
                 self.status_label.setText(
-                    "PSR-600 Page Memory conversion skipped."
+                    self._lt('PSR-600 Page Memory conversion skipped.')
                 )
             return
 
@@ -23948,7 +23782,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     confirm_image_exit=False,
                 )
             else:
-                self.status_label.setText("V50/SY77 ALL file conversion skipped.")
+                self.status_label.setText(self._lt('V50/SY77 ALL file conversion skipped.'))
             return
 
         if self._is_mpc_sequence_source_path(image_path):
@@ -23966,7 +23800,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     confirm_image_exit=False,
                 )
             else:
-                self.status_label.setText("MPC sequence conversion skipped.")
+                self.status_label.setText(self._lt('MPC sequence conversion skipped.'))
             return
 
         if not prevalidated and not self._prepare_for_disk_load("this floppy image"):
@@ -24124,7 +23958,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             filename=filename,
         )
         self.status_label.setText(
-            f"{action} {source_name} to {filename}. The image was saved but not opened or scanned."
+            self._lt('{action} {source_name} to {filename}. The image was saved but not opened or scanned.', action=self._lt(action), source_name=source_name, filename=filename)
         )
         QMessageBox.information(
             self,
@@ -24214,9 +24048,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             source=self.diskImageCaptureContext.get("source_name", "the selected floppy"),
         )
         if self.diskImageCaptureContext.get("source_kind") == "image_convert":
-            self.status_label.setText("Image conversion cancelled. No image was saved.")
+            self.status_label.setText(self._lt('Image conversion cancelled. No image was saved.'))
         else:
-            self.status_label.setText("Floppy imaging cancelled. No image was saved.")
+            self.status_label.setText(self._lt('Floppy imaging cancelled. No image was saved.'))
 
     def _on_floppy_image_capture_finished(self):
         self._set_disk_load_busy(False)
@@ -24415,9 +24249,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         delete_item.setTextAlignment(Qt.AlignCenter)
         delete_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         delete_item.setToolTip(
-            "Cancel this pending addition."
+            self._lt("Cancel this pending addition.")
             if is_pending_addition
-            else "Remove this file from the image on Save."
+            else self._lt("Remove this file from the image on Save.")
         )
         self.table.setItem(row, 0, delete_item)
 
@@ -24428,12 +24262,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         copy_item = QTableWidgetItem("📋")
         copy_item.setTextAlignment(Qt.AlignCenter)
         copy_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        copy_item.setToolTip("Copy filename to clipboard.")
+        copy_item.setToolTip(self._lt('Copy filename to clipboard.'))
         self.table.setItem(row, 2, copy_item)
 
         filename_item = QTableWidgetItem(filename)
         filename_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        filename_item.setToolTip("Double-click to rename this file inside the image.")
+        filename_item.setToolTip(self._lt('Double-click to rename this file inside the image.'))
         self.table.setItem(row, 3, filename_item)
 
         title_mode = self._image_path_title_mode(image_path)
@@ -24442,8 +24276,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         title_item = self._make_title_item(raw_title, title_mode=title_mode, fallback_title=filename)
         if self._image_title_is_smart_pianosoft_catalog_backed(image_path):
             title_item.setToolTip(
-                "Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. "
-                "The MIDI track-name event is left unchanged."
+                self._lt('Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. The MIDI track-name event is left unchanged.')
             )
         self.table.setItem(row, 4, title_item)
 
@@ -24558,7 +24391,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             tooltip = "Click to edit this MIDI title."
         else:
             tooltip = "Only MIDI and E-SEQ files have editable title metadata."
-        return tooltip
+        return self._lt(tooltip)
 
     def _make_title_item(self, raw_title, *, title_mode="", fallback_title=""):
         display_title = self._display_title_text(
@@ -24667,17 +24500,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return len(title) > self.TITLE_COMPAT_LIMIT
 
     def _update_compat_indicator(self, row, title):
-        indicator = QTableWidgetItem("LONG" if self._is_title_too_long(title) else "")
+        indicator = QTableWidgetItem(self._lt("Long").upper() if self._is_title_too_long(title) else "")
         indicator.setTextAlignment(Qt.AlignCenter)
         indicator.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         if self._is_title_too_long(title):
             indicator.setToolTip(
-                f"Title is longer than {self.TITLE_COMPAT_LIMIT} characters; "
-                "older systems may truncate or reject it."
+                self._lt('Title is longer than {limit} characters; older systems may truncate or reject it.', limit=self.TITLE_COMPAT_LIMIT)
             )
         else:
             indicator.setToolTip(
-                f"Title length is within the {self.TITLE_COMPAT_LIMIT}-character compatibility limit."
+                self._lt('Title length is within the {limit}-character compatibility limit.', limit=self.TITLE_COMPAT_LIMIT)
             )
         self.table.setItem(row, 5, indicator)
 
@@ -24851,7 +24683,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._clear_regular_list_state()
             self._reset_image_state()
             self._apply_midi_mode_ui()
-            self.status_label.setText("Image Mode closed.")
+            self.status_label.setText(self._lt('Image Mode closed.'))
             self._refresh_regular_pianodir_row()
             return
         if self.table.rowCount() == 0:
@@ -24860,7 +24692,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._refresh_regular_mode_action_state()
             self._cleanup_midi_scratch_dir()
             self._apply_midi_mode_ui()
-            self.status_label.setText("List is already empty.")
+            self.status_label.setText(self._lt('List is already empty.'))
             self._refresh_regular_pianodir_row()
             return
 
@@ -24879,7 +24711,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._refresh_regular_mode_action_state()
         self._cleanup_midi_scratch_dir()
         self._apply_midi_mode_ui()
-        self.status_label.setText("List cleared.")
+        self.status_label.setText(self._lt('List cleared.'))
         self._refresh_regular_pianodir_row()
 
     def _apply_path_remap(self, old_to_new):
@@ -24952,7 +24784,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         else:
             filename_item.setText(target_filename)
         filename_item.setToolTip(
-            "Pending filename. Use Save to rename the original file, or Save As to write a renamed copy."
+            self._lt('Pending filename. Use Save to rename the original file, or Save As to write a renamed copy.')
         )
 
     def create_long_midi_filenames(self):
@@ -24997,15 +24829,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
             if use_dos83:
                 status_detail = (
-                    "The Filename column shows the Save As names; internal names remain DOS 8.3."
+                    self._lt('The Filename column shows the Save As names; internal names remain DOS 8.3.')
                 )
             else:
                 status_detail = (
-                    f"Queued {staged_internal_count} internal filename change(s). "
-                    "Use Save or Save As Image to write them."
+                    self._lt('Queued {staged_internal_count} internal filename change(s). Use Save or Save As Image to write them.', staged_internal_count=staged_internal_count)
                 )
             self.status_label.setText(
-                f"Named {len(midi_rows)} MIDI file(s) from their track numbers and song titles.\n"
+                self._lt("Named {count} MIDI file(s) from their track numbers and song titles.", count=len(midi_rows)) + "\n"
                 + status_detail
             )
             self._update_menu_actions()
@@ -25091,8 +24922,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     self.table.sortItems(sort_section, sort_order)
 
         self.status_label.setText(
-            f"Named {len(midi_rows)} MIDI file(s) from their track numbers and song titles.\n"
-            "Use Save to rename originals, or Save As to write named copies."
+            self._lt('Named {count} MIDI file(s) from their track numbers and song titles.\nUse Save to rename originals, or Save As to write named copies.', count=len(midi_rows))
         )
         self._refresh_regular_mode_action_state()
         auto_fit = getattr(self, "_auto_fit_table_columns_after_batch_change", None)
@@ -25172,12 +25002,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._stage_regular_row_pending_rename(row, source, os.path.basename(target))
             staged_count += 1
 
-        status_parts = [f"Staged {staged_count} DOS 8.3 filename change(s)."]
+        status_parts = [self._lt('Staged {staged_count} DOS 8.3 filename change(s).', staged_count=staged_count)]
         if unchanged_count:
-            status_parts.append(f"{unchanged_count} already matched and were left unchanged.")
-        status_parts.append("Use Save to rename originals, or Save As to write renamed copies elsewhere.")
+            status_parts.append(self._lt('{unchanged_count} already matched and were left unchanged.', unchanged_count=unchanged_count))
+        status_parts.append(self._lt('Use Save to rename originals, or Save As to write renamed copies elsewhere.'))
         if self.backup_checkbox.isChecked() and staged_count:
-            status_parts.append("Backup is enabled; Save will keep copies with the old filenames.")
+            status_parts.append(self._lt('Backup is enabled; Save will keep copies with the old filenames.'))
         self.status_label.setText("\n".join(status_parts))
         self._refresh_regular_mode_action_state()
         if staged_count:
@@ -25279,10 +25109,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 staged_count += 1
             self._refresh_image_filename_display(row)
 
-        status_parts = [f"Staged {staged_count} DOS 8.3 filename change(s)."]
+        status_parts = [self._lt('Staged {staged_count} DOS 8.3 filename change(s).', staged_count=staged_count)]
         if unchanged_count:
-            status_parts.append(f"{unchanged_count} already matched and were left unchanged.")
-        status_parts.append("Use Save or Save As Image to write the queued names.")
+            status_parts.append(self._lt('{unchanged_count} already matched and were left unchanged.', unchanged_count=unchanged_count))
+        status_parts.append(self._lt('Use Save or Save As Image to write the queued names.'))
         self.status_label.setText("\n".join(status_parts))
         self._refresh_pianodir_row()
         self._refresh_image_mode_action_state()
@@ -25461,15 +25291,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 QApplication.processEvents()
         progressDialog.close()
 
-        status_parts = [f"Staged {converted_count} file(s) for MIDI Type 0 conversion."]
+        status_parts = [self._lt('Staged {converted_count} file(s) for MIDI Type 0 conversion.', converted_count=converted_count)]
         if remap_all_instruments and converted_count:
-            status_parts.append("Combined instruments on MIDI channel 1 using Acoustic Grand Piano.")
+            status_parts.append(self._lt('Combined instruments on MIDI channel 1 using Acoustic Grand Piano.'))
         if unchanged_count:
-            status_parts.append(f"{unchanged_count} already Type 0 and were left unchanged.")
+            status_parts.append(self._lt('{unchanged_count} already Type 0 and were left unchanged.', unchanged_count=unchanged_count))
         if converted_count:
-            status_parts.append("Use Save to overwrite the originals, or Save As to write copies.")
+            status_parts.append(self._lt('Use Save to overwrite the originals, or Save As to write copies.'))
         if errors:
-            status_parts.append(f"{len(errors)} file(s) failed conversion.")
+            status_parts.append(self._lt('{count} file(s) failed conversion.', count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
@@ -25645,22 +25475,22 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 QApplication.processEvents()
         progressDialog.close()
 
-        status_parts = [f"Staged pedal compatibility changes for {changed_count} MIDI file(s)."]
+        status_parts = [self._lt('Staged pedal compatibility changes for {changed_count} MIDI file(s).', changed_count=changed_count)]
         if unchanged_count:
             if softening_requested:
                 status_parts.append(
-                    f"{unchanged_count} MIDI file(s) had no eligible binary CC64 stream; continuous or static pedal data was preserved."
+                    self._lt('{unchanged_count} MIDI file(s) had no eligible binary CC64 stream; continuous or static pedal data was preserved.', unchanged_count=unchanged_count)
                 )
             else:
-                status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+                status_parts.append(self._lt('{unchanged_count} MIDI file(s) did not need changes.', unchanged_count=unchanged_count))
         if softening_requested and changed_count:
             status_parts.append(
-                "Binary sustain transitions were softened; existing continuous pedal streams were preserved."
+                self._lt('Binary sustain transitions were softened; existing continuous pedal streams were preserved.')
             )
         if changed_count:
-            status_parts.append("Use Save to overwrite the originals, or Save As to write copies.")
+            status_parts.append(self._lt('Use Save to overwrite the originals, or Save As to write copies.'))
         if errors:
-            status_parts.append(f"{len(errors)} file(s) failed.")
+            status_parts.append(self._lt('{count} file(s) failed.', count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
@@ -25776,7 +25606,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self.image_session is not None:
             remaining = self._pending_image_space_remaining()
             status_parts.append(
-                f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}."
+                self._lt('Estimated free space after pending changes: {size}.', size=display_bytes(max(0, remaining)))
             )
         if errors:
             status_parts.append(self._lt("Failed: {count} MIDI file(s).", count=len(errors)))
@@ -25867,23 +25697,23 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 QApplication.processEvents()
         progressDialog.close()
 
-        status_parts = [f"Queued pedal compatibility changes for {changed_count} MIDI file(s)."]
+        status_parts = [self._lt('Queued pedal compatibility changes for {changed_count} MIDI file(s).', changed_count=changed_count)]
         if unchanged_count:
             if softening_requested:
                 status_parts.append(
-                    f"{unchanged_count} MIDI file(s) had no eligible binary CC64 stream; continuous or static pedal data was preserved."
+                    self._lt('{unchanged_count} MIDI file(s) had no eligible binary CC64 stream; continuous or static pedal data was preserved.', unchanged_count=unchanged_count)
                 )
             else:
-                status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+                status_parts.append(self._lt('{unchanged_count} MIDI file(s) did not need changes.', unchanged_count=unchanged_count))
         if softening_requested and changed_count:
             status_parts.append(
-                "Binary sustain transitions were softened; existing continuous pedal streams were preserved."
+                self._lt('Binary sustain transitions were softened; existing continuous pedal streams were preserved.')
             )
         if self.image_session is not None:
             remaining = self._pending_image_space_remaining()
-            status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
+            status_parts.append(self._lt('Estimated free space after pending changes: {size}.', size=display_bytes(max(0, remaining))))
         if errors:
-            status_parts.append(f"{len(errors)} file(s) failed.")
+            status_parts.append(self._lt('{count} file(s) failed.', count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         self._refresh_image_mode_action_state()
 
@@ -25958,16 +25788,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 QApplication.processEvents()
         progress_dialog.close()
 
-        status_parts = [f"Staged XF removal for {changed_count} MIDI file(s)."]
+        status_parts = [self._lt('Staged XF removal for {changed_count} MIDI file(s).', changed_count=changed_count)]
         if unchanged_count:
-            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+            status_parts.append(self._lt('{unchanged_count} MIDI file(s) did not need changes.', unchanged_count=unchanged_count))
         if changed_count:
             status_parts.append(
-                "Requested metadata cleanup was staged; the change review shows removed records. "
-                "Use Save to overwrite the originals, or Save As to write copies."
+                self._lt('Requested metadata cleanup was staged; the change review shows removed records. Use Save to overwrite the originals, or Save As to write copies.')
             )
         if errors:
-            status_parts.append(f"{len(errors)} file(s) failed.")
+            status_parts.append(self._lt('{count} file(s) failed.', count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
@@ -26055,20 +25884,20 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 QApplication.processEvents()
         progress_dialog.close()
 
-        status_parts = [f"Queued XF removal for {changed_count} MIDI file(s)."]
+        status_parts = [self._lt('Queued XF removal for {changed_count} MIDI file(s).', changed_count=changed_count)]
         if unchanged_count:
-            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+            status_parts.append(self._lt('{unchanged_count} MIDI file(s) did not need changes.', unchanged_count=unchanged_count))
         if changed_count:
             status_parts.append(
-                "Requested metadata cleanup was staged; the change review shows removed records."
+                self._lt('Requested metadata cleanup was staged; the change review shows removed records.')
             )
         if self.image_session is not None:
             remaining = self._pending_image_space_remaining()
             status_parts.append(
-                f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}."
+                self._lt('Estimated free space after pending changes: {size}.', size=display_bytes(max(0, remaining)))
             )
         if errors:
-            status_parts.append(f"{len(errors)} file(s) failed.")
+            status_parts.append(self._lt('{count} file(s) failed.', count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         self._refresh_image_mode_action_state()
 
@@ -26490,7 +26319,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.pendingDeletePianodir = self.imageHasPianodir
         self._refresh_pianodir_row()
 
-        status_parts = [f"Read the floppy and queued {len(converted)} file(s) for E-SEQ -> MIDI conversion."]
+        status_parts = [self._lt('Read the floppy and queued {count} file(s) for E-SEQ -> MIDI conversion.', count=len(converted))]
         if use_long_filenames and converted:
             status_parts.append(
                 "Save As exports use track numbers and song titles; internal names remain DOS 8.3."
@@ -26498,11 +26327,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 "Track-number and song-title filenames are queued inside the floppy/image too."
             )
         remaining = self._pending_image_space_remaining()
-        status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
+        status_parts.append(self._lt('Estimated free space after pending changes: {size}.', size=display_bytes(max(0, remaining))))
         if converted:
-            status_parts.append("Use Save, Save As, or Save As Image to write the converted files.")
+            status_parts.append(self._lt('Use Save, Save As, or Save As Image to write the converted files.'))
         if errors:
-            status_parts.append(f"{len(errors)} file(s) could not be converted.")
+            status_parts.append(self._lt('{count} file(s) could not be converted.', count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         if converted:
             self._auto_fit_table_columns_after_batch_change()
@@ -26551,8 +26380,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._reset_image_state()
 
         status_text = (
-            f"Converted {converted_count} E-SEQ file(s) to MIDI and left {source_mode_name}.\n"
-            f"Current context moved to: \"{export_dir}\""
+            self._lt('Converted {converted_count} E-SEQ file(s) to MIDI and left {source_mode_name}.\nCurrent context moved to: "{export_dir}"', converted_count=converted_count, source_mode_name=self._lt(source_mode_name), export_dir=export_dir)
         )
         if omitted_count:
             status_text += f"\n{omitted_count} non-MIDI file(s) were not exported into MIDI Mode."
@@ -26623,7 +26451,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.table.setItem(row, 3, filename_item)
         else:
             filename_item.setText(target_filename)
-        filename_item.setToolTip("Pending converted filename. Use Save, Save As, or Save As Image to write it.")
+        filename_item.setToolTip(self._lt('Pending converted filename. Use Save, Save As, or Save As Image to write it.'))
 
         raw_title = title if title != "" else (target_filename if title_mode == "midi" else "")
         self.table.setItem(
@@ -26821,8 +26649,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         if converted_count:
             status_text = (
-                f"Staged {converted_count} file(s) for {source_kind.upper()} -> {target_kind.upper()} conversion.\n"
-                "Use Save, Save As, or Save As Image to write the converted files."
+                self._lt('Staged {converted_count} file(s) for {source_kind} -> {target_kind} conversion.\nUse Save, Save As, or Save As Image to write the converted files.', converted_count=converted_count, source_kind=source_kind.upper(), target_kind=target_kind.upper())
             )
             if use_long_filenames:
                 status_text += "\nMIDI filenames use track numbers and song titles."
@@ -27000,7 +26827,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 self.pendingDeletePianodir = self.imageHasPianodir
         self._refresh_pianodir_row()
 
-        status_parts = [f"Queued {len(converted)} file(s) for {source_kind.upper()} -> {target_kind.upper()} conversion."]
+        status_parts = [self._lt('Queued {count} file(s) for {source_kind} -> {target_kind} conversion.', count=len(converted), source_kind=source_kind.upper(), target_kind=target_kind.upper())]
         if use_long_filenames and converted:
             status_parts.append(
                 "Save As exports use track numbers and song titles; internal names remain DOS 8.3."
@@ -27008,11 +26835,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 "Track-number and song-title filenames are queued inside the disk/image too."
             )
         if trimmed_title_count:
-            status_parts.append(f"Removed extra spacing from {trimmed_title_count} song title(s).")
+            status_parts.append(self._lt('Removed extra spacing from {trimmed_title_count} song title(s).', trimmed_title_count=trimmed_title_count))
         remaining = self._pending_image_space_remaining()
-        status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
+        status_parts.append(self._lt('Estimated free space after pending changes: {size}.', size=display_bytes(max(0, remaining))))
         if errors:
-            status_parts.append(f"{len(errors)} file(s) could not be converted.")
+            status_parts.append(self._lt('{count} file(s) could not be converted.', count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         if converted:
             self._auto_fit_table_columns_after_batch_change()
@@ -27070,7 +26897,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             delete_item = QTableWidgetItem("X")
             delete_item.setTextAlignment(Qt.AlignCenter)
             delete_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            delete_item.setToolTip("Remove this file from the list.")
+            delete_item.setToolTip(self._lt('Remove this file from the list.'))
             self.table.setItem(row, 0, delete_item)
 
             # Column 1: FullPath (hidden)
@@ -27082,13 +26909,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             copy_item = QTableWidgetItem("📋")
             copy_item.setTextAlignment(Qt.AlignCenter)
             copy_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            copy_item.setToolTip("Copy filename to clipboard.")
+            copy_item.setToolTip(self._lt('Copy filename to clipboard.'))
             self.table.setItem(row, 2, copy_item)
 
             # Column 3: Filename
             filename_item = QTableWidgetItem(filename)
             filename_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            filename_item.setToolTip("Double-click to rename this file.")
+            filename_item.setToolTip(self._lt('Double-click to rename this file.'))
             self.table.setItem(row, 3, filename_item)
 
             # Column 4: Title (fallback to filename only when no title is present)
@@ -27130,7 +26957,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._reapply_regular_centered_title_assumption()
             self._refresh_regular_mode_action_state()
             self._refresh_regular_pianodir_row()
-            self.status_label.setText("File removed from the list.")
+            self.status_label.setText(self._lt('File removed from the list.'))
             return
 
         # Column 2: Clipboard copy (copies filename from col 3)
@@ -27139,7 +26966,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if filename_item:
                 filename = filename_item.text()
                 QApplication.clipboard().setText(filename)
-                self.status_label.setText(f"'{filename}' copied to clipboard.")
+                self.status_label.setText(self._lt("'{filename}' copied to clipboard.", filename=filename))
         # Column 4: Title edit via dialog.
         elif column == 4:
             self.edit_via_dialog(row)
@@ -27174,7 +27001,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if filename_item:
                 filename = filename_item.text()
                 QApplication.clipboard().setText(filename)
-                self.status_label.setText(f"'{filename}' copied to clipboard.")
+                self.status_label.setText(self._lt("'{filename}' copied to clipboard.", filename=filename))
             return
         if column == 4:
             self.edit_image_title(row)
@@ -27521,7 +27348,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self._should_generate_pianodir():
             self.pendingGeneratePianodir = True
             refresh_callback()
-            self.status_label.setText(f"{directory_name} will be generated on save.")
+            self.status_label.setText(self._lt('{directory_name} will be generated on save.', directory_name=directory_name))
         return True
 
     def _ensure_eseq_filenames_dos83_for_save(self):
@@ -27681,8 +27508,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         new_title_item = self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename)
         if catalog_backed:
             new_title_item.setToolTip(
-                "Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. "
-                "The MIDI track-name event is left unchanged."
+                self._lt('Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. The MIDI track-name event is left unchanged.')
             )
         self.table.setItem(row, 4, new_title_item)
         self._update_compat_indicator(row, new_title)
@@ -27691,14 +27517,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         warning = ""
         if self._compat_warning_is_active() and self._is_title_too_long(new_title):
-            warning = f"\nCompatibility warning: over {self.TITLE_COMPAT_LIMIT} characters."
+            warning = "\n" + self._lt("Compatibility warning: over {limit} characters.", limit=self.TITLE_COMPAT_LIMIT)
         if title_destination == "smart_pianosoft_catalog":
             title_kind = "Smart PianoSoft catalog title"
         else:
             title_kind = "E-SEQ title" if title_mode == "eseq" else "MIDI title"
         shown_title = self._display_title_text(new_title, title_mode=title_mode, fallback_title=filename)
         self.status_label.setText(
-            f"Pending image change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}"
+            self._lt("Pending image change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}", title_kind=self._lt(title_kind), filename=filename, shown_title=shown_title, warning=warning)
         )
 
         if self.table.selectionModel() is not None:
@@ -27761,8 +27587,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self._stage_regular_row_pending_rename(row, source_path, new_name)
         self.status_label.setText(
-            f"Pending filename change: '{os.path.basename(source_path)}' will become "
-            f"'{new_name}' on Save. Save As writes a renamed copy instead."
+            self._lt("Pending filename change: '{filename}' will become '{new_name}' on Save. Save As writes a renamed copy instead.", filename=os.path.basename(source_path), new_name=new_name)
         )
         self._refresh_regular_mode_action_state()
         self._auto_fit_table_columns_after_batch_change()
@@ -27800,14 +27625,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             filename_item = self.table.item(row, 3)
             if filename_item:
                 filename_item.setText(new_name)
-            self.status_label.setText(f"Pending addition renamed to '{new_name}'.")
+            self.status_label.setText(self._lt("Pending addition renamed to '{new_name}'.", new_name=new_name))
         else:
             if target_path == source_path:
                 self.pendingImageRenames.pop(source_path, None)
             else:
                 self.pendingImageRenames[source_path] = target_path
             self.status_label.setText(
-                f"Pending image rename:\n'{os.path.basename(source_path)}' will become '{new_name}' on save."
+                self._lt("Pending image rename:\n'{filename}' will become '{new_name}' on save.", filename=os.path.basename(source_path), new_name=new_name)
             )
 
         self._refresh_image_filename_display(row)
@@ -27884,7 +27709,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.pendingImageTitleEdits.pop(image_path, None)
             self.imageFileInfo.pop(image_path, None)
             self.table.removeRow(row)
-            self.status_label.setText(f"Pending addition '{filename}' canceled.")
+            self.status_label.setText(self._lt("Pending addition '{filename}' canceled.", filename=filename))
             self._refresh_pianodir_row()
             self._reapply_image_centered_title_assumption()
             return
@@ -27909,8 +27734,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.pendingImageExportFilenames.pop(image_path, None)
         self.table.removeRow(row)
         self.status_label.setText(
-            f"Pending removal: '{filename}' will be deleted from the {container_label} on Save, "
-            "or omitted from exported files on Save As."
+            self._lt("Pending removal: '{filename}' will be deleted from the {container_label} on Save, or omitted from exported files on Save As.", filename=filename, container_label=self._lt(container_label))
         )
         self._refresh_pianodir_row()
         self._reapply_image_centered_title_assumption()
@@ -28412,7 +28236,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         valid_files = [path for path in file_paths if os.path.isfile(path)]
         if not valid_files:
-            self.status_label.setText("No files were added to the image.")
+            self.status_label.setText(self._lt('No files were added to the image.'))
             return
 
         added = []
@@ -28595,21 +28419,21 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         status_parts = []
         if added:
-            status_parts.append(f"Queued {len(added)} file(s) to add to the image.")
+            status_parts.append(self._lt('Queued {count} file(s) to add to the image.', count=len(added)))
         if replaced:
-            status_parts.append(f"Queued {len(replaced)} file(s) to replace matching filenames.")
+            status_parts.append(self._lt('Queued {count} file(s) to replace matching filenames.', count=len(replaced)))
         if pianodir_loaded:
-            status_parts.append(f"Loaded {self._eseq_directory_filename(self.imageEseqVariant)}.")
+            status_parts.append(self._lt('Loaded {filename}.', filename=self._eseq_directory_filename(self.imageEseqVariant)))
         if converted_count:
-            status_parts.append(f"Staged {converted_count} dropped file(s) for automatic conversion.")
+            status_parts.append(self._lt('Staged {converted_count} dropped file(s) for automatic conversion.', converted_count=converted_count))
         if shortened:
-            status_parts.append(f"Shortened {len(shortened)} E-SEQ filename(s) to DOS 8.3.")
+            status_parts.append(self._lt('Shortened {count} E-SEQ filename(s) to DOS 8.3.', count=len(shortened)))
         if skipped:
-            status_parts.append(f"Skipped {len(skipped)} file(s).")
+            status_parts.append(self._lt('Skipped {count} file(s).', count=len(skipped)))
         if drop_cancelled:
-            status_parts.append("Drop cancelled.")
+            status_parts.append(self._lt('Drop cancelled.'))
         remaining = self._pending_image_space_remaining()
-        status_parts.append(f"Estimated free space after pending additions: {display_bytes(max(0, remaining))}.")
+        status_parts.append(self._lt('Estimated free space after pending additions: {size}.', size=display_bytes(max(0, remaining))))
         self.status_label.setText("\n".join(status_parts))
 
         if skipped:
@@ -28903,11 +28727,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._update_menu_actions()
             warning = ""
             if self._compat_warning_is_active() and self._is_title_too_long(new_title):
-                warning = f"\nCompatibility warning: over {self.TITLE_COMPAT_LIMIT} characters."
+                warning = "\n" + self._lt("Compatibility warning: over {limit} characters.", limit=self.TITLE_COMPAT_LIMIT)
             title_kind = "E-SEQ title" if title_mode == "eseq" else "MIDI title"
             shown_title = self._display_title_text(new_title, title_mode=title_mode, fallback_title=filename)
             self.status_label.setText(
-                f"Pending change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}"
+                self._lt("Pending change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}", title_kind=self._lt(title_kind), filename=filename, shown_title=shown_title, warning=warning)
             )
         if self.table.selectionModel() is not None:
             self.table.selectionModel().clearSelection()

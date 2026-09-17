@@ -14,6 +14,10 @@ from .recovery_delivery_translations import RECOVERY_DELIVERY_TRANSLATIONS
 from .preparation_preview_translations import PREPARATION_PREVIEW_TRANSLATIONS
 from .disk_discovery_translations import DISK_DISCOVERY_TRANSLATIONS
 from .markiv_backup_translations import MARKIV_BACKUP_MESSAGES
+from .markiv_backup_diagnostics_translations import MARKIV_BACKUP_DIAGNOSTICS_TRANSLATIONS
+from .music_error_translations import MUSIC_ERROR_TRANSLATIONS
+from .main_window_translations import MAIN_WINDOW_TRANSLATIONS
+from .status_translations import STATUS_TRANSLATIONS
 
 from .bulgarian_translations import (
     BULGARIAN_MESSAGE_TRANSLATIONS,
@@ -3047,6 +3051,10 @@ TEXT_TO_MESSAGE_ID["{path} ({count} folders)"] = "pending.folders"
 COMMON_TEXT_TRANSLATIONS.update(RECOVERY_DELIVERY_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(PREPARATION_PREVIEW_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(DISK_DISCOVERY_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(MARKIV_BACKUP_DIAGNOSTICS_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(MUSIC_ERROR_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(MAIN_WINDOW_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(STATUS_TRANSLATIONS)
 
 
 def tr(message_id, language_code=None, **kwargs):

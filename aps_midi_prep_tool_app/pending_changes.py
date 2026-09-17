@@ -10,9 +10,10 @@ from functools import wraps
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QLabel,
-    QMessageBox, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout,
+    QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout,
 )
 
+from .localized_dialogs import QMessageBox
 from .message_catalog import tr, translate_text
 from .preparation_profiles import PREPARATION_SETTING_KEYS
 from .conversion_review import ConversionReport, localize_music_error, localize_music_format

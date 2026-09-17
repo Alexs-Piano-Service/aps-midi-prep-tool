@@ -64,6 +64,11 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Translation coverage now includes recovery dialogs, Mark IV diagnostics,
+  malformed MIDI/E-SEQ errors, batch results, and file-list tooltips in all
+  12 languages. Switching languages refreshes existing controls and sorted
+  rows without changing song metadata. Qt dialog controls follow the selected
+  language and use consistent button labels.
 - Floppy Refresh leaves a missing target unselected and preserves the chosen
   connection type. Select a drive explicitly before continuing, even when
   another drive is available or a disconnected drive reappears.

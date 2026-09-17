@@ -2,8 +2,9 @@ import os
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog, QTableWidget
+from PySide6.QtWidgets import QApplication, QProgressDialog, QTableWidget
 
+from .localized_dialogs import QMessageBox
 from .floppy_image import is_supported_image_path
 from .ui_utils import center_dialog_on_parent
 

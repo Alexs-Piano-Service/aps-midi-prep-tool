@@ -234,7 +234,8 @@ renamer.apply_midi_dos83_plan(json.loads(sys.argv[1]), create_backups=True)
 @pytest.mark.parametrize("choice,action", [("Restore originals", "restore"), ("Resume rename", "resume"), ("Later", None)])
 def test_startup_recovery_dialog_applies_only_the_selected_action(tmp_path, monkeypatch, choice, action):
     from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication
+    from aps_midi_prep_tool_app.localized_dialogs import QMessageBox
     from aps_midi_prep_tool_app.rename_recovery_dialog import show_rename_recovery_dialogs
     app = QApplication.instance() or QApplication([])
     songs, plan, originals = _songs(tmp_path, "cycle")

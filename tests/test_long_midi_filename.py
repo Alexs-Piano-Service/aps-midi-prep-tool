@@ -86,6 +86,10 @@ class LongMidiFilenameTests(unittest.TestCase):
         }
 
         class FakeWindow:
+            @staticmethod
+            def _lt(source, **values):
+                return source.format(**values)
+
             def __init__(self):
                 self.choose_button = _FakeEnabledButton()
                 self.table = _FakeTable(

@@ -15,6 +15,7 @@ from .icon_utils import apply_window_icon
 from .markiv_backup.backup import run_backup, verify_backup
 from .markiv_backup.devices import resolve_source
 from .markiv_backup.library import CancelledError, check_cancel, scan_library
+from .markiv_backup_diagnostics import localize_backup_diagnostic
 from .markiv_device_discovery import discover_mounted_sources
 from .message_catalog import normalize_language_code, tr, translate_text
 
@@ -326,7 +327,8 @@ class MarkIVBackupDialog(QDialog):
         fields = ("subtitle", "artist", "composer", "genre")
         if expanded:
             fields += ("copyright", "metadata_source", "album_id", "song_id")
-        return [f"{self._t('markiv.' + field)}: {metadata[field]}"
+        return [f"{self._t('markiv.' + field)}: "
+                f"{self.lt(metadata[field]) if field == 'metadata_source' else metadata[field]}"
                 for field in fields if metadata.get(field) not in (None, "")]
 
     def _open_text_dialog(self, title, text, *, object_name):
@@ -363,7 +365,9 @@ class MarkIVBackupDialog(QDialog):
 
     def _open_report(self):
         if self._report_messages:
-            self._open_text_dialog(self._t("markiv.report_title"), "\n\n".join(self._report_messages),
+            messages = (localize_backup_diagnostic(message, self.language_code)
+                        for message in self._report_messages)
+            self._open_text_dialog(self._t("markiv.report_title"), "\n\n".join(messages),
                                    object_name="markivBackupReportDetails")
 
     def _update_buttons(self, *_args):
@@ -467,8 +471,9 @@ class MarkIVBackupDialog(QDialog):
             self.source_combo.clear()
             for device in result:
                 self.source_combo.addItem(str(device.mountpoint))
+                name = self.lt("Disklavier music") if device.is_mark_iv else device.label or device.mountpoint.name
                 self.source_combo.setItemData(self.source_combo.count() - 1,
-                                              device.display_name, Qt.ToolTipRole)
+                                              f"{name}  —  {device.device}  ({device.mountpoint})", Qt.ToolTipRole)
             if not selected:
                 selected = next((str(device.mountpoint) for device in result if device.is_mark_iv), "")
             self.source_combo.setEditText(selected)

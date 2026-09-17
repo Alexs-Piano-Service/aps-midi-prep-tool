@@ -1,9 +1,20 @@
 """Offer recovery before users start working with files after an interrupted rename."""
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
 
+from .localized_dialogs import QMessageBox
 from .dos83_renamer import find_pending_midi_renames, recover_midi_dos83_transaction
+
+
+def _show_recovery_error(parent, title, summary, error):
+    dialog = QMessageBox(parent)
+    dialog.setIcon(QMessageBox.Warning)
+    dialog.setTextFormat(Qt.PlainText)
+    dialog.setWindowTitle(title)
+    dialog.setText(summary)
+    dialog.setDetailedText(str(error))
+    dialog.setStandardButtons(QMessageBox.Ok)
+    dialog.exec()
 
 
 def show_rename_recovery_dialogs(parent):
@@ -11,7 +22,10 @@ def show_rename_recovery_dialogs(parent):
     try:
         pending = find_pending_midi_renames()
     except Exception as exc:
-        QMessageBox.warning(parent, translate("Rename recovery unavailable"), str(exc))
+        _show_recovery_error(
+            parent, "Rename recovery unavailable",
+            "Interrupted renames could not be checked. Review the details before trying again.", exc,
+        )
         return
     for directory in pending:
         dialog = QMessageBox(parent)
@@ -32,6 +46,9 @@ def show_rename_recovery_dialogs(parent):
         try:
             recover_midi_dos83_transaction(directory, "restore" if clicked is restore else "resume")
         except Exception as exc:
-            QMessageBox.warning(parent, translate("Rename recovery incomplete"), str(exc))
+            _show_recovery_error(
+                parent, "Rename recovery incomplete",
+                "Recovery could not be completed. Review the details before trying again.", exc,
+            )
         else:
             QMessageBox.information(parent, translate("Rename recovery complete"), translate("The files are ready to open. Recovery copies have been removed."))

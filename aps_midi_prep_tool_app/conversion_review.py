@@ -3,6 +3,7 @@
 from collections import Counter
 from dataclasses import asdict, dataclass
 import re
+from string import Formatter
 
 from .eseq_converter import ESEQ_MIDI_DIVISION, is_clavinova_mda_eseq_bytes, parse_eseq_bytes
 from .eseq_legacy import is_legacy_eseq_bytes
@@ -14,7 +15,35 @@ from .midi_type0_converter import (
     _parse_track_events,
     _parse_vlq,
 )
-from .message_catalog import translate_text
+from .message_catalog import COMMON_TEXT_TRANSLATIONS, normalize_language_code, translate_text
+from .music_error_translations import MUSIC_ERROR_TRANSLATIONS
+
+
+def _music_error_patterns():
+    """Match only canonical diagnostics, with constrained technical parameters."""
+    fields = {
+        "status": r"[0-9A-F]{2}",
+        "format": r"\d+",
+        "location": r"(?:track [1-9]\d*|merged tracks), tick \d+",
+        "track_label": r"(?:track [1-9]\d*|merged tracks)",
+        "value": r".*?",
+    }
+    labels = {"track {track}", "merged tracks", "{tracks}, tick {tick}"}
+    sources = [source for source in MUSIC_ERROR_TRANSLATIONS if source not in labels]
+    sources.extend((
+        "Truncated MIDI header.", "Invalid MIDI header.", "Missing MIDI track.",
+        "Truncated MIDI chunk.", "MIDI format 2 files are not supported for Type 0 conversion.",
+    ))
+    for source in sources:
+        parts = [r"(?P<prefix>.*?: )?"]
+        for literal, field, _format, _conversion in Formatter().parse(source):
+            parts.append(re.escape(literal))
+            if field:
+                parts.append(f"(?P<{field}>{fields[field]})")
+        yield source, re.compile("".join(parts), re.DOTALL)
+
+
+_MUSIC_ERROR_PATTERNS = tuple(_music_error_patterns())
 
 
 def localize_music_format(label, language_code=None):
@@ -32,7 +61,29 @@ def localize_music_format(label, language_code=None):
 
 def localize_music_error(error, language_code=None):
     """Translate recognized parser diagnostics while retaining unknown technical details."""
-    return translate_text(str(error), language_code)
+    message = str(error)
+    if normalize_language_code(language_code) == "en":
+        return message
+    if message in COMMON_TEXT_TRANSLATIONS:
+        return translate_text(message, language_code)
+    for template, pattern in _MUSIC_ERROR_PATTERNS:
+        match = pattern.fullmatch(message)
+        if match is None:
+            continue
+        values = match.groupdict()
+        prefix = values.pop("prefix") or ""
+        for field in ("location", "track_label"):
+            if field not in values:
+                continue
+            tracks, separator, tick = values[field].partition(", tick ")
+            if tracks.startswith("track "):
+                tracks = translate_text("track {track}", language_code, track=tracks[6:])
+            else:
+                tracks = translate_text("merged tracks", language_code)
+            values[field] = (translate_text("{tracks}, tick {tick}", language_code, tracks=tracks, tick=tick)
+                             if separator else tracks)
+        return prefix + translate_text(template, language_code, **values)
+    return message
 
 
 @dataclass(frozen=True)

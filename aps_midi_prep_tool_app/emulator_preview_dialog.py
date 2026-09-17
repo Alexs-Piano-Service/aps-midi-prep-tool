@@ -7,10 +7,11 @@ from string import Formatter
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QHeaderView, QHBoxLayout,
-    QLabel, QMessageBox, QPlainTextEdit, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
+    QLabel, QPlainTextEdit, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
+from .localized_dialogs import QMessageBox
 from .icon_utils import apply_window_icon
 from .message_catalog import translate_text
 from .conversion_review import localize_music_error

@@ -111,7 +111,7 @@ def main():
             return
         if config_error is not None:
             from PySide6.QtCore import Qt
-            from PySide6.QtWidgets import QMessageBox
+            from .localized_dialogs import QMessageBox
 
             message = QMessageBox(window)
             message.setIcon(QMessageBox.Warning)
