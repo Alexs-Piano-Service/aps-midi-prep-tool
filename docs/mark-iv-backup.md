@@ -59,6 +59,14 @@ destination. Existing backups are kept. Album folders contain original-format
 music with unchanged file contents, including audio and supporting assets.
 Portable filenames and suffixes handle names that would otherwise collide.
 
+Before copying, APS checks free space for originals, the manifest, and optional
+MIDI copies. Its conservative conversion allowance is eight times the eligible
+E-SEQ byte count plus at least 64 KiB per song for metadata and allocation.
+This allowance also applies when originals will be removed, since both versions
+coexist until each MIDI copy is verified. APS rechecks space before converting
+each song and before writing its actual MIDI output. If another program fills
+the destination meanwhile, failed conversions retain their verified originals.
+
 When conversion is selected, APS first copies and verifies the originals,
 then converts supported E-SEQ files from those copies. Each successful
 conversion creates a verified `.mid` file in the same folder. If **Keep the

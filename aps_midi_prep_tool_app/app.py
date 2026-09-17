@@ -49,6 +49,12 @@ def _migrate_legacy_settings() -> None:
 
 
 def main():
+    from .disk_device_probe import run_device_probe_from_argv
+
+    probe_exit_code = run_device_probe_from_argv(sys.argv)
+    if probe_exit_code is not None:
+        sys.exit(probe_exit_code)
+
     from .floppy_image import run_windows_raw_write_helper_from_argv
 
     helper_exit_code = run_windows_raw_write_helper_from_argv(sys.argv)

@@ -109,8 +109,7 @@ def test_destination_blocks_reverse_conversion_and_custom_restores_it(
 def test_eseq_destination_disables_saved_convert_after_read_choice(window, monkeypatch):
     _apply(window, "mark_i")
     window.settings.setValue(window.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, True)
-    monkeypatch.setattr(main_window, "list_floppy_drives", lambda: [])
-    monkeypatch.setattr(main_window, "list_greaseweazle_devices", lambda: [])
+    monkeypatch.setattr(window, "_discover_floppy_devices", lambda: ([], []))
 
     def inspect(dialog):
         checkbox = next(item for item in dialog.findChildren(QCheckBox)

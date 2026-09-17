@@ -80,6 +80,15 @@ offers a playback fix when the potentially silent condition is found. Targeted
 XF removal preserves unknown sequencer metadata and trailing bytes. Broad
 cleanup is available as an explicit choice.
 
+When merging MIDI channels, APS expands Reset All Controllers (CC121) into
+explicit resets so one source channel does not reset other merged parts.
+This includes Breath (CC2) and Foot Controller (CC4), restoring the surviving
+source's value or 127 when no other source supplies a value. These defaults
+follow the [Yamaha MOTIF-RACK ES implementation](https://jp.yamaha.com/files/download/other_assets/6/334856/motifrackes_en_om_b0.pdf)
+and [MX data list](https://it.yamaha.com/files/download/other_assets/6/329536/mx49mx61_en_dl_a0.pdf).
+Reset defaults and assignable-controller effects vary by device, so conversion
+reports warn whenever CC121 is removed. Review playback on the intended player.
+
 File Inspection provides one-click Type 0 conversion and piano channel merging
 for the selected MIDI song. These stage real edits with the same Undo and Save
 workflow as other utilities. Preview filters, temporary instrument choices, and
@@ -106,6 +115,11 @@ not establish playback compatibility on an actual piano or test a physical USB
 floppy drive; those require the controller, firmware, media, and drive combination.
 
 ## Preserve recovery and extraction work
+
+Floppy discovery runs in separate helper processes with a ten-second wait and
+Cancel. APS terminates unfinished helpers on timeout or cancellation while
+keeping results from drives that responded. Reconnect an unresponsive drive
+and retry: each attempt starts fresh, without requiring APS to restart.
 
 After a failed or cancelled USB recovery read, **Save partial capture...** saves
 the captured image and a JSON diagnostic record, including sector coverage and

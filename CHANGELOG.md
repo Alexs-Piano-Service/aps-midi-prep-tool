@@ -32,6 +32,16 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Channel collapse restores Breath (CC2) and Foot Controller (CC4) after CC121,
+  using Yamaha synth defaults while retaining other source channels' settings.
+  Conversion reports flag removed CC121 commands because device-specific reset
+  effects cannot always be reproduced.
+- Floppy discovery uses separate helper processes that are terminated on timeout
+  or cancellation. Retrying starts fresh even if a previous driver call never
+  returns, without restarting APS.
+- Mark IV backup checks include space for optional MIDI conversions before any
+  copying begins, and recheck space during conversion. This includes the period
+  when originals and MIDI copies coexist even with original retention disabled.
 - Windows helper cancellation and timeouts wait for descendant processes to
   finish terminating before cleaning up their files, avoiding intermittent
   sharing violations after stopping a process tree.

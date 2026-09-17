@@ -5,6 +5,7 @@ import errno
 import json
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,42 @@ def _source(tmp_path, files):
 
 def _manifest(result):
     return json.loads((result.folder / backup.MANIFEST).read_text())
+
+
+@pytest.mark.parametrize('keep_originals', [True, False])
+@pytest.mark.parametrize('extension', ['FIL', 'bin'])
+def test_conversion_headroom_is_required_before_any_copy(tmp_path, monkeypatch, keep_originals, extension):
+    source = _source(tmp_path, {f'songs/user/1/SONG.{extension}': _fil()})
+    plan = scan_library(source)
+    assert plan.files[0].convertible_eseq
+    # Enough for the old originals-only preflight, but not the conversion reserve.
+    free = plan.total_bytes + backup._manifest_allowance(plan)
+    monkeypatch.setattr(backup.shutil, 'disk_usage', lambda path: SimpleNamespace(free=free))
+    target = tmp_path / 'backup'
+    monkeypatch.setattr(backup, '_hash', lambda *args: pytest.fail('Copy started before space validation'))
+    with pytest.raises(ValueError, match='MIDI conversions'):
+        backup.run_backup(plan, target, convert_eseq=True, keep_originals=keep_originals)
+    assert not target.exists()
+    assert backup._validate_target(plan, target) == target
+
+
+def test_conversion_rechecks_space_after_copy_and_keeps_original(tmp_path, monkeypatch):
+    source = _source(tmp_path, {'songs/user/1/SONG.FIL': _fil()})
+    plan = scan_library(source)
+    free = 1024 ** 3
+    def progress(event):
+        nonlocal free
+        if event['completed'] == len(plan.files):
+            free = 0  # Another writer consumed the remaining destination space.
+    monkeypatch.setattr(backup.shutil, 'disk_usage', lambda path: SimpleNamespace(free=free))
+    monkeypatch.setattr(backup, 'convert_eseq_bytes_to_midi_bytes',
+                        lambda *args, **kwargs: pytest.fail('Conversion started without enough space'))
+    result = backup.run_backup(plan, tmp_path / 'backup', progress=progress,
+                               convert_eseq=True, keep_originals=False)
+    assert (result.status, result.verified, result.converted) == ('incomplete', 1, 0)
+    assert 'free space' in result.errors[0]
+    assert (result.folder / plan.files[0].destination).read_bytes() == _fil()
+    assert not list(result.folder.rglob('*.mid'))
 
 
 def _assert_originals(result, source, originals):

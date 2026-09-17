@@ -180,8 +180,6 @@ from .floppy_image import (
     create_floppy_images_from_files,
     display_bytes,
     image_extension,
-    list_greaseweazle_devices,
-    list_floppy_drives,
     output_filters,
     usb_floppy_format_capacity_error,
 )
@@ -21589,8 +21587,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _discover_floppy_devices(self, *, include_greaseweazle=True):
         result = discover_floppy_devices(
             self,
-            floppy_probe=list_floppy_drives,
-            greaseweazle_probe=list_greaseweazle_devices if include_greaseweazle else None,
+            include_greaseweazle=include_greaseweazle,
             prepare_dialog=self._prepare_progress_dialog,
             translate=self._lt,
         )
@@ -21604,7 +21601,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 "\n".join(issues) + "\n\n" + " ".join(self._lt(text) for text in (
                     "Check that a disk is inserted, reconnect an unresponsive USB drive, then try again.",
                     "Any drives that responded are still available.",
-                    "If the system is still waiting for the device, restart APS.",
                 )),
             )
         return floppy_drives, greaseweazle_devices

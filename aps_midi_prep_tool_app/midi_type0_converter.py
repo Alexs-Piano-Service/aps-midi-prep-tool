@@ -32,8 +32,11 @@ MIDI_RESET_ALL_CONTROLLERS = 121
 MIDI_NOTE_TERMINATION_CONTROLLERS = {123, 124, 125, 126, 127}
 # CC121 resets performance controls and parameter selectors, but leaves bank,
 # volume, pan, effects and the selected RPN/NRPN parameter values unchanged.
+# Yamaha MOTIF-RACK ES/MX data lists specify maximum for Breath and Foot.
+# Other assignable/device-specific reset effects cannot all be reproduced;
+# conversion review explicitly warns whenever CC121 is removed.
 MIDI_CONTROLLER_RESET_VALUES = {
-    1: 0, 11: 127, 64: 0, 65: 0, 66: 0, 67: 0,
+    1: 0, 2: 127, 4: 127, 11: 127, 64: 0, 65: 0, 66: 0, 67: 0,
 }
 MIDI_PARAMETER_SELECT_CONTROLLERS = {98, 99, 100, 101}
 SUSTAIN_PEDAL_CONTROLLER = 64

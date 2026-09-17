@@ -8,6 +8,19 @@ def _translations(*values):
 
 
 CONVERSION_REPORT_TRANSLATIONS = {
+    "Reset All Controllers (CC121) commands were removed; device-specific reset effects may be lost.": _translations(
+        "Se eliminaron comandos Reset All Controllers (CC121); pueden perderse efectos de reinicio específicos del dispositivo.",
+        "Des commandes Reset All Controllers (CC121) ont été supprimées ; des effets de réinitialisation propres à l’appareil peuvent être perdus.",
+        "Reset All Controllers-Befehle (CC121) wurden entfernt; gerätespezifische Rücksetzeffekte können verloren gehen.",
+        "Sono stati rimossi comandi Reset All Controllers (CC121); gli effetti di ripristino specifici del dispositivo potrebbero andare persi.",
+        "Comandos Reset All Controllers (CC121) foram removidos; efeitos de redefinição específicos do dispositivo podem ser perdidos.",
+        "Команди Reset All Controllers (CC121) бяха премахнати; специфични за устройството ефекти от нулирането може да се загубят.",
+        "Reset All Controllers-opdrachten (CC121) zijn verwijderd; apparaatspecifieke reseteffecten kunnen verloren gaan.",
+        "Usunięto komunikaty Reset All Controllers (CC121); efekty resetowania właściwe dla urządzenia mogą zostać utracone.",
+        "Reset All Controllers（CC121）コマンドが削除されたため、機器固有のリセット効果が失われる可能性があります。",
+        "Reset All Controllers(CC121) 명령이 제거되어 장치별 초기화 효과가 손실될 수 있습니다.",
+        "Reset All Controllers（CC121）命令已被移除，可能丢失设备特有的重置效果。",
+    ),
     "All Sound Off (CC120) commands were removed; immediate muting may be lost.": _translations(
         "Se eliminaron comandos All Sound Off (CC120); puede perderse el silenciamiento inmediato.",
         "Des commandes All Sound Off (CC120) ont été supprimées ; la coupure immédiate du son peut être perdue.",

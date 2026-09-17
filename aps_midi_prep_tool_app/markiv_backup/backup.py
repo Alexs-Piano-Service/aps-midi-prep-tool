@@ -80,7 +80,29 @@ def _hash(path: Path, cancel=None, on_chunk=None) -> str:
     return digest.hexdigest()
 
 
-def _validate_target(plan: BackupPlan, target: Path) -> Path:
+def _manifest_allowance(plan: BackupPlan) -> int:
+    return max(16 * 1024 * 1024, len(plan.files) * 8192)
+
+
+def _midi_conversion_allowance(item) -> int:
+    """Reserve conservative derivative space without rereading the source drive.
+
+    Compact E-SEQ events expand into MIDI events plus variable-length deltas.
+    Allow eight times the source size, plus metadata/allocation headroom. This
+    is an estimate, not a guarantee against other writers filling the disk.
+    """
+    title_bytes = len(str(item.metadata.get('title') or '').encode('utf-8'))
+    return item.size * 8 + max(64 * 1024, title_bytes + 1024)
+
+
+def _conversion_headroom(plan: BackupPlan) -> int:
+    return sum(_midi_conversion_allowance(item) for item in plan.files
+               if (item.convertible_eseq or item.kind == 'E-SEQ')
+               and item.kind not in {'Metadata', 'PianoSoft package'}
+               and Path(item.source).suffix.lower() != '.pspg')
+
+
+def _validate_target(plan: BackupPlan, target: Path, *, convert_eseq=False) -> Path:
     source = plan.source.resolve(strict=True)
     target = target.expanduser().resolve()
     if _within(target, source):
@@ -93,7 +115,14 @@ def _validate_target(plan: BackupPlan, target: Path) -> Path:
     # Catch a second mount/bind alias of the source data filesystem too.
     if os.path.ismount(source) and ancestor.stat().st_dev == source.stat().st_dev:
         raise ValueError('The backup destination must be on a different filesystem from the source drive.')
-    if shutil.disk_usage(ancestor).free < plan.total_bytes + max(16 * 1024 * 1024, len(plan.files) * 8192):
+    required = plan.total_bytes + _manifest_allowance(plan)
+    if convert_eseq:
+        # All originals coexist with derivatives until each conversion is
+        # verified, including when the user requests MIDI-only output.
+        required += _conversion_headroom(plan)
+    if shutil.disk_usage(ancestor).free < required:
+        if convert_eseq:
+            raise ValueError('Not enough free space for the backup, MIDI conversions, and manifest.')
         raise ValueError('Not enough free space for the backup and its manifest.')
     seen = set()
     for item in plan.files:
@@ -185,7 +214,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     """
     check_cancel(cancel)
     keep_originals = not convert_eseq or bool(keep_originals)
-    target = _validate_target(plan, Path(target))
+    target = _validate_target(plan, Path(target), convert_eseq=convert_eseq)
     target.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     folder = Path(tempfile.mkdtemp(prefix=f'MarkIV-Backup-{stamp}-', dir=target))
@@ -314,6 +343,8 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                 emit(f'Converting {item.destination}', event='conversion', force=True)
                 try:
                     check_cancel(cancel)
+                    if shutil.disk_usage(folder).free < _midi_conversion_allowance(item) + _manifest_allowance(plan):
+                        raise ValueError('Not enough free space for the MIDI conversion and manifest.')
                     original = _contained(folder, item.destination)
                     data = _read_conversion_source(original, original_record['sha256'], cancel)
                     title = item.metadata.get('title')
@@ -321,6 +352,8 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                         title = None
                     payload = convert_eseq_bytes_to_midi_bytes(data, title_override=title)
                     check_cancel(cancel)
+                    if shutil.disk_usage(folder).free < len(payload) + _manifest_allowance(plan):
+                        raise ValueError('Not enough free space for the MIDI conversion and manifest.')
                     checksum = _write_derivative(_contained(folder, relative.as_posix()), payload, cancel)
                     record.update(status='verified', size=len(payload), sha256=checksum)
                     converted += 1

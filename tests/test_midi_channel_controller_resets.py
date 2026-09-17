@@ -74,7 +74,7 @@ def test_reset_restores_sustain_and_bend_before_same_tick_note_without_releasing
 
 
 @pytest.mark.parametrize("controller,value,default", [
-    (1, 90, 0), (11, 40, 127),
+    (1, 90, 0), (2, 40, 127), (4, 70, 127), (11, 40, 127),
     (64, 127, 0), (65, 127, 0), (66, 127, 0), (67, 127, 0),
 ])
 def test_reset_restores_observed_controller_default(convert, controller, value, default):
@@ -85,6 +85,42 @@ def test_reset_restores_observed_controller_default(convert, controller, value, 
     assert _events(converted) == [
         (0, [0xB0, controller, value]), (480, [0xB0, controller, default]),
     ]
+
+
+@pytest.mark.parametrize("controller", [2, 4])
+def test_breath_and_foot_reset_before_next_note_and_preserve_other_source(convert, controller):
+    source = _midi([
+        (0, [0xB2, controller, 90]), (120, [0xB5, controller, 30]),
+        (240, [0xB5, 121, 0]), (240, [0x92, 60, 100]),
+        (480, [0x82, 60, 0]), (480, [0xB2, 121, 0]),
+        (480, [0x92, 67, 100]), (960, [0x82, 67, 0]),
+    ])
+    converted, _changed = convert(source)
+    assert _events(converted) == [
+        (0, [0xB0, controller, 90]), (120, [0xB0, controller, 30]),
+        (240, [0xB0, controller, 90]), (240, [0x90, 60, 100]),
+        (480, [0x80, 60, 0]), (480, [0xB0, controller, 127]),
+        (480, [0x90, 67, 100]), (960, [0x80, 67, 0]),
+    ]
+
+
+def test_device_specific_controller_reset_loss_is_reported(convert):
+    from aps_midi_prep_tool_app.conversion_review import ConversionReport, compare_music_bytes
+    from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
+
+    source = _midi([(0, [0xB2, 16, 90]), (480, [0xB2, 121, 0]),
+                    (480, [0x92, 60, 100]), (960, [0x82, 60, 0])])
+    converted, _changed = convert(source)
+    report = compare_music_bytes(source, converted)
+    assert report.controller_resets_removed
+    assert "device-specific reset effects may be lost" in report.to_text()
+    for language in SUPPORTED_LANGUAGES:
+        assert "CC121" in report.to_text(language.code)
+    assert ConversionReport.from_dict(report.as_dict()) == report
+    old_report = report.as_dict()
+    old_report.pop("controller_resets_removed")
+    assert not ConversionReport.from_dict(old_report).controller_resets_removed
+    assert not compare_music_bytes(source, source).controller_resets_removed
 
 
 @pytest.mark.parametrize("controller", [98, 99, 100, 101])
