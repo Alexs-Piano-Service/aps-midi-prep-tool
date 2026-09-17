@@ -34,7 +34,7 @@ def test_real_app_smoke_exercises_ui_img_hfe_and_mp3(tmp_path):
 
     completed = _invoke(tmp_path, package_smoke.SMOKE_ARGUMENT, results)
 
-    report = json.loads((results / package_smoke.REPORT_FILENAME).read_text())
+    report = json.loads((results / package_smoke.REPORT_FILENAME).read_text(encoding="utf-8"))
     assert completed.returncode == 0, completed.stderr + json.dumps(report, indent=2)
     assert report["status"] == "passed"
     assert set(report["cases"]) == set(package_smoke.CASE_NAMES)
@@ -77,7 +77,7 @@ app.main()
 
     completed = _invoke(tmp_path, package_smoke.SMOKE_ARGUMENT, results, code=code)
 
-    report = json.loads((results / package_smoke.REPORT_FILENAME).read_text())
+    report = json.loads((results / package_smoke.REPORT_FILENAME).read_text(encoding="utf-8"))
     assert completed.returncode == 1
     assert report["status"] == "failed"
     assert report["cases"]["hfe"]["status"] == "failed"

@@ -64,6 +64,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Windows package smoke tests read UTF-8 reports explicitly, preserving accented
+  paths when the system's default text encoding differs.
 - Type 0 batch conversion, renaming, and GUI save backups share collision-safe
   name planning and exclusive creation. Selected recordings, intended output
   names, and existing backups are protected in either processing order.
