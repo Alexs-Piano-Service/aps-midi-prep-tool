@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from aps_midi_prep_tool_app import dos83_renamer as renamer
+from aps_midi_prep_tool_app.helpers import file_backup
 
 
 @pytest.fixture(autouse=True)
@@ -271,7 +272,7 @@ def test_backup_creation_race_cannot_overwrite_arriving_file(tmp_path, monkeypat
             backup.write_bytes(b"arrived after planning")
         return builtins.open(file, mode, *args, **kwargs)
 
-    monkeypatch.setattr(renamer, "open", racing_open, raising=False)
+    monkeypatch.setattr(file_backup, "open", racing_open, raising=False)
     with pytest.raises(RuntimeError, match="Backup failed"):
         renamer.apply_midi_dos83_plan(plan, create_backups=True, backup_path_builder=lambda _: backup)
 

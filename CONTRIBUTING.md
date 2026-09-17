@@ -45,20 +45,27 @@ workflow you verified.
 
 ## CI and release tags
 
-Windows builds require `mformat.exe`, `mcopy.exe`, `mdir.exe`, `mdel.exe`, and
-`mren.exe` on the build machine's PATH, or in `aps_midi_prep_tool_app/bin/mtools`
-when using `build/build_windows_main.ps1`. The signed workflow installs the
-native UCRT64 mtools package through MSYS2. Both build routes include the tools
-with `--add-binary`, allowing PyInstaller to collect their DLL dependencies.
-CI and signed releases add the setup action's reported `msys2-location` plus
-`ucrt64/bin` to PATH; the action can install into a runner temporary directory,
-so the runner's preinstalled `C:\msys64` must not be assumed. Both workflows run
-`python scripts/check_mtools.py` to report and execute all five required tools
-before testing. HFE image tests also require Greaseweazle: CI installs the
-pinned v1.23 source on Linux and stages the verified standalone Windows archive
-with `scripts/stage_windows_hfe_tool.ps1` in Windows CI and signed releases.
-Recipients do not need to install mtools separately. Verify an actual Windows
-package on a machine without a development toolchain before distributing it.
+Both local Windows builds and the signed workflow invoke
+`build/build_windows_main.ps1`. The script requires all five mtools executables
+(`mformat`, `mcopy`, `mdir`, `mdel`, `mren`) on PATH or in the bundled mtools
+folder. PyInstaller collects their DLL dependencies. The workflow obtains
+mtools from the MSYS2 setup action's reported `msys2-location`, never a presumed
+`C:\msys64` path. Run `python scripts/check_mtools.py` before testing.
+
+HFE support is required. `scripts/stage_windows_hfe_tool.ps1` downloads the
+pinned, SHA-256-verified standalone Greaseweazle archive and records all extracted
+runtime files. The shared build verifies that receipt and includes the complete
+library, DLLs, and licenses. With no `APS_WINDOWS_GW_DIR` or
+`-GreaseweazleDirectory`, local builds run the same staging script automatically.
+A lone `gw.exe` or an incomplete/modified stage fails the build.
+
+LAME uses the complete runtime and documentation staged by
+`scripts/stage_windows_lame.ps1`. Set `APS_WINDOWS_LAME_DIR` or `-LameDirectory`
+to that stage; otherwise the build stages the MSYS2 installation containing
+`-LameExe` or the `lame.exe` found on PATH. `-BundleLame $false` is only for
+special-purpose development builds, which cannot pass release acceptance.
+`-OneFile -Name APSMIDIPrepTool` selects the signed workflow's EXE layout;
+the default local layout remains a folder named `APS MIDI Prep Tool`.
 
 The **CI** workflow runs the full suite on Linux and Windows for every branch
 push and pull request. Both jobs install mtools and Greaseweazle so disk-image
@@ -69,34 +76,50 @@ runtime dependencies, including `libpulse0`. Configure branch protection to requ
 In `Alexs-Piano-Service/aps-midi-prep-tool`, successful push CI on `main`
 automatically starts **Release Windows (Signed)** for the same commit. Download
 `APSMIDIPrepTool-windows-signed` from that run's Artifacts section for the signed
-EXE and Windows manual test kit. This uses the public repository's Azure signing
-variables and secret; automatic signing is skipped in other repositories and
-for pull requests. Manual runs and published releases still trigger packaging,
-and published releases receive the signed EXE and test kit as release assets.
+EXE and Windows manual test kit. The workflow also exercises the signed EXE's
+window, IMG creation/reopening, HFE round trip, and built-in piano MP3 rendering
+with development tools removed from PATH. Its `windows-package-smoke` artifact
+records the EXE hash and results. This is still a hosted runner, so clean Windows
+10 and 11 acceptance remains required. Automatic signing uses the public
+repository's Azure configuration and is skipped for other repositories and PRs.
 
-Before tagging a release, commit the version/documentation changes, push that
-exact commit to the repository that will publish the release, and wait for
-both CI jobs to pass. Create the tag with the checked helper:
+`packaging/release.json` declares the version, publication status/date, and exact
+required package filenames. During development, README and the consolidated
+changelog identify 0.8.3 as unreleased; AppStream identifies a dated development
+snapshot. Before tagging, set the actual release date and `status: ready`, change
+the README to `Current version`, date the changelog entry, and set AppStream's
+matching stable release date. Do this in one commit, push it, and wait for both
+CI jobs. The tagging helper rejects version/tag mismatches and unreleased or
+inconsistent metadata in addition to missing, failed, or skipped CI:
 
 ```bash
 python scripts/tag_release.py v0.8.3 --repo OWNER/REPOSITORY
 git push RELEASE_REMOTE v0.8.3
 ```
 
-Replace the example tag, repository, and remote with the intended release.
-The helper refuses a dirty checkout, missing CI, a failed or unfinished latest
-run, and missing/skipped platform jobs. It creates a local annotated tag at the
-validated commit and records the CI run URL in the tag message. Use `GH_TOKEN`
-or `GITHUB_TOKEN` with Actions read access for a private repository.
+The helper creates a local annotated tag and records its CI URL. It does not
+push. Packaging validates the same metadata, including tags supplied directly
+to the workflow. Use `GH_TOKEN` or `GITHUB_TOKEN` for private Actions access.
 
-The signed Windows release workflow remains responsible for packaging and
-signing. It also checks that the exact checked-out commit already passed both
-CI jobs, so a manually created tag without recorded validation cannot publish
-an executable through that workflow. A local test log alone does not qualify.
-The helper does not push tags, configure repository protection, or backfill CI
-history for older releases. Administrators can still create tags outside this
-helper; repository rules must restrict tag creation if that bypass needs to be
-prevented. Publish the release only after the validated tag has been pushed.
+Prepare a **draft** and publish after every intended package is uploaded and
+accepted. The Windows workflow no longer runs on `release: published`; a manual
+run's optional `release_tag` stages its EXE and test kit in a draft. It does not
+produce the installer, portable ZIP, or Linux AppImage: build/stage those too,
+or deliberately revise the required package list before tagging. Already
+accepted build artifacts can be staged directly without rebuilding:
+
+```bash
+python scripts/release_assets.py stage v0.8.3 --repo OWNER/REPOSITORY --files dist/PACKAGE
+python scripts/release_assets.py publish v0.8.3 --repo OWNER/REPOSITORY --acceptance dist/release-acceptance.json
+```
+
+Publication checks the exact remote tag and CI commit, every declared asset,
+and clean-machine acceptance tied to each uploaded package's SHA-256.
+See [release evidence](docs/release-process.md) for the record format and
+[Windows acceptance](docs/windows-test-plan.md) for the actual tests.
+Both staging and the legacy signing workflow refuse to modify a published
+release. Repository administrators can still bypass helpers using GitHub's UI
+or API; restrict release/tag permissions if that must be prevented.
 
 The gate uses GitHub [workflow run](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow)
 and [workflow job](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run)

@@ -27,30 +27,9 @@ def _format_fields(text):
 
 
 def test_release_version_is_consistent_across_app_and_documentation():
-    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    from scripts.release_metadata import validate_release_metadata
 
-    readme_match = re.search(
-        r"^Current version: \x60([^\x60]+)\x60$",
-        readme,
-        re.MULTILINE,
-    )
-    changelog_match = re.search(
-        r"^## \[([^]]+)] - \d{4}-\d{2}-\d{2}$",
-        changelog,
-        re.MULTILINE,
-    )
-
-    assert readme_match is not None
-    assert changelog_match is not None
-    assert readme_match.group(1) == APP_VERSION
-    assert changelog_match.group(1) == APP_VERSION
-
-    metadata = ET.parse(PROJECT_ROOT / "packaging/com.alexpianoservice.APSMidiPrepTool.metainfo.xml")
-    release = metadata.find("releases/release")
-    assert release is not None
-    assert release.get("version") == APP_VERSION
-    assert f"## [{APP_VERSION}] - {release.get('date')}" in changelog
+    assert validate_release_metadata(PROJECT_ROOT)["version"] == APP_VERSION
 
 
 def test_message_catalog_has_complete_language_and_placeholder_coverage():

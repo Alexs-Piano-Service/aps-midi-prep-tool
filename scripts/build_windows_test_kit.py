@@ -42,6 +42,7 @@ CASES = [
     "IMG to HFE", "HFE to IMG", "Capacity boundary", "Filename handling",
     "Damaged image recovery", "Cancel operation", "Close during disk activity",
     "Destination failure and retry", "Physical floppy recovery", "Final clean-machine verification",
+    "Render and play MP3",
 ]
 
 

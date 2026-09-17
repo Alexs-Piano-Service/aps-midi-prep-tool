@@ -4,7 +4,9 @@ APP_TITLE_WITH_VERSION = f"{APP_NAME} v{APP_VERSION}"
 APP_WEBSITE = "https://www.alexanderpeppe.com/"
 UPDATE_CHECK_URL = "https://www.alexanderpeppe.com/aps-midi-prep-tool-data/update.json"
 BUG_REPORT_URL = "https://www.alexanderpeppe.com/aps-midi-prep-tool-data/bug-report.php"
-BUG_REPORT_SECRET = "6ea29fb50dec1b43041c9131a8001575c5e80db4e148c82723d742270c2bbee1"
+# Public compatibility token for the legacy reporting protocol; not an
+# installation credential. The receiving server must enforce its own controls.
+BUG_REPORT_PUBLIC_TOKEN = "6ea29fb50dec1b43041c9131a8001575c5e80db4e148c82723d742270c2bbee1"
 FEEDBACK_URL = "https://www.alexanderpeppe.com/aps-midi-prep-tool-data/feedback.php"
 SOUNDFONT_CATALOG_URL = "https://www.alexanderpeppe.com/aps-midi-prep-tool-data/soundfonts.json"
 

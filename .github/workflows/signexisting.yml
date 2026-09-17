@@ -1,4 +1,4 @@
-name: Sign Existing Release EXEs
+name: Sign Existing Draft Release EXEs
 
 on:
   workflow_dispatch:
@@ -24,6 +24,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          $draft = gh release view "$env:RELEASE_TAG" --repo "$env:REPOSITORY" --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$draft.isDraft) { throw 'Only draft release assets may be changed.' }
           New-Item -ItemType Directory -Path release-assets -Force | Out-Null
           New-Item -ItemType Directory -Path unsigned -Force | Out-Null
 
@@ -92,4 +94,6 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          $draft = gh release view "$env:RELEASE_TAG" --repo "$env:REPOSITORY" --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$draft.isDraft) { throw 'Only draft release assets may be changed.' }
           gh release upload "$env:RELEASE_TAG" unsigned/*.exe --repo "$env:REPOSITORY" --clobber

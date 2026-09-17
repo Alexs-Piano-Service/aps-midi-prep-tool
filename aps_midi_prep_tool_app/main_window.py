@@ -158,6 +158,7 @@ from .helpers.atomic_file import atomic_write_bytes
 from .preview_audio_cache import PreviewAudioCache, file_identity, preview_cache_key
 from .soundfont_network import open_soundfont_url
 from .helpers.file_batch import FileBatchWriteError, publish_file_batch
+from .helpers.file_backup import copy_file_backup, plan_file_backups, unique_backup_path
 from .console_log import ConsoleLogDialog, get_console_log_bus
 from .additional_formats import (
     electone_mdr_to_midi,
@@ -229,7 +230,7 @@ from .app_info import (
     APP_TITLE_WITH_VERSION,
     APP_VERSION,
     APP_WEBSITE,
-    BUG_REPORT_SECRET,
+    BUG_REPORT_PUBLIC_TOKEN,
     BUG_REPORT_URL,
     FEEDBACK_URL,
     SETTINGS_APP as APP_SETTINGS_APP,
@@ -8760,6 +8761,8 @@ class BugReportSubmitWorker(QThread):
             separators=(",", ":"),
         ).encode("utf-8")
         timestamp = str(int(time.time()))
+        # This legacy HMAC uses a public client token. It cannot authenticate
+        # an installation or provide server-side authorization/abuse prevention.
         signature = "sha256=" + hmac.new(
             self.secret.encode("utf-8"),
             timestamp.encode("utf-8") + b"." + body,
@@ -9053,7 +9056,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._controlPanelLayoutPairs.append((panel_layout, grid_layout))
         return grid_layout
 
-    def __init__(self, *, initial_settings=None):
+    def __init__(self, *, initial_settings=None, settings=None):
         super().__init__()
         install_tooltip_delay_style()
         self.setWindowTitle(APP_NAME)
@@ -9142,7 +9145,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.updateCheckStartupScheduled = False
         self.bugReportWorker = None
         self.feedbackWorker = None
-        self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        self.settings = settings if settings is not None else QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         # Retired or incompatible delivery choices must not leave their old
         # export defaults active under a different, valid destination label.
         profile = get_preparation_profile(self.settings.value(SETTING_PROFILE, "unsure"))
@@ -21584,9 +21587,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 exc,
             )
 
-    def _discover_floppy_devices(self, *, include_greaseweazle=True):
+    def _discover_floppy_devices(self, *, include_greaseweazle=True, parent=None):
+        parent = self if parent is None else parent
         result = discover_floppy_devices(
-            self,
+            parent,
             include_greaseweazle=include_greaseweazle,
             prepare_dialog=self._prepare_progress_dialog,
             translate=self._lt,
@@ -21596,7 +21600,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         floppy_drives, greaseweazle_devices, issues = result
         if issues:
             QMessageBox.warning(
-                self,
+                parent,
                 self._lt("Drive Detection Incomplete"),
                 "\n".join(issues) + "\n\n" + " ".join(self._lt(text) for text in (
                     "Check that a disk is inserted, reconnect an unresponsive USB drive, then try again.",
@@ -21604,6 +21608,69 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 )),
             )
         return floppy_drives, greaseweazle_devices
+
+    def _add_floppy_drive_refresh(self, dialog, buttons, drive_combo, refresh_state, *,
+                                 gw_device_combo=None, source_combo=None):
+        """Rescan in place, retaining device selections and other dialog options."""
+        refresh_button = buttons.addButton(self._lt("Refresh"), QDialogButtonBox.ActionRole)
+        refresh_button.setObjectName("refreshFloppyDrives")
+        refresh_button.setAutoDefault(False)
+
+        def populate(combo, devices, empty_text):
+            previous = combo.currentData()
+            previous_path = getattr(previous, "path", None)
+            blocked = combo.blockSignals(True)
+            try:
+                combo.clear()
+                for device in devices:
+                    combo.addItem(device.display_name, device)
+                if devices:
+                    combo.setCurrentIndex(next(
+                        (index for index, device in enumerate(devices) if device.path == previous_path), 0,
+                    ))
+                else:
+                    combo.addItem(self._lt(empty_text), None)
+                combo.setEnabled(bool(devices))
+            finally:
+                combo.blockSignals(blocked)
+            current = combo.currentData()
+            # A different drive or changed disk geometry should update the
+            # detected size. Reordering the same drive must retain manual size.
+            if not blocked and (
+                previous_path, getattr(previous, "size_bytes", None)
+            ) != (getattr(current, "path", None), getattr(current, "size_bytes", None)):
+                combo.currentIndexChanged.emit(combo.currentIndex())
+
+        def refresh():
+            if not refresh_button.isEnabled():
+                return
+            refresh_button.setEnabled(False)
+            ok_button = buttons.button(QDialogButtonBox.Ok)
+            if ok_button is not None:
+                ok_button.setEnabled(False)
+            try:
+                result = self._discover_floppy_devices(
+                    include_greaseweazle=gw_device_combo is not None, parent=dialog,
+                )
+                if result is None:
+                    return
+                floppy_drives, greaseweazle_devices = result
+                populate(drive_combo, floppy_drives, "No supported floppy drive detected")
+                if gw_device_combo is not None:
+                    populate(gw_device_combo, greaseweazle_devices, "No Greaseweazle device detected")
+                if source_combo is not None:
+                    selected_devices = (greaseweazle_devices if source_combo.currentData() == "floppy_gw"
+                                        else floppy_drives)
+                    if not selected_devices:
+                        self._restore_read_floppy_source_selection(
+                            source_combo, has_floppy_drives=bool(floppy_drives),
+                            has_greaseweazle_devices=bool(greaseweazle_devices),
+                        )
+            finally:
+                refresh_button.setEnabled(True)
+                refresh_state()
+
+        refresh_button.clicked.connect(refresh)
 
     def _choose_format_floppy_options(self):
         devices = self._discover_floppy_devices()
@@ -21725,10 +21792,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             gw_page.setVisible(is_gw)
             ok_button = buttons.button(QDialogButtonBox.Ok)
             if ok_button is not None:
-                ok_button.setEnabled(bool(greaseweazle_devices) if is_gw else bool(floppy_drives))
+                ok_button.setEnabled((gw_device_combo.currentData() is not None) if is_gw else (drive_combo.currentData() is not None))
             QTimer.singleShot(0, resize_dialog_to_content)
 
         target_combo.currentIndexChanged.connect(refresh_target_state)
+        self._add_floppy_drive_refresh(
+            dialog, buttons, drive_combo, refresh_target_state,
+            gw_device_combo=gw_device_combo, source_combo=target_combo,
+        )
         refresh_target_state()
         resize_dialog_to_content()
 
@@ -22114,11 +22185,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             gw_page.setVisible(is_gw)
             ok = buttons.button(QDialogButtonBox.Ok)
             if ok is not None:
-                ok.setEnabled(bool(greaseweazle_devices) if is_gw else bool(floppy_drives))
+                ok.setEnabled((gw_device_combo.currentData() is not None) if is_gw else (drive_combo.currentData() is not None))
             QTimer.singleShot(0, resize_dialog_to_content)
 
         drive_combo.currentIndexChanged.connect(refresh_drive_disk_size)
         source_combo.currentIndexChanged.connect(refresh_source_state)
+        self._add_floppy_drive_refresh(
+            dialog, buttons, drive_combo, refresh_source_state,
+            gw_device_combo=gw_device_combo, source_combo=source_combo,
+        )
         refresh_drive_disk_size()
         refresh_source_state()
         resize_dialog_to_content()
@@ -22542,7 +22617,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     )
             else:
                 recovery_hint.setText(self._lt("Normal read uses fast file-level reading when possible."))
-            ok_enabled = bool(greaseweazle_devices) if is_gw else bool(floppy_drives)
+            ok_enabled = (gw_device_combo.currentData() is not None) if is_gw else (drive_combo.currentData() is not None)
             ok_button = buttons.button(QDialogButtonBox.Ok)
             if ok_button is not None:
                 ok_button.setEnabled(ok_enabled)
@@ -22551,6 +22626,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         source_combo.currentIndexChanged.connect(refresh_dialog_state)
         recovery_checkbox.toggled.connect(refresh_dialog_state)
+        self._add_floppy_drive_refresh(
+            dialog, buttons, drive_combo, refresh_dialog_state,
+            gw_device_combo=gw_device_combo, source_combo=source_combo,
+        )
         refresh_dialog_state()
         resize_dialog_to_content()
 
@@ -23010,6 +23089,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
+        def refresh_drive_state():
+            if ok_button is not None:
+                ok_button.setEnabled(drive_combo.currentData() is not None)
+
+        self._add_floppy_drive_refresh(dialog, buttons, drive_combo, refresh_drive_state)
         dialog.layout().activate()
         hint_size = dialog.sizeHint()
         dialog.resize(max(dialog.minimumWidth(), hint_size.width()), hint_size.height())
@@ -23117,10 +23201,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             gw_page.setVisible(is_gw)
             ok_button = buttons.button(QDialogButtonBox.Ok)
             if ok_button is not None:
-                ok_button.setEnabled(bool(greaseweazle_devices) if is_gw else bool(floppy_drives))
+                ok_button.setEnabled((gw_device_combo.currentData() is not None) if is_gw else (drive_combo.currentData() is not None))
             QTimer.singleShot(0, resize_dialog_to_content)
 
         target_combo.currentIndexChanged.connect(refresh_target_state)
+        self._add_floppy_drive_refresh(
+            dialog, buttons, drive_combo, refresh_target_state,
+            gw_device_combo=gw_device_combo, source_combo=target_combo,
+        )
         refresh_target_state()
         resize_dialog_to_content()
 
@@ -24369,25 +24457,26 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         kind_item.setToolTip(self._type_column_tooltip(kind_item.text(), image_mode=True, is_midi=is_midi))
         self.table.setItem(row, 6, kind_item)
 
-    def _unique_backup_path(self, desired_path):
-        if not os.path.exists(desired_path):
-            return desired_path
-        stem, ext = os.path.splitext(desired_path)
-        counter = 2
-        while True:
-            candidate = f"{stem}_{counter}{ext}"
-            if not os.path.exists(candidate):
-                return candidate
-            counter += 1
+    def _unique_backup_path(self, desired_path, *, reserved_paths=()):
+        reserved = list(reserved_paths)
+        if not self.is_image_mode():
+            for row in self._regular_file_rows():
+                source = self.table.item(row, 1).text()
+                reserved.extend((source, os.path.join(
+                    os.path.dirname(source), self._regular_row_output_filename(row),
+                )))
+        return unique_backup_path(desired_path, reserved_paths=reserved)
 
-    def _get_backup_path(self, file_path):
+    def _get_backup_path(self, file_path, *, reserved_paths=()):
         source_dir = os.path.dirname(os.path.abspath(file_path))
         backup_root = self.regularModeContextPath if not self.is_image_mode() else ""
         if not backup_root or not os.path.isdir(backup_root):
             backup_root = source_dir
         backup_dir = os.path.join(backup_root, "backup")
         os.makedirs(backup_dir, exist_ok=True)
-        return self._unique_backup_path(os.path.join(backup_dir, os.path.basename(file_path)))
+        return self._unique_backup_path(
+            os.path.join(backup_dir, os.path.basename(file_path)), reserved_paths=reserved_paths,
+        )
 
     def _get_image_backup_path(self, image_path):
         stem, ext = os.path.splitext(os.path.abspath(image_path))
@@ -24553,12 +24642,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._update_regular_centered_title_assumption()
         self._refresh_regular_title_display_items()
 
-    def _create_backup_if_enabled(self, file_path):
+    def _create_backup_if_enabled(self, file_path, *, backup_path=None):
         if not self.backup_checkbox.isChecked():
             return None
         try:
-            backup_path = self._get_backup_path(file_path)
-            shutil.copy2(file_path, backup_path)
+            backup_path = backup_path or self._get_backup_path(file_path)
+            copy_file_backup(file_path, backup_path)
             return None
         except Exception as e:
             return f"Could not create backup for {os.path.basename(file_path)}: {e}"
@@ -24568,7 +24657,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return None
         backup_path = self._get_image_backup_path(image_path)
         try:
-            shutil.copy2(image_path, backup_path)
+            copy_file_backup(image_path, backup_path)
             return None
         except Exception as e:
             return (
@@ -29240,7 +29329,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _bug_report_secret(self):
         return str(
             os.environ.get("APS_MIDI_PREP_TOOL_BUG_REPORT_SECRET")
-            or BUG_REPORT_SECRET
+            or BUG_REPORT_PUBLIC_TOKEN
             or ""
         )
 
@@ -29255,7 +29344,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return str(
             os.environ.get("APS_MIDI_PREP_TOOL_FEEDBACK_SECRET")
             or os.environ.get("APS_MIDI_PREP_TOOL_BUG_REPORT_SECRET")
-            or BUG_REPORT_SECRET
+            or BUG_REPORT_PUBLIC_TOKEN
             or ""
         )
 
@@ -30602,12 +30691,22 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         errors = []
         backup_count = 0
         if self.backup_checkbox.isChecked():
+            backup_sources = []
             for source, target in plan:
                 if os.path.normcase(os.path.abspath(source)) == os.path.normcase(os.path.abspath(target)):
                     continue
                 if os.path.normcase(os.path.abspath(source)) in skip_backup_keys:
                     continue
-                backup_error = self._create_backup_if_enabled(source)
+                backup_sources.append(source)
+            try:
+                backup_plan = plan_file_backups(
+                    backup_sources, reserved_paths=[path for entry in plan for path in entry],
+                    backup_path_builder=self._get_backup_path,
+                )
+            except Exception as exc:
+                return [str(exc)], {}, 0
+            for source, backup_path in backup_plan:
+                backup_error = self._create_backup_if_enabled(source, backup_path=backup_path)
                 if backup_error:
                     errors.append(backup_error)
                 else:
@@ -31049,8 +31148,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 # failure. No source is read again after publication starts.
                 progress.setCancelButton(None)
                 stage_progress(0, max(1, len(prepared)), self._lt("Saving files to new folder..."))
+                backup_paths = {}
+                if self.backup_checkbox.isChecked():
+                    reserved_paths = [path for entry in prepared for path in entry]
+                    backup_paths = dict(plan_file_backups(
+                        existing, reserved_paths=reserved_paths,
+                        backup_path_builder=lambda path: self._get_backup_path(
+                            path, reserved_paths=reserved_paths,
+                        ),
+                    ))
                 publish_file_batch(
-                    prepared, backup_callback=self._create_backup_if_enabled,
+                    prepared, backup_callback=lambda path: self._create_backup_if_enabled(
+                        path, backup_path=backup_paths.get(path),
+                    ),
                     progress_callback=lambda index, total, path: stage_progress(
                         index, total, self._lt("Saving {filename}...", filename=os.path.basename(path)),
                     ),

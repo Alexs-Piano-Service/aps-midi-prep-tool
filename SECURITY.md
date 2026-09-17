@@ -39,6 +39,21 @@ Security reports may include:
 - Vulnerabilities in bundled helper tools or release packaging.
 - Crashes or parsing bugs caused by malformed MIDI, E-SEQ, or disk-image data.
 
+## Bug-report and feedback endpoint
+
+The reporting protocol's bundled `BUG_REPORT_PUBLIC_TOKEN` (formerly named
+`BUG_REPORT_SECRET`) is public. Its timestamped HMAC is retained for compatibility
+with the existing endpoint; it does not authenticate legitimate installations.
+Replacing it with another distributed constant would not create a credential.
+The legacy environment-variable names remain supported for compatibility.
+
+The PHP receiving endpoints are not in this repository and have not been audited
+here. The server operator must check whether they trust this token for access or
+abuse prevention. Any such trust must be removed server-side, with request-size
+and rate limits, input validation, and independent authorization for privileged
+actions. Client signatures alone cannot provide those protections. Do not use
+the bundled token to protect any other service; retire that trust if it exists.
+
 ## Legal And Safety Notes
 
 Use test copies when possible. Do not use this project to distribute copyrighted

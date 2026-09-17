@@ -1,10 +1,9 @@
 """Mark IV library backup and optional MIDI copies, with cancellable workers."""
 
 from pathlib import Path
-import sys
 import threading
 
-from PySide6.QtCore import QStorageInfo, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
@@ -14,8 +13,9 @@ from PySide6.QtWidgets import (
 
 from .icon_utils import apply_window_icon
 from .markiv_backup.backup import run_backup, verify_backup
-from .markiv_backup.devices import MountedDevice, discover_devices, resolve_source
+from .markiv_backup.devices import resolve_source
 from .markiv_backup.library import CancelledError, check_cancel, scan_library
+from .markiv_device_discovery import discover_mounted_sources
 from .message_catalog import normalize_language_code, tr, translate_text
 
 
@@ -32,27 +32,6 @@ def _format_size(value):
         if size < 1024 or unit == "TiB":
             return f"{size:,.0f} {unit}" if unit == "B" else f"{size:,.1f} {unit}"
         size /= 1024
-
-
-def _mounted_sources():
-    if sys.platform.startswith("linux"):
-        return discover_devices()
-    # Qt also discovers readable Windows volumes. Browsing a copied data
-    # folder works on every platform without any mounting software.
-    devices = []
-    for volume in QStorageInfo.mountedVolumes():
-        if not volume.isValid() or not volume.isReady():
-            continue
-        root = Path(volume.rootPath())
-        devices.append(MountedDevice(
-            device=bytes(volume.device()).decode(errors="replace"),
-            mountpoint=root,
-            filesystem=bytes(volume.fileSystemType()).decode(errors="replace"),
-            label=volume.displayName(),
-            read_only=volume.isReadOnly(),
-            is_mark_iv=(root / "songs").is_dir(),
-        ))
-    return sorted(devices, key=lambda device: (not device.is_mark_iv, str(device.mountpoint)))
 
 
 class MarkIVBackupWorker(QThread):
@@ -79,7 +58,7 @@ class MarkIVBackupWorker(QThread):
         try:
             check_cancel(self._cancel)
             if self.operation == "discover":
-                result = _mounted_sources()
+                result = discover_mounted_sources(cancel=self._cancel)
             elif self.operation == "scan":
                 result = scan_library(resolve_source(self.source),
                                       progress=self.progressChanged.emit, cancel=self._cancel)

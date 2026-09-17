@@ -19,9 +19,11 @@ from . import APP_NAME, COMPANY_NAME, __version__
 from .library import BackupPlan, CancelledError, check_cancel, is_conversion_candidate
 from .paths import is_link
 from ..eseq_converter import convert_eseq_bytes_to_midi_bytes
+from ..rename_recovery import sync_directory
 
 CHUNK_SIZE = 1024 * 1024
 MANIFEST = 'manifest.json'
+JOURNAL = 'manifest.journal.jsonl'
 
 
 @dataclass
@@ -61,6 +63,103 @@ def _atomic_json(path: Path, value):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temp, path)
+    sync_directory(path.parent)
+
+
+class _ManifestJournal:
+    """Persist each changed record; charge compact snapshots to journal bytes.
+
+    A fixed file-count snapshot interval would still rewrite O(N²) bytes.
+    Instead, a snapshot is due only after at least its previous size has been
+    appended. The journal is retained until the final snapshot, so a crash
+    before or after snapshot publication can replay by sequence number.
+    """
+
+    def __init__(self, folder: Path, manifest: dict):
+        self.folder = folder
+        self.manifest = manifest
+        self.sequence = 0
+        self.pending_bytes = 0
+        self.error_count = len(manifest['errors'])
+        self.conversion_error_count = len(manifest['conversion_errors'])
+        with (folder / JOURNAL).open('xb') as stream:
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.snapshot()
+
+    def snapshot(self):
+        self.manifest['journal_sequence'] = self.sequence
+        _atomic_json(self.folder / MANIFEST, self.manifest)
+        self.snapshot_size = (self.folder / MANIFEST).stat().st_size
+        self.pending_bytes = 0
+
+    def append(self, collection: str, index: int, record: dict):
+        event = {'sequence': self.sequence + 1, 'collection': collection,
+                 'index': index, 'record': record,
+                 'errors': self.manifest['errors'][self.error_count:],
+                 'conversion_errors': self.manifest['conversion_errors'][self.conversion_error_count:]}
+        payload = (json.dumps(event, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+        with (self.folder / JOURNAL).open('ab') as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.sequence += 1
+        self.error_count = len(self.manifest['errors'])
+        self.conversion_error_count = len(self.manifest['conversion_errors'])
+        self.pending_bytes += len(payload)
+        if self.pending_bytes >= self.snapshot_size:
+            self.snapshot()
+
+    def finish(self):
+        self.snapshot()
+        (self.folder / JOURNAL).unlink()
+        sync_directory(self.folder)
+
+
+def _load_manifest(folder: Path) -> dict:
+    """Read a snapshot and replay durable updates from an interrupted backup."""
+    with _contained(folder, MANIFEST).open(encoding='utf-8') as stream:
+        manifest = json.load(stream)
+    if manifest.get('schema_version') != 1 or not isinstance(manifest.get('files'), list):
+        raise ValueError('Unrecognized backup manifest')
+    if not isinstance(manifest.get('derivatives', []), list):
+        raise ValueError('Unrecognized backup derivative records')
+    sequence = manifest.get('journal_sequence', 0)
+    journal = _contained(folder, JOURNAL)
+    if not journal.exists():
+        return manifest
+    with journal.open('rb') as stream:
+        for line in stream:
+            # A killed/failed append can leave one incomplete final line.
+            if not line.endswith(b'\n'):
+                break
+            try:
+                event = json.loads(line)
+                number = event['sequence']
+                if not isinstance(number, int) or number < 1:
+                    raise ValueError('Invalid journal sequence')
+                if number <= sequence:
+                    continue  # Already included in the atomic snapshot.
+                collection, index, record = event['collection'], event['index'], event['record']
+                if (number != sequence + 1 or collection not in {'files', 'derivatives'}
+                        or not isinstance(index, int) or index < 0 or not isinstance(record, dict)
+                        or not isinstance(event['errors'], list)
+                        or not isinstance(event['conversion_errors'], list)):
+                    raise ValueError('Invalid journal record')
+                records = manifest.setdefault(collection, [])
+                if index < len(records):
+                    records[index] = record
+                elif collection == 'derivatives' and index == len(records):
+                    records.append(record)
+                else:
+                    raise ValueError('Invalid journal record index')
+                manifest.setdefault('errors', []).extend(event['errors'])
+                manifest.setdefault('conversion_errors', []).extend(event['conversion_errors'])
+                sequence = number
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError('Unrecognized backup progress journal') from exc
+    manifest['journal_sequence'] = sequence
+    return manifest
 
 
 def _hash(path: Path, cancel=None, on_chunk=None) -> str:
@@ -132,7 +231,8 @@ def _validate_target(plan: BackupPlan, target: Path, *, convert_eseq=False) -> P
         if key in seen:
             raise ValueError(f'Duplicate backup destination: {item.destination}')
         seen.add(key)
-        if Path(item.destination).parts[0].casefold() in {MANIFEST, 'readme.txt', '.incomplete'}:
+        if Path(item.destination).parts[0].casefold() in {
+                MANIFEST, MANIFEST + '.tmp', JOURNAL, 'readme.txt', '.incomplete'}:
             raise ValueError(f'Reserved backup filename: {item.destination}')
     return target
 
@@ -194,6 +294,7 @@ def _write_derivative(path: Path, payload: bytes, cancel=None) -> str:
         reserved = True
         os.replace(partial, path)
         reserved = False
+        sync_directory(path.parent)
         return expected
     finally:
         partial.unlink(missing_ok=True)
@@ -209,7 +310,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     distinguish a cancelled, failed, or interrupted run from a complete backup.
     Optional E-SEQ conversion runs after every original has been copied, adding
     verified MIDI siblings. If keep_originals is false, a converted E-SEQ copy
-    is removed from the backup only after its MIDI and manifest are saved.
+    is removed from the backup only after its MIDI and progress are saved.
     Failed conversions retain their originals. Source files are never changed.
     """
     check_cancel(cancel)
@@ -218,7 +319,9 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     target.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     folder = Path(tempfile.mkdtemp(prefix=f'MarkIV-Backup-{stamp}-', dir=target))
-    (folder / '.incomplete').write_text('Backup has not completed. See manifest.json.\n', encoding='utf-8')
+    (folder / '.incomplete').write_text(
+        'Backup has not completed. Verify Backup reads manifest.json and any\n'
+        'manifest.journal.jsonl to recover saved progress.\n', encoding='utf-8')
     records = [dict(asdict(item), status='pending') for item in plan.files]
     manifest = {'schema_version': 1, 'application': {'name': APP_NAME, 'version': __version__},
                 'created_at': datetime.now(timezone.utc).isoformat(),
@@ -246,10 +349,10 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
         bytes_done += size
         emit('Verifying copied bytes…')
 
-    _atomic_json(folder / MANIFEST, manifest)
+    journal = _ManifestJournal(folder, manifest)
     status = 'incomplete' if errors else 'complete'
     try:
-        for item, record in zip(plan.files, records):
+        for index, (item, record) in enumerate(zip(plan.files, records)):
             check_cancel(cancel)
             partial = None
             reserved_destination = False
@@ -300,6 +403,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                 reserved_destination = False
                 partial = None
                 os.utime(dst, ns=(before.st_atime_ns, before.st_mtime_ns))
+                sync_directory(dst.parent)
                 record.update(status='verified', sha256=expected)
                 copied += 1
                 verified += 1
@@ -317,23 +421,23 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                     partial.unlink(missing_ok=True)
                 if reserved_destination:
                     dst.unlink(missing_ok=True)
-                _atomic_json(folder / MANIFEST, manifest)
+                journal.append('files', index, record)
             emit(f'Verified {verified} of {len(records)} files', force=True)
         if convert_eseq:
             reserved = {_path_key(item.destination) for item in plan.files}
             reserved.update(_path_key(parent) for item in plan.files
                             for parent in Path(item.destination).parents)
             candidates = []
-            for item, record in zip(plan.files, records):
+            for index, (item, record) in enumerate(zip(plan.files, records)):
                 check_cancel(cancel)
                 if record['status'] != 'verified' or Path(item.source).suffix.lower() == '.pspg':
                     continue
                 original = _contained(folder, item.destination)
                 # Recheck the verified copy instead of trusting the scan flag.
                 if is_conversion_candidate(original, item.kind):
-                    candidates.append((item, record))
+                    candidates.append((index, item, record))
             conversion_total = len(candidates)
-            for item, original_record in candidates:
+            for original_index, item, original_record in candidates:
                 check_cancel(cancel)
                 relative = _derivative_path(folder, item.destination, reserved)
                 record = {'source': item.source, 'original': item.destination,
@@ -368,22 +472,26 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                     status = 'incomplete'
                     emit(message, event='error', force=True)
                 finally:
-                    _atomic_json(folder / MANIFEST, manifest)
+                    journal.append('derivatives', len(manifest['derivatives']) - 1, record)
                 if record['status'] == 'verified' and not keep_originals:
-                    # The verified MIDI and its manifest entry are already
+                    # The verified MIDI and its journal entry are already
                     # durable before removing any copied original. Cancellation
                     # or a failed conversion leaves the original in place.
                     check_cancel(cancel)
+                    original_record.update(status='replacement_pending', replacement=relative.as_posix())
+                    journal.append('files', original_index, original_record)
                     try:
                         _contained(folder, item.destination).unlink()
                         original_record.update(status='replaced', replacement=relative.as_posix())
                     except (OSError, ValueError) as exc:
+                        original_record['status'] = 'verified'
+                        original_record.pop('replacement', None)
                         message = f'{item.source}: Could not remove converted backup original: {exc}'
                         errors.append(message)
                         status = 'incomplete'
                         emit(message, event='error', force=True)
                     finally:
-                        _atomic_json(folder / MANIFEST, manifest)
+                        journal.append('files', original_index, original_record)
                 emit(f'Converted {converted} of {conversion_total} E-SEQ files',
                      event='conversion', force=True)
         check_cancel(cancel)
@@ -394,7 +502,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
         errors.append(str(exc))
     manifest.update(status=status, completed_at=datetime.now(timezone.utc).isoformat(),
                     copied=copied, verified=verified, converted=converted)
-    _atomic_json(folder / MANIFEST, manifest)
+    journal.finish()
     conversion_note = (
         'Optional E-SEQ conversions are additional MIDI files beside the originals.\n'
         if keep_originals else
@@ -422,12 +530,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
 def verify_backup(folder: Path, progress=None, cancel=None) -> list[str]:
     """Check original and derivative checksums, reporting every failure."""
     folder = Path(folder).expanduser().resolve(strict=True)
-    with (folder / MANIFEST).open(encoding='utf-8') as stream:
-        manifest = json.load(stream)
-    if manifest.get('schema_version') != 1 or not isinstance(manifest.get('files'), list):
-        raise ValueError('Unrecognized backup manifest')
-    if not isinstance(manifest.get('derivatives', []), list):
-        raise ValueError('Unrecognized backup derivative records')
+    manifest = _load_manifest(folder)
     errors = []
     if manifest.get('status') != 'complete' or (folder / '.incomplete').exists():
         errors.append(f'Backup is not complete (status: {manifest.get("status", "unknown")})')
@@ -439,7 +542,8 @@ def verify_backup(folder: Path, progress=None, cancel=None) -> list[str]:
         rel = record.get('destination', '')
         try:
             path = _contained(folder, rel)
-            if index < len(manifest['files']) and record.get('status') == 'replaced':
+            replacement_status = record.get('status') in {'replaced', 'replacement_pending'}
+            if index < len(manifest['files']) and replacement_status:
                 replacement = replacements.get(record.get('replacement'), {})
                 options = manifest.get('options', {})
                 if (options.get('convert_eseq') is not True
@@ -451,6 +555,12 @@ def verify_backup(folder: Path, progress=None, cancel=None) -> list[str]:
                     raise ValueError('Original has no verified MIDI replacement')
                 # The corresponding derivative is checked below, including
                 # missing files, size, checksum, and unsafe destination paths.
+                # A crash may land on either side of the original's unlink.
+                if record.get('status') == 'replacement_pending' and path.exists():
+                    if path.stat().st_size != record['size']:
+                        raise ValueError('Size does not match')
+                    if _hash(path, cancel) != record['sha256']:
+                        raise ValueError('SHA-256 checksum does not match')
             else:
                 if record.get('status') != 'verified' or not record.get('sha256'):
                     raise ValueError('File was not verified during backup')

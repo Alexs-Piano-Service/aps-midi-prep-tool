@@ -17,6 +17,13 @@ Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $stage.FullName
 $executables = @(Get-ChildItem -LiteralPath (Join-Path $stage.FullName 'extracted') -Recurse -Filter 'gw.exe')
 if ($executables.Count -ne 1) { throw 'Expected exactly one standalone gw.exe in the verified archive.' }
 $toolDirectory = $executables[0].DirectoryName
+$files = [ordered]@{}
+foreach ($file in Get-ChildItem -LiteralPath $toolDirectory -Recurse -File) {
+    $relative = $file.FullName.Substring($toolDirectory.Length + 1).Replace('\', '/')
+    $files[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+@{ archive_sha256 = $sha256; files = $files } | ConvertTo-Json -Depth 4 |
+    Set-Content -LiteralPath (Join-Path $toolDirectory '.aps-hfe-stage.json') -Encoding utf8
 if ($env:GITHUB_PATH) { Add-Content -LiteralPath $env:GITHUB_PATH -Value $toolDirectory }
 if ($env:GITHUB_ENV) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "APS_WINDOWS_GW_DIR=$toolDirectory" }
 Write-Output $toolDirectory

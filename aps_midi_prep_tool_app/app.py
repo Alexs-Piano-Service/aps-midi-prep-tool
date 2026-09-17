@@ -49,6 +49,12 @@ def _migrate_legacy_settings() -> None:
 
 
 def main():
+    from .package_smoke import run_package_smoke_from_argv
+
+    smoke_exit_code = run_package_smoke_from_argv(sys.argv)
+    if smoke_exit_code is not None:
+        sys.exit(smoke_exit_code)
+
     from .disk_device_probe import run_device_probe_from_argv
 
     probe_exit_code = run_device_probe_from_argv(sys.argv)

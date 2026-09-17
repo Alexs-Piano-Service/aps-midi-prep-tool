@@ -63,6 +63,11 @@ class _DeviceProbe:
                 if self.kind == "floppy":
                     values["mountpoints"] = tuple(values.get("mountpoints", ()))
                     self.devices.append(FloppyDriveInfo(**values))
+                elif self.kind == "markiv":
+                    from .markiv_backup.devices import MountedDevice
+
+                    values["mountpoint"] = Path(values["mountpoint"])
+                    self.devices.append(MountedDevice(**values))
                 else:
                     self.devices.append(GreaseweazleDeviceInfo(**values))
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:

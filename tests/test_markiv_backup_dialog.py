@@ -1,5 +1,6 @@
 """Mark IV utility workflows and worker lifecycle through the Qt interface."""
 
+import json
 import os
 import threading
 import time
@@ -61,7 +62,8 @@ def dialog(application, tmp_path):
 
 def test_immediate_close_prevents_deferred_drive_discovery(application, tmp_path, monkeypatch):
     discoveries = []
-    monkeypatch.setattr(dialog_module, "_mounted_sources", lambda: discoveries.append(True) or [])
+    monkeypatch.setattr(dialog_module, "discover_mounted_sources",
+                        lambda **_kwargs: discoveries.append(True) or [])
     settings = QSettings(str(tmp_path / "immediate-close.ini"), QSettings.IniFormat)
     instance = dialog_module.MarkIVBackupDialog(settings, refresh_on_open=True)
     try:
@@ -361,6 +363,51 @@ def test_closing_waits_for_worker_cancellation(application, dialog, volume, monk
         release.set()
         _wait(application, lambda: not dialog.is_busy)
     _wait(application, lambda: not dialog.isVisible())
+
+
+def test_close_during_backup_waits_for_file_cleanup_and_cancelled_manifest(
+        application, dialog, volume, tmp_path, monkeypatch):
+    source, song, original = volume
+    entered = threading.Event()
+    release = threading.Event()
+    cancellation = []
+    backup = dialog_module.run_backup
+
+    def blocked_backup(plan, target, progress=None, cancel=None, **kwargs):
+        cancellation.append(cancel)
+
+        def copying(event):
+            if event.get("bytes_done", 0) and not entered.is_set():
+                entered.set()
+                release.wait(10)
+            progress(event)
+
+        return backup(plan, target, progress=copying, cancel=cancel, **kwargs)
+
+    monkeypatch.setattr(dialog_module, "run_backup", blocked_backup)
+    dialog.source_combo.setEditText(str(source))
+    dialog.destination_edit.setText(str(tmp_path / "backups"))
+    dialog.start_scan()
+    _wait(application, lambda: not dialog.is_busy)
+    dialog.show()
+    dialog.start_backup()
+    try:
+        _wait(application, entered.is_set)
+        dialog.close()
+        application.processEvents()
+        assert cancellation[0].is_set()
+        assert dialog.is_busy
+        assert dialog.isVisible()
+    finally:
+        release.set()
+        _wait(application, lambda: not dialog.is_busy)
+    _wait(application, lambda: not dialog.isVisible())
+    assert dialog.result_folder is not None
+    manifest = json.loads((dialog.result_folder / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "cancelled"
+    assert (dialog.result_folder / ".incomplete").exists()
+    assert not list(dialog.result_folder.rglob("*.partial"))
+    assert song.read_bytes() == original
 
 
 @pytest.fixture

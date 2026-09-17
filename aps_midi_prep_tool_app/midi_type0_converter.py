@@ -1,11 +1,11 @@
 import os
-import shutil
 import uuid
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from math import ceil
 
+from .helpers.file_backup import copy_file_backup, plan_file_backups
 
 _SYSTEM_MESSAGE_DATA_LENGTHS = {
     0xF1: 1,
@@ -1649,11 +1649,6 @@ def _unique_abs_paths(file_paths):
     return unique
 
 
-def _default_backup_path(file_path):
-    stem, ext = os.path.splitext(file_path)
-    return f"{stem}_backup{ext}"
-
-
 def convert_midi_file_to_type0_path(
     source_path,
     dest_path,
@@ -1696,12 +1691,24 @@ def convert_midi_files_to_type0(
     remap_all_instruments_to_channel0=False,
 ):
     unique_paths = _unique_abs_paths(file_paths)
-    backup_path_builder = backup_path_builder or _default_backup_path
 
     converted = []
     unchanged = []
     backups_created = []
     failed = []
+
+    backup_paths = {}
+    if create_backups:
+        try:
+            backup_paths = dict(plan_file_backups(
+                unique_paths, backup_path_builder=backup_path_builder,
+            ))
+        except Exception as exc:
+            # A custom builder can fail late; refuse the whole batch before
+            # publishing any conversions or creating any backups.
+            return Type0ConversionResult([], [], [], [
+                (path, f"Backup planning failed: {exc}") for path in unique_paths
+            ])
 
     for file_path in unique_paths:
         if not os.path.isfile(file_path):
@@ -1722,8 +1729,8 @@ def convert_midi_files_to_type0(
                 continue
 
             if create_backups:
-                backup_path = backup_path_builder(file_path)
-                shutil.copy2(file_path, backup_path)
+                backup_path = backup_paths[file_path]
+                copy_file_backup(file_path, backup_path)
                 backups_created.append(backup_path)
 
             temp_path = f"{file_path}.aps_type0_{uuid.uuid4().hex}.tmp"

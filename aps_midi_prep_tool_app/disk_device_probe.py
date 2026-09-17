@@ -25,12 +25,14 @@ def run_device_probe_from_argv(argv):
         return 2
 
     from .floppy_image import list_floppy_drives, list_greaseweazle_devices
+    from .markiv_device_discovery import mounted_sources
 
-    probes = {"floppy": list_floppy_drives, "greaseweazle": list_greaseweazle_devices}
+    probes = {"floppy": list_floppy_drives, "greaseweazle": list_greaseweazle_devices,
+              "markiv": mounted_sources}
     result = {"devices": [], "error": ""}
     try:
         result["devices"] = [asdict(device) for device in probes[argv[2]]()]
     except Exception as exc:
         result["error"] = str(exc) or type(exc).__name__
-    Path(argv[3]).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    Path(argv[3]).write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
     return 1 if result["error"] else 0

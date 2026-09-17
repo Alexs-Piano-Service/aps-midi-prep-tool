@@ -8,6 +8,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+try:
+    from .release_metadata import ReleaseMetadataError, validate_release_metadata
+except ImportError:
+    from release_metadata import ReleaseMetadataError, validate_release_metadata
+
 
 WORKFLOW = "ci.yml"
 REQUIRED_JOBS = frozenset({"Tests (ubuntu-latest)", "Tests (windows-latest)"})
@@ -78,10 +83,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="GitHub owner/repository")
     parser.add_argument("--sha", required=True, help="Full commit SHA to release")
+    parser.add_argument("--tag", help="Requested release tag; also requires publication-ready metadata")
     args = parser.parse_args()
     try:
+        validate_release_metadata(tag=args.tag, require_ready=args.tag is not None)
         url = require_successful_ci(args.repo, args.sha)
-    except ReleaseGateError as exc:
+    except (ReleaseGateError, ReleaseMetadataError) as exc:
         parser.exit(1, f"Release blocked: {exc}\n")
     print(f"Cross-platform CI passed: {url}")
 

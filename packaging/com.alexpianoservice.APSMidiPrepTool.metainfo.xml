@@ -27,11 +27,11 @@
   <url type="homepage">https://www.alexanderpeppe.com/</url>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="0.8.3" date="2026-09-15">
+    <release version="0.8.3" type="development" date="2026-09-17">
       <description>
-        <p>Preserve MIDI controller state and note endings during piano channel
-        merging, protect existing image contents and rename recovery data,
-        and support portable startup configuration and Windows image tools.</p>
+        <p>Create verified Mark IV library backups, preserve MIDI controller
+        state and note endings, protect recordings during conversion and
+        renaming, and support portable deployment and Windows image tools.</p>
       </description>
     </release>
     <release version="0.8.2" date="2026-09-08">

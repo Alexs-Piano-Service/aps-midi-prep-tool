@@ -1,5 +1,6 @@
 """Real-file Save As overwrite confirmation and transactional publication."""
 
+import builtins
 import copy
 import io
 import os
@@ -14,6 +15,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from aps_midi_prep_tool_app import main_window
+from aps_midi_prep_tool_app.helpers import file_backup
 from aps_midi_prep_tool_app.pending_changes import staged_batch
 
 
@@ -400,3 +402,46 @@ def test_eseq_catalog_is_confirmed_and_published_with_edited_song(window, tmp_pa
     assert all((folder / "backup" / path.name).read_bytes() == original
                for path, original in originals.items())
     assert w.regularHasPianodir and not w.pendingEdits and not w._staged_undo_stack
+
+
+def test_save_as_backups_reserve_new_outputs_inside_backup_folder(window, tmp_path, monkeypatch):
+    first, second = _load(window, tmp_path)
+    window._stage_regular_row_pending_rename(_item(window, second)["row"], str(second), "A_2.MID")
+    destination = first.parent / "backup"
+    destination.mkdir()
+    existing = destination / "A.MID"
+    existing.write_bytes(b"previously exported recording")
+    questions = _choose_destination(monkeypatch, destination, yes=True)
+
+    window.save_as_changes()
+
+    assert len(questions) == 1 and not window._test_errors
+    assert existing.read_bytes() == first.read_bytes()
+    assert (destination / "A_2.MID").read_bytes() == second.read_bytes()
+    assert (destination / "A_3.MID").read_bytes() == b"previously exported recording"
+
+
+@pytest.mark.parametrize("kind", ["regular", "image"])
+def test_gui_backup_refuses_file_arriving_after_planning(window, tmp_path, monkeypatch, kind):
+    source, _ = _load(window, tmp_path)
+    if kind == "regular":
+        destination = source.parent / "backup" / source.name
+        make_backup = window._create_backup_if_enabled
+    else:
+        source = tmp_path / "disk.img"
+        source.write_bytes(b"original image")
+        destination = tmp_path / "disk_backup.img"
+        make_backup = window._create_image_backup_if_enabled
+    original = source.read_bytes()
+
+    def racing_open(path, mode="r", *args, **kwargs):
+        if Path(path) == destination and mode == "xb":
+            destination.write_bytes(b"arrived after planning")
+        return builtins.open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(file_backup, "open", racing_open, raising=False)
+    error = make_backup(str(source))
+
+    assert "Could not create backup" in error
+    assert source.read_bytes() == original
+    assert destination.read_bytes() == b"arrived after planning"

@@ -62,6 +62,7 @@ the executable's path, hash, signature status, and available commands.
 | 16 | Make a disposable output unavailable or hold it open in another application; save, then release the lock and retry. | Failure is reported, existing source/output remains intact, and retry works. |
 | 17 | If hardware is available, read a known-good 720 KB floppy and reopen IMG/HFE copies. Cancel a marginal-disk recovery and retain partial capture/diagnostics. | Usable good capture; bounded stalls/cancellation; unread sectors reported. Mark N/A with hardware reason when unavailable. Never write to original disks. |
 | 18 | After restarting, repeat create/open/edit IMG, create/open HFE, both conversions, damaged-image recovery, and cancellation. Run `where.exe mformat` (also mcopy, mdir, mdel, mren) outside APS. | All workflows still work; tools are still absent from the machine PATH. |
+| 19 | Select a test song and export MP3 using the built-in piano renderer. Play the exported MP3 in a separate audio player. | Nonempty playable audio with the expected notes; no LAME or development-tool installation required. If the package advertises bundled SoundFonts, repeat with that renderer. |
 
 ## Release decision
 
@@ -102,6 +103,13 @@ path containing spaces and an accented character, removes MSYS2 from PATH, and
 uses the application's export function to encode a real WAV file as MP3. The
 release packages the tested directory at `bin` inside the frozen application.
 These tests exercise source code, not a frozen APS executable.
+
+The signed packaging workflow additionally runs `scripts/test_windows_package.ps1`
+against the final signed EXE. It exercises the UI, IMG creation/reopening, an
+HFE round trip, and built-in piano MP3 rendering with a restricted PATH and a
+process deadline. Its report includes the executable hash. Retain actual
+clean-machine evidence for each distributed package as described in
+[release process](release-process.md); this hosted-runner check does not replace it.
 
 On Windows the strict option makes missing image tools or staged LAME fail. Without it,
 tool-dependent cases explicitly skip; native handle/process tests still run.

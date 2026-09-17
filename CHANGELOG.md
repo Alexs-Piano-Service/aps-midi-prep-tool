@@ -5,10 +5,13 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [Unreleased]
+## [0.8.3] - Unreleased
 
 ### Added
 
+- Floppy Read, Image, Format, Save, and Write dialogs offer **Refresh** to
+  detect newly connected drives without reopening the dialog. Refresh keeps
+  the selected drive when available and preserves the other dialog options.
 - Pushes to the public repository's `main` branch automatically build a signed
   Windows EXE after Linux and Windows CI pass for the same commit. The EXE and
   Windows manual test kit are available as a workflow artifact.
@@ -21,8 +24,37 @@ with release sections grouped by version and date.
   the originals alongside them. Cancellation and partial failures keep completed
   files, and existing backups can be verified again from the utility.
 
+- Native Windows tests exercise real IMG/HFE round trips, clean versus ordinary
+  E-SEQ saves, bundled mtools without PATH access, capacity failures, reserved
+  filenames, locked destinations, and cancellation of helper descendants.
+  CI publishes a portable clean-machine manual test kit with generated songs,
+  mixed and damaged images, checksums, a PowerShell launcher, and result records.
+
+- An optional `aps-midi-prep-tool.json` beside the executable presets all saved
+  preferences, remembered dialogs, shortcuts, and paths at each launch. Instrument
+  and delivery selections supply preparation defaults; relative paths support
+  USB deployments on Windows and Linux, including AppImage releases. Open MIDI
+  Folder and Open Image now remember their starting folders. A configuration
+  guide and Nalbantov example cover deployment and supported setting names.
+- A polite review invitation after the third successful physical floppy read,
+  with Write a review, Remind me later, and Never ask again choices in all 12
+  languages. Counts and choices persist; reminders wait three more successful
+  reads. Image opens, failed reads, and cancelled reads do not advance the count.
+- Linux and Windows CI on branch pushes and pull requests, with mtools installed
+  for real-image regression tests. The tagging helper and signed packaging
+  workflow require a recorded pass for both platforms on the exact commit.
+
 ### Changed
 
+- Windows local and signed builds share one packaging script and require the
+  complete verified Greaseweazle runtime. The final signed EXE is smoke-tested
+  for its window, IMG/HFE workflows, and built-in piano MP3 export.
+- Release tags and packaging validate application, changelog, README, and
+  release metadata together. Packages are staged in drafts; the publication
+  helper requires every declared asset and clean-machine evidence matching
+  each package's SHA-256. Version 0.8.3 remains explicitly unreleased.
+- The legacy bug-report token is identified as public compatibility data;
+  security documentation describes the outstanding server-side audit.
 - View visibility actions consistently say **Show**, with checked meaning
   visible. The **Preparing for...** row is shown on new installations.
 - Preparation defaults select descriptive MIDI filenames unless the destination
@@ -32,6 +64,15 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Type 0 batch conversion, renaming, and GUI save backups share collision-safe
+  name planning and exclusive creation. Selected recordings, intended output
+  names, and existing backups are protected in either processing order.
+- Mark IV drive discovery uses a disposable helper process with a ten-second
+  deadline. Cancel and Close recover from stalled volume queries, and retries
+  start fresh without terminating a backup-writing thread.
+- Mark IV backup progress uses a durable per-file journal and periodic compact
+  snapshots, avoiding quadratic manifest writes for large libraries. Verification
+  replays interrupted progress, including MIDI-only original replacement.
 - Channel collapse restores Breath (CC2) and Foot Controller (CC4) after CC121,
   using Yamaha synth defaults while retaining other source channels' settings.
   Conversion reports flag removed CC121 commands because device-specific reset
@@ -63,32 +104,6 @@ with release sections grouped by version and date.
   roots while retaining HTTPS verification.
 - Mark IV device-source resolution recognizes POSIX device paths on Windows;
   cross-platform tests compare resolved mount paths consistently.
-
-## [0.8.3] - 2026-09-15
-
-### Added
-
-- Native Windows tests exercise real IMG/HFE round trips, clean versus ordinary
-  E-SEQ saves, bundled mtools without PATH access, capacity failures, reserved
-  filenames, locked destinations, and cancellation of helper descendants.
-  CI publishes a portable clean-machine manual test kit with generated songs,
-  mixed and damaged images, checksums, a PowerShell launcher, and result records.
-
-- An optional `aps-midi-prep-tool.json` beside the executable presets all saved
-  preferences, remembered dialogs, shortcuts, and paths at each launch. Instrument
-  and delivery selections supply preparation defaults; relative paths support
-  USB deployments on Windows and Linux, including AppImage releases. Open MIDI
-  Folder and Open Image now remember their starting folders. A configuration
-  guide and Nalbantov example cover deployment and supported setting names.
-- A polite review invitation after the third successful physical floppy read,
-  with Write a review, Remind me later, and Never ask again choices in all 12
-  languages. Counts and choices persist; reminders wait three more successful
-  reads. Image opens, failed reads, and cancelled reads do not advance the count.
-- Linux and Windows CI on branch pushes and pull requests, with mtools installed
-  for real-image regression tests. The tagging helper and signed packaging
-  workflow require a recorded pass for both platforms on the exact commit.
-
-### Fixed
 
 - Disklavier normalization preserves same-tick pedal and program reversals,
   repeated settings after note activity or resets, and reset effects on routed

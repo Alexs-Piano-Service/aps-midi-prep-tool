@@ -1,6 +1,7 @@
 """Release tags require both platforms to pass on the exact published commit."""
 
 import subprocess
+import json
 
 import pytest
 
@@ -87,7 +88,17 @@ def checkout(tmp_path, monkeypatch):
     monkeypatch.setattr(tag_release, "ROOT", tmp_path)
     tag_release.git("init", "--quiet")
     (tmp_path / "file.txt").write_text("Committed source", encoding="utf-8")
-    tag_release.git("add", "file.txt")
+    (tmp_path / "aps_midi_prep_tool_app").mkdir()
+    (tmp_path / "aps_midi_prep_tool_app/app_info.py").write_text('APP_VERSION = "1.2.3"\n')
+    (tmp_path / "packaging").mkdir()
+    (tmp_path / "packaging/release.json").write_text(json.dumps({
+        "version": "1.2.3", "status": "ready", "date": "2026-09-01", "required_assets": ["app.exe"],
+    }))
+    (tmp_path / "README.md").write_text('Current version: `1.2.3`\n')
+    (tmp_path / "CHANGELOG.md").write_text('## [1.2.3] - 2026-09-01\n')
+    (tmp_path / "packaging/com.alexpianoservice.APSMidiPrepTool.metainfo.xml").write_text(
+        '<component><releases><release version="1.2.3" date="2026-09-01"/></releases></component>')
+    tag_release.git("add", ".")
     tag_release.git("-c", "user.name=APS Tests", "-c", "user.email=tests@example.invalid", "commit", "-qm", "Initial")
     # An annotated tag needs an identity; configure only this temporary repo.
     tag_release.git("config", "user.name", "APS Tests")
@@ -101,6 +112,13 @@ def test_tag_is_not_created_when_ci_cannot_be_verified(checkout, monkeypatch):
     monkeypatch.setattr(tag_release, "require_successful_ci", reject)
     with pytest.raises(release_gate.ReleaseGateError):
         tag_release.tag_release("v1.2.3", REPOSITORY)
+    assert tag_release.git("tag", "--list") == ""
+
+
+def test_version_mismatch_cannot_be_tagged_even_with_passing_ci(checkout, monkeypatch):
+    monkeypatch.setattr(tag_release, "require_successful_ci", lambda *_: successful_run()["html_url"])
+    with pytest.raises(tag_release.ReleaseMetadataError, match="tag must be v1.2.3"):
+        tag_release.tag_release("v9.8.7", REPOSITORY)
     assert tag_release.git("tag", "--list") == ""
 
 

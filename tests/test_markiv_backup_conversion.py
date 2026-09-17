@@ -487,25 +487,25 @@ def test_midi_only_original_removal_failure_keeps_both_files_and_reports_error(t
     assert any('Original is locked' in error for error in result.errors)
 
 
-def test_midi_only_manifest_failure_before_removal_keeps_original(tmp_path, monkeypatch):
+def test_midi_only_journal_failure_before_removal_keeps_original(tmp_path, monkeypatch):
     originals = {'songs/user/1/OLD.FIL': _fil()}
     source = _source(tmp_path, originals)
-    save = backup._atomic_json
+    save = backup._ManifestJournal.append
     failed = False
 
-    def fail_first_verified_derivative(path, manifest):
+    def fail_first_verified_derivative(journal, collection, index, record):
         nonlocal failed
-        if not failed and any(row['status'] == 'verified' for row in manifest['derivatives']):
+        if not failed and collection == 'derivatives' and record['status'] == 'verified':
             failed = True
-            raise OSError('Cannot save manifest')
-        save(path, manifest)
+            raise OSError('Cannot save progress journal')
+        save(journal, collection, index, record)
 
-    monkeypatch.setattr(backup, '_atomic_json', fail_first_verified_derivative)
+    monkeypatch.setattr(backup._ManifestJournal, 'append', fail_first_verified_derivative)
     result = backup.run_backup(scan_library(source), tmp_path / 'backup',
                                convert_eseq=True, keep_originals=False)
     assert (result.status, result.converted) == ('incomplete', 1)
     _assert_originals(result, source, originals)
-    assert any('Cannot save manifest' in error for error in result.errors)
+    assert any('Cannot save progress journal' in error for error in result.errors)
 
 
 @pytest.mark.parametrize('change', ['no_derivative', 'wrong_original', 'wrong_replacement', 'not_verified'])

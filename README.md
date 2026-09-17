@@ -21,7 +21,10 @@
   · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-Current version: `0.8.3`
+Development version: `0.8.3`
+
+This checkout includes changes planned for 0.8.3. The download link above points
+to the latest published release; see its release notes for shipped features.
 
 APS MIDI Prep Tool is a desktop app for Yamaha Disklavier and other legacy
 player-piano workflows. Use it to recover songs from old floppies, organize your
@@ -48,6 +51,9 @@ holds the contents of a floppy disk.
 Edits and conversions in the main list wait until you save. Formatting and
 writing a physical floppy require a separate confirmation. If the floppy is
 irreplaceable, make a disk image before working on it.
+
+If a floppy drive is missing from a dialog, connect it, insert a disk, and choose
+**Refresh**. The drive list updates without reopening the dialog.
 
 Use **Edit → Review Changes** to compare original and proposed filenames,
 titles, and conversions or discard selected songs' edits. **Edit → Undo**

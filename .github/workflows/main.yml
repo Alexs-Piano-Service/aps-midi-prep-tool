@@ -6,8 +6,11 @@ on:
     branches: [main]
     types: [completed]
   workflow_dispatch:
-  release:
-    types: [published]
+    inputs:
+      release_tag:
+        description: 'Optional validated tag to package and stage as a draft'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -23,13 +26,14 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.conclusion == 'success')
     runs-on: windows-latest
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           # main may have advanced while CI ran; package the commit CI tested.
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ inputs.release_tag || github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,7 +44,13 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/release_gate.py --repo "$env:GITHUB_REPOSITORY" --sha (git rev-parse HEAD)
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $gateArgs = @('--repo', $env:GITHUB_REPOSITORY, '--sha', (git rev-parse HEAD))
+          if ($env:RELEASE_TAG) { $gateArgs += @('--tag', $env:RELEASE_TAG) }
+          elseif ($env:GITHUB_REF_TYPE -eq 'tag') { $gateArgs += @('--tag', $env:GITHUB_REF_NAME) }
+          python scripts/release_gate.py @gateArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Release gate failed.' }
 
       - name: Install dependencies
         shell: pwsh
@@ -116,29 +126,7 @@ jobs:
 
       - name: Build Windows EXE
         shell: pwsh
-        run: |
-          $pyInstallerArgs = @(
-            "--noconfirm",
-            "--onefile",
-            "--windowed",
-            "--collect-data", "certifi",
-            "--name", "APSMIDIPrepTool",
-            "--icon", "aps_midi_prep_tool_app/aps.ico",
-            "--manifest", "manifests/main_as_invoker.xml"
-          )
-          foreach ($toolName in @("mformat", "mcopy", "mdir", "mdel", "mren")) {
-            $toolPath = (Get-Command "$toolName.exe" -ErrorAction Stop).Source
-            $pyInstallerArgs += @("--add-binary", "$toolPath;aps_midi_prep_tool_app/bin/mtools")
-          }
-          # The standalone helper needs its lib directory, DLLs, and licenses.
-          $gwDirectory = $env:APS_WINDOWS_GW_DIR
-          if (!(Test-Path -LiteralPath (Join-Path $gwDirectory 'gw.exe'))) { throw 'Standalone Greaseweazle is missing.' }
-          $pyInstallerArgs += @("--add-data", "$gwDirectory;aps_midi_prep_tool_app/bin/greaseweazle")
-          # Package the exact encoder/DLL bundle exercised by native Windows CI.
-          $lameDirectory = $env:APS_WINDOWS_LAME_DIR
-          if (!(Test-Path -LiteralPath (Join-Path $lameDirectory 'lame.exe'))) { throw 'Staged LAME is missing.' }
-          $pyInstallerArgs += @("--add-data", "$lameDirectory;bin")
-          pyinstaller @pyInstallerArgs aps_midi_prep_tool.py
+        run: ./build/build_windows_main.ps1 -OneFile -Name APSMIDIPrepTool
 
       - name: Require Windows EXE
         shell: pwsh
@@ -172,6 +160,21 @@ jobs:
             throw "Signature invalid for ${exe}: $($sig.Status) - $($sig.StatusMessage)"
           }
 
+      - name: Exercise the signed package without development tools on PATH
+        shell: pwsh
+        timeout-minutes: 6
+        run: |
+          $metadata = Get-Content packaging/release.json -Raw | ConvertFrom-Json
+          ./scripts/test_windows_package.ps1 -ExecutablePath dist/APSMIDIPrepTool.exe -OutputDirectory "$env:RUNNER_TEMP/aps-package-smoke" -ExpectedVersion $metadata.version
+
+      - name: Upload package smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-package-smoke
+          path: ${{ runner.temp }}/aps-package-smoke/
+          if-no-files-found: warn
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -179,11 +182,12 @@ jobs:
           path: |
             dist/APSMIDIPrepTool.exe
             dist/windows-test-kit.zip
+          if-no-files-found: error
 
-      - name: Attach signed EXE to release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/APSMIDIPrepTool.exe
-            dist/windows-test-kit.zip
+      - name: Stage signed EXE and test kit in a draft release
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: python scripts/release_assets.py stage "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --files dist/APSMIDIPrepTool.exe dist/windows-test-kit.zip

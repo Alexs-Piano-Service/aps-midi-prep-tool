@@ -6,6 +6,11 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from .helpers.file_backup import (
+    copy_file_backup as _copy_backup,
+    default_backup_path as _default_backup_path,
+    plan_file_backups,
+)
 from .rename_recovery import (
     new_transaction_directory, preflight_space, recovery_lock, recovery_root,
     sync_directory, sync_file, write_manifest,
@@ -54,11 +59,6 @@ def is_dos83_filename(filename):
 
 def _normalize_path_key(path):
     return os.path.normcase(os.path.abspath(path))
-
-
-def _default_backup_path(file_path):
-    stem, ext = os.path.splitext(file_path)
-    return f"{stem}_backup{ext}"
 
 
 def _letters_only_upper(filename):
@@ -169,36 +169,11 @@ def validate_midi_dos83_plan(plan):
 
 
 def _plan_backups(plan, moving, backup_path_builder):
-    # Resolve directory aliases too, including destinations that do not exist yet.
-    def path_key(path):
-        return _normalize_path_key(os.path.realpath(path))
-
-    reserved = {path_key(path) for entry in plan for path in entry}
-    backups = []
-    for source, _ in moving:
-        desired = os.path.abspath(backup_path_builder(source))
-        candidate = desired
-        stem, extension = os.path.splitext(desired)
-        counter = 2
-        while path_key(candidate) in reserved or os.path.lexists(candidate):
-            candidate = f"{stem}_{counter}{extension}"
-            counter += 1
-        reserved.add(path_key(candidate))
-        backups.append((source, candidate))
-    return backups
-
-
-def _copy_backup(source, destination):
-    created = False
-    try:
-        with open(source, "rb") as source_file, open(destination, "xb") as backup_file:
-            created = True
-            shutil.copyfileobj(source_file, backup_file)
-        shutil.copystat(source, destination)
-    except Exception:
-        if created:
-            os.unlink(destination)
-        raise
+    return plan_file_backups(
+        [source for source, _ in moving],
+        reserved_paths=[path for entry in plan for path in entry],
+        backup_path_builder=backup_path_builder,
+    )
 
 
 def _digest(path):

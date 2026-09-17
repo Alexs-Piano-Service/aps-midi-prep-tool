@@ -27,6 +27,10 @@ be able to read the source. A copied data folder works on either platform.
 APS opens source files only for reading. A read-only mount can also enforce
 that at the operating-system level.
 
+Drive discovery has a ten-second limit. Cancel or close the utility if a drive
+does not respond; refreshing starts a fresh discovery attempt. Cancelling an
+active backup waits for orderly file cleanup and retains its partial result.
+
 Use an offline data volume or a stable copy while scanning and backing up.
 APS reads the saved catalog directly; it does not connect to a running piano
 database. Catalog decoding supports the inspected Mark IV PostgreSQL 7.3
@@ -87,6 +91,13 @@ file contents, and reads back generated MIDI files for the same check.
 `manifest.json` records original and destination paths, recovered metadata,
 checksums, generated MIDI copies, and any errors. `README.txt` summarizes the
 result.
+
+During a backup, durable per-file updates are stored in
+`manifest.journal.jsonl`, with periodic compact snapshots. This avoids rewriting
+the entire library manifest for every song. An orderly finish consolidates the
+manifest and removes the journal. After interruption, keep both files together:
+**Verify backup...** replays saved progress and still reports the backup as
+incomplete. A partial trailing journal record from an interrupted write is ignored.
 
 To check an existing backup, open the utility, choose **Verify backup...**, and
 select the `MarkIV-Backup-...` folder containing `manifest.json`. Verification

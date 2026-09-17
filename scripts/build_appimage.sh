@@ -27,6 +27,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
+python3 scripts/release_metadata.py
+
 mapfile -t APP_INFO < <(
     python3 - <<'PY'
 import ast
