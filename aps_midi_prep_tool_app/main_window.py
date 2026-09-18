@@ -10552,6 +10552,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._preparing_destination = True
         try:
             self._eseq_conversion_cc7_policy = CC7_POLICY_PRESERVE
+            if profile.trim_title_spaces:
+                # Clean titles before conversion embeds them and builds filenames.
+                sorting_enabled = self.table.isSortingEnabled()
+                self.table.setSortingEnabled(False)
+                try:
+                    self._stage_trim_title_spaces_for_all(show_summary=False)
+                finally:
+                    self.table.setSortingEnabled(sorting_enabled)
             if target == "eseq":
                 self._prepare_disklavier_containers()
             source = "midi" if target == "eseq" else "eseq"

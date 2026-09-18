@@ -41,6 +41,13 @@ With screen formatting enabled, opening the title editor starts with the first
 32 characters so an overlong title can be corrected. Cancelling leaves the title
 unchanged. The **Long** column marks overlong titles without highlighting their
 characters.
+
+Standard MIDI export, E3 / DKC-800 / DKC-850, and ENSPIRE / DKC-900 preparation
+automatically removes leading and trailing title spaces and collapses repeated
+spaces. This applies to loaded songs and future imports, including titles embedded
+during E-SEQ-to-MIDI conversion. Title cleanup is staged for review and undo;
+original files change only when saved.
+
 Clavinova MDA songs are staged as Disklavier FIL through a MIDI intermediate;
 the review identifies this container conversion. Files that cannot be converted
 remain visible as unprepared, with an error, and their originals stay intact.

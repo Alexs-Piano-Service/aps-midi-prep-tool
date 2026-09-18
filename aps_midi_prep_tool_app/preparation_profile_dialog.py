@@ -14,7 +14,7 @@ from .icon_utils import apply_window_icon
 from .message_catalog import DEFAULT_LANGUAGE, normalize_language_code, translate_text
 from .preparation_profiles import (
     COMPATIBILITY_SOURCE, MEDIA_BY_KEY, PIANO_PROFILES, PIANO_PROFILE_CATEGORIES,
-    SETTING_DISK_FORMAT, SETTING_IMAGE_FORMAT,
+    SETTING_DISK_FORMAT, SETTING_IMAGE_FORMAT, SETTING_PROFILE,
     display_setting, get_preparation_medium, get_preparation_profile, proposed_settings,
 )
 
@@ -168,6 +168,12 @@ class PreparationProfileDialog(QDialog):
             "Format for Disklavier screen", self._current_value("format_disklavier_screen"),
             display_setting(changes["format_disklavier_screen"]),
         ))
+        current_profile = get_preparation_profile(self.settings.value(SETTING_PROFILE, "unsure"))
+        if profile.trim_title_spaces or current_profile.trim_title_spaces:
+            rows.append((
+                "Trim Title Spaces", display_setting(current_profile.trim_title_spaces),
+                display_setting(profile.trim_title_spaces),
+            ))
         self.changes_table.setRowCount(len(rows))
         for row, values in enumerate(rows):
             for column, text in enumerate(values):

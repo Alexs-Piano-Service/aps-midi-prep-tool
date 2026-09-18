@@ -50,6 +50,9 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Standard MIDI export, E3 / DKC-800 / DKC-850, and ENSPIRE / DKC-900 preparation
+  automatically stages title spacing cleanup for loaded songs and future imports,
+  including E-SEQ-to-MIDI conversions.
 - Windows local and signed builds share one packaging script and require the
   complete verified Greaseweazle runtime. The final signed EXE is smoke-tested
   for its window, IMG/HFE workflows, and built-in piano MP3 export.

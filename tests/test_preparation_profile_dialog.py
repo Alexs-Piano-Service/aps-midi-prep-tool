@@ -287,8 +287,9 @@ def test_usb_summary_omits_disk_defaults_but_shows_required_eseq_conversion(appl
     settings = QSettings(str(tmp_path / "profile.ini"), QSettings.IniFormat)
     dialog = PreparationProfileDialog(settings, "enspire", "usb", song_counts={"eseq": 2})
     try:
-        assert [row[0] for row in _rows(dialog)] == ["Song format", "Filenames", "Convert songs", "Format for Disklavier screen"]
-        assert _rows(dialog)[-2] == ("Convert songs", "2", "E-SEQ → MIDI (staged)")
+        assert [row[0] for row in _rows(dialog)] == ["Song format", "Filenames", "Convert songs", "Format for Disklavier screen", "Trim Title Spaces"]
+        assert _rows(dialog)[-1] == ("Trim Title Spaces", "Off", "On")
+        assert ("Convert songs", "2", "E-SEQ → MIDI (staged)") in _rows(dialog)
         dialog.profile_combo.setCurrentIndex(dialog.profile_combo.findData("custom"))
         assert not dialog.changes_table.isHidden()
         assert [row[0] for row in _rows(dialog)] == ["Filenames", "Format for Disklavier screen"]

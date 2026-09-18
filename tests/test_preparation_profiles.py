@@ -272,7 +272,9 @@ def test_dialog_restricts_media_when_switching_to_modern_usb_controller(applicat
         assert dialog.medium_combo.count() == 1
         assert dialog.medium_combo.currentData() == "usb"
         assert dialog.changes_table.item(0, 2).text() == "MIDI"
-        assert dialog.changes_table.rowCount() == 3
+        assert dialog.changes_table.rowCount() == 4
+        assert dialog.changes_table.item(3, 0).text() == "Trim Title Spaces"
+        assert dialog.changes_table.item(3, 2).text() == "On"
         dialog.profile_combo.setCurrentIndex(dialog.profile_combo.findData("custom"))
         assert dialog.changes_table.rowCount() == 2
     finally:

@@ -52,6 +52,7 @@ class PianoProfile:
     category: str = "disklavier"
     source_label: str = "APS Disklavier Compatibility Table"
     preparation_note: str = ""
+    trim_title_spaces: bool = False
 
 
 FLOPPY_MEDIA = ("original", "nalbantov", "flashfloppy_img", "flashfloppy_hfe", "emulator_custom")
@@ -95,11 +96,13 @@ PIANO_PROFILES = (
         "e3_850", "E3 / DKC-800 / DKC-850", "midi", ("midi", "eseq"), (0, 1),
         None, ("usb",), "usb", "documented",
         "Use MIDI folder export for USB. E-SEQ playback is supported; DKC-850 recording capabilities depend on the host piano.",
+        trim_title_spaces=True,
     ),
     PianoProfile(
         "enspire", "ENSPIRE / DKC-900", "midi", ("midi",), (0, 1),
         None, ("usb",), "usb", "documented",
         "Use MIDI folder export for USB. E-SEQ songs are prepared as MIDI before delivery; E-SEQ playback is not supported.",
+        trim_title_spaces=True,
     ),
     PianoProfile(
         "midi_export", "Standard MIDI export / modern playback", "midi", ("midi",), (0, 1),
@@ -107,6 +110,7 @@ PIANO_PROFILES = (
         "Preserve MIDI channels, instruments, pedals, and metadata. Check the destination player's own requirements.",
         "",
         category="general",
+        trim_title_spaces=True,
     ),
     PianoProfile(
         "pianodisc_128plus", "PDS-128 Plus", "midi", ("midi",), (0,),
