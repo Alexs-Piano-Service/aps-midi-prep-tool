@@ -235,11 +235,16 @@ class DropTableWidget(QTableWidget):
             return generation != self._zip_import_generation or progress.wasCanceled()
 
         def report_progress(completed, total):
-            progress.setRange(0, max(1, total))
+            # An unknown total shows activity while the ZIP directory is read.
+            # Once known, byte counts advance even within a single large file.
+            progress.setRange(0, total)
             progress.setValue(completed)
             QApplication.processEvents()
 
         try:
+            # Paint before opening the archive, which may itself take time.
+            progress.show()
+            QApplication.processEvents()
             for path in paths:
                 if not self._is_zip_path(path):
                     expanded.append(path)
@@ -248,7 +253,7 @@ class DropTableWidget(QTableWidget):
                 try:
                     members = extract_zip(
                         path, directory.name,
-                        progress=report_progress,
+                        byte_progress=report_progress,
                         is_cancelled=cancelled,
                     )
                     # Keep companion metadata on disk, but only import files the

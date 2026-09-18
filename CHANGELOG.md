@@ -68,6 +68,9 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- ZIP extraction shows its progress dialog before reading the archive and
+  advances by bytes while unpacking large files. Windows ZIP-drop regression
+  tests compare paths independently of their separator spelling.
 - Mark IV translation tests preserve platform-specific path separators and
   exercise both Windows and POSIX paths on every platform.
 - Translation coverage now includes recovery dialogs, Mark IV diagnostics,

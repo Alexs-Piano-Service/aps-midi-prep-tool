@@ -181,7 +181,8 @@ def test_bad_or_empty_zip_does_not_block_other_dropped_files(application, tmp_pa
         archive.write_bytes(b"not a zip")
     direct = tmp_path / "direct.mid"
     _drop(table, archive, direct)
-    assert added == [str(direct)]
+    # Qt uses forward slashes for local URLs, including on Windows.
+    assert [Path(path) for path in added] == [direct]
     assert len(errors) == 1
     assert table._zip_imports == []
     parent.deleteLater()
