@@ -64,6 +64,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Mark IV translation tests preserve platform-specific path separators and
+  exercise both Windows and POSIX paths on every platform.
 - Translation coverage now includes recovery dialogs, Mark IV diagnostics,
   malformed MIDI/E-SEQ errors, batch results, and file-list tooltips in all
   12 languages. Switching languages refreshes existing controls and sorted

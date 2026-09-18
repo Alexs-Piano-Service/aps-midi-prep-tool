@@ -1,7 +1,7 @@
 """Exercise nested warnings, backup reports, and toolkit labels in every language."""
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from string import Formatter
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -51,7 +51,12 @@ def test_backup_diagnostic_translations_preserve_fields_and_paths(language):
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
-def test_backup_report_localizes_nested_errors_without_changing_logs(application, tmp_path, monkeypatch, language):
+@pytest.mark.parametrize(
+    "path_type", [Path, PurePosixPath, PureWindowsPath], ids=["native", "posix", "windows"],
+)
+def test_backup_report_localizes_nested_errors_without_changing_logs(
+    application, tmp_path, monkeypatch, language, path_type,
+):
     settings = QSettings(str(tmp_path / "backup.ini"), QSettings.IniFormat)
     settings.setValue("language", language)
     dialog = MarkIVBackupDialog(settings, refresh_on_open=False)
@@ -87,10 +92,12 @@ def test_backup_report_localizes_nested_errors_without_changing_logs(application
         if language != "en":
             assert translate_text("Original filename", language) != "Original filename"
         dialog._operation = "discover"
-        device = MountedDevice("/dev/example", Path("/Music <Original>"), is_mark_iv=True)
+        device = MountedDevice("/dev/example", path_type("/Music <Original>"), is_mark_iv=True)
         dialog._succeeded([device])
+        # Localize the label while preserving the path's platform-specific separators.
+        assert dialog.source_combo.itemText(0) == str(device.mountpoint)
         assert dialog.source_combo.itemData(0, Qt.ToolTipRole) == (
-            f"{translate_text('Disklavier music', language)}  —  /dev/example  (/Music <Original>)"
+            f"{translate_text('Disklavier music', language)}  —  /dev/example  ({device.mountpoint})"
         )
     finally:
         dialog.close()
