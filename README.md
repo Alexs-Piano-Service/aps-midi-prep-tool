@@ -38,15 +38,18 @@ holds the contents of a floppy disk.
    separate Python installation.
 2. Choose **Open MIDI Folder** for MIDI or E-SEQ songs, **Open Image** for a disk
    image, or **Disk → Read Floppy...** for a physical disk. You can also drag
-   files into the main window.
+   files into the main window. Dropping a ZIP automatically extracts its contents
+   and adds supported files individually, including files in subfolders.
 3. Choose **Preparing for...** to review defaults for your controller and delivery
    method. Review song titles, filenames, and playback order.
    Applying a destination stages its required conversions. Choose **Custom**
    in the destination row to return to manual preparation.
 4. Choose **Save As** to export copies to a folder, or **Save As Image** to
    create IMG/HFE floppy images. **Save** updates the current source where
-   supported. If the Save As folder already contains the output files, confirm
-   their replacement in the overwrite prompt; this also works in the source folder.
+   supported; MIDI and E-SEQ songs imported from a ZIP prompt for a destination
+   folder. The original ZIP stays unchanged. If the Save As folder already
+   contains the output files, confirm their replacement in the overwrite prompt;
+   this also works in the source folder.
 
 Edits and conversions in the main list wait until you save. Formatting and
 writing a physical floppy require a separate confirmation. If the floppy is

@@ -9,6 +9,10 @@ with release sections grouped by version and date.
 
 ### Added
 
+- Dropping a ZIP extracts supported files from its folders and imports them
+  individually. Save prompts for a destination for imported MIDI and E-SEQ songs,
+  leaving the ZIP unchanged. Extraction progress and errors are translated in
+  all 12 languages.
 - Floppy Read, Image, Format, Save, and Write dialogs offer **Refresh** to
   detect newly connected drives without reopening the dialog. Refresh keeps
   the selected drive when available and preserves the other dialog options.

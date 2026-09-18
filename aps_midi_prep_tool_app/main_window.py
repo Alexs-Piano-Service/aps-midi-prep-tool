@@ -16504,6 +16504,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.emulatorImageWorker.cancel()
         self._reset_image_state()
         self._cleanup_midi_scratch_dir()
+        cleanup_zip_imports = getattr(self.table, "cleanup_zip_imports", None)
+        if callable(cleanup_zip_imports):
+            cleanup_zip_imports()
         super().closeEvent(event)
 
     def _handle_section_resized(self, logical_index, old_size, new_size):
@@ -17603,7 +17606,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.saveAsImageButton.setToolTip(self._lt("Save the current image session as a separate image file."))
         else:
             self.saveButton.setEnabled(True)
-            self.saveButton.setToolTip(self._lt("Write pending file changes to the currently listed files."))
+            if MidiTitleWindow._zip_import_source(self):
+                self.saveButton.setToolTip(self._lt("Save copies with current titles and filenames to a selected destination folder."))
+            else:
+                self.saveButton.setToolTip(self._lt("Write pending file changes to the currently listed files."))
             self.saveAsButton.setToolTip(self._lt("Save copies with current titles and filenames to a selected destination folder."))
             self.saveAsImageButton.setToolTip(self._lt("Create one or more floppy images from the currently listed files."))
         self._update_menu_actions()
@@ -17679,6 +17685,25 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return self.midiScratchDir
         self.midiScratchDir = tempfile.mkdtemp(prefix="aps_midi_prep_")
         return self.midiScratchDir
+
+    def _zip_source_for_path(self, path):
+        lookup = getattr(getattr(self, "table", None), "zip_source_for_path", None)
+        return lookup(path) if callable(lookup) else ""
+
+    def _zip_import_source(self):
+        table = getattr(self, "table", None)
+        lookup = getattr(table, "zip_source_for_path", None)
+        if not callable(lookup):
+            return ""
+        session = getattr(self, "image_session", None)
+        if session is not None:
+            return lookup(getattr(session, "source_path", ""))
+        for row in range(table.rowCount()):
+            item = table.item(row, 1)
+            source = lookup(item.text()) if item is not None else ""
+            if source:
+                return source
+        return ""
 
     def _set_mode_banner(self, headline, detail=""):
         text = self._lt(headline).strip().upper()
@@ -18268,6 +18293,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             for path in file_paths:
                 if not path:
                     continue
+                path = MidiTitleWindow._zip_source_for_path(self, path) or path
                 try:
                     abs_paths.append(os.path.abspath(path))
                 except OSError:
@@ -18383,7 +18409,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 source_stem = getattr(self.image_session, "source_name", "") or ""
         else:
             context_path = getattr(self, "regularModeContextPath", "") or ""
-            source_stem = os.path.basename(os.path.normpath(context_path)) if context_path else ""
+            zip_source = MidiTitleWindow._zip_import_source(self)
+            source_stem = (
+                os.path.splitext(os.path.basename(zip_source))[0]
+                if zip_source else
+                os.path.basename(os.path.normpath(context_path)) if context_path else ""
+            )
 
         return self._sanitize_export_folder_name(source_stem or "midi_export")
 
@@ -18466,6 +18497,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         if saved_dir:
             return saved_dir
+        if not fallback:
+            fallback = MidiTitleWindow._zip_import_source(self)
         fallback_dir = self._existing_directory_for_dialog_path(fallback)
         if fallback_dir:
             return fallback_dir
@@ -28779,6 +28812,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
+        if MidiTitleWindow._zip_source_for_path(self, getattr(self.image_session, "source_path", "")):
+            self.save_image_as()
+            return
         if not self._has_pending_image_changes():
             QMessageBox.information(self, "No Changes", "There are no pending image changes to save.")
             return
@@ -29982,7 +30018,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 catalog_stem = self._catalog_filename_stem()
                 source_stem = catalog_stem or f"gw_drive_{self.image_session.gw_source.drive.lower()}"
         else:
-            source_dir = os.path.dirname(self.image_session.source_path)
+            source_path = self.image_session.source_path
+            source_dir = os.path.dirname(MidiTitleWindow._zip_source_for_path(self, source_path) or source_path)
             source_stem = os.path.splitext(os.path.basename(self.image_session.source_path))[0]
             catalog_stem = ""
         source_dir = self._last_save_as_location(source_dir)
@@ -30563,6 +30600,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
         if self.is_image_mode():
             self.save_image_changes()
+            return
+
+        # Imported archive members are temporary sources. Saving a folder makes
+        # the result durable without silently changing or replacing the ZIP.
+        if MidiTitleWindow._zip_import_source(self):
+            self.save_as_changes()
             return
 
         if self.is_local_eseq_mode() and not self._ensure_pianodir_generation_for_save():
