@@ -50,6 +50,7 @@ from .midi_metadata import (
 )
 from .additional_formats import electone_mdr_to_midi, pianodisc_system3
 from .subprocess_utils import WindowsProcessTreeWaiter, windows_subprocess_kwargs
+from . import floppy_save_recovery, windows_write_guard
 
 
 class FloppyImageError(Exception):
@@ -1330,12 +1331,24 @@ def _windows_ctypes():
     return ctypes, wintypes, ctypes.WinDLL("kernel32", use_last_error=True)
 
 
+def _windows_io_buffer(size, payload=None):
+    # Volume handles use noncached I/O. Keep the backing allocation alive via
+    # from_buffer while aligning its address for 512-byte and 4K sectors.
+    import ctypes
+    backing = ctypes.create_string_buffer(int(size) + 4095)
+    offset = (-ctypes.addressof(backing)) % 4096
+    buffer = (ctypes.c_char * int(size)).from_buffer(backing, offset)
+    if payload is not None:
+        buffer.raw = payload
+    return buffer
+
+
 def _windows_last_error_message(prefix):
     ctypes, _wintypes, _kernel32 = _windows_ctypes()
     error_code = ctypes.get_last_error()
     if error_code:
         separator = " - " if str(prefix or "").endswith(":") else ": "
-        return f"{prefix}{separator}{ctypes.FormatError(error_code).strip()}"
+        return f"{prefix}{separator}[WinError {error_code}] {ctypes.FormatError(error_code).strip()}"
     return f"{prefix}."
 
 
@@ -1519,11 +1532,21 @@ def _windows_detect_floppy_size(raw_path):
                 if size > 0:
                     return size
 
+        with _WindowsRecoveryVolumeHandle(raw_path, write=False) as volume:
             for disk_format in sorted(DISK_FORMATS, key=lambda item: item.size_bytes, reverse=True):
                 try:
-                    volume.read_at(disk_format.size_bytes - 1, 1, "floppy size probe")
-                    return disk_format.size_bytes
+                    sector_size = 512
+                    data = volume.read_at_recovery(
+                        disk_format.size_bytes - sector_size, sector_size, "floppy size probe",
+                        deadline_at=time.monotonic() + 2.0,
+                    )
+                    if len(data) == sector_size:
+                        return disk_format.size_bytes
+                    if getattr(volume, "incomplete_cancel_drain", False):
+                        return 0
                 except FloppyImageError:
+                    if getattr(volume, "incomplete_cancel_drain", False):
+                        return 0
                     continue
     except FloppyImageError:
         return 0
@@ -1942,7 +1965,8 @@ def verify_image_payloads(delivered_path, prepared_raw_path, disk_format, *, can
 
 
 def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_format,
-                                    *, progress_callback=None, cancel_callback=None):
+                                    *, progress_callback=None, cancel_callback=None,
+                                    verify_entire_image=False):
     _notify_progress(progress_callback, 4, 5, "Reading back floppy contents for verification...")
     with tempfile.TemporaryDirectory(prefix="aps_floppy_readback_") as verify_dir:
         readback_path = os.path.join(verify_dir, "readback.img")
@@ -1955,6 +1979,8 @@ def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_fo
             else:
                 _gw_read_floppy(target, readback_path, progress_callback=progress_callback,
                                 cancel_callback=cancel_callback)
+            if verify_entire_image and floppy_save_recovery.digest(readback_path) != floppy_save_recovery.digest(prepared_path):
+                raise FloppyImageError("The physical floppy differs from the prepared format image.")
             return verify_image_payloads(readback_path, prepared_path, disk_format,
                                          cancel_callback=cancel_callback)
         except FloppyOperationCancelled:
@@ -3165,7 +3191,7 @@ class _WindowsVolumeHandle:
 
     def read_at(self, offset, size, label):
         self._seek(offset, label)
-        buffer = self._ctypes.create_string_buffer(int(size))
+        buffer = _windows_io_buffer(size)
         bytes_read = self._wintypes.DWORD()
         ok = self._kernel32.ReadFile(
             self.handle,
@@ -3195,7 +3221,9 @@ class _WindowsVolumeHandle:
         if self.write:
             _windows_device_io_control(self.handle, self.FSCTL_UNLOCK_VOLUME)
 
-    def write_file(self, input_path, progress_callback=None, cancel_callback=None):
+    def write_file(self, input_path, progress_callback=None, cancel_callback=None, diagnostics=None):
+        diagnostics = diagnostics if diagnostics is not None else {}
+        diagnostics.update(stage="write", api="WriteFile", bytes_written=0, target_mutation_attempted=False)
         self._seek(0, "start of floppy device")
         total_size = os.path.getsize(input_path)
         written_total = 0
@@ -3208,8 +3236,9 @@ class _WindowsVolumeHandle:
                 chunk = handle.read(chunk_size)
                 if not chunk:
                     break
-                buffer = self._ctypes.create_string_buffer(chunk)
+                buffer = _windows_io_buffer(len(chunk), chunk)
                 bytes_written = self._wintypes.DWORD()
+                diagnostics["target_mutation_attempted"] = True
                 ok = self._kernel32.WriteFile(
                     self.handle,
                     buffer,
@@ -3217,8 +3246,10 @@ class _WindowsVolumeHandle:
                     self._ctypes.byref(bytes_written),
                     None,
                 )
+                diagnostics["bytes_written"] = written_total + bytes_written.value
                 if not ok or bytes_written.value != len(chunk):
                     error_code = self._ctypes.get_last_error() if not ok else 0
+                    diagnostics["winerror"] = error_code
                     windows_error = (
                         self._ctypes.FormatError(error_code).strip()
                         if error_code
@@ -3241,19 +3272,28 @@ class _WindowsVolumeHandle:
         _raise_if_cancelled(cancel_callback)
         if progress_callback is not None and total_size > 0:
             progress_callback(99, 100, "Finalizing floppy write...")
+        diagnostics.update(stage="flush", api="FlushFileBuffers")
         if not self._kernel32.FlushFileBuffers(self.handle):
             error_code = self._ctypes.get_last_error()
-            if error_code in {self.ERROR_INVALID_FUNCTION, self.ERROR_NOT_READY}:
+            diagnostics["winerror"] = error_code
+            if error_code == self.ERROR_INVALID_FUNCTION:
                 if progress_callback is not None and total_size > 0:
                     progress_callback(
                         100,
                         100,
                         "Writing floppy complete; Windows did not confirm the final flush.",
                     )
-                return
-            raise FloppyImageError(_windows_last_error_message(f"Could not flush floppy device {self.path}"))
+                return {"confidence": "flush_unconfirmed", "bytes_written": written_total,
+                        "api": "FlushFileBuffers", "winerror": error_code}
+            error = FloppyImageError(_windows_last_error_message(f"Could not flush floppy device {self.path}"))
+            error.diagnostics = {"stage": "flush", "bytes_written": written_total,
+                                 "api": "FlushFileBuffers", "winerror": error_code,
+                                 "confidence": "partial_or_uncertain"}
+            raise error
         if progress_callback is not None and total_size > 0:
             progress_callback(100, 100, "Writing floppy complete.")
+        diagnostics.update(stage="complete", flush_confirmed=True)
+        return {"confidence": "written", "bytes_written": written_total, "flush_confirmed": True}
 
 
 class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
@@ -3479,7 +3519,7 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
                 self._error_message("Could not create a floppy read event", error_code)
             )
 
-        buffer = self._ctypes.create_string_buffer(size)
+        buffer = _windows_io_buffer(size)
         overlapped = type(self)._overlapped_type()
         overlapped.Offset = offset & 0xFFFFFFFF
         overlapped.OffsetHigh = (offset >> 32) & 0xFFFFFFFF
@@ -4796,36 +4836,38 @@ def _write_block_device(input_path, device_path, progress_callback=None, cancel_
             "You can also use Save As Image as a safer fallback."
         )
         try:
-            _write_block_device_windows_direct(
+            return _write_block_device_windows_helper(
                 input_path,
                 device_path,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
             )
-            return
         except FloppyOperationCancelled:
             raise
         except FloppyImageError as exc:
             detail = str(exc)
-            if _windows_raw_write_denied(exc):
+            failure_diagnostics = getattr(exc, "diagnostics", {})
+            if _windows_raw_write_denied(exc) and not failure_diagnostics.get("target_mutation_attempted"):
                 try:
-                    _write_block_device_windows_elevated(
+                    return _write_block_device_windows_elevated(
                         input_path,
                         device_path,
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
                     )
-                    return
                 except FloppyOperationCancelled:
                     raise
                 except FloppyImageError as elevated_exc:
+                    failure_diagnostics = getattr(elevated_exc, "diagnostics", {})
                     detail = (
                         f"{detail}\n\n"
                         f"Administrator retry failed: {elevated_exc}"
                     )
             if "Access is denied" in detail or "denied" in detail.lower() or "lock" in detail.lower():
                 detail = f"{detail}\n\n{permission_hint}"
-            raise FloppyImageError(detail) from exc
+            error = FloppyImageError(detail)
+            error.diagnostics = failure_diagnostics
+            raise error from exc
 
     permission_hint = (
         "Direct floppy writes require write permission for the block device. "
@@ -4879,27 +4921,35 @@ def _write_block_device(input_path, device_path, progress_callback=None, cancel_
         raise FloppyImageError(detail) from exc
 
 
-def _write_block_device_windows_direct(input_path, device_path, progress_callback=None, cancel_callback=None):
+def _write_block_device_windows_direct(input_path, device_path, progress_callback=None, cancel_callback=None, diagnostics=None):
     if os.name != "nt":
         raise FloppyImageError("Windows raw floppy writes are only available on Windows.")
-    with _WindowsVolumeHandle(device_path, write=True) as volume:
-        volume.lock_for_write()
-        try:
-            volume.write_file(
-                input_path,
-                progress_callback=progress_callback,
-                cancel_callback=cancel_callback,
-            )
-        finally:
-            volume.unlock_after_write()
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics.update(stage="open", api="CreateFileW", bytes_written=0, target_mutation_attempted=False)
+    try:
+        with _WindowsVolumeHandle(device_path, write=True) as volume:
+            diagnostics.update(stage="lock", api="FSCTL_LOCK_VOLUME")
+            volume.lock_for_write()
+            try:
+                return volume.write_file(
+                    input_path, progress_callback=progress_callback,
+                    cancel_callback=cancel_callback, diagnostics=diagnostics,
+                )
+            finally:
+                volume.unlock_after_write()
+    except Exception as exc:
+        diagnostics["error"] = _disk_io_error_details(exc)
+        exc.diagnostics = dict(diagnostics)
+        raise
 
 
-def _windows_raw_write_helper_command(input_path, device_path, result_path):
+def _windows_raw_write_helper_command(input_path, device_path, result_path, cancel_path=""):
     helper_args = [
         _WINDOWS_RAW_WRITE_HELPER_ARG,
         os.path.abspath(input_path),
         str(device_path),
         os.path.abspath(result_path),
+        cancel_path,
     ]
     if getattr(sys, "frozen", False):
         return sys.executable, subprocess.list2cmdline(helper_args)
@@ -4910,7 +4960,7 @@ def _windows_raw_write_helper_command(input_path, device_path, result_path):
     return sys.executable, subprocess.list2cmdline([script_path, *helper_args])
 
 
-def _run_windows_process_as_admin(executable, parameters, cancel_callback=None):
+def _run_windows_process_as_admin(executable, parameters, cancel_callback=None, cancel_path="", poll_callback=None):
     ctypes, wintypes, _kernel32 = _windows_ctypes()
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 
@@ -4965,15 +5015,25 @@ def _run_windows_process_as_admin(executable, parameters, cancel_callback=None):
         raise FloppyImageError(_windows_last_error_message("Could not request administrator approval for floppy writing"))
 
     try:
+        deadline = time.monotonic() + windows_write_guard.WRITE_TIMEOUT_SECONDS + 10
         while True:
+            if poll_callback is not None:
+                poll_callback()
+            if (cancel_callback and cancel_callback()) or time.monotonic() >= deadline:
+                # Never abandon the helper. Its watchdog acknowledges the request
+                # or terminates blocked I/O, and we wait for the process to exit.
+                _request_raw_writer_stop(cancel_path)
             result = kernel32.WaitForSingleObject(info.hProcess, INFINITE_SLICE_MS)
             if result == WAIT_OBJECT_0:
                 break
             if result == WAIT_TIMEOUT:
                 continue
             if result == WAIT_FAILED:
-                raise FloppyImageError(_windows_last_error_message("Could not wait for administrator floppy write helper"))
-            _raise_if_cancelled(cancel_callback)
+                _request_raw_writer_stop(cancel_path)
+                exit_code = wintypes.DWORD()
+                if kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code)) and exit_code.value != 259:
+                    return int(exit_code.value)
+                time.sleep(0.1)
         exit_code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code)):
             raise FloppyImageError(_windows_last_error_message("Could not read administrator floppy write result"))
@@ -4983,43 +5043,93 @@ def _run_windows_process_as_admin(executable, parameters, cancel_callback=None):
             kernel32.CloseHandle(info.hProcess)
 
 
-def _write_block_device_windows_elevated(input_path, device_path, progress_callback=None, cancel_callback=None):
-    if os.name != "nt":
-        raise FloppyImageError("Administrator retry is only available on Windows.")
-    _raise_if_cancelled(cancel_callback)
-    fd, result_path = tempfile.mkstemp(prefix="aps_raw_floppy_write_", suffix=".json")
-    os.close(fd)
-    try:
-        executable, parameters = _windows_raw_write_helper_command(input_path, device_path, result_path)
-        _notify_progress(
-            progress_callback,
-            0,
-            100,
-            "Requesting administrator approval for direct floppy write...",
-        )
-        exit_code = _run_windows_process_as_admin(
-            executable,
-            parameters,
-            cancel_callback=cancel_callback,
-        )
-        result = {}
+_WINDOWS_RAW_WRITE_LOCK = threading.Lock()
+
+
+def _request_raw_writer_stop(cancel_path):
+    if cancel_path:
         try:
-            with open(result_path, "r", encoding="utf-8") as handle:
+            with open(cancel_path, "ab"):
+                pass
+        except OSError:
+            # The helper's own deadline still applies. Do not release an active
+            # writer simply because its cancellation marker cannot be created.
+            pass
+
+
+def _write_block_device_windows_helper(input_path, device_path, progress_callback=None, cancel_callback=None, *, elevated=False):
+    if os.name != "nt":
+        raise FloppyImageError("Windows raw floppy writes are only available on Windows.")
+    with _WINDOWS_RAW_WRITE_LOCK, tempfile.TemporaryDirectory(prefix="aps_raw_writer_") as work:
+        _raise_if_cancelled(cancel_callback)
+        result_path = os.path.join(work, "result.json")
+        cancel_path = os.path.join(work, "cancel")
+        executable, parameters = _windows_raw_write_helper_command(input_path, device_path, result_path, cancel_path)
+        last_progress = None
+
+        def poll_progress():
+            nonlocal last_progress
+            try:
+                with open(result_path, encoding="utf-8") as handle:
+                    progress = json.load(handle).get("progress")
+                if progress and progress != last_progress:
+                    last_progress = progress
+                    if progress_callback is not None:
+                        progress_callback(*progress)
+            except (OSError, ValueError):
+                pass
+            except Exception:
+                # A UI callback must not release a helper that is still writing.
+                _request_raw_writer_stop(cancel_path)
+
+        if elevated:
+            _notify_progress(progress_callback, 0, 100, "Requesting administrator approval for direct floppy write...")
+            exit_code = _run_windows_process_as_admin(
+                executable, parameters, cancel_callback=cancel_callback, cancel_path=cancel_path,
+                poll_callback=poll_progress,
+            )
+        else:
+            _notify_progress(progress_callback, 0, 100, "Writing floppy image...")
+            process = subprocess.Popen(
+                subprocess.list2cmdline([executable]) + " " + parameters,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                **windows_subprocess_kwargs(),
+            )
+            deadline = time.monotonic() + windows_write_guard.WRITE_TIMEOUT_SECONDS + 10
+            while process.poll() is None:
+                poll_progress()
+                if (cancel_callback and cancel_callback()) or time.monotonic() >= deadline:
+                    _request_raw_writer_stop(cancel_path)
+                time.sleep(0.1)
+            exit_code = process.wait()
+        try:
+            with open(result_path, encoding="utf-8") as handle:
                 result = json.load(handle)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             result = {}
         if exit_code == 0 and result.get("ok"):
-            _notify_progress(progress_callback, 100, 100, "Administrator floppy write complete.")
-            return
-        helper_error = str(result.get("error") or "").strip()
-        if helper_error:
-            raise FloppyImageError(helper_error)
-        raise FloppyImageError(f"The administrator floppy write helper exited with code {exit_code}.")
-    finally:
-        try:
-            os.remove(result_path)
-        except OSError:
-            pass
+            return result.get("verification", {"confidence": "written"})
+        diagnostics = result.get("diagnostics", {})
+        # A killed/crashed helper may not have published its latest progress.
+        # Never interpret missing state as proof that the disk was untouched.
+        if not result or exit_code not in (0, 1):
+            diagnostics["target_mutation_attempted"] = True
+        diagnostics.update(method="windows_raw_helper", helper_exit_code=exit_code)
+        message = str(result.get("error") or "The floppy writer stopped before confirming completion.")
+        stopped = result.get("stop_reason")
+        if stopped == "cancelled" or (cancel_callback and cancel_callback()):
+            error = FloppyOperationCancelled(message)
+        else:
+            error = FloppyImageError(message)
+        error.diagnostics = diagnostics
+        raise error
+
+
+def _write_block_device_windows_elevated(input_path, device_path, progress_callback=None, cancel_callback=None):
+    return _write_block_device_windows_helper(
+        input_path, device_path, progress_callback=progress_callback,
+        cancel_callback=cancel_callback, elevated=True,
+    )
 
 
 def mtools_path(path):
@@ -5100,22 +5210,97 @@ def _read_image_listing_with_7z(img_path):
     return ImageListing(entries=entries, free_space=free_space, cluster_size=cluster_size)
 
 
-def _read_windows_filesystem_drive_listing(drive_path):
+def _windows_legacy_disk_space(root):
+    """Query FAT volume space when GetDiskFreeSpaceExW is unsupported."""
+    ctypes, wintypes, kernel32 = _windows_ctypes()
+    kernel32.GetDiskFreeSpaceW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetDiskFreeSpaceW.restype = wintypes.BOOL
+    sectors_per_cluster = wintypes.DWORD()
+    bytes_per_sector = wintypes.DWORD()
+    free_clusters = wintypes.DWORD()
+    total_clusters = wintypes.DWORD()
+    if not kernel32.GetDiskFreeSpaceW(
+        root, ctypes.byref(sectors_per_cluster), ctypes.byref(bytes_per_sector),
+        ctypes.byref(free_clusters), ctypes.byref(total_clusters),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    cluster_size = sectors_per_cluster.value * bytes_per_sector.value
+    if cluster_size <= 0 or total_clusters.value <= 0 or free_clusters.value > total_clusters.value:
+        raise FloppyImageError("GetDiskFreeSpaceW returned invalid floppy capacity information.")
+    return free_clusters.value * cluster_size, cluster_size
+
+
+def _disk_io_error_details(exc):
+    code = getattr(exc, "winerror", None)
+    if code is None:
+        match = re.search(r"\[WinError (\d+)\]", str(exc))
+        if match:
+            code = int(match.group(1))
+    return {
+        "type": type(exc).__name__,
+        "message": str(exc)[:2000],
+        "winerror": code,
+        "errno": getattr(exc, "errno", None),
+    }
+
+
+def _windows_floppy_disk_space(root, diagnostics):
+    attempts = diagnostics["space_queries"] = []
+    primary = {"api": "GetDiskFreeSpaceExW"}
+    attempts.append(primary)
+    try:
+        usage = shutil.disk_usage(root)
+    except OSError as exc:
+        primary.update(status="failed", error=_disk_io_error_details(exc))
+        # ERROR_NOT_SUPPORTED is a capability failure. Other failures (such as
+        # no media or access denied) must not be bypassed with another query.
+        if getattr(exc, "winerror", None) != 50:
+            raise
+    else:
+        primary.update(status="ok", free_bytes=usage.free)
+        # GetDiskFreeSpaceExW has no cluster-size output. Query the actual
+        # allocation unit as well; never budget safe staging with a guess.
+
+    fallback = {"api": "GetDiskFreeSpaceW"}
+    attempts.append(fallback)
+    try:
+        free_bytes, cluster_size = _windows_legacy_disk_space(root)
+    except Exception as exc:
+        fallback.update(status="failed", error=_disk_io_error_details(exc))
+        raise
+    fallback.update(status="ok", free_bytes=free_bytes, cluster_size=cluster_size)
+    return (usage.free if primary["status"] == "ok" else free_bytes), cluster_size
+
+
+def _read_windows_filesystem_drive_listing(drive_path, *, diagnostics=None):
     root = _windows_filesystem_root(drive_path)
     if not root:
         raise FloppyImageError(f"Invalid Windows floppy drive path: {drive_path}")
 
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics.update(root=root, stage="query_free_space")
     entries = []
+    space_error = None
     try:
-        usage = shutil.disk_usage(root)
-    except OSError as exc:
-        raise FloppyImageError(
-            f"Could not read floppy drive {drive_path}: {exc}. "
-            "If this is a protected or damaged disk, use Disk > Read Floppy... with recovery instead."
-        ) from exc
+        free_bytes, cluster_size = _windows_floppy_disk_space(root, diagnostics)
+    except (OSError, FloppyImageError) as exc:
+        space_error = exc
+        cluster_size = None
+    diagnostics["directory_status"] = "running"
+
+    def walk_error(exc):
+        # os.walk otherwise silently treats an unreadable directory as empty.
+        raise exc
 
     try:
-        for current_root, dirnames, filenames in os.walk(root):
+        diagnostics["stage"] = "list_directory"
+        for current_root, dirnames, filenames in os.walk(root, onerror=walk_error):
             dirnames[:] = [
                 dirname
                 for dirname in dirnames
@@ -5123,30 +5308,42 @@ def _read_windows_filesystem_drive_listing(drive_path):
                     os.path.relpath(os.path.join(current_root, dirname), root)
                 )
             ]
+            if dirnames:
+                raise FloppyImageError("File-level floppy saving does not support folders. Use an explicitly selected image write instead.")
             for filename in filenames:
                 full_path = os.path.join(current_root, filename)
                 relative_path = os.path.relpath(full_path, root)
                 image_path = _normalize_image_path(relative_path)
                 if _is_windows_volume_metadata_path(image_path):
                     continue
-                try:
-                    stat_result = os.stat(full_path)
-                except OSError:
-                    continue
+                diagnostics.update(stage="stat_file", file=image_path)
+                stat_result = os.stat(full_path)
                 entries.append(
                     ImageEntry(
                         path=image_path,
                         size=stat_result.st_size,
-                        packed_size=allocated_size(stat_result.st_size, 1024),
+                        packed_size=allocated_size(stat_result.st_size, cluster_size) if cluster_size else 0,
                         attributes="",
                         modified_time=stat_result.st_mtime,
                     )
                 )
-    except OSError as exc:
+                diagnostics["stage"] = "list_directory"
+    except (OSError, FloppyImageError) as exc:
+        diagnostics["directory_status"] = "failed"
+        diagnostics["error"] = _disk_io_error_details(exc)
         raise FloppyImageError(f"Could not list files on floppy drive {drive_path}: {exc}") from exc
 
+    diagnostics.update(directory_status="complete", files=len(entries))
+    if space_error is not None:
+        diagnostics["stage"] = "query_free_space"
+        raise FloppyImageError(
+            f"Windows could not report filesystem space for {root} "
+            f"({diagnostics['space_queries'][-1]['api']}): {space_error}"
+        ) from space_error
     entries.sort(key=lambda item: item.path.lower())
-    return ImageListing(entries=entries, free_space=usage.free, cluster_size=1024)
+    diagnostics.update(stage="complete", files=len(entries))
+    diagnostics.pop("file", None)
+    return ImageListing(entries=entries, free_space=free_bytes, cluster_size=cluster_size)
 
 
 def _windows_drive_file_path(root, image_path):
@@ -5187,28 +5384,73 @@ def run_windows_raw_write_helper_from_argv(argv=None):
     argv = list(sys.argv if argv is None else argv)
     if not _helper_argv_uses_windows_raw_write(argv):
         return None
-    result = {"ok": False}
+    result = {"ok": False, "diagnostics": {}}
     result_path = argv[4] if len(argv) >= 5 else ""
+    cancel_path = argv[5] if len(argv) >= 6 else ""
+    stopped = None
+    publish_lock = threading.Lock()
+
+    def publish():
+        if not result_path:
+            return
+        with publish_lock:
+            temporary = result_path + ".new"
+            snapshot = dict(result, diagnostics=dict(result["diagnostics"]))
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(snapshot, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, result_path)
+
+    def request_stop(reason):
+        result["stop_reason"] = reason
+        result["error"] = "Floppy writing was cancelled; the disk may be partially written." if reason == "cancelled" else "Floppy writing exceeded its time limit; the disk may be partially written."
+        try:
+            publish()
+        except OSError:
+            pass
+
+    def force_exit():
+        # Only the disposable helper exits. Termination cancels its pending I/O;
+        # the UI keeps waiting until Windows signals process termination.
+        ctypes, wintypes, kernel32 = _windows_ctypes()
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess(kernel32.GetCurrentProcess(), 125)
+
+    def progress(step, total, message):
+        result["progress"] = [step, total, message]
+        publish()
+
     try:
         if os.name != "nt":
             raise FloppyImageError("The elevated floppy write helper is only available on Windows.")
-        if len(argv) < 5:
-            raise FloppyImageError("The elevated floppy write helper received incomplete arguments.")
-        input_path = argv[2]
-        device_path = argv[3]
-        _write_block_device_windows_direct(input_path, device_path)
-        result = {"ok": True}
+        if len(argv) < 6 or not cancel_path:
+            raise FloppyImageError("The floppy write helper received incomplete arguments.")
+        stopped = windows_write_guard.start_watchdog(cancel_path, request_stop, force_exit)
+        verification = _write_block_device_windows_direct(
+            argv[2], argv[3], diagnostics=result["diagnostics"],
+            progress_callback=progress,
+            cancel_callback=lambda: bool(result.get("stop_reason")) or os.path.exists(cancel_path),
+        )
+        result.update(ok=True, verification=verification)
         return 0
     except Exception as exc:
-        result = {"ok": False, "error": str(exc)}
+        result.update(ok=False, error=result.get("error") or str(exc))
+        if isinstance(exc, FloppyOperationCancelled):
+            result["stop_reason"] = "cancelled"
+        result["diagnostics"].update(getattr(exc, "diagnostics", {}))
         return 1
     finally:
-        if result_path:
-            try:
-                with open(result_path, "w", encoding="utf-8") as handle:
-                    json.dump(result, handle)
-            except OSError:
-                pass
+        try:
+            publish()
+        except OSError:
+            pass
+        finally:
+            # The parent also waits for final result publication. Keep the
+            # watchdog active if its flush or replacement blocks.
+            if stopped is not None:
+                stopped.set()
 
 
 def _image_entry_key(entry):
@@ -5280,9 +5522,9 @@ def _read_fat12_block_device_listing(device_path):
     )
 
 
-def read_image_listing(img_path):
+def read_image_listing(img_path, *, diagnostics=None):
     if os.name == "nt" and _windows_filesystem_root(img_path):
-        return _read_windows_filesystem_drive_listing(img_path)
+        return _read_windows_filesystem_drive_listing(img_path, diagnostics=diagnostics)
     if _is_block_device_path(img_path):
         return _read_fat12_block_device_listing(img_path)
     try:
@@ -8214,6 +8456,10 @@ class FloppyImageSession:
                 progress_callback=write_progress,
                 cancel_callback=cancel_callback,
             )
+            session.last_write_verification = _verify_physical_floppy_contents(
+                session.working_img_path, "floppy_usb", drive_info, disk_format,
+                progress_callback=progress_callback, cancel_callback=cancel_callback,
+            )
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 100, 100, "Opening prepared floppy...")
             session.format_applied_lightly = True
@@ -8598,10 +8844,14 @@ class FloppyImageSession:
             )
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 98, 100, "Verifying formatted floppy...")
-            read_image_listing(working_img)
+            verification = _verify_physical_floppy_contents(
+                working_img, "floppy_usb", drive_info, disk_format,
+                progress_callback=progress_callback, cancel_callback=cancel_callback,
+                verify_entire_image=True,
+            )
             _notify_progress(progress_callback, 100, 100, "Opening formatted floppy...")
             _raise_if_cancelled(cancel_callback)
-            return cls(
+            session = cls(
                 drive_info.path,
                 "img",
                 temp_dir,
@@ -8612,6 +8862,8 @@ class FloppyImageSession:
                 source_name=f"{drive_info.path} - {disk_format.label}",
                 drive_info=drive_info,
             )
+            session.last_write_verification = verification
+            return session
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
@@ -10061,141 +10313,199 @@ class FloppyImageSession:
                 os.remove(temp_output)
 
     def _sync_modified_image_files_to_windows_drive(
-        self,
-        modified_img,
-        drive_path,
-        progress_callback=None,
-        cancel_callback=None,
+        self, modified_img, drive_path, progress_callback=None, cancel_callback=None,
+    ):
+        diagnostics = self.last_floppy_save_diagnostics = {
+            "operation": "save_files", "method": "windows_filesystem",
+            "drive": drive_path, "stage": "prepare_recovery", "status": "running",
+            "target_mutation_attempted": False, "files_removed": 0, "files_copied": 0,
+            "files_staged": 0, "bytes_staged": 0,
+        }
+        package = None
+        try:
+            _raise_if_cancelled(cancel_callback)
+            package = floppy_save_recovery.SaveRecoveryPackage(drive_path, modified_img)
+            diagnostics["recovery_directory"] = str(package.directory)
+            self._sync_windows_drive_files(
+                modified_img, drive_path, diagnostics, package,
+                progress_callback=progress_callback, cancel_callback=cancel_callback,
+            )
+            diagnostics.update(status="complete", stage="complete")
+            diagnostics.pop("file", None)
+            package.checkpoint(status="complete", diagnostics=dict(diagnostics))
+        except Exception as exc:
+            diagnostics["status"] = "cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed"
+            diagnostics["error"] = _disk_io_error_details(exc)
+            if exc.__cause__ is not None:
+                diagnostics["cause"] = _disk_io_error_details(exc.__cause__)
+            changed = diagnostics["target_mutation_attempted"]
+            self.last_write_verification = {
+                "confidence": "partial_or_uncertain" if changed else "not_written",
+                "hardware_tested": False,
+            }
+            if package is not None:
+                try:
+                    package.checkpoint(status=diagnostics["status"], diagnostics=dict(diagnostics))
+                except OSError as journal_error:
+                    diagnostics["journal_error"] = str(journal_error)
+            raise
+        diagnostics.update(status="complete", stage="complete")
+        diagnostics.pop("file", None)
+
+    def _sync_windows_drive_files(
+        self, modified_img, drive_path, diagnostics, package,
+        progress_callback=None, cancel_callback=None,
     ):
         root = _windows_filesystem_root(drive_path)
         if not root:
             raise FloppyImageError(f"Invalid Windows floppy drive path: {drive_path}")
-
         source_listing = read_image_listing(modified_img)
-        target_listing = read_image_listing(drive_path)
-        source_entries = list(source_listing.entries)
-        target_entries = list(target_listing.entries)
-        source_by_key = {_image_entry_key(entry): entry for entry in source_entries}
-        target_by_key = {_image_entry_key(entry): entry for entry in target_entries}
-        nested_entries = [
-            entry.path
-            for entry in source_entries + target_entries
-            if entry.directory
-        ]
-        if nested_entries:
+        diagnostics.update(stage="preflight_listing", preflight_listing={})
+        target_listing = read_image_listing(drive_path, diagnostics=diagnostics["preflight_listing"])
+        source = {_image_entry_key(entry): entry for entry in source_listing.entries}
+        target = {_image_entry_key(entry): entry for entry in target_listing.entries}
+        if any(entry.directory for entry in (*source.values(), *target.values())):
             raise FloppyImageError(
                 "File-level Save To Floppy only supports root-directory floppy files. "
                 "Use Disk > Write Current Image to Floppy... for disks with folders."
             )
 
-        permission_hint = (
-            "Close File Explorer windows using the floppy, make sure the disk is not write-protected, "
-            "and try again."
+        diagnostics["stage"] = "check_target_identity"
+        same_source = (
+            getattr(self, "source_kind", "") == "floppy_usb"
+            and _windows_filesystem_root(getattr(self, "source_path", "")) == root
         )
-        compare_keys = [
-            key
-            for key, source_entry in source_by_key.items()
-            if (
-                key in target_by_key
-                and source_entry.size == target_by_key[key].size
-                and not _must_refresh_floppy_sync_entry(source_entry)
+        if same_source:
+            baseline_path = self.working_img_path
+            baseline = {_image_entry_key(entry): entry for entry in read_image_listing(baseline_path).entries}
+            if set(baseline) != set(target):
+                raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
+        else:
+            baseline = {}
+            if target:
+                raise FloppyImageError("Read the target floppy before replacing its existing files with Save To Floppy.")
+
+        originals = {}
+        for key, entry in target.items():
+            _raise_if_cancelled(cancel_callback)
+            path = _windows_drive_file_path(root, entry.path)
+            original = package.retain("originals", entry.path, path)
+            originals[key] = original
+            expected_bytes = _read_fat12_file_bytes(baseline_path, baseline[key].path)
+            if baseline[key].size != entry.size or hashlib.sha256(expected_bytes).hexdigest() != floppy_save_recovery.digest(original):
+                raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
+
+        diagnostics["stage"] = "prepare_replacements"
+        replacements = {}
+        intended = {}
+        for key, entry in source.items():
+            _raise_if_cancelled(cancel_callback)
+            extracted = os.path.join(self.temp_dir, f"save_{uuid.uuid4().hex}.bin")
+            try:
+                self._extract_from_image(modified_img, entry.path, extracted, cancel_callback=cancel_callback)
+                saved = package.retain("replacements", entry.path, extracted)
+            finally:
+                if os.path.exists(extracted):
+                    os.remove(extracted)
+            intended[key] = {"size": entry.size, "sha256": floppy_save_recovery.digest(saved)}
+            if key not in originals or floppy_save_recovery.digest(originals[key]) != intended[key]["sha256"]:
+                replacements[key] = saved
+
+        # Retain all predecessors until every new file has been staged and read
+        # back. Near-full media is rejected instead of freeing space by deletion.
+        needed = sum(allocated_size(source[key].size, target_listing.cluster_size) for key in replacements)
+        diagnostics.update(stage="check_staging_space", staging_bytes_required=needed,
+                           free_bytes=target_listing.free_space)
+        if needed > target_listing.free_space:
+            raise FloppyImageError(
+                f"Safe floppy saving needs {needed} bytes of staging space; only {target_listing.free_space} are available. "
+                "No files were changed. Save As Image, then write a backed-up or spare disk instead."
             )
-        ]
-        total_steps = max(1, len(compare_keys) + len(target_entries) + len(source_entries) + 1)
-        step = 0
+        package.checkpoint(status="ready", expected=intended)
+
+        def check_originals(staged_names=()):
+            listing = read_image_listing(drive_path)
+            actual = {_image_entry_key(entry): entry for entry in listing.entries}
+            if set(actual) != set(target) | set(staged_names):
+                raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
+            for key, entry in target.items():
+                _raise_if_cancelled(cancel_callback)
+                if floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != package.manifest["originals"][target[key].path]["sha256"]:
+                    raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
+
+        check_originals()
+        staged = {}
         mcopy = _require_command("mcopy")
-        preserved_keys = set()
-        temp_extract_dir = tempfile.mkdtemp(prefix="aps_floppy_file_save_", dir=self.temp_dir)
-        try:
-            for key in sorted(compare_keys):
-                _raise_if_cancelled(cancel_callback)
-                source_entry = source_by_key[key]
-                target_entry = target_by_key[key]
-                step += 1
-                _notify_progress(
-                    progress_callback,
-                    step,
-                    total_steps,
-                    f"Checking existing {source_entry.path} on floppy...",
-                )
-                source_extract_path = os.path.join(
-                    temp_extract_dir,
-                    f"{uuid.uuid4().hex}_{os.path.basename(source_entry.path)}",
-                )
-                self._extract_from_image(
-                    modified_img,
-                    source_entry.path,
-                    source_extract_path,
-                    cancel_callback=cancel_callback,
-                )
-                if _files_have_same_content(
-                    source_extract_path,
-                    _windows_drive_file_path(root, target_entry.path),
-                ):
-                    preserved_keys.add(key)
+        for key, saved in replacements.items():
+            _raise_if_cancelled(cancel_callback)
+            entry = source[key]
+            diagnostics.update(stage="stage_file", file=entry.path)
+            # 8.3 names also work on Yamaha FAT volumes. Never reuse a name.
+            name = "APS" + uuid.uuid4().hex[:5].upper() + ".TMP"
+            while name in source or name in target or os.path.lexists(_windows_drive_file_path(root, name)):
+                name = "APS" + uuid.uuid4().hex[:5].upper() + ".TMP"
+            path = _windows_drive_file_path(root, name)
+            staged[key] = path
+            package.before("stage", name)
+            diagnostics["target_mutation_attempted"] = True
+            # Reserve the name exclusively before asking mcopy to populate it.
+            with open(path, "xb"):
+                pass
+            _notify_progress(progress_callback, len(staged), max(1, len(replacements)), f"Copying {entry.path} to floppy...")
+            self._run_mtools(
+                [mcopy, "-o", "-i", modified_img, mtools_path(entry.path), _windows_mcopy_host_path(root, name)],
+                f"Could not copy {entry.path} to the floppy", cancel_callback=cancel_callback,
+            )
+            floppy_save_recovery.sync_file(path)
+            if os.path.getsize(path) != entry.size or floppy_save_recovery.digest(path) != intended[key]["sha256"]:
+                raise FloppyImageError(f"Staged floppy file verification failed: {entry.path}")
+            diagnostics["files_staged"] += 1
+            diagnostics["bytes_staged"] += entry.size
+            package.after()
 
-            for entry in sorted(target_entries, key=lambda item: item.path.lower()):
-                _raise_if_cancelled(cancel_callback)
-                step += 1
-                key = _image_entry_key(entry)
-                if key in preserved_keys:
-                    _notify_progress(
-                        progress_callback,
-                        step,
-                        total_steps,
-                        f"Keeping unchanged {entry.path} on floppy...",
-                    )
-                    continue
-                _notify_progress(
-                    progress_callback,
-                    step,
-                    total_steps,
-                    f"Removing old {entry.path} from floppy...",
-                )
-                target_path = _windows_drive_file_path(root, entry.path)
-                try:
-                    if os.path.isfile(target_path) or os.path.islink(target_path):
-                        os.remove(target_path)
-                except OSError as exc:
-                    raise FloppyImageError(
-                        f"Could not remove {entry.path} from the floppy: {exc}\n\n{permission_hint}"
-                    ) from exc
+        # Recheck names and contents immediately before publication.
+        check_originals(os.path.basename(path).upper() for path in staged.values())
 
-            for entry in sorted(source_entries, key=lambda item: item.path.lower()):
-                _raise_if_cancelled(cancel_callback)
-                step += 1
-                key = _image_entry_key(entry)
-                if key in preserved_keys:
-                    _notify_progress(
-                        progress_callback,
-                        step,
-                        total_steps,
-                        f"Skipping unchanged {entry.path}...",
-                    )
-                    continue
-                _notify_progress(
-                    progress_callback,
-                    step,
-                    total_steps,
-                    f"Copying {entry.path} to floppy...",
-                )
-                self._run_mtools(
-                    [
-                        mcopy,
-                        "-i",
-                        modified_img,
-                        mtools_path(entry.path),
-                        _windows_mcopy_host_path(root, entry.path),
-                    ],
-                    f"Could not copy {entry.path} to the floppy",
-                    cancel_callback=cancel_callback,
-                )
-        finally:
-            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+        def publish(key):
+            _raise_if_cancelled(cancel_callback)
+            entry = source[key]
+            diagnostics.update(stage="publish_file", file=entry.path)
+            package.before("replace", entry.path)
+            diagnostics["target_mutation_attempted"] = True
+            os.replace(staged[key], _windows_drive_file_path(root, entry.path))
+            diagnostics["files_copied"] += 1
+            package.after()
 
-        _raise_if_cancelled(cancel_callback)
-        _notify_progress(progress_callback, total_steps, total_steps, "Checking floppy directory...")
-        read_image_listing(drive_path)
+        catalogs = [key for key in replacements if is_eseq_directory_path(source[key].path)]
+        for key in sorted(set(replacements) - set(catalogs)):
+            publish(key)
+
+        for key in sorted(set(target) - set(source)):
+            _raise_if_cancelled(cancel_callback)
+            entry = target[key]
+            diagnostics.update(stage="remove_file", file=entry.path)
+            package.before("delete", entry.path)
+            diagnostics["target_mutation_attempted"] = True
+            os.remove(_windows_drive_file_path(root, entry.path))
+            diagnostics["files_removed"] += 1
+            package.after()
+
+        for key in sorted(catalogs):
+            publish(key)
+
+        diagnostics.update(stage="post_write_listing", post_write_listing={})
+        diagnostics.pop("file", None)
+        final = read_image_listing(drive_path, diagnostics=diagnostics["post_write_listing"])
+        actual = {_image_entry_key(entry): entry for entry in final.entries}
+        if set(actual) != set(intended):
+            raise FloppyImageError("Floppy verification failed: the final file list differs from the prepared image.")
+        diagnostics["stage"] = "verify_file_contents"
+        for key, entry in actual.items():
+            _raise_if_cancelled(cancel_callback)
+            diagnostics["file"] = entry.path
+            if entry.size != intended[key]["size"] or floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != intended[key]["sha256"]:
+                raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
+        diagnostics["file_contents_verified"] = True
 
     def _sync_modified_image_files_to_floppy_drive(
         self,
@@ -10506,6 +10816,7 @@ class FloppyImageSession:
         cancel_callback=None,
         verify_after_write=False,
     ):
+        self.last_floppy_save_diagnostics = {}
         self.last_write_verification = {"confidence": "not_written", "hardware_tested": False}
         modified_img = self.create_modified_image(
             renames=renames,
@@ -10526,6 +10837,7 @@ class FloppyImageSession:
             reports = ()
             if self.source_kind == "floppy_usb":
                 _notify_progress(progress_callback, 4, 5, f"Saving files to floppy {self.source_path}...")
+                self.last_write_verification = {"confidence": "partial_or_uncertain", "hardware_tested": False}
                 self._sync_modified_image_files_to_floppy_drive(
                     modified_img,
                     self.source_path,
@@ -10535,6 +10847,7 @@ class FloppyImageSession:
             elif self.source_kind == "floppy_gw":
                 drive_name = self.gw_source.drive if self.gw_source is not None else "A"
                 _notify_progress(progress_callback, 4, 5, f"Writing Greaseweazle drive {drive_name}...")
+                self.last_write_verification = {"confidence": "partial_or_uncertain", "hardware_tested": False}
                 write_sector_map = _gw_write_floppy(
                     self.gw_source,
                     modified_img,
@@ -10570,17 +10883,38 @@ class FloppyImageSession:
                     target = self.gw_source if self.source_kind == "floppy_gw" else (
                         self.drive_info or FloppyDriveInfo(self.source_path, self.disk_format.size_bytes)
                     )
+                    self.last_floppy_save_diagnostics["stage"] = "readback"
                     self.last_write_verification = _verify_physical_floppy_contents(
                         modified_img, self.source_kind, target, self.disk_format,
                         progress_callback=progress_callback, cancel_callback=cancel_callback,
                     )
             if not self.source_kind.startswith("floppy"):
                 _raise_if_cancelled(cancel_callback)
+            if self.source_kind.startswith("floppy"):
+                self.last_floppy_save_diagnostics["stage"] = "update_session"
             os.replace(modified_img, self.working_img_path)
             self._extracted_files.clear()
             self.repair_changed = False
             self.repair_note = "Floppy saved." if self.source_kind.startswith("floppy") else "Image saved."
             self.latest_gw_sector_reports = reports
+            self.last_floppy_save_diagnostics.update(stage="complete", status="complete")
+        except Exception as exc:
+            failure = getattr(exc, "diagnostics", {})
+            if failure:
+                self.last_floppy_save_diagnostics = dict(failure, status="cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed")
+                self.last_write_verification = {
+                    "confidence": "partial_or_uncertain" if failure.get("target_mutation_attempted") else "not_written",
+                    "hardware_tested": False,
+                }
+            elif self.last_write_verification.get("confidence") in {"written", "flush_unconfirmed", "partial_or_uncertain"}:
+                self.last_floppy_save_diagnostics.setdefault("stage", "write")
+                self.last_floppy_save_diagnostics.setdefault("target_mutation_attempted", True)
+                self.last_floppy_save_diagnostics.update(
+                    status="cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed",
+                    error=_disk_io_error_details(exc),
+                )
+            raise
+
         finally:
             temp_output = locals().get("temp_output")
             if temp_output and os.path.exists(temp_output):
@@ -10608,6 +10942,7 @@ class FloppyImageSession:
         progress_callback=None,
         cancel_callback=None,
     ):
+        self.last_floppy_save_diagnostics = {}
         self.last_write_verification = {"confidence": "not_written", "hardware_tested": False}
         modified_img = self.create_modified_image(
             renames=renames,
@@ -10632,6 +10967,7 @@ class FloppyImageSession:
                     raise FloppyImageError("Invalid floppy drive selection.")
                 if file_level:
                     _notify_progress(progress_callback, 4, 5, f"Saving files to floppy {target.path}...")
+                    self.last_write_verification = {"confidence": "partial_or_uncertain", "hardware_tested": False}
                     self._sync_modified_image_files_to_floppy_drive(
                         modified_img,
                         target.path,
@@ -10640,34 +10976,15 @@ class FloppyImageSession:
                     )
                 else:
                     _notify_progress(progress_callback, 4, 5, f"Writing floppy {target.path}...")
-                    try:
-                        _write_block_device(
-                            modified_img,
-                            target.path,
-                            progress_callback=progress_callback,
-                            cancel_callback=cancel_callback,
-                        )
-                    except FloppyImageError as exc:
-                        if not _windows_raw_write_denied(exc):
-                            raise
-                        _notify_progress(
-                            progress_callback,
-                            4,
-                            5,
-                            "Windows denied direct floppy image writing; saving files through the mounted drive...",
-                        )
-                        try:
-                            self._sync_modified_image_files_to_floppy_drive(
-                                modified_img,
-                                target.path,
-                                progress_callback=progress_callback,
-                                cancel_callback=cancel_callback,
-                            )
-                        except FloppyImageError as fallback_exc:
-                            raise FloppyImageError(
-                                "Windows would not allow a full image write to the floppy drive. "
-                                f"The app tried copying files to the mounted drive instead, but that also failed: {fallback_exc}"
-                            ) from fallback_exc
+                    self.last_write_verification = {"confidence": "partial_or_uncertain", "hardware_tested": False}
+                    outcome = _write_block_device(
+                        modified_img, target.path, progress_callback=progress_callback,
+                        cancel_callback=cancel_callback,
+                    )
+                    if isinstance(outcome, dict):
+                        self.last_write_verification = outcome
+                        self.last_floppy_save_diagnostics = dict(outcome, method="raw", stage="complete", status="complete", target_mutation_attempted=True)
+                        verify_after_write = verify_after_write or outcome.get("confidence") == "flush_unconfirmed"
             elif file_level:
                 raise FloppyImageError(
                     "File-level Save To Floppy requires a floppy drive. "
@@ -10677,6 +10994,7 @@ class FloppyImageSession:
                 if not isinstance(target, GreaseweazleFloppySource):
                     raise FloppyImageError("Invalid Greaseweazle source selection.")
                 _notify_progress(progress_callback, 4, 5, f"Writing Greaseweazle drive {target.drive}...")
+                self.last_write_verification = {"confidence": "partial_or_uncertain", "hardware_tested": False}
                 write_sector_map = _gw_write_floppy(
                     target,
                     modified_img,
@@ -10694,14 +11012,34 @@ class FloppyImageSession:
                 )
             else:
                 raise FloppyImageError("Invalid floppy write target.")
-            self.last_write_verification = {"confidence": "written", "hardware_tested": False}
+            if self.last_write_verification.get("confidence") != "flush_unconfirmed":
+                self.last_write_verification = {"confidence": "written", "hardware_tested": False}
             if verify_after_write:
+                self.last_floppy_save_diagnostics["stage"] = "readback"
                 self.last_write_verification = _verify_physical_floppy_contents(
                     modified_img, target_kind, target, self.disk_format,
                     progress_callback=progress_callback, cancel_callback=cancel_callback,
                 )
             _notify_progress(progress_callback, 5, 5, "Floppy write complete.")
             self.latest_gw_sector_reports = reports
+            self.last_floppy_save_diagnostics.update(stage="complete", status="complete")
+        except Exception as exc:
+            failure = getattr(exc, "diagnostics", {})
+            if failure:
+                self.last_floppy_save_diagnostics = dict(failure, status="cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed")
+                self.last_write_verification = {
+                    "confidence": "partial_or_uncertain" if failure.get("target_mutation_attempted") else "not_written",
+                    "hardware_tested": False,
+                }
+            elif self.last_write_verification.get("confidence") in {"written", "flush_unconfirmed", "partial_or_uncertain"}:
+                self.last_floppy_save_diagnostics.setdefault("stage", "write")
+                self.last_floppy_save_diagnostics.setdefault("target_mutation_attempted", True)
+                self.last_floppy_save_diagnostics.update(
+                    status="cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed",
+                    error=_disk_io_error_details(exc),
+                )
+            raise
+
         finally:
             if os.path.exists(modified_img):
                 os.remove(modified_img)

@@ -96,8 +96,8 @@ def test_onboarding_displays_localized_bodies_notice_menu_paths_and_pagination(m
             assert stack.currentIndex() == index
             assert selector.currentText() == translate_text(source_title, code)
             labels = stack.currentWidget().findChildren(QLabel)
-            assert labels[0].text() == translate_text(source_title, code)
-            body = labels[1].text()
+            assert len(labels) == 1
+            body = labels[0].text()
             assert html.escape(ONBOARDING_TRANSLATIONS[code]["notice"]) in body
             # Every prose fragment must come from the selected language. This
             # catches the old path that translated only titles and buttons.

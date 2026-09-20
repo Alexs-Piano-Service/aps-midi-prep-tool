@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 
+from .midi_metadata import TITLE_DISPLAY_ENCODINGS
 from .preparation_profiles import (
     FLOPPY_MEDIA, MEDIA_BY_KEY, PROFILES_BY_KEY,
     SETTING_DISK_FORMAT, SETTING_IMAGE_FORMAT, SETTING_MEDIUM, SETTING_PROFILE,
@@ -55,6 +56,7 @@ INTEGER_SETTINGS = frozenset({
 })
 STRING_SETTINGS = PATH_SETTINGS | frozenset({
     "language", "appearance_mode", "font_scale", "eseq_to_midi_switch_mode",
+    "title_display_encoding",
     "greaseweazle_device_path", "greaseweazle_drive", "read_floppy_source_kind",
     "read_floppy_gw_image_type", "image_floppy_drive_image_type",
     "read_floppy_gw_format", "disk_recovery_image_format",
@@ -126,6 +128,8 @@ def load_startup_config(path=None):
                 raise ValueError(f"{key}: expected an integer from 0 to 2147483647.")
         if SETTING_PROFILE in values and values[SETTING_PROFILE] not in PROFILES_BY_KEY:
             raise ValueError(f"Unknown preparation_profile: {values[SETTING_PROFILE]}")
+        if "title_display_encoding" in values and values["title_display_encoding"] not in dict(TITLE_DISPLAY_ENCODINGS):
+            raise ValueError(f"Unknown title_display_encoding: {values['title_display_encoding']}")
         if SETTING_MEDIUM in values:
             medium_key = values[SETTING_MEDIUM]
             if medium_key not in MEDIA_BY_KEY:

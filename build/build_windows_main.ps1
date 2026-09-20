@@ -14,6 +14,8 @@ $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RepoRoot
 & $Python scripts/release_metadata.py
 if ($LASTEXITCODE -ne 0) { throw 'Release metadata validation failed.' }
+& $Python scripts/write_build_info.py build/build-info.json
+if ($LASTEXITCODE -ne 0) { throw 'Build identity generation failed.' }
 
 function Resolve-Executable {
     param(
@@ -38,6 +40,7 @@ $PyInstallerArgs = @(
     "--noconfirm",
     "--windowed",
     "--collect-data", "certifi",
+    "--add-data", "build/build-info.json;aps_midi_prep_tool_app",
     "--name", $Name,
     "--icon", (Join-Path $RepoRoot "aps_midi_prep_tool_app\aps.ico"),
     "--manifest", (Join-Path $RepoRoot "manifests\main_as_invoker.xml")

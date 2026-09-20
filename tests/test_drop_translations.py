@@ -80,3 +80,40 @@ def test_drop_fallback_error_localizes_standard_button(monkeypatch, code):
     assert seen == [True]
     parent.deleteLater()
     app.processEvents()
+
+
+@pytest.mark.parametrize("code", [language.code for language in SUPPORTED_LANGUAGES])
+def test_ambiguous_image_drop_warning_uses_selected_language(monkeypatch, tmp_path, code):
+    app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.currentLanguage = code
+    parent._lt = lambda source: translate_text(source, code)
+    opened, seen = [], []
+    parent.load_image_file = opened.append
+    table = drop_table_widget.DropTableWidget(0, 1, parent)
+    source = (
+        "Only one disk image can be opened at a time. Drop it separately from other files.\n\n"
+        "Nothing from this drop was imported. Extract ZIP files first, then "
+        "drop one image or select the song files separately."
+    )
+
+    def inspect(dialog):
+        assert dialog.icon() == drop_table_widget.QMessageBox.Warning
+        assert dialog.windowTitle() == translate_text("Drop Failed", code)
+        assert dialog.text() == translate_text(source, code)
+        assert dialog.button(drop_table_widget.QMessageBox.Ok).text() == translate_text("OK", code)
+        if code != "en":
+            assert dialog.text() != source
+        seen.append(True)
+        return drop_table_widget.QMessageBox.Ok
+
+    monkeypatch.setattr(drop_table_widget.QMessageBox, "exec", inspect)
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(tmp_path / f"disk-{n}.img")) for n in range(2)])
+    try:
+        table.dropEvent(SimpleNamespace(mimeData=lambda: mime, acceptProposedAction=lambda: None))
+        assert seen == [True]
+        assert opened == []
+    finally:
+        parent.deleteLater()
+        app.processEvents()

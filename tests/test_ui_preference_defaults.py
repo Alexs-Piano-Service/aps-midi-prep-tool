@@ -56,7 +56,7 @@ def _assert_filename_dialog_defaults(window, monkeypatch, *, enabled, checked):
                          else window._t("bulk.long_filenames")]
         convert = controls["Convert E-SEQ files to MIDI after reading" if read_dialog
                            else window._t("bulk.convert")]
-        assert not convert.isChecked()
+        assert convert.isChecked() is (read_dialog and window._preparation_profile().song_format == "midi")
         assert names.isEnabled() is enabled
         assert names.isChecked() is checked
         seen.append(dialog.windowTitle())
@@ -278,7 +278,7 @@ def test_long_filename_controls_do_not_require_eseq_conversion(window, monkeypat
                          else window._t("bulk.long_filenames")]
         convert = controls["Convert E-SEQ files to MIDI after reading" if dialog_kind == "read"
                            else window._t("bulk.convert")]
-        assert not convert.isChecked()
+        assert convert.isChecked() is (dialog_kind == "read" and window._preparation_profile().song_format == "midi")
         for enabled in (False, True, False):
             convert.setChecked(enabled)
             assert names.isEnabled() is (not dos83)

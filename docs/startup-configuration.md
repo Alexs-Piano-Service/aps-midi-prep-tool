@@ -154,6 +154,7 @@ Every entry in this table accepts an absolute or relative path string.
 | `show_preparation_row` | Boolean: show the active preparation row; defaults to `true`. |
 | `show_compat_warning` | Boolean: show title compatibility warnings. |
 | `format_disklavier_screen` | Boolean: format the title display for the Disklavier screen; profile defaults enable it for Mark I, Mark II, and Mark III. |
+| `title_display_encoding` | String: `latin1` (default), `cp1252`, `shift_jis`, `gbk`, or `big5`. Interprets existing title bytes for display; does not convert files. |
 | `check_updates_at_startup` | Boolean: check for updates automatically. |
 | `skip_update_reminders` | Boolean: suppress update reminders. Set this to `true` and `check_updates_at_startup` to `false` for an offline deployment. |
 

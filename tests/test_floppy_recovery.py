@@ -210,6 +210,7 @@ def test_windows_deadline_race_preserves_normally_completed_read(
             return 77
 
         def ReadFile(self, *_args):
+            _args[1].raw = b"DATA"
             self.fake_ctypes.last_error = (
                 floppy_image._WindowsRecoveryVolumeHandle.ERROR_IO_PENDING
             )

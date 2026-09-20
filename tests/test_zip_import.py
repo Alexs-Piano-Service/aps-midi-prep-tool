@@ -130,6 +130,98 @@ def test_actual_copied_bytes_are_bounded_even_if_reader_exceeds_declared_size(tm
     assert (destination / "song.mid").read_bytes() == b"1234"
 
 
+@pytest.mark.parametrize("limit", ["bytes", "files"])
+def test_shared_budget_rejects_archive_before_writing(tmp_path, monkeypatch, limit):
+    archive, destination = _archive(tmp_path, [("one.mid", b"123"), ("notes.txt", b"456")])
+    retained = str(tmp_path / "earlier-import")
+    budget = {retained: (3, 2)}
+    if limit == "bytes":
+        monkeypatch.setattr(zip_import, "MAX_SESSION_UNCOMPRESSED_BYTES", 8)
+    else:
+        monkeypatch.setattr(zip_import, "MAX_SESSION_FILES", 3)
+
+    with pytest.raises(zip_import.ZipImportError, match="temporary storage budget"):
+        zip_import.extract_zip(archive, destination, budget=budget)
+
+    assert list(destination.iterdir()) == []
+    assert budget == {retained: (3, 2)}
+
+
+def test_shared_budget_reserves_all_companion_files_before_copying(tmp_path):
+    archive, destination = _archive(tmp_path, [
+        ("song.mid", b"123"), ("notes.txt", b"456"), ("nested.zip", b"zip"),
+        ("empty.txt", b""), ("__MACOSX/._song.mid", b"ignored"),
+    ])
+    budget = {}
+    observations = []
+
+    zip_import.extract_zip(
+        archive, destination, budget=budget,
+        progress=lambda *_args: observations.append(dict(budget)),
+    )
+
+    assert observations
+    assert all(usage == {str(destination): (9, 4)} for usage in observations)
+    assert budget == {str(destination): (9, 4)}
+
+
+def test_reentrant_extraction_cannot_spend_reserved_budget(tmp_path, monkeypatch):
+    archive, destination = _archive(tmp_path, [("song.mid", b"123")])
+    second_destination = tmp_path / "second-extraction"
+    second_destination.mkdir()
+    monkeypatch.setattr(zip_import, "MAX_SESSION_UNCOMPRESSED_BYTES", 5)
+    budget = {}
+    attempted = []
+
+    def extract_during_progress(*_args):
+        if attempted:
+            return
+        attempted.append(True)
+        with pytest.raises(zip_import.ZipImportError, match="temporary storage budget"):
+            zip_import.extract_zip(archive, second_destination, budget=budget)
+
+    paths = zip_import.extract_zip(
+        archive, destination, budget=budget, progress=extract_during_progress,
+    )
+
+    assert attempted == [True]
+    assert [Path(path).read_bytes() for path in paths] == [b"123"]
+    assert list(second_destination.iterdir()) == []
+    assert budget == {str(destination): (3, 1)}
+
+
+def test_actual_copied_bytes_cannot_exceed_remaining_shared_budget(tmp_path, monkeypatch):
+    archive, destination = _archive(tmp_path, [("song.mid", b"x")])
+    retained = str(tmp_path / "earlier-import")
+    budget = {retained: (3, 1)}
+    monkeypatch.setattr(zip_import, "MAX_SESSION_UNCOMPRESSED_BYTES", 7)
+    monkeypatch.setattr(zip_import, "COPY_CHUNK_SIZE", 2)
+    monkeypatch.setattr(zip_import.zipfile.ZipFile, "open", lambda *args: io.BytesIO(b"123456789"))
+
+    with pytest.raises(zip_import.ZipImportError, match="temporary storage budget"):
+        zip_import.extract_zip(archive, destination, budget=budget)
+
+    assert (destination / "song.mid").read_bytes() == b"1234"
+    assert budget == {retained: (3, 1)}
+
+
+def test_cancelled_extraction_releases_its_shared_budget_reservation(tmp_path):
+    archive, destination = _archive(tmp_path, [("song.mid", b"123")])
+    retained = str(tmp_path / "earlier-import")
+    budget = {retained: (3, 1)}
+    progress = []
+
+    with pytest.raises(zip_import.ZipImportCancelled):
+        zip_import.extract_zip(
+            archive, destination, budget=budget,
+            progress=lambda *_args: progress.append(True),
+            is_cancelled=lambda: bool(progress),
+        )
+
+    assert list(destination.iterdir()) == []
+    assert budget == {retained: (3, 1)}
+
+
 def test_cancellation_interrupts_a_large_file_and_closes_handles(tmp_path, monkeypatch):
     archive, destination = _archive(tmp_path, [("song.mid", b"123456789"), ("other.mid", b"other")])
     monkeypatch.setattr(zip_import, "COPY_CHUNK_SIZE", 2)

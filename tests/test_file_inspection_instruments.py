@@ -210,7 +210,7 @@ class FileInspectionInstrumentTests(unittest.TestCase):
         output = _Output()
         worker = MidiOutputWorker(
             b"",
-            0,
+            "Test output",
             program_overrides={1: 40},
         )
         overrides = {1: 40}

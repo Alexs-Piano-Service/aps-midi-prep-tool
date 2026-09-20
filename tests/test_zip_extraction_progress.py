@@ -34,6 +34,7 @@ def test_extraction_is_visible_before_open_and_advances_within_one_file(
     parent.can_accept_regular_drop_path = lambda path: path.endswith(".mid")
     added = []
     errors = []
+    parent._zip_import_references = lambda: added
     parent.add_regular_file_from_drop = lambda path: added.append(Path(path)) or {"status": "added"}
     parent._show_error_list = lambda *args, **_kwargs: errors.append(args)
     parent._show_operation_error = lambda *args, **_kwargs: errors.append(args)

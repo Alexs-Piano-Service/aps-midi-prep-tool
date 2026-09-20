@@ -85,7 +85,7 @@ repository's Azure configuration and is skipped for other repositories and PRs.
 
 `packaging/release.json` declares the version, publication status/date, and exact
 required package filenames. During development, README and the consolidated
-changelog identify 0.8.3 as unreleased; AppStream identifies a dated development
+changelog identify 0.8.4 as unreleased; AppStream identifies a dated development
 snapshot. Before tagging, set the actual release date and `status: ready`, change
 the README to `Current version`, date the changelog entry, and set AppStream's
 matching stable release date. Do this in one commit, push it, and wait for both
@@ -93,8 +93,8 @@ CI jobs. The tagging helper rejects version/tag mismatches and unreleased or
 inconsistent metadata in addition to missing, failed, or skipped CI:
 
 ```bash
-python scripts/tag_release.py v0.8.3 --repo OWNER/REPOSITORY
-git push RELEASE_REMOTE v0.8.3
+python scripts/tag_release.py v0.8.4 --repo OWNER/REPOSITORY
+git push RELEASE_REMOTE v0.8.4
 ```
 
 The helper creates a local annotated tag and records its CI URL. It does not
@@ -109,8 +109,8 @@ or deliberately revise the required package list before tagging. Already
 accepted build artifacts can be staged directly without rebuilding:
 
 ```bash
-python scripts/release_assets.py stage v0.8.3 --repo OWNER/REPOSITORY --files dist/PACKAGE
-python scripts/release_assets.py publish v0.8.3 --repo OWNER/REPOSITORY --acceptance dist/release-acceptance.json
+python scripts/release_assets.py stage v0.8.4 --repo OWNER/REPOSITORY --files dist/PACKAGE
+python scripts/release_assets.py publish v0.8.4 --repo OWNER/REPOSITORY --acceptance dist/release-acceptance.json
 ```
 
 Publication checks the exact remote tag and CI commit, every declared asset,

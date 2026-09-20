@@ -27,7 +27,13 @@
   <url type="homepage">https://www.alexanderpeppe.com/</url>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="0.8.3" type="development" date="2026-09-17">
+    <release version="0.8.4" type="development" date="2026-09-19">
+      <description>
+        <p>Improve floppy-write recovery, emulator-image transactions,
+        MIDI output selection, preparation preferences, and translations.</p>
+      </description>
+    </release>
+    <release version="0.8.3" date="2026-09-18">
       <description>
         <p>Create verified Mark IV library backups, preserve MIDI controller
         state and note endings, protect recordings during conversion and

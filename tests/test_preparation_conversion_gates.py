@@ -116,8 +116,10 @@ def test_eseq_destination_disables_saved_convert_after_read_choice(window, monke
                         if item.text() == "Convert E-SEQ files to MIDI after reading")
         assert not checkbox.isEnabled()
         assert not checkbox.isChecked()
-        assert "disabled" in checkbox.toolTip()
-        assert any(label.text() == checkbox.toolTip() for label in dialog.findChildren(QLabel))
+        assert "Preparing for" in checkbox.toolTip()
+        assert window._preparation_profile().label in checkbox.toolTip()
+        assert "Custom" in checkbox.toolTip()
+        assert any(label.text() == window._preparation_options_hint() for label in dialog.findChildren(QLabel))
         return QDialog.Rejected
 
     window._exec_child_dialog = inspect

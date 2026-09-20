@@ -68,7 +68,7 @@ class FileInspectionChannelTests(unittest.TestCase):
         output = _Output()
         worker = MidiOutputWorker(
             b"",
-            0,
+            "Test output",
             enabled_channels={5},
             channel_levels={5: 50},
         )

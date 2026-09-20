@@ -105,17 +105,11 @@ def _settings_language_code(settings):
     return normalize_language_code(settings.value(SETTING_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE)
 
 
-def _workflow_page(title, body_html, body_font_stack, notice_text=""):
+def _workflow_page(body_html, body_font_stack, notice_text=""):
     page = QWidget()
     layout = QVBoxLayout(page)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(10)
-
-    title_label = QLabel(title)
-    title_label.setTextFormat(Qt.PlainText)
-    title_label.setAlignment(Qt.AlignCenter)
-    title_label.setStyleSheet("font-size: 18px; font-weight: 700;")
-    layout.addWidget(title_label)
 
     notice_html = ""
     if notice_text:
@@ -190,10 +184,9 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
 
         page_stack = QStackedWidget(dialog)
         page_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        for page_title, page_html in pages:
+        for _, page_html in pages:
             page_stack.addWidget(
                 _workflow_page(
-                    page_title,
                     page_html,
                     body_font_stack,
                     notice_text=onboarding_text("notice", language_code),

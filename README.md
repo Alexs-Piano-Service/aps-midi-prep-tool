@@ -21,9 +21,9 @@
   · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-Development version: `0.8.3`
+Development version: `0.8.4`
 
-This checkout includes changes planned for 0.8.3. The download link above points
+This checkout includes changes planned for 0.8.4. The download link above points
 to the latest published release; see its release notes for shipped features.
 
 APS MIDI Prep Tool is a desktop app for Yamaha Disklavier and other legacy
@@ -39,11 +39,18 @@ holds the contents of a floppy disk.
 2. Choose **Open MIDI Folder** for MIDI or E-SEQ songs, **Open Image** for a disk
    image, or **Disk → Read Floppy...** for a physical disk. You can also drag
    files into the main window. Dropping a ZIP automatically extracts its contents
-   and adds supported files individually, including files in subfolders.
+   and adds supported files individually, including files in subfolders. Open
+   one disk image at a time, separately from song files. ZIPs containing multiple
+   images or an image alongside songs show a warning and import nothing; extract
+   them first, then drop one image or select the songs separately.
+   Temporary ZIP contents are removed once the list, undo history, and any image
+   session no longer need them, including after saving to a folder or clearing
+   the list. Retained ZIP contents share a 1 GiB / 10,000-file extraction limit.
 3. Choose **Preparing for...** to review defaults for your controller and delivery
    method. Review song titles, filenames, and playback order.
    Applying a destination stages its required conversions. Choose **Custom**
-   in the destination row to return to manual preparation.
+   in the destination row to return to manual preparation while keeping current
+   preferences and staged changes.
 4. Choose **Save As** to export copies to a folder, or **Save As Image** to
    create IMG/HFE floppy images. **Save** updates the current source where
    supported; MIDI and E-SEQ songs imported from a ZIP prompt for a destination

@@ -5,14 +5,75 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [0.8.3] - Unreleased
+## [0.8.4] - Unreleased
 
 ### Added
 
+- **View → Title display encoding** can display existing title bytes as Latin-1,
+  Windows-1252, Shift-JIS, GBK, or Big5 without changing the source files.
 - Dropping a ZIP extracts supported files from its folders and imports them
   individually. Save prompts for a destination for imported MIDI and E-SEQ songs,
   leaving the ZIP unchanged. Extraction progress and errors are translated in
   all 12 languages.
+
+### Changed
+
+- Options controlled by **Preparing for...** show their effective values and
+  are disabled, with one note per dialog and explanations in tooltips. This
+  includes Read Floppy conversion and title cleanup, filename rules, and image
+  song formats. **Custom** restores manual control.
+- Standard MIDI export, E3 / DKC-800 / DKC-850, and ENSPIRE / DKC-900 preparation
+  automatically stages title spacing cleanup for loaded songs and future imports,
+  including E-SEQ-to-MIDI conversions.
+
+### Fixed
+
+- ZIP imports release unused extraction folders after saving, clearing or
+  replacing the list, and cancelled imports. Files needed by pending operations,
+  image sessions, or Undo remain available. All retained ZIP extractions share
+  a 1 GiB / 10,000-file limit, including companion files.
+- Emulator image export uses a verified publication transaction and retains
+  original images and a recovery manifest if rollback is incomplete.
+- MIDI output selection follows the backend and port name across refreshes.
+  Missing, duplicate, or changed outputs stop playback or select audio preview
+  with an explanation instead of redirecting notes to another device.
+- Saved emulator disk numbers survive restart. The preparation row's **Custom**
+  button keeps current filename, title-formatting, and export preferences as well
+  as staged changes.
+- MIDI discovery accepts bounded extended headers and reports malformed or
+  unreadable candidates rather than silently skipping them.
+- Modern MIDI destinations allow printable Latin-1 title edits, including
+  accented names. Legacy destinations keep conservative ASCII validation.
+  Unedited titles retain their original bytes during folder export.
+- Development metadata advances to 0.8.4 after the published 0.8.3 release.
+  Release checks reject stale planned-changes wording in a released README.
+- Windows file-level floppy saves retry an unsupported free-space query with
+  the older Windows API. Initial directory and file-metadata errors stop saving
+  before file changes. Bug reports include the save stage, API error codes,
+  attempted target changes, and completed file counts.
+- Windows file saves retain persistent recovery packages, check target contents
+  against the opened session, and stage and verify replacements before publishing
+  them. Insufficient staging space stops the save without changes; PIANODIR.FIL
+  is published last. Final names and song bytes are verified.
+- Windows raw writes forward cancellation to a bounded helper and wait for its
+  exit before permitting another write. Device-not-ready flush failures now fail;
+  unsupported flushing requires physical readback. USB formatting verifies the
+  actual disk, and fallback capacity probes read aligned, complete sectors.
+- Raw-write time limits remain enforced if cancellation diagnostics or final
+  result writes stall. Recovery checksums remain compatible with Python 3.10.
+- Bug reports identify the build commit and distinguish untouched disks from
+  partial writes. A denied raw write no longer implicitly switches to file copying.
+- Drops containing multiple disk images or an image alongside other files,
+  including ZIP contents, show a warning before importing anything. Extract
+  such ZIPs first, then drop one image or select the songs separately.
+- ZIP extraction shows its progress dialog before reading the archive and
+  advances by bytes while unpacking large files. Windows ZIP-drop regression
+  tests compare paths independently of their separator spelling.
+
+## [0.8.3] - 2026-09-18
+
+### Added
+
 - Floppy Read, Image, Format, Save, and Write dialogs offer **Refresh** to
   detect newly connected drives without reopening the dialog. Refresh keeps
   the selected drive when available and preserves the other dialog options.
@@ -50,16 +111,13 @@ with release sections grouped by version and date.
 
 ### Changed
 
-- Standard MIDI export, E3 / DKC-800 / DKC-850, and ENSPIRE / DKC-900 preparation
-  automatically stages title spacing cleanup for loaded songs and future imports,
-  including E-SEQ-to-MIDI conversions.
 - Windows local and signed builds share one packaging script and require the
   complete verified Greaseweazle runtime. The final signed EXE is smoke-tested
   for its window, IMG/HFE workflows, and built-in piano MP3 export.
 - Release tags and packaging validate application, changelog, README, and
   release metadata together. Packages are staged in drafts; the publication
   helper requires every declared asset and clean-machine evidence matching
-  each package's SHA-256. Version 0.8.3 remains explicitly unreleased.
+  each package's SHA-256.
 - The legacy bug-report token is identified as public compatibility data;
   security documentation describes the outstanding server-side audit.
 - View visibility actions consistently say **Show**, with checked meaning
@@ -71,9 +129,6 @@ with release sections grouped by version and date.
 
 ### Fixed
 
-- ZIP extraction shows its progress dialog before reading the archive and
-  advances by bytes while unpacking large files. Windows ZIP-drop regression
-  tests compare paths independently of their separator spelling.
 - Mark IV translation tests preserve platform-specific path separators and
   exercise both Windows and POSIX paths on every platform.
 - Translation coverage now includes recovery dialogs, Mark IV diagnostics,

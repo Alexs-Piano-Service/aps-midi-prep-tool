@@ -84,7 +84,9 @@ from .midi_metadata import (
     update_midi_title,
     update_midi_title_to_path,
     update_midi_title_to_destination,
-    validate_legacy_title_input,
+    validate_title_input,
+    title_for_display,
+    TITLE_DISPLAY_ENCODINGS,
     extract_first_title_from_midi,
     extract_midi_type_label_from_midi,
     has_eseq_title_metadata,
@@ -127,6 +129,7 @@ from .midi_type0_converter import (
 from .midi_channel_merger import merge_midi_channels_to_channel0_path
 from .xf_stripper import XF_CLEANUP_BROAD, XF_CLEANUP_TARGETED, strip_xf_from_midi_path
 from .conversion_review import build_staged_conversion_details, inspect_music_bytes, localize_music_error
+from .write_safety_messages import localize_write_message
 from .eseq_inspection_report import format_eseq_header_details
 from .bulk_extraction_job import localize_extraction_job_error, read_extraction_job
 from .eseq_converter import CC7_POLICY_PRESERVE, CC7_POLICY_PLAYBACK_FIX_100, count_eseq_zero_volume_candidates
@@ -137,7 +140,7 @@ from .ui_utils import (
     is_dark_theme,
     pixmap_from_base64,
 )
-from .drop_table_widget import DropTableWidget
+from .drop_table_widget import DropTableWidget, zip_import_operation
 from .disk_device_discovery import discover_floppy_devices
 from .disk_session_worker import (
     BulkExtractionWorker,
@@ -2958,11 +2961,16 @@ class MidiPreviewRenderWorker(QThread):
 
 
 def _midi_output_ports():
-    """Return system MIDI outputs without making the optional backend mandatory."""
+    """Return (backend API, port name) identities from the optional backend.
+
+    RtMidi exposes names, but no persistent per-device identifier. Retain the
+    backend as well so a change in the default API cannot redirect playback.
+    """
     try:
         import rtmidi
         output = rtmidi.MidiOut()
-        ports = list(output.get_ports())
+        backend_api = output.get_current_api()
+        ports = [(backend_api, name) for name in output.get_ports()]
         del output
         return ports, ""
     except Exception as exc:
@@ -3177,17 +3185,19 @@ class MidiOutputWorker(QThread):
     def __init__(
         self,
         midi_bytes,
-        port_index,
+        port_name,
         start_seconds=0.0,
         tempo_percent=100,
         program_overrides=None,
         enabled_channels=None,
         channel_levels=None,
         parent=None,
+        backend_api=None,
     ):
         super().__init__(parent)
         self.midi_bytes = bytes(midi_bytes or b"")
-        self.port_index = int(port_index)
+        self.port_name = port_name
+        self.backend_api = backend_api
         self.start_seconds = max(0.0, float(start_seconds or 0.0))
         self.tempo_percent = _normalized_tempo_percent(tempo_percent)
         self.program_overrides = _normalized_program_overrides(
@@ -3421,14 +3431,47 @@ class MidiOutputWorker(QThread):
 
     def run(self):
         output = None
+        output_verified = False
         try:
             import rtmidi
             events = _midi_output_events(self.midi_bytes)
-            output = rtmidi.MidiOut()
-            ports = output.get_ports()
-            if self.port_index < 0 or self.port_index >= len(ports):
-                raise RuntimeError("The selected MIDI output is no longer available.")
-            output.open_port(self.port_index)
+            output = (
+                rtmidi.MidiOut(rtapi=self.backend_api)
+                if self.backend_api is not None else rtmidi.MidiOut()
+            )
+            if (
+                self.backend_api is not None
+                and output.get_current_api() != self.backend_api
+            ):
+                raise RuntimeError(
+                    "The selected MIDI output is no longer available. "
+                    "Refresh the output list and choose an output again."
+                )
+            ports = list(output.get_ports())
+            matching_ports = [
+                index for index, name in enumerate(ports)
+                if name == self.port_name
+            ]
+            if not matching_ports:
+                raise RuntimeError(
+                    "The selected MIDI output is no longer available. "
+                    "Refresh the output list and choose an output again."
+                )
+            if len(matching_ports) != 1:
+                raise RuntimeError(
+                    "Multiple MIDI outputs have this name. Rename or disconnect "
+                    "duplicate outputs, then refresh the list."
+                )
+            output.open_port(matching_ports[0])
+            # Enumeration and opening are separate RtMidi calls. If hot-plugging
+            # changed the list during open, close without sending even silence
+            # messages to a potentially unintended destination.
+            if list(output.get_ports()) != ports:
+                raise RuntimeError(
+                    "The MIDI output list changed while opening the selected "
+                    "device. Refresh the output list and choose an output again."
+                )
+            output_verified = True
             recorded_state = {}
             program_overrides = dict(self.program_overrides)
             enabled_channels = self.enabled_channels
@@ -3513,7 +3556,11 @@ class MidiOutputWorker(QThread):
         finally:
             if output is not None:
                 try:
-                    self._silence(output)
+                    if output_verified:
+                        self._silence(output)
+                except Exception:
+                    pass
+                try:
                     output.close_port()
                 except Exception:
                     pass
@@ -6458,9 +6505,18 @@ class FileInspectionDialog(QDialog):
         self.output_combo.clear()
         self.output_combo.addItem(self.t("Audio preview"), ("audio", -1))
         selected = 0
-        for port_index, name in enumerate(ports):
-            self.output_combo.addItem(name, ("midi", port_index))
-            if previous == ("midi", port_index):
+        for backend_api, name in ports:
+            identity = ("midi", backend_api, name)
+            self.output_combo.addItem(name, identity)
+            ambiguous = ports.count((backend_api, name)) != 1
+            if ambiguous:
+                item = self.output_combo.model().item(self.output_combo.count() - 1)
+                item.setEnabled(False)
+                item.setToolTip(self.t(
+                    "Multiple MIDI outputs have this name. Rename or disconnect "
+                    "duplicate outputs, then refresh the list."
+                ))
+            elif previous == identity:
                 selected = self.output_combo.count() - 1
         self.output_combo.setCurrentIndex(selected)
         self.output_combo.blockSignals(False)
@@ -6471,6 +6527,14 @@ class FileInspectionDialog(QDialog):
         )
         self.output_combo.setToolTip(tooltip)
         self._on_output_changed()
+        if isinstance(previous, tuple) and previous[0] == "midi" and selected == 0:
+            ambiguous = len(previous) == 3 and ports.count(previous[1:]) > 1
+            message = (
+                self.t("The selected MIDI output name is shared by multiple devices. Audio preview has been selected.")
+                if ambiguous else
+                self.t("The selected MIDI output is no longer available. Audio preview has been selected.")
+            )
+            QMessageBox.warning(self, self.t("MIDI Output Changed"), message)
 
     def _using_midi_output(self):
         data = self.output_combo.currentData()
@@ -7568,7 +7632,7 @@ class FileInspectionDialog(QDialog):
             return
         worker = MidiOutputWorker(
             midi_bytes,
-            data[1],
+            data[2],
             start_seconds=self._slider_base_seconds(),
             tempo_percent=self._preview_tempo_percent(),
             program_overrides=self._effective_channel_program_overrides(
@@ -7579,6 +7643,7 @@ class FileInspectionDialog(QDialog):
                 available_channels
             ),
             parent=self,
+            backend_api=data[1],
         )
         worker.playbackStarted.connect(
             lambda position_ms, started_at, active_worker=worker: self._on_midi_output_started(
@@ -7620,7 +7685,7 @@ class FileInspectionDialog(QDialog):
         QMessageBox.warning(
             self,
             self.t("MIDI Output Failed"),
-            f"{self.t('The MIDI file could not be sent to the selected output.')}\n\n{message}",
+            f"{self.t('The MIDI file could not be sent to the selected output.')}\n\n{self.t(message)}",
         )
 
     def _on_midi_output_finished(self):
@@ -8769,6 +8834,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
     TITLE_RAW_ROLE = Qt.UserRole + 1
+    TITLE_EDITED_ROLE = Qt.UserRole + 2
     CENTERED_TITLE_DISK_THRESHOLD = 3
     SETTINGS_ORG = APP_SETTINGS_ORG
     SETTINGS_APP = APP_SETTINGS_APP
@@ -8973,6 +9039,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.pendingGwConversionDetails = None
         self.pendingGwCapture = None
         self.pendingDiskRecoveryRequest = None
+        self._pending_disk_load_results = {}
         self.diskRecoveryWorker = None
         self.diskRecoveryProgressDialog = None
         self.diskRecoveryContext = {}
@@ -9012,8 +9079,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if profile.song_format and medium.key not in FLOPPY_MEDIA:
                 self.settings.remove(SETTING_IMAGE_FORMAT)
                 self.settings.remove(SETTING_DISK_FORMAT)
-        if profile.song_format and medium.key in {"nalbantov", "flashfloppy_img", "flashfloppy_hfe"}:
-            self.settings.setValue("emulator_image_starting_number", 0)
+        if (
+            profile.song_format
+            and medium.key in {"nalbantov", "flashfloppy_img", "flashfloppy_hfe"}
+            and not self.settings.contains(self.SETTING_EMULATOR_IMAGE_STARTING_NUMBER)
+        ):
+            self.settings.setValue(self.SETTING_EMULATOR_IMAGE_STARTING_NUMBER, 0)
         for key in (self.SETTING_USE_DOS83_FILENAMES, self.SETTING_FORMAT_DISKLAVIER_SCREEN):
             if not self.settings.contains(key):
                 self.settings.setValue(key, proposed_settings(profile, medium)[key])
@@ -9595,6 +9666,20 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._set_static_tooltip(self.viewFormatDisklavierScreenAction, "When editing titles, use the Disklavier's two 16-character screen rows.")
         self.viewFormatDisklavierScreenAction.toggled.connect(self.format_disklavier_checkbox.setChecked)
         self.viewMenu.addAction(self.viewFormatDisklavierScreenAction)
+
+        self.titleDisplayEncodingMenu = self.viewMenu.addMenu(self._lt("Title display encoding"))
+        self.titleDisplayEncodingGroup = QActionGroup(self)
+        self.titleDisplayEncodingGroup.setExclusive(True)
+        self.titleDisplayEncodingActions = {}
+        for encoding, label in TITLE_DISPLAY_ENCODINGS:
+            action = QAction(self._lt(label), self)
+            action.setCheckable(True)
+            action.setChecked(encoding == self._title_display_encoding())
+            self._set_static_tooltip(action, "Choose how existing MIDI and E-SEQ title bytes are displayed. Files are unchanged; edited titles use Latin-1 and the destination's character restrictions.")
+            action.triggered.connect(lambda _checked, value=encoding: self._set_title_display_encoding(value))
+            self.titleDisplayEncodingGroup.addAction(action)
+            self.titleDisplayEncodingMenu.addAction(action)
+            self.titleDisplayEncodingActions[encoding] = action
 
         self.viewMenu.addSeparator()
         self.viewShowStatusAction = QAction("Show Status", self)
@@ -10294,6 +10379,38 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             MidiTitleWindow._preparation_medium(self),
         )["use_dos83_filenames"]
 
+    def _preparation_forced_option_reason(self, option_label, value_label):
+        profile = MidiTitleWindow._preparation_profile(self)
+        return self._lt(
+            "Preparing for {profile} sets {option} to {value}. "
+            "Change the target system or choose Custom to change this option.",
+            profile=self._lt(profile.label), option=self._lt(option_label),
+            value=self._lt(value_label),
+        )
+
+    def _preparation_options_hint(self):
+        return self._lt(
+            "Some options are set by Preparing for {profile}. "
+            "Change the target system or choose Custom to change them.",
+            profile=self._lt(MidiTitleWindow._preparation_profile(self).label),
+        )
+
+    def _refresh_preparation_filename_action(self):
+        action = getattr(self, "settingsUseDos83FilenamesAction", None)
+        if action is None:
+            return
+        forced = self._preparation_requires_dos83_filenames()
+        label = self._lt("Use 8.3 filenames")
+        action.setText(self._with_mnemonic(label, "8"))
+        action.setEnabled(self.choose_button.isEnabled() and not forced)
+        blocked = action.blockSignals(True)
+        action.setChecked(self._dos83_filenames_enabled())
+        action.blockSignals(blocked)
+        reason = (self._preparation_forced_option_reason("Use 8.3 filenames", "On")
+                  if forced else self._t("filename_policy.dos83.tooltip"))
+        action.setToolTip(reason)
+        action.setStatusTip(reason)
+
     def _preparation_export_defaults(self):
         profile = MidiTitleWindow._preparation_profile(self)
         medium = MidiTitleWindow._preparation_medium(self)
@@ -10353,7 +10470,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self._disk_worker_busy() or not self.choose_button.isEnabled():
             return
         profile = get_preparation_profile("custom")
-        self._apply_preparation_profile(profile, get_preparation_medium(profile, "custom"))
+        self._apply_preparation_profile(
+            profile, get_preparation_medium(profile, "custom"), preserve_preferences=True,
+        )
 
     def choose_preparation_profile(self):
         if self._disk_worker_busy():
@@ -10644,8 +10763,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return True
 
     @staged_batch
-    def _apply_preparation_profile(self, profile, medium):
-        changes = proposed_settings(profile, medium)
+    def _apply_preparation_profile(self, profile, medium, *, preserve_preferences=False):
+        changes = {} if preserve_preferences else proposed_settings(profile, medium)
         for key, value in changes.items():
             self.settings.setValue(key, value)
         self.settings.setValue(SETTING_PROFILE, profile.key)
@@ -10654,11 +10773,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.toggle_dos83_filenames(changes["use_dos83_filenames"])
             self._set_long_midi_filenames_enabled(changes["long_midi_filenames"])
         toggle_screen = getattr(self, "toggle_format_disklavier_screen", None)
-        if callable(toggle_screen):
+        if callable(toggle_screen) and "format_disklavier_screen" in changes:
             toggle_screen(changes["format_disklavier_screen"])
         self._refresh_preparation_ui()
         prepare = getattr(self, "_prepare_for_destination", None)
-        if callable(prepare):
+        if callable(prepare) and not preserve_preferences:
             prepare()
         refresh_actions = getattr(self, "_update_menu_actions", None)
         if callable(refresh_actions):
@@ -10672,12 +10791,24 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             elif profile.midi_types == (0,):
                 remaining += counts.get("midi_non_type0", 0)
         t = getattr(self, "_lt", lambda text, **fields: text.format(**fields))
+        if preserve_preferences:
+            self.status_label.setText(t(
+                "Automatic preparation is off. Current preferences and staged changes have been kept."
+            ))
+            return
         self.status_label.setText(t(
             "Preparing for {profile}. {remaining} file(s) still need conversion. Review staged changes before saving.",
             profile=t(profile.label), remaining=remaining,
         ))
 
     def _refresh_settings_menu_text(self):
+        if hasattr(self, "titleDisplayEncodingMenu"):
+            self.titleDisplayEncodingMenu.setTitle(self._lt("Title display encoding"))
+        for encoding, label in TITLE_DISPLAY_ENCODINGS:
+            action = getattr(self, "titleDisplayEncodingActions", {}).get(encoding)
+            if action is not None:
+                action.setText(self._lt(label))
+                action.setChecked(encoding == MidiTitleWindow._title_display_encoding(self))
         if hasattr(self, "settingsMenu"):
             self.settingsMenu.setTitle(self._t("menu.settings"))
         if hasattr(self, "appearanceMenu"):
@@ -11121,9 +11252,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 type=bool,
             )
         )
+        preparation_hint = QLabel()
+        preparation_hint.setWordWrap(True)
+        preparation_hint.setVisible(self._preparation_requires_dos83_filenames())
+        form_layout.addWidget(preparation_hint, 11, 1, 1, 2)
         if self._preparation_requires_dos83_filenames():
             long_name_checkbox.setChecked(False)
             long_name_checkbox.setEnabled(False)
+            reason = self._preparation_forced_option_reason("Descriptive filenames", "Off")
+            long_name_checkbox.setToolTip(reason)
+            preparation_hint.setText(self._preparation_options_hint())
         trim_title_spaces_checkbox.setChecked(
             self.settings.value(
                 self.SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES,
@@ -11198,6 +11336,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                                     localize_extraction_job_error(exc, self._language_code()))
                 return
             selected_job["path"] = path
+            # Resumed jobs retain their recorded options for verified output.
+            preparation_hint.hide()
+            long_name_checkbox.setToolTip(self._t("bulk.long_filenames.tooltip"))
             source_edit.setText(job["source_directory"])
             output_edit.setText(job["output_directory"])
             options = job["options"]
@@ -11275,10 +11416,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_SOURCE, source_directory)
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_OUTPUT, output_directory)
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_CONVERT_ESEQ, convert_eseq)
-        self.settings.setValue(
-            self.SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES,
-            long_name_checkbox.isChecked(),
-        )
+        if not self._preparation_requires_dos83_filenames():
+            self.settings.setValue(
+                self.SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES,
+                long_name_checkbox.isChecked(),
+            )
         self.settings.setValue(
             self.SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES,
             trim_title_spaces_checkbox.isChecked(),
@@ -11699,7 +11841,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if reason:
                 content_combo.model().item(index).setEnabled(False)
                 content_combo.setItemData(index, reason, Qt.ToolTipRole)
-                content_restriction = reason
+        if preparation_profile.song_format:
+            content_restriction = MidiTitleWindow._preparation_forced_option_reason(
+                self, "Song format",
+                "E-SEQ" if preparation_profile.song_format == "eseq" else (
+                    "MIDI Type 0" if preparation_profile.midi_types == (0,) else "MIDI"
+                ),
+            )
+            content_combo.setEnabled(False)
         content_combo.setToolTip(content_restriction)
         output_format_combo = QComboBox()
         output_format_combo.setObjectName("emulatorOutputFormatCombo")
@@ -12787,7 +12936,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return dialog
 
     def _set_progress_dialog_message(self, dialog, message):
-        full_message = self._lt(str(message or ""))
+        full_message = localize_write_message(
+            self._lt(str(message or "")),
+            self._language_code() if hasattr(self, "_language_code") else None,
+        )
         label = getattr(dialog, "_aps_stable_progress_label", None)
         if label is None:
             dialog.setLabelText(full_message)
@@ -12820,6 +12972,24 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         text = str(detail or "").strip()
         lower = text.lower()
         raw_operation = operation in {"format", "write_image"}
+        diagnostics = getattr(getattr(self, "image_session", None), "last_floppy_save_diagnostics", {})
+        if operation != "format" and diagnostics.get("status") in {"failed", "cancelled"}:
+            changed = diagnostics.get("target_mutation_attempted")
+            state = (
+                "The floppy may be partially written. Keep the recovery copy before attempting another write."
+                if changed else "APS has not changed the floppy."
+                if changed is False else "The floppy write has not been verified."
+            )
+            guidance = self._lt(state) + " " + self._lt(
+                "Keep this session open and use Save As Image to retain the prepared songs."
+            )
+            if diagnostics.get("recovery_directory"):
+                guidance += "\n\n" + self._lt(
+                    "Recovery copy: {folder}", folder=diagnostics["recovery_directory"],
+                )
+            return guidance
+        if "could not report filesystem space" in lower:
+            return self._lt("Windows could not report the floppy's available space. Keep this session open and use Save As Image before choosing another write method.")
 
         access_denied = (
             "access is denied" in lower
@@ -12973,7 +13143,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         else:
             message = self._ensure_sentence(self._lt(summary))
             if detail_text:
-                message += f"\n\n{self._t('error.details_label')}: {localize_music_error(detail_text, self._language_code())}"
+                message += f"\n\n{self._t('error.details_label')}: {localize_write_message(detail_text, self._language_code())}"
             guidance_text = self._lt(guidance) if guidance is not None else self._guidance_for_error_detail(detail_text)
             if guidance_text:
                 message += f"\n\n{self._ensure_sentence(guidance_text)}"
@@ -13166,6 +13336,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         worker.start()
         return True
 
+    @zip_import_operation
     def _on_disk_load_success(self, session, listing):
         read_kind = self.diskLoadContext.get("load_kind", "")
         if self.diskLoadProgressDialog is not None:
@@ -15161,6 +15332,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             failure_title="Greaseweazle Conversion Failed",
         )
 
+    @zip_import_operation
     def _on_disk_load_failure(self, message):
         if self.diskLoadProgressDialog is not None:
             self.diskLoadProgressDialog.close()
@@ -15353,7 +15525,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
 
         default_name = f"{os.path.splitext(os.path.basename(capture_path))[0]}_{disk_format.key.replace('.', '_')}.img"
-        default_path = os.path.join(os.path.dirname(os.path.abspath(capture_path)), default_name)
+        archive_path = MidiTitleWindow._zip_source_for_path(self, capture_path)
+        default_path = os.path.join(
+            os.path.dirname(os.path.abspath(archive_path or capture_path)), default_name,
+        )
         output_path, _selected_filter = QFileDialog.getSaveFileName(
             self,
             self._lt("Save Converted Image"),
@@ -15406,6 +15581,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             ),
         )
 
+    @zip_import_operation
     def _handle_greaseweazle_conversion_failure(self, details):
         details = dict(details or {})
         message = details.get("message", "")
@@ -15435,9 +15611,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.pendingFloppyReadConvertToMidi = False
             self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
-            self.status_label.setText(self._lt(
-                "Greaseweazle conversion stopped. Raw capture saved at {path}.", path=capture_path,
-            ))
+            if MidiTitleWindow._zip_source_for_path(self, capture_path):
+                self.status_label.setText(self._lt(
+                    "Greaseweazle conversion stopped; the source image was not changed.",
+                ))
+            else:
+                self.status_label.setText(self._lt(
+                    "Greaseweazle conversion stopped. Raw capture saved at {path}.", path=capture_path,
+                ))
             return
 
         original_source = details.get("source")
@@ -15485,6 +15666,26 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 capture.cleanup()
         self.pendingGwCapture = None
 
+    def _queue_disk_load_result(self, handler, payload):
+        # A queued callback owns its sources even after the worker and its
+        # context are gone, and while other UI actions process events.
+        pending = getattr(self, "_pending_disk_load_results", None)
+        if pending is None:
+            pending = self._pending_disk_load_results = {}
+        token = object()
+        pending[token] = payload
+        QTimer.singleShot(
+            0, lambda: MidiTitleWindow._run_disk_load_result(self, handler, payload, token),
+        )
+
+    @zip_import_operation
+    def _run_disk_load_result(self, handler, payload, token):
+        try:
+            return handler(payload)
+        finally:
+            self._pending_disk_load_results.pop(token, None)
+
+    @zip_import_operation
     def _on_disk_load_finished(self):
         self._set_disk_load_busy(False)
         self.diskLoadShouldOfferCapture = False
@@ -15499,21 +15700,20 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.pendingDiskRecoveryRequest = None
         if gw_conversion_details:
             self.diskLoadContext = {}
-            QTimer.singleShot(
-                0,
-                lambda details=gw_conversion_details: self._handle_greaseweazle_conversion_failure(details),
+            MidiTitleWindow._queue_disk_load_result(
+                self, self._handle_greaseweazle_conversion_failure, gw_conversion_details,
             )
         elif gw_capture:
             self.diskLoadContext = {}
-            QTimer.singleShot(
-                0,
-                lambda payload=gw_capture: self._handle_greaseweazle_capture_ready(payload),
+            MidiTitleWindow._queue_disk_load_result(
+                self, self._handle_greaseweazle_capture_ready, gw_capture,
             )
         elif recovery_request:
-            QTimer.singleShot(0, lambda request=recovery_request: self._offer_disk_recovery(request))
+            MidiTitleWindow._queue_disk_load_result(self, self._offer_disk_recovery, recovery_request)
         else:
             self.diskLoadContext = {}
 
+    @zip_import_operation
     def _offer_disk_recovery(self, request):
         if request.get("load_kind") == "floppy_usb":
             timing_note = self._lt(
@@ -15833,6 +16033,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
 
+    @zip_import_operation
     def _on_disk_recovery_finished(self):
         self._remember_disk_recovery_diagnostics(self.diskRecoveryWorker)
         self._set_disk_load_busy(False)
@@ -15940,7 +16141,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return any(legacy_choices) if legacy_choices else self.DEFAULT_LONG_MIDI_FILENAMES
 
     def _set_long_midi_filenames_enabled(self, enabled):
-        enabled = bool(enabled)
+        enabled = bool(enabled) and not MidiTitleWindow._preparation_requires_dos83_filenames(self)
         self.settings.setValue(self.SETTING_LONG_MIDI_FILENAMES, enabled)
         # Keep the original per-dialog keys synchronized for existing installs
         # and for users who move between app versions.
@@ -16297,6 +16498,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             False,
             type=bool,
         )
+        force_short_names = MidiTitleWindow._preparation_requires_dos83_filenames(self)
+        force_title_trim = MidiTitleWindow._preparation_profile(self).trim_title_spaces
+        if force_title_trim:
+            trim_title_spaces = True
         if self.settings.value(
             self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
             False,
@@ -16348,6 +16553,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         layout.addWidget(trim_title_spaces_checkbox)
 
+        for checkbox, forced, option, value in (
+            (long_name_checkbox, force_short_names, "Name MIDI files by track number and song title", "Off"),
+            (trim_title_spaces_checkbox, force_title_trim, "Remove extra spaces from song titles", "On"),
+        ):
+            if forced:
+                reason = self._preparation_forced_option_reason(option, value)
+                checkbox.setEnabled(False)
+                checkbox.setToolTip(reason)
+        if force_short_names or force_title_trim:
+            hint = QLabel(self._preparation_options_hint())
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+
         hide_checkbox = QCheckBox(
             self._lt("Do not show this E-SEQ to MIDI conversion dialog again")
         )
@@ -16371,11 +16589,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         trim_title_spaces = trim_title_spaces_checkbox.isChecked()
         if volume_checkbox is not None and volume_checkbox.isChecked():
             self._eseq_conversion_cc7_policy = CC7_POLICY_PLAYBACK_FIX_100
-        self._set_long_midi_filenames_enabled(use_long_filenames)
-        self.settings.setValue(
-            self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES,
-            trim_title_spaces,
-        )
+        if not force_short_names:
+            self._set_long_midi_filenames_enabled(use_long_filenames)
+        if not force_title_trim:
+            self.settings.setValue(
+                self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES,
+                trim_title_spaces,
+            )
         if hide_checkbox.isChecked():
             self.settings.setValue(
                 self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
@@ -16817,13 +17037,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             action.setChecked(enabled)
 
     def _dos83_filenames_enabled(self):
+        if MidiTitleWindow._preparation_requires_dos83_filenames(self):
+            return True
         settings = getattr(self, "settings", None)
         if settings is None:
             return False
         return settings.value(self.SETTING_USE_DOS83_FILENAMES, False, type=bool)
 
     def toggle_dos83_filenames(self, state):
-        enabled = bool(state)
+        enabled = bool(state) or MidiTitleWindow._preparation_requires_dos83_filenames(self)
         self.settings.setValue(self.SETTING_USE_DOS83_FILENAMES, enabled)
         if enabled:
             set_long_filenames = getattr(self, "_set_long_midi_filenames_enabled", None)
@@ -17649,6 +17871,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         return reply == QMessageBox.Yes
 
+    @zip_import_operation
     def _reset_image_state(self, cleanup=True):
         self._clear_staging_history()
         if cleanup and self.image_session is not None:
@@ -17698,6 +17921,38 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         lookup = getattr(getattr(self, "table", None), "zip_source_for_path", None)
         return lookup(path) if callable(lookup) else ""
 
+    def _zip_import_references(self):
+        """Sources still needed by the current session, pending work, or Undo."""
+        def paths(value):
+            if isinstance(value, (str, os.PathLike)):
+                if os.path.isabs(value):
+                    yield os.fspath(value)
+            elif isinstance(value, (ImageLoadSource, ImageRecoverySource)):
+                yield from paths(value.path)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    yield from paths(key)
+                    yield from paths(item)
+            elif isinstance(value, (tuple, list, set)):
+                for item in value:
+                    yield from paths(item)
+
+        for value in PendingChangesMixin._staged_zip_import_references(self):
+            yield from paths(value)
+        session = getattr(self, "image_session", None)
+        for name in ("source_path", "working_img_path", "capture_path"):
+            yield from paths(getattr(session, name, None))
+        # diskLoadContext also owns the source between a failed load and its
+        # queued recovery prompt; that prompt clears it when recovery is declined.
+        for name in (
+            "diskLoadContext", "diskRecoveryContext", "pendingDiskRecoveryRequest",
+            "pendingGwConversionDetails", "pendingGwCapture", "_pending_disk_load_results",
+        ):
+            yield from paths(getattr(self, name, None))
+        for name in ("diskLoadWorker", "diskRecoveryWorker", "diskImageCaptureWorker"):
+            worker = getattr(self, name, None)
+            yield from paths(getattr(worker, "source", None))
+
     def _zip_import_source(self):
         table = getattr(self, "table", None)
         lookup = getattr(table, "zip_source_for_path", None)
@@ -17744,7 +17999,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         t = getattr(self, "_lt", lambda text, **fields: text.format(**fields))
         return t(
             "Preparing for {profile} uses {format}. Conversion to {other} is disabled. "
-            "Change the destination or choose Custom to enable it.",
+            "Change the target system or choose Custom to enable it.",
             profile=t(profile.label),
             format="E-SEQ" if profile.song_format == "eseq" else "MIDI",
             other="E-SEQ" if target_kind == "eseq" else "MIDI",
@@ -17784,6 +18039,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         refresh_conversions = getattr(self, "_refresh_preparation_conversion_actions", None)
         if callable(refresh_conversions):
             refresh_conversions()
+        refresh_filenames = getattr(self, "_refresh_preparation_filename_action", None)
+        if callable(refresh_filenames):
+            refresh_filenames()
         if not hasattr(self, "fileSaveAction"):
             return
 
@@ -17895,10 +18153,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 long_name_tooltip = (
                     "Stage track-number and song-title filenames for the listed MIDI files."
                 )
-            long_name_enabled = open_enabled and bool(long_name_rows)
+            forced_short_names = not self.is_image_mode() and self._preparation_requires_dos83_filenames()
+            long_name_enabled = open_enabled and bool(long_name_rows) and not forced_short_names
+            action_label = self._lt("Name MIDI Files from Song Titles")
+            self.utilitiesLongFilenamesAction.setText(action_label)
             self.utilitiesLongFilenamesAction.setEnabled(long_name_enabled)
             self.utilitiesLongFilenamesAction.setToolTip(
-                long_name_tooltip if long_name_enabled else "Add or convert MIDI files before naming them from song titles."
+                self._preparation_forced_option_reason("Descriptive filenames", "Off") if forced_short_names
+                else self._lt(long_name_tooltip if long_name_enabled else "Add or convert MIDI files before naming them from song titles.")
             )
             self.utilitiesLongFilenamesAction.setStatusTip(
                 self.utilitiesLongFilenamesAction.toolTip()
@@ -18552,6 +18814,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return "Image Mode"
         return self._lt("{mode} ({content})", mode=self._lt(self.image_session.mode_name), content=self._disk_content_label())
 
+    @zip_import_operation
     def _clear_regular_list_state(self):
         self._clear_staging_history()
         self.table.setSortingEnabled(False)
@@ -19970,6 +20233,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if hasattr(self, "_schedule_destination_preparation"):
             self._schedule_destination_preparation()
 
+    @zip_import_operation
     def _load_regular_files(self, file_paths, status_text, *, prepare_destination=True):
         self.table.setSortingEnabled(False)
         self._clear_regular_list_state()
@@ -20270,6 +20534,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         current_title = self._row_raw_title(row)
         if current_title == "No title found.":
             return False
+        title_item = self.table.item(row, 4)
+        if (
+            MidiTitleWindow._title_display_encoding(self) != "latin1"
+            and not title_item.data(MidiTitleWindow.TITLE_EDITED_ROLE)
+            and any(ord(ch) > 0x7E for ch in current_title)
+        ):
+            # A display choice must not make automatic spacing cleanup rewrite
+            # bytes from a multibyte title as though they were Latin-1 text.
+            return False
         return self._trim_title_spacing(current_title) != current_title
 
     def _title_spacing_trim_needed(self):
@@ -20293,7 +20566,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _validate_trimmed_title(self, filename, title_mode, new_title):
         if not new_title:
             return f"{filename}: title would become blank."
-        validation_error = validate_legacy_title_input(new_title, self._language_code())
+        validation_error = MidiTitleWindow._validate_title_for_destination(self, new_title, title_mode)
         if validation_error:
             return f"{filename}: {validation_error}"
         if title_mode == "eseq" and len(new_title.encode("latin1")) > 32:
@@ -20315,6 +20588,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             new_title,
             title_mode=title_mode,
             fallback_title=filename,
+            edited=True,
         )
         if self.is_image_mode() and self._image_title_is_smart_pianosoft_catalog_backed(path):
             title_item.setToolTip(
@@ -20395,6 +20669,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if not self.pendingFloppyReadTrimTitles:
             return 0
         self.pendingFloppyReadTrimTitles = False
+        if MidiTitleWindow._preparation_profile(self).trim_title_spaces:
+            # The preparation queued by loading owns this cleanup and its errors.
+            return 0
         return self._stage_trim_title_spaces_for_all(show_summary=False)
 
     @staged_batch
@@ -20456,12 +20733,23 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _write_listed_file_to_path(self, source_path, new_title, dest_path, *, order_key=None):
         source_material_path = self._regular_source_material_path(source_path)
         title_mode = self._listed_file_title_mode(source_path)
+        conversion = getattr(self, "pendingRegularConversions", {}).get(source_path, {})
+        validation_title = new_title if source_path in getattr(self, "pendingEdits", {}) or conversion.get("title_edited") else None
+        # Exporting an existing title is not an edit. Keep the original bytes,
+        # including non-Latin encodings and E-SEQ padding, unless explicitly edited.
+        if source_path not in getattr(self, "pendingEdits", {}):
+            new_title = None
+        if validation_title is not None:
+            validation_error = MidiTitleWindow._validate_title_for_destination(self, validation_title, title_mode)
+            if validation_error:
+                return f"Invalid title for {os.path.basename(source_path)}: {validation_error}"
         if title_mode == "eseq":
             return self._write_eseq_file_to_path(source_material_path, dest_path, title=new_title, order_key=order_key)
-        if title_mode == "midi":
+        if title_mode == "midi" and new_title is not None:
             return update_midi_title_to_path(source_material_path, new_title, dest_path)
         try:
-            shutil.copy2(source_material_path, dest_path)
+            with open(source_material_path, "rb") as handle:
+                atomic_write_bytes(dest_path, handle.read())
             return None
         except Exception as exc:
             return f"Error copying {os.path.basename(source_path)}: {exc}"
@@ -20522,6 +20810,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         pending_title = self.pendingImageTitleEdits.get(source_path)
         title_mode = self._image_path_title_mode(source_path)
+        info = getattr(self, "imageFileInfo", {}).get(source_path, {})
+        validation_title = pending_title if pending_title is not None else info.get("title") if info.get("title_edited") else None
+        if validation_title is not None:
+            validation_error = MidiTitleWindow._validate_title_for_destination(self, validation_title, title_mode)
+            if validation_error:
+                raise FloppyImageError(f"Invalid title for {final_name}: {validation_error}")
 
         if title_mode == "eseq":
             error_msg = self._write_eseq_file_to_path(
@@ -20870,6 +21164,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._refresh_disk_usage_bars()
         self._resize_table_columns_to_fill()
 
+    @zip_import_operation
     def _load_midi_paths_into_list(self, midi_specs, status_text):
         self.table.setSortingEnabled(False)
         self._clear_regular_list_state()
@@ -21355,8 +21650,18 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         disk_combo = QComboBox(dialog)
         list_all_disks_checkbox = QCheckBox("List all disk sizes")
         eseq_checkbox = QCheckBox("E-SEQ disk with empty PIANODIR.FIL")
+        eseq_checkbox.setObjectName("newImageEseqCheckbox")
+        preparation_profile = MidiTitleWindow._preparation_profile(self)
         preparation_defaults = MidiTitleWindow._preparation_export_defaults(self)
-        eseq_checkbox.setChecked(preparation_defaults.get("eseq", True))
+        eseq_checkbox.setChecked(
+            preparation_profile.song_format == "eseq"
+            if preparation_profile.song_format else preparation_defaults.get("eseq", True)
+        )
+        if preparation_profile.song_format:
+            eseq_checkbox.setEnabled(False)
+            eseq_checkbox.setToolTip(MidiTitleWindow._preparation_forced_option_reason(
+                self, "Song format", "E-SEQ" if preparation_profile.song_format == "eseq" else "MIDI",
+            ))
 
         form_grid = self._make_dialog_form_grid()
         type_label = self._add_dialog_form_row(form_grid, 0, "Image type:", type_combo)
@@ -21374,6 +21679,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             [type_label, type_options_spacer, disk_label, disk_options_spacer, eseq_spacer]
         )
         dialog_layout.addLayout(form_grid)
+        if preparation_profile.song_format:
+            preparation_hint = QLabel(eseq_checkbox.toolTip())
+            preparation_hint.setObjectName("newImagePreparationHint")
+            preparation_hint.setWordWrap(True)
+            dialog_layout.addWidget(preparation_hint)
 
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         dialog_layout.addWidget(buttons)
@@ -22383,6 +22693,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         recovery_layout.addWidget(recovery_hint, 1, 1)
         layout.addLayout(recovery_layout)
 
+        preparation_profile = self._preparation_profile()
+        conversion_is_forced = bool(preparation_profile.song_format)
+        filenames_are_forced = self._preparation_requires_dos83_filenames()
+        title_trimming_is_forced = preparation_profile.trim_title_spaces
+
         convert_to_midi_checkbox = QCheckBox("Convert E-SEQ files to MIDI after reading")
         convert_to_midi_checkbox.setChecked(
             self.settings.value(
@@ -22394,11 +22709,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         convert_to_midi_checkbox.setToolTip(
             self._lt('After the floppy opens, queue detected Yamaha E-SEQ songs for Standard MIDI conversion.')
         )
-        conversion_restriction = self._preparation_conversion_restriction("midi")
-        if conversion_restriction:
-            convert_to_midi_checkbox.setChecked(False)
+        if conversion_is_forced:
+            convert_to_midi_checkbox.setChecked(preparation_profile.song_format == "midi")
             convert_to_midi_checkbox.setEnabled(False)
-            convert_to_midi_checkbox.setToolTip(conversion_restriction)
+            conversion_reason = self._preparation_forced_option_reason(
+                "Convert E-SEQ files to MIDI after reading",
+                "On" if convert_to_midi_checkbox.isChecked() else "Off",
+            )
+            convert_to_midi_checkbox.setToolTip(conversion_reason)
 
         convert_layout = QGridLayout()
         convert_layout.setContentsMargins(0, 0, 0, 0)
@@ -22407,7 +22725,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         convert_label_spacer = QLabel("")
         convert_layout.addWidget(convert_label_spacer, 0, 0)
         convert_layout.addWidget(convert_to_midi_checkbox, 0, 1)
-
         long_name_checkbox = QCheckBox(
             self._lt("Name MIDI files by track number and song title")
         )
@@ -22415,12 +22732,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         long_name_checkbox.setToolTip(
             self._t("filename_policy.long_read_floppy.tooltip")
         )
-        long_name_checkbox.setEnabled(not self._preparation_requires_dos83_filenames())
+        long_name_checkbox.setEnabled(not filenames_are_forced)
         convert_layout.addWidget(long_name_checkbox, 1, 1)
-        if conversion_restriction:
-            conversion_hint = QLabel(conversion_restriction)
-            conversion_hint.setWordWrap(True)
-            convert_layout.addWidget(conversion_hint, 2, 1)
+        if filenames_are_forced:
+            filename_reason = self._preparation_forced_option_reason(
+                "Name MIDI files by track number and song title", "Off",
+            )
+            long_name_checkbox.setToolTip(filename_reason)
         layout.addLayout(convert_layout)
 
         trim_titles_checkbox = QCheckBox(self._lt("Trim title spaces after reading"))
@@ -22430,6 +22748,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         trim_titles_checkbox.setToolTip(
             self._lt("After reading, remove leading/trailing title spaces and collapse repeated spaces.")
         )
+        if title_trimming_is_forced:
+            trim_titles_checkbox.setChecked(True)
+            trim_titles_checkbox.setEnabled(False)
+            trim_reason = self._preparation_forced_option_reason(
+                "Trim title spaces after reading", "On",
+            )
+            trim_titles_checkbox.setToolTip(trim_reason)
 
         trim_layout = QGridLayout()
         trim_layout.setContentsMargins(0, 0, 0, 0)
@@ -22438,6 +22763,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         trim_label_spacer = QLabel("")
         trim_layout.addWidget(trim_label_spacer, 0, 0)
         trim_layout.addWidget(trim_titles_checkbox, 0, 1)
+        if conversion_is_forced or filenames_are_forced or title_trimming_is_forced:
+            preparation_hint = QLabel(self._preparation_options_hint())
+            preparation_hint.setWordWrap(True)
+            trim_layout.addWidget(preparation_hint, 1, 1)
         layout.addLayout(trim_layout)
 
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
@@ -22514,10 +22843,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         convert_to_midi = convert_to_midi_checkbox.isChecked()
         long_filenames = long_name_checkbox.isChecked()
         trim_titles = trim_titles_checkbox.isChecked()
-        self.settings.setValue(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, convert_to_midi)
-        self._set_long_midi_filenames_enabled(long_filenames)
+        if not conversion_is_forced:
+            self.settings.setValue(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, convert_to_midi)
+        if not filenames_are_forced:
+            self._set_long_midi_filenames_enabled(long_filenames)
         self.settings.setValue(self.SETTING_READ_FLOPPY_START_RECOVERY, recover)
-        self.settings.setValue(self.SETTING_READ_FLOPPY_TRIM_TITLES, trim_titles)
+        if not title_trimming_is_forced:
+            self.settings.setValue(self.SETTING_READ_FLOPPY_TRIM_TITLES, trim_titles)
         if source_kind == "floppy_usb":
             drive_info = drive_combo.currentData()
             if not isinstance(drive_info, FloppyDriveInfo):
@@ -23372,6 +23704,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 return False
         return True
 
+    @zip_import_operation
     def _activate_disk_session(self, session, listing, *, reset_original_write=True, prepare_destination=True):
         old_session = self.image_session
         recovery_diagnostics = self._json_safe_disk_recovery_diagnostics(
@@ -23756,6 +24089,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def recover_damaged_floppy_dialog(self):
         self.load_floppy_drive(default_recovery=True)
 
+    @zip_import_operation
     def load_image_file(self, image_path, prevalidated=False):
         self._log_event(
             "Image",
@@ -24093,6 +24427,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         else:
             self.status_label.setText(self._lt('Floppy imaging cancelled. No image was saved.'))
 
+    @zip_import_operation
     def _on_floppy_image_capture_finished(self):
         self._set_disk_load_busy(False)
         self.diskImageCaptureContext = {}
@@ -24314,7 +24649,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         title_mode = self._image_path_title_mode(image_path)
         is_midi = self._is_midi_image_path(image_path)
         raw_title = title if title != "" else (filename if title_mode == "midi" else "")
-        title_item = self._make_title_item(raw_title, title_mode=title_mode, fallback_title=filename)
+        title_item = self._make_title_item(
+            raw_title, title_mode=title_mode, fallback_title=filename,
+            edited=self._image_title_is_smart_pianosoft_catalog_backed(image_path),
+        )
         if self._image_title_is_smart_pianosoft_catalog_backed(image_path):
             title_item.setToolTip(
                 self._lt('Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. The MIDI track-name event is left unchanged.')
@@ -24418,8 +24756,34 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return False
         return self._title_looks_centered(raw_title)
 
-    def _display_title_text(self, raw_title, *, title_mode="", fallback_title=""):
+    def _validate_title_for_destination(self, title, title_mode="midi"):
+        modern_profiles = {
+            "midi_export", "mark_iv", "e3_850", "enspire",
+            "pianodisc_prodigy", "qrs_pmii", "qrs_pno3", "qrs_pno4",
+        }
+        profile = MidiTitleWindow._preparation_profile(self)
+        screen_checkbox = getattr(self, "format_disklavier_checkbox", None)
+        custom_midi = profile.key == "custom" and not (screen_checkbox and screen_checkbox.isChecked())
+        legacy = title_mode != "midi" or not (custom_midi or profile.key in modern_profiles)
+        return validate_title_input(title, self._language_code(), legacy=legacy)
+
+    def _title_display_encoding(self):
+        settings = getattr(self, "settings", None)
+        value = settings.value("title_display_encoding", "latin1") if settings is not None else "latin1"
+        return value if value in dict(TITLE_DISPLAY_ENCODINGS) else "latin1"
+
+    def _set_title_display_encoding(self, encoding):
+        if encoding not in dict(TITLE_DISPLAY_ENCODINGS):
+            return
+        self.settings.setValue("title_display_encoding", encoding)
+        self._refresh_image_title_display_items()
+        self._refresh_regular_title_display_items()
+        self._refresh_trim_title_spaces_action_state()
+
+    def _display_title_text(self, raw_title, *, title_mode="", fallback_title="", edited=False):
         if raw_title:
+            if not edited and title_mode in {"midi", "eseq"}:
+                return title_for_display(raw_title, MidiTitleWindow._title_display_encoding(self))
             return raw_title
         if title_mode == "midi":
             return fallback_title
@@ -24434,16 +24798,18 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             tooltip = "Only MIDI and E-SEQ files have editable title metadata."
         return self._lt(tooltip)
 
-    def _make_title_item(self, raw_title, *, title_mode="", fallback_title=""):
+    def _make_title_item(self, raw_title, *, title_mode="", fallback_title="", edited=False):
         display_title = self._display_title_text(
             raw_title,
             title_mode=title_mode,
             fallback_title=fallback_title,
+            edited=edited,
         )
         title_item = QTableWidgetItem(display_title)
         title_item.setFont(self.title_monospace_font)
         title_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         title_item.setData(self.TITLE_RAW_ROLE, raw_title)
+        title_item.setData(self.TITLE_EDITED_ROLE, edited)
         title_item.setToolTip(self._title_item_tooltip(title_mode, raw_title))
         return title_item
 
@@ -24459,6 +24825,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _refresh_image_title_display_items(self):
         if not self.is_image_mode():
             return
+        updates = []
         for row in range(self.table.rowCount()):
             if self._is_special_pianodir_row(row):
                 continue
@@ -24471,18 +24838,23 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             raw_title = self._row_raw_title(row)
             title_mode = self._image_path_title_mode(image_path)
             fallback_title = filename_item.text() if filename_item is not None else os.path.basename(image_path)
-            title_item.setText(
+            updates.append((title_item,
                 self._display_title_text(
                     raw_title,
                     title_mode=title_mode,
                     fallback_title=fallback_title,
-                )
-            )
-            title_item.setToolTip(self._title_item_tooltip(title_mode, raw_title))
+                    edited=bool(title_item.data(self.TITLE_EDITED_ROLE)),
+                ), self._title_item_tooltip(title_mode, raw_title),
+            ))
+        # Keep item identity when changing text reorders a sorted table.
+        for title_item, display_title, tooltip in updates:
+            title_item.setText(display_title)
+            title_item.setToolTip(tooltip)
 
     def _refresh_regular_title_display_items(self):
         if self.is_image_mode():
             return
+        updates = []
         for row in self._regular_file_rows():
             full_path_item = self.table.item(row, 1)
             filename_item = self.table.item(row, 3)
@@ -24493,14 +24865,17 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             raw_title = self._row_raw_title(row)
             title_mode = self._listed_file_title_mode(full_path)
             fallback_title = filename_item.text() if filename_item is not None else os.path.basename(full_path)
-            title_item.setText(
+            updates.append((title_item,
                 self._display_title_text(
                     raw_title,
                     title_mode=title_mode,
                     fallback_title=fallback_title,
-                )
-            )
-            title_item.setToolTip(self._title_item_tooltip(title_mode, raw_title))
+                    edited=bool(title_item.data(self.TITLE_EDITED_ROLE)),
+                ), self._title_item_tooltip(title_mode, raw_title),
+            ))
+        for title_item, display_title, tooltip in updates:
+            title_item.setText(display_title)
+            title_item.setToolTip(tooltip)
 
     def _reapply_image_centered_title_assumption(self):
         if not self.is_image_mode():
@@ -24714,6 +25089,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     guidance="The app continued with the files it could read",
                 )
 
+    @zip_import_operation
     def clear_list(self):
         if not self.choose_button.isEnabled():
             QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
@@ -24831,6 +25207,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def create_long_midi_filenames(self):
         if not self.choose_button.isEnabled():
             QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+            return
+        if not self.is_image_mode() and MidiTitleWindow._preparation_requires_dos83_filenames(self):
+            QMessageBox.information(
+                self, self._lt("Preparing for..."),
+                self._preparation_forced_option_reason("Descriptive filenames", "Off"),
+            )
             return
 
         if self.is_image_mode():
@@ -26023,6 +26405,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if path_item is None or filename_item is None:
             return
 
+        title_edited = source_path in self.pendingImageTitleEdits or bool(
+            self.imageFileInfo.get(source_path, {}).get("title_edited")
+        )
+        if title_edited:
+            error = MidiTitleWindow._validate_title_for_destination(self, self._row_raw_title(row), title_mode)
+            if error:
+                raise EseqConversionError(error)
         report_details = MidiTitleWindow._image_conversion_review_details(
             self, source_path, replacement_host_path,
         )
@@ -26048,7 +26437,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         display_filename = os.path.basename(target_path)
         filename_item.setText(display_filename)
         raw_title = title if title != "" else (display_filename if title_mode == "midi" else "")
-        title_item = self._make_title_item(raw_title, title_mode=title_mode, fallback_title=display_filename)
+        title_item = self._make_title_item(raw_title, title_mode=title_mode, fallback_title=display_filename, edited=title_edited)
         self.table.setItem(row, 4, title_item)
 
         self._set_image_file_info(
@@ -26061,6 +26450,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             order_key=order_key,
         )
         self.imageFileInfo[info_key].update(report_details)
+        self.imageFileInfo[info_key]["title_edited"] = title_edited
         self._reapply_image_centered_title_assumption()
         kind_item = self.table.item(row, 6)
         if kind_item is None:
@@ -26290,6 +26680,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if reason:
             self.status_label.setText(reason)
             return
+        if MidiTitleWindow._preparation_profile(self).song_format == "midi":
+            # Loading the session already queued preparation and may have
+            # completed it. Do not convert again or report a missing E-SEQ file.
+            QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
+            return
         if self.image_session is None:
             return
 
@@ -26467,12 +26862,20 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         overwrite_original=False,
     ):
         title, midi_type, title_mode, is_midi, order_key = self._probe_regular_file(temp_path)
+        title_edited = source_path in self.pendingEdits or bool(
+            self.pendingRegularConversions.get(source_path, {}).get("title_edited")
+        )
+        if title_edited:
+            error = MidiTitleWindow._validate_title_for_destination(self, self._row_raw_title(row), title_mode)
+            if error:
+                raise EseqConversionError(error)
         report_details = build_staged_conversion_details(source_path, temp_path)
         self.pendingRegularConversions[source_path] = {
             "temp_path": temp_path,
             "target_kind": target_kind,
             "target_filename": target_filename,
             "overwrite_original": bool(overwrite_original),
+            "title_edited": title_edited,
             **report_details,
         }
         self.pendingEdits.pop(source_path, None)
@@ -26498,7 +26901,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.table.setItem(
             row,
             4,
-            self._make_title_item(raw_title, title_mode=title_mode, fallback_title=target_filename),
+            self._make_title_item(raw_title, title_mode=title_mode, fallback_title=target_filename, edited=title_edited),
         )
         self._update_compat_indicator(row, raw_title)
         self._update_midi_type_indicator(row, midi_type)
@@ -27252,8 +27655,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         editor.setMinimumWidth(480)
 
         dos83_checkbox = QCheckBox(self._lt("Use 8.3 filenames"))
+        preparation_dos83 = self._preparation_requires_dos83_filenames()
         dos83_checkbox.setChecked(force_dos83 or self._dos83_filenames_enabled())
-        dos83_checkbox.setEnabled(not force_dos83)
+        dos83_checkbox.setEnabled(not (force_dos83 or preparation_dos83))
         dos83_checkbox.setToolTip(
             self._lt(
                 "Restrict the filename to an eight-character name and three-character extension. "
@@ -27277,6 +27681,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         form_grid.addWidget(warning_label, 2, 1)
         self._align_dialog_form_labels([prompt, option_spacer, warning_spacer])
         dialog_layout.addLayout(form_grid)
+
+        if preparation_dos83:
+            reason = self._preparation_forced_option_reason("Use 8.3 filenames", "On")
+            dos83_checkbox.setToolTip(reason)
+            hint = QLabel(reason)
+            hint.setWordWrap(True)
+            dialog_layout.addWidget(hint)
 
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         ok_button = buttons.button(QDialogButtonBox.Ok)
@@ -27514,6 +27925,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         new_title, ok = self._prompt_for_title(
             current_title,
             title_mode=prompt_title_mode,
+            edited=catalog_backed or bool(self.table.item(row, 4).data(self.TITLE_EDITED_ROLE)),
         )
         if not ok or not new_title.strip():
             return
@@ -27521,7 +27933,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if new_title == current_title:
             return
 
-        validation_error = validate_legacy_title_input(new_title, self._language_code())
+        validation_error = MidiTitleWindow._validate_title_for_destination(self, new_title, prompt_title_mode)
         if validation_error:
             QMessageBox.warning(self, "Invalid Title", validation_error)
             return
@@ -27546,7 +27958,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 guidance="The image and MIDI file have not been changed",
             )
             return
-        new_title_item = self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename)
+        new_title_item = self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename, edited=True)
         if catalog_backed:
             new_title_item.setToolTip(
                 self._lt('Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. The MIDI track-name event is left unchanged.')
@@ -27563,7 +27975,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             title_kind = "Smart PianoSoft catalog title"
         else:
             title_kind = "E-SEQ title" if title_mode == "eseq" else "MIDI title"
-        shown_title = self._display_title_text(new_title, title_mode=title_mode, fallback_title=filename)
+        shown_title = self._display_title_text(new_title, title_mode=title_mode, fallback_title=filename, edited=True)
         self.status_label.setText(
             self._lt("Pending image change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}", title_kind=self._lt(title_kind), filename=filename, shown_title=shown_title, warning=warning)
         )
@@ -28271,6 +28683,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.eseqCountBar.set_count(len(self._image_eseq_rows()) if self.imageEseqMode else 0)
 
     @staged_batch
+    @zip_import_operation
     def queue_image_additions(self, file_paths):
         if not self.is_image_mode():
             return
@@ -28495,7 +28908,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if added or replaced:
             self._schedule_destination_preparation()
 
-    def _prompt_for_title(self, current_title, title_mode="midi"):
+    def _prompt_for_title(self, current_title, title_mode="midi", *, edited=False):
+        original_title = current_title
+        if not edited and title_mode in {"midi", "eseq"}:
+            current_title = title_for_display(current_title, MidiTitleWindow._title_display_encoding(self))
         dialog = QDialog(self)
         apply_window_icon(dialog)
         dialog.setWindowTitle("Edit Song Title")
@@ -28534,6 +28950,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
 
         editor = QLineEdit(current_title)
+        editor.setObjectName("songTitleEditor")
         editor.setFont(title_field_font)
         editor.setLayoutDirection(Qt.LeftToRight)
         editor.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -28677,13 +29094,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         def composed_title():
             if use_screen_format:
                 if not screen_fields_changed():
-                    return screen_title
+                    return current_title if current_title != original_title else screen_title
                 return first_field.text()[:16].rstrip() + second_field.text()[:16].rstrip()
             return editor.text()
 
         def update_state():
             title_text = composed_title()
-            validation_error = validate_legacy_title_input(title_text, self._language_code())
+            validation_error = MidiTitleWindow._validate_title_for_destination(self, title_text, title_mode)
             unchanged = title_text == current_title
             has_text = bool(first_field.text().strip() or second_field.text().strip()) if use_screen_format else bool(editor.text().strip())
             is_valid = validation_error is None or unchanged
@@ -28727,7 +29144,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             editor.setFocus()
 
         if self._exec_child_dialog(dialog) == QDialog.Accepted:
-            return composed_title(), True
+            title_text = composed_title()
+            return (original_title if title_text == current_title else title_text), True
         return "", False
 
     @staged_batch
@@ -28747,12 +29165,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         current_title = self._row_raw_title(row)
         if current_title == "No title found.":
             current_title = ""
-        new_title, ok = self._prompt_for_title(current_title, title_mode=title_mode)
+        new_title, ok = self._prompt_for_title(
+            current_title, title_mode=title_mode,
+            edited=bool(self.table.item(row, 4).data(self.TITLE_EDITED_ROLE)),
+        )
         if ok and new_title.strip():
             if new_title == current_title:
                 return
 
-            validation_error = validate_legacy_title_input(new_title, self._language_code())
+            validation_error = MidiTitleWindow._validate_title_for_destination(self, new_title, title_mode)
             if validation_error:
                 QMessageBox.warning(self, "Invalid Title", validation_error)
                 return
@@ -28761,7 +29182,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 return
             self.pendingEdits[full_path] = new_title
             filename = self.table.item(row, 3).text() if self.table.item(row, 3) else "this file"
-            new_title_item = self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename)
+            new_title_item = self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename, edited=True)
             self.table.setItem(row, 4, new_title_item)
             self._update_compat_indicator(row, new_title)
             self._reapply_regular_centered_title_assumption()
@@ -28770,7 +29191,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if self._compat_warning_is_active() and self._is_title_too_long(new_title):
                 warning = "\n" + self._lt("Compatibility warning: over {limit} characters.", limit=self.TITLE_COMPAT_LIMIT)
             title_kind = "E-SEQ title" if title_mode == "eseq" else "MIDI title"
-            shown_title = self._display_title_text(new_title, title_mode=title_mode, fallback_title=filename)
+            shown_title = self._display_title_text(new_title, title_mode=title_mode, fallback_title=filename, edited=True)
             self.status_label.setText(
                 self._lt("Pending change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}", title_kind=self._lt(title_kind), filename=filename, shown_title=shown_title, warning=warning)
             )
@@ -28787,6 +29208,22 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             dict(self.pendingImageTitleEdits),
             bool(self.pendingDeletePianodir),
         )
+
+    def _validate_pending_image_titles(self):
+        edited_titles = {
+            path: info.get("title", "")
+            for path, info in getattr(self, "imageFileInfo", {}).items()
+            if info.get("title_edited")
+        }
+        edited_titles.update(getattr(self, "pendingImageTitleEdits", {}))
+        for path, title in edited_titles.items():
+            if path in getattr(self, "pendingImageDeletes", set()):
+                continue
+            error = MidiTitleWindow._validate_title_for_destination(self, title, self._image_path_title_mode(path))
+            if error:
+                QMessageBox.warning(self, self._lt("Invalid Title"), f"{os.path.basename(path)}: {error}")
+                return False
+        return True
 
     def _reload_image_table_after_commit(self):
         if self.image_session is None:
@@ -28819,6 +29256,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self.image_session is None:
             return
         if not MidiTitleWindow._ensure_preparation_ready(self):
+            return
+        if not MidiTitleWindow._validate_pending_image_titles(self):
             return
         if MidiTitleWindow._zip_source_for_path(self, getattr(self.image_session, "source_path", "")):
             self.save_image_as()
@@ -29082,6 +29521,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.diskCommitProgressDialog.close()
             self.diskCommitProgressDialog = None
         self._log_warning_event("Disk", "Save cancelled")
+        diagnostics = getattr(self.image_session, "last_floppy_save_diagnostics", {})
+        if diagnostics.get("status") == "cancelled":
+            QMessageBox.warning(self, "Floppy Write Cancelled", self._floppy_operation_error_guidance(
+                _message, operation="save_files", file_level=True,
+            ))
+            self.status_label.setText(self._lt("Floppy write cancelled. Pending changes are still staged."))
+            return
         verification = getattr(self.image_session, "last_write_verification", {})
         if verification.get("confidence") == "written":
             message = self._lt("Files were written. Readback verification was cancelled, so the contents have not been verified.")
@@ -29268,6 +29714,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             "image": image_context,
         }
         if include_floppy_recovery:
+            save_diagnostics = self._json_safe_disk_recovery_diagnostics(
+                getattr(self.image_session, "last_floppy_save_diagnostics", {})
+            )
+            if save_diagnostics:
+                context["floppy_save"] = save_diagnostics
             recovery_diagnostics = self._json_safe_disk_recovery_diagnostics(
                 getattr(self, "lastDiskRecoveryDiagnostics", {})
             )
@@ -29285,6 +29736,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         floppy_user_context=None,
         include_floppy_recovery_diagnostics=True,
     ):
+        from .build_info import build_identity
         report_id = uuid.uuid4().hex
         sender_email = str(contact or "").strip()
         log_tail = ""
@@ -29317,6 +29769,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             "app": {
                 "name": APP_NAME,
                 "version": APP_VERSION,
+                "build": build_identity(),
                 "title": APP_TITLE_WITH_VERSION,
                 "website": APP_WEBSITE,
             },
@@ -29988,10 +30441,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return ""
         return selected_filter.split("*.", 1)[1].split(")", 1)[0].strip().lower()
 
+    @zip_import_operation
     def save_image_as(self):
         if self.image_session is None:
             return
         if not MidiTitleWindow._ensure_preparation_ready(self):
+            return
+        if not MidiTitleWindow._validate_pending_image_titles(self):
             return
         if self.imageEseqMode and not self._ensure_eseq_file_limit(
             len(self._image_eseq_rows()),
@@ -30396,6 +30852,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             context_paths.append(dest_path)
         return context_dir, context_paths
 
+    @zip_import_operation
     def save_as_image(self):
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
@@ -30603,6 +31060,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._refresh_regular_mode_action_state()
         return [], len(old_to_new), backup_count
 
+    @zip_import_operation
     def save_pending_changes(self):
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
@@ -30694,8 +31152,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     dest_path = update_spec.get("destination", full_path)
                     try:
                         error_msg = None
-                        if new_title is not None:
-                            validation_error = validate_legacy_title_input(new_title, self._language_code())
+                        title_edited = full_path in self.pendingEdits or self.pendingRegularConversions.get(full_path, {}).get("title_edited")
+                        if new_title is not None and title_edited:
+                            validation_error = MidiTitleWindow._validate_title_for_destination(
+                                self, new_title, self._listed_file_title_mode(full_path),
+                            )
                             if validation_error:
                                 error_msg = f"Invalid title for {os.path.basename(full_path)}: {validation_error}"
                         if not error_msg:
@@ -30818,6 +31279,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.status_label.setText(message)
         QMessageBox.information(self, "Save Complete", message)
 
+    @zip_import_operation
     def save_as_zip(self):
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
@@ -31079,6 +31541,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         QMessageBox.information(self, self._lt("Save As Complete"), message)
         self._log_event("Files", "Save As completed", mode="regular", destination=export_dir, files=len(output_paths))
 
+    @zip_import_operation
     def save_as_changes(self):
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return

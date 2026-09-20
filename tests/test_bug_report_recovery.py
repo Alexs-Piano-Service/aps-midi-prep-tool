@@ -1,8 +1,10 @@
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QScrollArea, QWidget
+import pytest
 
 from aps_midi_prep_tool_app.main_window import MidiTitleWindow
 
@@ -86,6 +88,54 @@ def test_feedback_and_opt_out_omit_recovery_diagnostics():
     assert feedback["kind"] == "feedback"
 
 
+@pytest.mark.parametrize("include_diagnostics", [False, True])
+def test_bug_report_includes_file_save_phase_and_native_errors(include_diagnostics):
+    class Window(_BugReportWindow):
+        _bug_report_context = MidiTitleWindow._bug_report_context
+        _json_safe_disk_recovery_diagnostics = staticmethod(
+            MidiTitleWindow._json_safe_disk_recovery_diagnostics
+        )
+
+        @staticmethod
+        def is_floppy_mode():
+            return True
+
+    window = Window()
+    window.image_session = SimpleNamespace(
+        source_kind="floppy_usb", source_name="A:", source_ext="img",
+        last_floppy_save_diagnostics={
+            "stage": "preflight_listing", "status": "failed",
+            "target_mutation_attempted": False,
+            "files_removed": 0, "files_copied": 0,
+            "preflight_listing": {
+                "stage": "query_free_space",
+                "space_queries": [
+                    {"api": "GetDiskFreeSpaceExW", "error": {"winerror": 50}},
+                    {"api": "GetDiskFreeSpaceW", "error": {"winerror": 21}},
+                ],
+            },
+            "raw_bytes": b"Never include disk bytes",
+        },
+    )
+    payload = window._build_bug_report_payload(
+        summary="Floppy Save Failed", description="", contact="", include_logs=False,
+        include_floppy_recovery_diagnostics=include_diagnostics,
+    )
+    if include_diagnostics:
+        diagnostics = payload["context"]["floppy_save"]
+        assert diagnostics["stage"] == "preflight_listing"
+        assert diagnostics["target_mutation_attempted"] is False
+        assert diagnostics["files_removed"] == diagnostics["files_copied"] == 0
+        assert diagnostics["preflight_listing"]["space_queries"][0]["error"]["winerror"] == 50
+        assert "raw_bytes" not in diagnostics
+    else:
+        assert "floppy_save" not in payload["context"]
+    feedback = MidiTitleWindow._build_feedback_payload(
+        window, summary="Feedback", description="", contact="", include_logs=False,
+    )
+    assert "floppy_save" not in feedback["context"]
+
+
 def test_recovery_diagnostic_sanitizer_never_serializes_disk_bytes():
     diagnostics = {
         "readable_sectors": 10,
@@ -161,3 +211,28 @@ def test_bug_report_form_scrolls_but_action_buttons_remain_fixed():
     assert inspected["scroll_index"] == 0
     assert inspected["buttons_index"] == 1
     assert inspected["minimum_height"] < 700
+
+
+def test_bug_report_identifies_the_build_commit(monkeypatch):
+    from aps_midi_prep_tool_app import build_info
+    monkeypatch.setattr(build_info, "build_identity", lambda: {"commit": "1234abcd", "dirty": True})
+    payload = _BugReportWindow()._build_bug_report_payload(
+        summary="Save failed", description="Unsupported query", contact="", include_logs=False,
+    )
+    assert payload["app"]["build"] == {"commit": "1234abcd", "dirty": True}
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_save_guidance_distinguishes_untouched_and_partial_media(changed):
+    window = SimpleNamespace(_lt=lambda source, **fields: source.format(**fields), image_session=SimpleNamespace(last_floppy_save_diagnostics={
+        "status": "failed", "target_mutation_attempted": changed,
+        "recovery_directory": "C:/recovery/save-123", "stage": "preflight_listing",
+    }))
+    guidance = MidiTitleWindow._floppy_operation_error_guidance(
+        window, "Windows could not report filesystem space", operation="save_files", file_level=True,
+    )
+    assert ("APS has not changed the floppy" in guidance) is (not changed)
+    assert ("partially written" in guidance) is changed
+    assert "C:/recovery/save-123" in guidance
+    assert "Save As Image" in guidance
+    assert "damaged" not in guidance and "write-protect" not in guidance

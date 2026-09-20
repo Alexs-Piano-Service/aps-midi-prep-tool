@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QDialog, QSpinBox
 
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translate_text
@@ -137,30 +137,74 @@ def test_preparation_bar_refreshes_profile_delivery_controls_and_tooltips_in_eve
         ))
         assert w.preparationLabel.toolTip() == translate_text(
             "Preparing for {profile} uses {format}. Conversion to {other} is disabled. "
-            "Change the destination or choose Custom to enable it.",
+            "Change the target system or choose Custom to enable it.",
             language.code, profile=translate_text(profile.label, language.code), format="MIDI", other="E-SEQ",
         )
         assert w.preparationCustomButton.isVisible()
 
 
 @pytest.mark.parametrize("profile_key,medium,expected", (
-    ("mark_ii", "nalbantov", 0),
-    ("mark_ii_xg", "flashfloppy_img", 0),
-    ("custom", "custom", 1),
+    ("mark_ii", "nalbantov", 200),
+    ("mark_ii_xg", "flashfloppy_img", 200),
+    ("mark_iii", "flashfloppy_hfe", 200),
+    ("custom", "custom", 200),
 ))
-def test_startup_corrects_preset_numbering_and_preserves_manual_settings(
+def test_startup_preserves_saved_emulator_number_in_builder(
     tmp_path, monkeypatch, profile_key, medium, expected,
 ):
     app = QApplication.instance() or QApplication([])
     settings = QSettings(str(tmp_path / "numbering.ini"), QSettings.IniFormat)
     settings.setValue("preparation_profile", profile_key)
     settings.setValue("preparation_medium", medium)
-    settings.setValue("emulator_image_starting_number", 1)
+    settings.setValue("emulator_image_starting_number", 200)
     monkeypatch.setattr(main_window, "QSettings", lambda *_args: settings)
     monkeypatch.setattr(main_window.MidiTitleWindow, "_log_event", lambda *_args, **_kwargs: None)
     w = main_window.MidiTitleWindow()
     try:
         assert settings.value("emulator_image_starting_number", type=int) == expected
+        shown = []
+        def inspect(dialog, **_kwargs):
+            shown.append(dialog.findChild(QSpinBox, "emulatorStartingNumberSpin").value())
+            return QDialog.Rejected
+        monkeypatch.setattr(w, "_exec_child_dialog", inspect)
+        w.show_emulator_image_utility()
+        assert shown == [expected]
     finally:
         w.close()
         app.processEvents()
+
+
+def test_custom_button_preserves_preferences_and_staged_changes(window, tmp_path):
+    w, app, song = window
+    profile = get_preparation_profile("mark_ii")
+    w._apply_preparation_profile(profile, get_preparation_medium(profile, "nalbantov"))
+    w.settings.setValue("emulator_image_starting_number", 200)
+    preferences = {key: w.settings.value(key) for key in w.settings.allKeys()
+                   if key not in {"preparation_profile", "preparation_medium"}}
+    staged = {path: dict(value) for path, value in w.pendingRegularConversions.items()}
+    edits = dict(w.pendingEdits)
+    renames = dict(w.pendingRegularRenames)
+    pianodir = w.pendingGeneratePianodir
+    w.show()
+    app.processEvents()
+
+    QTest.mouseClick(w.preparationCustomButton, Qt.LeftButton)
+
+    assert w._preparation_profile().key == "custom"
+    assert {key: w.settings.value(key) for key in preferences} == preferences
+    assert w.pendingRegularConversions == staged
+    assert w.pendingEdits == edits
+    assert w.pendingRegularRenames == renames
+    assert w.pendingGeneratePianodir == pianodir
+    assert w.format_disklavier_checkbox.isChecked()
+    assert w._dos83_filenames_enabled()
+    assert not w._long_midi_filenames_enabled()
+    assert w.settingsUseDos83FilenamesAction.isEnabled()
+    assert "preferences and staged changes have been kept" in w.status_label.text()
+
+    # A later import keeps its original format once automatic preparation is off.
+    added = tmp_path / "LATER.MID"
+    added.write_bytes(song.read_bytes())
+    w._load_regular_files([str(added)], "Loaded")
+    app.processEvents()
+    assert str(added) not in w.pendingRegularConversions

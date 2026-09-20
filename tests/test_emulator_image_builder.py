@@ -1,11 +1,13 @@
 import csv
 import hashlib
+import json
 import ntpath
 from pathlib import Path
 
 import pytest
 
 from aps_midi_prep_tool_app import emulator_image_builder
+from aps_midi_prep_tool_app.helpers import file_batch
 from aps_midi_prep_tool_app.emulator_image_builder import (
     DEFAULT_SAFETY_MARGIN_BYTES,
     build_emulator_disk_images,
@@ -196,7 +198,7 @@ def test_discovers_songs_by_content_and_excludes_catalogs(tmp_path, include_subf
     eseq_path = source / "SECOND"
     convert_midi_file_to_eseq_path(midi_path, eseq_path)
     (source / "NOTES.FIL").write_bytes(b"This is not a song.")
-    (source / "NOTES.MID").write_bytes(b"This is not MIDI.")
+    (source / "NOTES.TXT").write_bytes(b"This is not MIDI.")
     # Directory/catalog files are never song entries, even if a damaged or
     # mislabeled catalog happens to contain a recognized song header.
     for name in ("PIANODIR.FIL", "MUSIC.DIR", "PDISK.MNG", "psong.mng"):
@@ -753,19 +755,19 @@ def test_replacement_commit_failure_restores_every_existing_image(
     second = output / "ROLL0002.img"
     first.write_bytes(b"first existing image")
     second.write_bytes(b"second existing image")
-    real_finish = emulator_image_builder._finish_temp_output
+    real_write = file_batch.atomic_write_bytes
     commit_calls = []
 
-    def fail_second_commit(staged_path, final_path):
+    def fail_second_commit(final_path, payload, **kwargs):
         commit_calls.append(final_path)
         if len(commit_calls) == 2:
             raise OSError("simulated commit failure")
-        return real_finish(staged_path, final_path)
+        return real_write(final_path, payload, **kwargs)
 
     monkeypatch.setattr(emulator_image_builder, "PIANODIR_MAX_TRACKS", 1)
     monkeypatch.setattr(
-        emulator_image_builder,
-        "_finish_temp_output",
+        file_batch,
+        "atomic_write_bytes",
         fail_second_commit,
     )
 
@@ -781,9 +783,85 @@ def test_replacement_commit_failure_restores_every_existing_image(
             overwrite_existing=True,
         )
 
-    assert commit_calls == [str(first), str(second)]
+    assert commit_calls == [str(first), str(second), str(first)]
     assert first.read_bytes() == b"first existing image"
     assert second.read_bytes() == b"second existing image"
+
+
+@pytest.mark.parametrize("failure_phase", ["publication", "verification"])
+@pytest.mark.parametrize("output_ext", ["img", "hfe"])
+def test_incomplete_emulator_rollback_retains_originals_and_manifest(
+    tmp_path, monkeypatch, failure_phase, output_ext,
+):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    output.mkdir()
+    originals = {}
+    for number in (1, 2):
+        album = source / f"Album {number}"
+        album.mkdir()
+        (album / "Song.mid").write_bytes(_midi_bytes(f"Song {number}"))
+        destination = output / f"ROLL{number:04d}.{output_ext}"
+        originals[destination] = f"original image {number}".encode()
+        destination.write_bytes(originals[destination])
+    first, second = originals
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir()
+    real_mkdtemp = file_batch.tempfile.mkdtemp
+
+    def make_recovery_directory(suffix=None, prefix=None, dir=None):
+        return real_mkdtemp(suffix=suffix, prefix=prefix, dir=dir or recovery_root)
+
+    monkeypatch.setattr(
+        file_batch.tempfile, "mkdtemp",
+        make_recovery_directory,
+    )
+    real_write = file_batch.atomic_write_bytes
+    real_verify = emulator_image_builder.verify_image_payloads
+
+    def failing_write(destination, payload, **kwargs):
+        destination = Path(destination)
+        if destination == first and payload == originals[first]:
+            raise OSError("Destination is unavailable during restoration")
+        if failure_phase == "publication" and destination == second:
+            raise OSError("Second image publication failed")
+        return real_write(destination, payload, **kwargs)
+
+    def failing_verify(delivered, prepared, disk_format, **kwargs):
+        if failure_phase == "verification" and Path(delivered) == second:
+            raise FloppyImageError("Second delivered image verification failed")
+        return real_verify(delivered, prepared, disk_format, **kwargs)
+
+    monkeypatch.setattr(file_batch, "atomic_write_bytes", failing_write)
+    monkeypatch.setattr(emulator_image_builder, "verify_image_payloads", failing_verify)
+    with pytest.raises(FloppyImageError, match="could not be restored") as caught:
+        build_emulator_disk_images(
+            source, output, prefix="ROLL", starting_number=1,
+            output_ext=output_ext, output_content="midi", disk_layout="folders",
+            overwrite_existing=True,
+        )
+
+    error = caught.value
+    recovery = Path(error.recovery_directory)
+    assert recovery.is_dir()
+    assert str(recovery) in str(error)
+    assert first.name in str(error)
+    expected_failure = ("Second image publication failed" if failure_phase == "publication"
+                        else "Second delivered image verification failed")
+    assert expected_failure in str(error)
+    manifest = json.loads((recovery / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["rollback_errors"] == error.rollback_errors
+    for record in manifest["files"]:
+        destination = Path(record["destination"])
+        assert (recovery / record["original_file"]).read_bytes() == originals[destination]
+        assert (recovery / record["prepared_file"]).is_file()
+    first_record = next(record for record in manifest["files"] if record["destination"] == str(first))
+    assert first_record["published"] is True
+    assert first_record["restored"] is False
+    assert first.read_bytes() != originals[first]
+    assert second.read_bytes() == originals[second]
+    assert list(recovery_root.iterdir()) == [recovery]
 
 
 def test_default_prefix_numbers_even_a_single_image(tmp_path):

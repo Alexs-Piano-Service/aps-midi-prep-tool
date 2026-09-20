@@ -17,6 +17,7 @@ from .localized_dialogs import QMessageBox
 from .message_catalog import tr, translate_text
 from .preparation_profiles import PREPARATION_SETTING_KEYS
 from .conversion_review import ConversionReport, localize_music_error, localize_music_format
+from .drop_table_widget import zip_import_operation
 from .eseq_pianodir import PianodirMetadata
 
 
@@ -50,6 +51,9 @@ def staged_batch(method):
             self._staging_depth = 0
             self._record_staged_snapshot(snapshot)
             self._refresh_pending_changes_ui()
+            collect = getattr(getattr(self, "table", None), "collect_unused_zip_imports", None)
+            if callable(collect):
+                collect()
     return wrapped
 
 
@@ -65,6 +69,21 @@ class _MetadataUndoFilter(QObject):
 
 
 class PendingChangesMixin:
+    def _staged_zip_import_references(self):
+        """Path-bearing current state and every source reachable through Undo."""
+        for name in _STATE_FIELDS:
+            yield getattr(self, name, None)
+        snapshots = list(getattr(self, "_staged_undo_stack", ()))
+        metadata_edit = getattr(self, "_staged_metadata_edit", None)
+        if metadata_edit:
+            snapshots.append(metadata_edit[1])
+        for snapshot in snapshots:
+            yield snapshot.get("state", {})
+            yield snapshot.get("copies", {})
+            for row in snapshot.get("rows", ()):
+                if len(row) > 1 and row[1] is not None:
+                    yield row[1].text()
+
     def _pending_text(self, key, **fields):
         return tr("pending." + key, self._language_code(), **fields)
 
@@ -192,6 +211,7 @@ class PendingChangesMixin:
             "catalog": self.imagePianodirCatalogEdit.text(),
         }
 
+    @zip_import_operation
     def _invalidate_staged_undo(self):
         self._staging_epoch = getattr(self, "_staging_epoch", 0) + 1
         self._undo_all_requires_source_reset = True
@@ -203,6 +223,7 @@ class PendingChangesMixin:
             pending[1]["assets"].cleanup()
         self._staged_metadata_edit = None
 
+    @zip_import_operation
     def _clear_staging_history(self):
         self._invalidate_staged_undo()
         self._undo_all_requires_source_reset = False
@@ -210,6 +231,7 @@ class PendingChangesMixin:
             assets.cleanup()
         self._restored_staging_assets = []
 
+    @zip_import_operation
     def undo_last_staged_batch(self):
         if getattr(self, "_staging_depth", 0):
             return
@@ -221,6 +243,7 @@ class PendingChangesMixin:
         self._restore_staged_snapshot(snapshot)
         self.status_label.setText(self._pending_text("undone"))
 
+    @zip_import_operation
     def undo_all_staged_changes(self):
         if getattr(self, "_staging_depth", 0):
             return
@@ -326,6 +349,8 @@ class PendingChangesMixin:
         else:
             self._refresh_regular_eseq_mode()
             self._refresh_regular_pianodir_row()
+        self._refresh_image_title_display_items()
+        self._refresh_regular_title_display_items()
         self._refresh_regular_mode_action_state()
         self._refresh_pending_changes_ui()
 

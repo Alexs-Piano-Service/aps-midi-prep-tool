@@ -9,11 +9,13 @@ import posixpath
 import random
 import re
 import shutil
+import stat
 import tempfile
 import uuid
 from dataclasses import dataclass, replace
 
 from .dos83_renamer import build_dos83_filename
+from .helpers.file_batch import FileBatchWriteError, publish_file_batch
 from .helpers.portable_filename import is_windows_device_name
 from .conversion_review import build_conversion_report
 from .eseq_converter import (
@@ -41,7 +43,6 @@ from .floppy_image import (
     FloppyOperationCancelled,
     _copy_host_file_into_image,
     _delete_eseq_directory_entries_from_image,
-    _finish_temp_output,
     _geometry_from_boot_sector,
     _is_image_capacity_error,
     _read_fat12_file_bytes,
@@ -57,11 +58,12 @@ from .midi_metadata import (
     extract_first_title_from_midi,
     extract_midi_type_label_from_midi,
     is_midi_file,
+    probe_midi_file_type,
     update_eseq_title_to_path,
     write_midi_title_to_path,
 )
 from .midi_type0_converter import convert_midi_file_to_type0_path
-from .message_catalog import tr
+from .message_catalog import tr, translate_text
 from .long_midi_filename import build_long_midi_filename
 from .smart_pianosoft import (
     SMART_PIANOSOFT_DISK_CATALOG_NAME,
@@ -189,12 +191,22 @@ def discover_song_files(source_directory, *, include_subfolders=True):
             SMART_PIANOSOFT_SONG_CATALOG_NAME,
         }:
             return
-        if os.path.isfile(path) and (is_midi_file(path) or is_eseq_file(path)):
-            paths.append(os.path.abspath(path))
+        try:
+            if not stat.S_ISREG(os.stat(path).st_mode):
+                return
+            midi_type = probe_midi_file_type(path)
+            if midi_type is not None or is_eseq_file(path):
+                paths.append(os.path.abspath(path))
+            elif os.path.splitext(filename)[1].lower() in {".mid", ".midi"}:
+                raise ValueError("Missing MThd header chunk.")
+        except (OSError, ValueError) as exc:
+            raise FloppyImageError(f"Could not inspect song {filename}: {exc}") from exc
 
     try:
         if include_subfolders:
-            for root, directory_names, filenames in os.walk(source_directory):
+            def walk_error(error):
+                raise error
+            for root, directory_names, filenames in os.walk(source_directory, onerror=walk_error):
                 directory_names[:] = [name for name in directory_names if not name.startswith(".")]
                 directory_names.sort(key=_natural_sort_key)
                 for filename in filenames:
@@ -1359,8 +1371,6 @@ def build_emulator_disk_images(
         raise FloppyImageError(f"The output path is not a folder: {output_directory}")
 
     temp_directory = tempfile.mkdtemp(prefix="aps_emulator_images_")
-    committed_paths = []
-    replacement_backups = {}
     try:
         included_folders = list(folders)
         reviewed_album_titles = {}
@@ -1584,23 +1594,41 @@ def build_emulator_disk_images(
             staged_outputs.append((staged_song_list_path, song_list_path))
 
         _raise_if_cancelled(cancel_callback)
-        for backup_index, existing_path in enumerate(existing_paths, start=1):
-            backup_path = os.path.join(
-                temp_directory,
-                f"existing_output_{backup_index:04d}.bak",
-            )
-            shutil.copy2(existing_path, backup_path)
-            replacement_backups[existing_path] = backup_path
+        expected_images = {
+            final_path: raw_path
+            for (raw_path, _songs), final_path in zip(raw_images, final_paths)
+        }
 
-        for staged_path, final_path in staged_outputs:
-            committed_paths.append(final_path)
-            _finish_temp_output(staged_path, final_path)
-
-        for (raw_path, _songs), final_path in zip(raw_images, final_paths):
+        def verify_published_output(_completed, _total, final_path):
+            # Verification runs while the transaction still owns all recovery
+            # copies. A failure here must undo publication just like a write
+            # failure, including the output that was just published.
             _raise_if_cancelled(cancel_callback)
+            raw_path = expected_images.get(final_path)
+            if raw_path is None:
+                return
             _notify(progress_callback, total_steps - 1, total_steps,
-                    f"Verifying delivered contents: {os.path.basename(final_path)}...")
+                    translate_text(
+                        "Verifying delivered contents: {name}...",
+                        language_code, name=os.path.basename(final_path),
+                    ))
             verify_image_payloads(final_path, raw_path, disk_format, cancel_callback=cancel_callback)
+
+        try:
+            publish_file_batch(staged_outputs, progress_callback=verify_published_output)
+        except FileBatchWriteError as exc:
+            if not exc.rollback_errors:
+                raise exc.original_exception from exc
+            error = FloppyImageError(translate_text(
+                "Emulator image export failed: {error}\n\n"
+                "Some output files could not be restored: {files}\n"
+                "Recovery copies and a manifest have been retained in:\n{folder}",
+                language_code, error=str(exc), files="\n".join(exc.rollback_errors),
+                folder=exc.recovery_directory,
+            ))
+            error.rollback_errors = exc.rollback_errors
+            error.recovery_directory = exc.recovery_directory
+            raise error from exc
 
         _notify(
             progress_callback,
@@ -1630,17 +1658,6 @@ def build_emulator_disk_images(
             warnings=warnings,
             contents_verified=True,
         )
-    except Exception:
-        for path in reversed(committed_paths):
-            try:
-                backup_path = replacement_backups.get(path)
-                if backup_path and os.path.isfile(backup_path):
-                    shutil.copy2(backup_path, path)
-                elif os.path.lexists(path):
-                    os.remove(path)
-            except OSError:
-                pass
-        raise
     finally:
         shutil.rmtree(temp_directory, ignore_errors=True)
 

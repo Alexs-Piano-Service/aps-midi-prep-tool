@@ -20,9 +20,18 @@ removed, or you choose **Custom**.
 
 The destination row highlights active preparation. Click **Custom** in that row
 to turn off automatic preparation and allow conversion to either format. Changes
-already staged stay available for review. **Custom** and **I'm not sure** keep
-manual conversion settings, default to long MIDI filenames, and turn off
-Disklavier screen formatting. You can then adjust those choices manually.
+already staged stay available for review, and current filename, title-formatting,
+and export preferences stay unchanged. Applying **Custom** or **I'm not sure**
+from the preparation dialog instead shows proposed defaults for review, including
+long MIDI filenames and disabled Disklavier screen formatting.
+
+Options controlled by the destination are disabled and show their effective
+values. Each affected dialog has one preparation note, and disabled controls
+explain their setting in a tooltip. For MIDI destinations, **Convert E-SEQ files
+to MIDI after reading** is checked and locked; for E-SEQ destinations it is
+unchecked and locked. Required filename rules, title cleanup, and song-format
+choices follow the same convention. Choose **Custom** to edit these options.
+Image type, capacity, and screen formatting remain editable defaults.
 
 The preparation row is visible by default. Use **View → Show Preparation Row**
 to hide or show it. Hiding it keeps
@@ -126,3 +135,18 @@ scheme. The app does not configure the emulator's drive interface.
 Profiles distinguish documented requirements from unverified configurations.
 None claims hardware playback testing. Generated files still need checking on
 the actual controller, firmware, and drive combination.
+
+Edited MIDI titles accept printable Latin-1 characters, including accented names,
+for Standard MIDI export, Mark IV, E3/DKC-850, ENSPIRE, Prodigy, and modern QRS
+profiles. Early hardware profiles, E-SEQ titles, and Smart PianoSoft catalog
+titles retain printable ASCII restrictions. Custom uses Latin-1 for MIDI when
+Disklavier screen formatting is off; an unknown destination remains conservative.
+
+Use **View > Title display encoding** to interpret existing titles as Latin-1
+(the default), Windows-1252, Japanese Shift-JIS, Simplified Chinese GBK, or
+Traditional Chinese Big5. This is an explicit display choice, without encoding
+detection. Viewing a title or exporting it without an edit preserves its original
+bytes. Accepting an unchanged decoded title in the editor also preserves it.
+Edited titles use Latin-1 and the destination's restrictions; this choice does
+not add Japanese or Chinese title writing. Automatic spacing cleanup leaves
+non-ASCII titles alone when another display encoding is selected.

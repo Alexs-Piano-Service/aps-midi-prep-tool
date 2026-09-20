@@ -6,7 +6,23 @@ changelog, and AppStream metadata. `unreleased` has no publication date;
 day, use `ready`, set `date` to the actual release date, and update the matching
 documentation. The tagging helper and packaging workflow check this identity.
 
-The initial 0.8.3 package list requires the Windows installer, portable ZIP,
+Before tagging, remove the README's planned-changes wording as well as changing
+its version label; the metadata check rejects a released README that still calls
+its changes planned. After publication, update the version badge, latest-version
+text, release date, and release-notes link on the
+[download page](https://www.alexanderpeppe.com/aps-midi-prep-tool/) together.
+Check them against the published GitHub release, then advance this checkout to
+the next unreleased patch version with a new changelog section. Do not move an
+already published tag to repair its documentation.
+
+The September 19, 2026 audit found the download page still showing v0.8.2 and
+September 9 while GitHub's latest release was
+[v0.8.3, published September 18](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/tag/v0.8.3).
+The website is maintained separately from this repository; its current release
+labels need to say **v0.8.3** and **September 18, 2026**. The pending fixes here
+are **0.8.4 development**, not an update to the existing v0.8.3 packages.
+
+The initial 0.8.4 package list requires the Windows installer, portable ZIP,
 Linux AppImage, and Windows test kit. Their exact filenames are in the metadata.
 The signed Windows workflow produces a standalone EXE and test kit. It does
 not produce the other required packages. Build and upload them before release,
@@ -41,11 +57,11 @@ Any extra uploaded EXE, ZIP, or AppImage also needs acceptance.
 
 ```json
 {
-  "tag": "v0.8.3",
+  "tag": "v0.8.4",
   "commit": "FULL_VALIDATED_COMMIT_SHA",
   "packages": [
     {
-      "asset": "APSMIDIPrepTool-0.8.3-windows-portable.zip",
+      "asset": "APSMIDIPrepTool-0.8.4-windows-portable.zip",
       "sha256": "SHA256_OF_UPLOADED_ZIP",
       "platform": "windows-11",
       "clean_machine": true,

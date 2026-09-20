@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from aps_midi_prep_tool_app import disk_session_worker, emulator_image_builder, floppy_image
+from aps_midi_prep_tool_app.helpers import file_batch
 
 
 @pytest.fixture
@@ -72,15 +73,16 @@ def test_failed_final_verification_restores_existing_delivery(tmp_path, monkeypa
     output.mkdir()
     previous = output / "DSKA0000.img"
     previous.write_bytes(b"previous customer delivery")
-    real_finish = emulator_image_builder._finish_temp_output
+    real_write = file_batch.atomic_write_bytes
 
-    def corrupt_delivery(source_path, output_path):
-        real_finish(source_path, output_path)
-        payload = bytearray(Path(output_path).read_bytes())
-        payload[payload.index(title)] ^= 1
-        Path(output_path).write_bytes(payload)
+    def corrupt_delivery(output_path, prepared_payload, **kwargs):
+        real_write(output_path, prepared_payload, **kwargs)
+        if title in prepared_payload:
+            payload = bytearray(Path(output_path).read_bytes())
+            payload[payload.index(title)] ^= 1
+            Path(output_path).write_bytes(payload)
 
-    monkeypatch.setattr(emulator_image_builder, "_finish_temp_output", corrupt_delivery)
+    monkeypatch.setattr(file_batch, "atomic_write_bytes", corrupt_delivery)
 
     with pytest.raises(floppy_image.FloppyImageError, match="contents differ"):
         emulator_image_builder.build_emulator_disk_images(
@@ -175,3 +177,77 @@ def test_commit_to_open_physical_floppy_honors_readback_choice(tmp_path, prepare
     assert reads == ([target.path] if verify else [])
     assert working.read_bytes() == prepared.read_bytes()
     assert session.last_write_verification["confidence"] == ("contents_verified" if verify else "written")
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_unsupported_flush_forces_independent_readback(tmp_path, prepared_image, monkeypatch, corrupt):
+    prepared, disk_format = prepared_image
+    modified = tmp_path / "modified.img"
+    shutil.copyfile(prepared, modified)
+    session = SimpleNamespace(create_modified_image=lambda **kw: str(modified), disk_format=disk_format)
+    target = floppy_image.FloppyDriveInfo("fake-drive", disk_format.size_bytes)
+    monkeypatch.setattr(floppy_image, "_write_block_device", lambda *a, **kw: {"confidence": "flush_unconfirmed", "winerror": 1})
+    reads = []
+    def read(source, output, size, **kw):
+        reads.append(source)
+        shutil.copyfile(prepared, output)
+        if corrupt:
+            _damage_song(output)
+    monkeypatch.setattr(floppy_image, "_read_block_device", read)
+    if corrupt:
+        with pytest.raises(floppy_image.FloppyImageError, match="readback verification failed"):
+            floppy_image.FloppyImageSession.write_to_floppy_target(session, "floppy_usb", target)
+        assert session.last_write_verification["confidence"] == "flush_unconfirmed"
+        assert session.last_floppy_save_diagnostics["stage"] == "readback"
+    else:
+        floppy_image.FloppyImageSession.write_to_floppy_target(session, "floppy_usb", target)
+        assert session.last_write_verification["confidence"] == "contents_verified"
+    assert reads == [target.path]
+
+
+def test_partial_raw_failure_updates_session_write_state(tmp_path, prepared_image, monkeypatch):
+    prepared, disk_format = prepared_image
+    modified = tmp_path / "modified.img"
+    shutil.copyfile(prepared, modified)
+    session = SimpleNamespace(create_modified_image=lambda **kw: str(modified), disk_format=disk_format)
+    target = floppy_image.FloppyDriveInfo("fake-drive", disk_format.size_bytes)
+    def write(*a, **kw):
+        error = floppy_image.FloppyImageError("[WinError 21] not ready")
+        error.diagnostics = {"stage": "flush", "target_mutation_attempted": True, "bytes_written": disk_format.size_bytes, "winerror": 21}
+        raise error
+    monkeypatch.setattr(floppy_image, "_write_block_device", write)
+    with pytest.raises(floppy_image.FloppyImageError, match="21"):
+        floppy_image.FloppyImageSession.write_to_floppy_target(session, "floppy_usb", target)
+    assert session.last_write_verification["confidence"] == "partial_or_uncertain"
+    assert session.last_floppy_save_diagnostics["stage"] == "flush"
+    assert session.last_floppy_save_diagnostics["bytes_written"] == disk_format.size_bytes
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_usb_format_verifies_physical_bytes_even_when_prepared_image_is_valid(tmp_path, monkeypatch, corrupt):
+    disk_format = next(item for item in floppy_image.DISK_FORMATS if item.key == "ibm.720")
+    target_path = tmp_path / "target.img"
+    target = floppy_image.FloppyDriveInfo(str(target_path), disk_format.size_bytes)
+    monkeypatch.setattr(floppy_image.FloppyImageSession, "_try_prepare_existing_usb_floppy", classmethod(lambda *a, **kw: None))
+    def write(source, destination, **kw):
+        shutil.copyfile(source, destination)
+        if corrupt:
+            data = bytearray(Path(destination).read_bytes())
+            data[100] ^= 1  # Still a readable blank FAT image; bytes differ.
+            Path(destination).write_bytes(data)
+    monkeypatch.setattr(floppy_image, "_write_block_device", write)
+    reads = []
+    def read(source, destination, size, **kw):
+        reads.append(source)
+        shutil.copyfile(source, destination)
+    monkeypatch.setattr(floppy_image, "_read_block_device", read)
+    if corrupt:
+        with pytest.raises(floppy_image.FloppyImageError, match="physical floppy differs"):
+            floppy_image.FloppyImageSession.format_usb_floppy(target, disk_format)
+    else:
+        session = floppy_image.FloppyImageSession.format_usb_floppy(target, disk_format)
+        try:
+            assert session.last_write_verification["confidence"] == "contents_verified"
+        finally:
+            session.cleanup()
+    assert reads == [target.path]

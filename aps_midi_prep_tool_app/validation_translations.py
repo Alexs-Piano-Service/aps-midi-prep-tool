@@ -12,6 +12,68 @@ def _add(sources, copies):
         VALIDATION_TRANSLATIONS[source] = dict(zip(_LANGUAGES, copies))
 
 
+_add("Use printable Latin-1 characters only. Unsupported characters: {characters}", (
+    "Use printable Latin-1 characters only. Unsupported characters: {characters}",
+    "Usa solo caracteres imprimibles de Latin-1. Caracteres no compatibles: {characters}",
+    "Utilisez uniquement des caractères imprimables Latin-1. Caractères non pris en charge : {characters}",
+    "Verwenden Sie nur druckbare Latin-1-Zeichen. Nicht unterstützte Zeichen: {characters}",
+    "Usa solo caratteri stampabili Latin-1. Caratteri non supportati: {characters}",
+    "Use apenas caracteres imprimíveis Latin-1. Caracteres não compatíveis: {characters}",
+    "Използвайте само печатаеми знаци от Latin-1. Неподдържани знаци: {characters}",
+    "Gebruik alleen afdrukbare Latin-1-tekens. Niet-ondersteunde tekens: {characters}",
+    "Używaj tylko drukowalnych znaków Latin-1. Nieobsługiwane znaki: {characters}",
+    "表示可能な Latin-1 文字のみを使用してください。使用できない文字: {characters}",
+    "출력 가능한 Latin-1 문자만 사용하세요. 지원하지 않는 문자: {characters}",
+    "请仅使用可打印的 Latin-1 字符。不支持的字符：{characters}",
+))
+_add("Title display encoding", (
+    "Title display encoding", "Codificación para mostrar títulos", "Encodage d’affichage des titres",
+    "Zeichenkodierung für die Titelanzeige", "Codifica di visualizzazione dei titoli",
+    "Codificação de exibição dos títulos", "Кодировка за показване на заглавията",
+    "Tekencodering voor titelweergave", "Kodowanie wyświetlanych tytułów",
+    "曲名表示の文字コード", "제목 표시 인코딩", "标题显示编码",
+))
+_add("Latin-1 (default)", (
+    "Latin-1 (default)", "Latin-1 (predeterminado)", "Latin-1 (par défaut)",
+    "Latin-1 (Standard)", "Latin-1 (predefinita)", "Latin-1 (padrão)",
+    "Latin-1 (по подразбиране)", "Latin-1 (standaard)", "Latin-1 (domyślne)",
+    "Latin-1（既定）", "Latin-1 (기본값)", "Latin-1（默认）",
+))
+_add("Windows-1252", ("Windows-1252",) * len(_LANGUAGES))
+_add("Japanese (Shift-JIS)", (
+    "Japanese (Shift-JIS)", "Japonés (Shift-JIS)", "Japonais (Shift-JIS)",
+    "Japanisch (Shift-JIS)", "Giapponese (Shift-JIS)", "Japonês (Shift-JIS)",
+    "Японски (Shift-JIS)", "Japans (Shift-JIS)", "Japońskie (Shift-JIS)",
+    "日本語（Shift-JIS）", "일본어 (Shift-JIS)", "日文（Shift-JIS）",
+))
+_add("Simplified Chinese (GBK)", (
+    "Simplified Chinese (GBK)", "Chino simplificado (GBK)", "Chinois simplifié (GBK)",
+    "Chinesisch, vereinfacht (GBK)", "Cinese semplificato (GBK)", "Chinês simplificado (GBK)",
+    "Опростен китайски (GBK)", "Vereenvoudigd Chinees (GBK)", "Chińskie uproszczone (GBK)",
+    "簡体字中国語（GBK）", "중국어 간체 (GBK)", "简体中文（GBK）",
+))
+_add("Traditional Chinese (Big5)", (
+    "Traditional Chinese (Big5)", "Chino tradicional (Big5)", "Chinois traditionnel (Big5)",
+    "Chinesisch, traditionell (Big5)", "Cinese tradizionale (Big5)", "Chinês tradicional (Big5)",
+    "Традиционен китайски (Big5)", "Traditioneel Chinees (Big5)", "Chińskie tradycyjne (Big5)",
+    "繁体字中国語（Big5）", "중국어 번체 (Big5)", "繁体中文（Big5）",
+))
+_add("Choose how existing MIDI and E-SEQ title bytes are displayed. Files are unchanged; edited titles use Latin-1 and the destination's character restrictions.", (
+    "Choose how existing MIDI and E-SEQ title bytes are displayed. Files are unchanged; edited titles use Latin-1 and the destination's character restrictions.",
+    "Elige cómo se muestran los bytes de los títulos MIDI y E-SEQ existentes. Los archivos no se modifican; los títulos editados usan Latin-1 y las restricciones de caracteres del destino.",
+    "Choisissez comment afficher les octets des titres MIDI et E-SEQ existants. Les fichiers restent inchangés ; les titres modifiés utilisent Latin-1 et respectent les restrictions de caractères de la destination.",
+    "Wählen Sie, wie die vorhandenen Titelbytes in MIDI und E-SEQ angezeigt werden. Die Dateien bleiben unverändert; bearbeitete Titel verwenden Latin-1 und die Zeichenbeschränkungen des Ziels.",
+    "Scegli come visualizzare i byte dei titoli MIDI ed E-SEQ esistenti. I file restano invariati; i titoli modificati usano Latin-1 e rispettano le restrizioni sui caratteri della destinazione.",
+    "Escolha como os bytes dos títulos MIDI e E-SEQ existentes são exibidos. Os arquivos permanecem inalterados; os títulos editados usam Latin-1 e as restrições de caracteres do destino.",
+    "Изберете как да се показват байтовете на съществуващите MIDI и E-SEQ заглавия. Файловете не се променят; редактираните заглавия използват Latin-1 и ограниченията за знаци на целевата система.",
+    "Kies hoe de bytes van bestaande MIDI- en E-SEQ-titels worden weergegeven. De bestanden blijven ongewijzigd; bewerkte titels gebruiken Latin-1 en de tekenbeperkingen van de bestemming.",
+    "Wybierz sposób wyświetlania bajtów istniejących tytułów MIDI i E-SEQ. Pliki pozostają niezmienione; edytowane tytuły używają Latin-1 i ograniczeń znaków systemu docelowego.",
+    "既存の MIDI と E-SEQ の曲名バイト列の表示方法を選択します。ファイルは変更されません。編集した曲名には Latin-1 と出力先の文字制限が適用されます。",
+    "기존 MIDI 및 E-SEQ 제목 바이트의 표시 방법을 선택하세요. 파일은 변경되지 않습니다. 편집한 제목은 Latin-1과 대상 시스템의 문자 제한을 따릅니다.",
+    "选择现有 MIDI 和 E-SEQ 标题字节的显示方式。文件保持不变；编辑后的标题使用 Latin-1，并遵循目标系统的字符限制。",
+))
+
+
 _add("Filename cannot be empty.", (
     "Enter a filename.", "Introduce un nombre de archivo.", "Saisissez un nom de fichier.",
     "Geben Sie einen Dateinamen ein.", "Inserisci un nome file.", "Digite um nome de arquivo.",

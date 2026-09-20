@@ -27,6 +27,14 @@ _LEGACY_TITLE_MAX_CODEPOINT = 0x7E
 _ESEQ_TITLE_START = 0x57
 _ESEQ_TITLE_END = 0x76
 _ESEQ_TITLE_LENGTH = _ESEQ_TITLE_END - _ESEQ_TITLE_START + 1
+_MAX_MIDI_HEADER_BYTES = 64 * 1024
+TITLE_DISPLAY_ENCODINGS = (
+    ("latin1", "Latin-1 (default)"),
+    ("cp1252", "Windows-1252"),
+    ("shift_jis", "Japanese (Shift-JIS)"),
+    ("gbk", "Simplified Chinese (GBK)"),
+    ("big5", "Traditional Chinese (Big5)"),
+)
 
 
 class MidiTitleFormatError(ValueError):
@@ -69,13 +77,30 @@ def extract_midi_type_label_from_midi(midi_path):
         return "Error"
 
 
+def probe_midi_file_type(midi_path):
+    """Return the SMF type, None for other content, or raise on invalid headers/I/O.
+
+    SMF permits additional header bytes. Bound the allocation and check the
+    declared size against the actual file before reading an extended header.
+    """
+    with open(midi_path, "rb") as handle:
+        prefix = handle.read(8)
+        if prefix[:4] != b"MThd":
+            return None
+        if len(prefix) != 8:
+            raise MidiTitleFormatError("Corrupt MIDI header length.")
+        length = int.from_bytes(prefix[4:8], "big")
+        if not 6 <= length <= _MAX_MIDI_HEADER_BYTES:
+            raise MidiTitleFormatError("Invalid MIDI header length.")
+        if 8 + length > os.fstat(handle.fileno()).st_size:
+            raise MidiTitleFormatError("Corrupt MIDI header length.")
+        return _extract_midi_format_type(prefix + handle.read(length))
+
+
 def is_midi_file(midi_path):
     try:
-        with open(midi_path, "rb") as f:
-            midi_bytes = f.read(14)
-        _extract_midi_format_type(midi_bytes)
-        return True
-    except Exception:
+        return probe_midi_file_type(midi_path) is not None
+    except (OSError, ValueError):
         return False
 
 
@@ -256,8 +281,24 @@ def _encode_title_bytes(title):
     except UnicodeEncodeError as exc:
         raise ValueError("Title contains characters that are not representable in Latin-1.") from exc
 
-def _decode_title_bytes(title_bytes):
-    return title_bytes.decode("latin1")
+def _decode_title_bytes(title_bytes, encoding="latin1"):
+    return title_bytes.decode(encoding)
+
+
+def title_for_display(raw_title, encoding="latin1"):
+    """Interpret the lossless Latin-1 carrier without changing stored title bytes.
+
+    Display decoding is explicit, never guessed. Replacement characters in a
+    preview are deliberately not propagated back to the stored title.
+    """
+    if encoding not in dict(TITLE_DISPLAY_ENCODINGS):
+        raise ValueError(f"Unsupported title display encoding: {encoding}")
+    try:
+        title_bytes = raw_title.encode("latin1")
+    except UnicodeEncodeError:
+        # Filename fallbacks and catalog titles may already be Unicode text.
+        return raw_title
+    return title_bytes.decode(encoding, errors="replace")
 
 
 def _extract_eseq_title_from_bytes(data):
@@ -304,11 +345,18 @@ def _describe_char_for_error(ch):
 
 def validate_legacy_title_input(title, language_code="en"):
     """Validate edited titles against a conservative legacy-safe character set."""
+    return validate_title_input(title, language_code, legacy=True)
+
+
+def validate_title_input(title, language_code="en", *, legacy=True):
+    """Validate an edit for legacy hardware or the supported Latin-1 MIDI writer."""
     invalid = []
     seen = set()
     for ch in title:
         code = ord(ch)
         if _LEGACY_TITLE_MIN_CODEPOINT <= code <= _LEGACY_TITLE_MAX_CODEPOINT:
+            continue
+        if not legacy and code <= 0xFF and ch.isprintable():
             continue
         if ch in seen:
             continue
@@ -321,10 +369,12 @@ def validate_legacy_title_input(title, language_code="en"):
     preview = ", ".join(_describe_char_for_error(ch) for ch in invalid[:5])
     if len(invalid) > 5:
         preview += ", ..."
-    return translate_text(
-        "Use printable ASCII only (space through ~). Unsupported characters: {characters}",
-        language_code,
-    ).format(characters=preview)
+    message = (
+        "Use printable ASCII only (space through ~). Unsupported characters: {characters}"
+        if legacy else
+        "Use printable Latin-1 characters only. Unsupported characters: {characters}"
+    )
+    return translate_text(message, language_code).format(characters=preview)
 
 def _set_first_title_in_midi_bytes(midi_bytes, new_title):
     declared_track_count, chunks = _parse_midi_chunks(midi_bytes)

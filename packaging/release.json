@@ -1,12 +1,12 @@
 {
-  "version": "0.8.3",
+  "version": "0.8.4",
   "status": "unreleased",
   "date": null,
-  "development_date": "2026-09-17",
+  "development_date": "2026-09-19",
   "required_assets": [
-    "APSMIDIPrepTool-0.8.3-Setup.exe",
-    "APSMIDIPrepTool-0.8.3-windows-portable.zip",
-    "APSMidiPrepTool-0.8.3-x86_64.AppImage",
+    "APSMIDIPrepTool-0.8.4-Setup.exe",
+    "APSMIDIPrepTool-0.8.4-windows-portable.zip",
+    "APSMidiPrepTool-0.8.4-x86_64.AppImage",
     "windows-test-kit.zip"
   ]
 }

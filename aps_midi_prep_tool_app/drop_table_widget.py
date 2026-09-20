@@ -1,5 +1,7 @@
 import os
 import tempfile
+from contextlib import contextmanager
+from functools import wraps
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
@@ -11,6 +13,19 @@ from .ui_utils import center_dialog_on_parent
 from .zip_import import ZipImportCancelled, ZipImportError, extract_zip
 
 
+def zip_import_operation(method):
+    """Keep stack-local ZIP inputs alive until a UI operation has settled."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        table = getattr(self, "table", self)
+        retain = getattr(table, "retain_zip_imports", None)
+        if not callable(retain):
+            return method(self, *args, **kwargs)
+        with retain():
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class DropTableWidget(QTableWidget):
     def __init__(self, rows, columns, parent=None):
         super().__init__(rows, columns, parent)
@@ -20,7 +35,9 @@ class DropTableWidget(QTableWidget):
         # Keep archive sources alive through conversion, undo, and image saves.
         # They have a separate lifetime from the window's conversion scratch space.
         self._zip_imports = []
+        self._zip_import_usage = {}
         self._zip_import_generation = 0
+        self._zip_import_use_depth = 0
 
     def _lt(self, text):
         window = self.window()
@@ -206,12 +223,64 @@ class DropTableWidget(QTableWidget):
                 continue
         return ""
 
+    @contextmanager
+    def retain_zip_imports(self):
+        self._zip_import_use_depth += 1
+        try:
+            yield
+        finally:
+            self._zip_import_use_depth -= 1
+            self.collect_unused_zip_imports()
+
+    def collect_unused_zip_imports(self, referenced_paths=None):
+        """Release whole archives only when live state and undo no longer use them."""
+        window = self.window()
+        if self._zip_import_use_depth or getattr(window, "_staging_depth", 0):
+            return
+        if not self._zip_imports:
+            return
+        if referenced_paths is None:
+            reference_provider = getattr(window, "_zip_import_references", None)
+            referenced_paths = list(reference_provider()) if callable(reference_provider) else []
+            referenced_paths.extend(
+                item.text() for row in range(self.rowCount())
+                if (item := self.item(row, 1)) is not None
+            )
+        paths = {
+            os.path.normcase(os.path.abspath(path))
+            for path in referenced_paths if path and os.path.isabs(path)
+        }
+        retained = []
+        for directory, archive_path in self._zip_imports:
+            root = os.path.normcase(os.path.abspath(directory.name))
+            needed = False
+            for path in paths:
+                try:
+                    if os.path.commonpath((root, path)) == root:
+                        needed = True
+                        break
+                except ValueError:
+                    continue
+            if not needed:
+                try:
+                    directory.cleanup()
+                except OSError:
+                    # A transient Windows sharing violation can be retried at
+                    # the next boundary; keep its storage charged meanwhile.
+                    needed = True
+                else:
+                    getattr(self, "_zip_import_usage", {}).pop(directory.name, None)
+            if needed:
+                retained.append((directory, archive_path))
+        self._zip_imports[:] = retained
+
     def cleanup_zip_imports(self):
         # Invalidate an extraction paused in processEvents before cleaning up.
         self._zip_import_generation += 1
         for directory, _archive_path in self._zip_imports:
             directory.cleanup()
         self._zip_imports.clear()
+        getattr(self, "_zip_import_usage", {}).clear()
 
     def _expand_zip_paths(self, main_window, paths):
         if not any(self._is_zip_path(path) for path in paths):
@@ -255,6 +324,7 @@ class DropTableWidget(QTableWidget):
                         path, directory.name,
                         byte_progress=report_progress,
                         is_cancelled=cancelled,
+                        budget=self._zip_import_usage,
                     )
                     # Keep companion metadata on disk, but only import files the
                     # active workflow can use. ZIP files are expanded once.
@@ -269,19 +339,23 @@ class DropTableWidget(QTableWidget):
                             + self._lt("No supported files were found in the ZIP file.")
                         )
                         directory.cleanup()
+                        self._zip_import_usage.pop(directory.name, None)
                         continue
                     imports.append((directory, os.path.abspath(path)))
                     expanded.extend(accepted)
                 except ZipImportCancelled:
                     directory.cleanup()
+                    self._zip_import_usage.pop(directory.name, None)
                     for previous, _archive_path in imports:
                         previous.cleanup()
+                        self._zip_import_usage.pop(previous.name, None)
                     status_label = getattr(main_window, "status_label", None)
                     if status_label is not None:
                         status_label.setText(self._lt("Drop cancelled."))
                     return None
                 except Exception as exc:
                     directory.cleanup()
+                    self._zip_import_usage.pop(directory.name, None)
                     detail = self._lt(str(exc)) if isinstance(exc, ZipImportError) else str(exc)
                     errors.append(
                         f"{os.path.basename(path)}: "
@@ -440,6 +514,7 @@ class DropTableWidget(QTableWidget):
         self._set_drag_invite_active(False)
         super().dragLeaveEvent(event)
 
+    @zip_import_operation
     def dropEvent(self, event):
         self._drag_urls_supported_for_current_drag = None
         self._set_drag_invite_active(False)
@@ -470,6 +545,23 @@ class DropTableWidget(QTableWidget):
                 image_paths = [path for path in local_paths if self._safe_is_supported_image_path(path)]
 
                 if image_paths and hasattr(main_window, "load_image_file"):
+                    # Opening an image replaces the active session. Reject the
+                    # whole ambiguous drop before any files can be imported.
+                    if len(local_paths) > 1:
+                        self._log_drop_event(
+                            main_window, "Drop rejected", images=len(image_paths),
+                            files=len(local_paths),
+                        )
+                        QMessageBox.warning(
+                            main_window, self._lt("Drop Failed"),
+                            self._lt(
+                                "Only one disk image can be opened at a time. Drop it separately from other files.\n\n"
+                                "Nothing from this drop was imported. Extract ZIP files first, then "
+                                "drop one image or select the song files separately."
+                            ),
+                        )
+                        self._safe_accept_event(event)
+                        return
                     self._log_drop_event(main_window, "Opening disk image", path=image_paths[0])
                     main_window.load_image_file(image_paths[0])
                     self._safe_accept_event(event)

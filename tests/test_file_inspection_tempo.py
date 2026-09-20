@@ -254,7 +254,7 @@ class FileInspectionTempoTests(unittest.TestCase):
             def send_message(self, _message):
                 pass
 
-        worker = MidiOutputWorker(b"", 0, tempo_percent=100)
+        worker = MidiOutputWorker(b"", "Test output", tempo_percent=100)
         worker.set_tempo_percent(10)
 
         tempo = worker._drain_commands(

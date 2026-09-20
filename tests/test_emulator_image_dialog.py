@@ -149,13 +149,17 @@ def test_builder_respects_destination_format_despite_conflicting_saved_content(t
     def inspect(dialog):
         content = dialog.findChild(QComboBox, "emulatorContentCombo")
         assert content.currentData() == target
+        assert not content.isEnabled()
         other_index = content.findData(other)
         assert not content.model().item(other_index).isEnabled()
         assert content.model().item(content.findData(target)).isEnabled()
         reason = MidiTitleWindow._preparation_conversion_restriction(window, other)
-        assert content.toolTip() == reason
         assert content.itemData(other_index, Qt.ToolTipRole) == reason
-        assert dialog.findChild(QLabel, "emulatorContentRestrictionHint").text() == reason
+        forced_reason = MidiTitleWindow._preparation_forced_option_reason(
+            window, "Song format", "E-SEQ" if target == "eseq" else "MIDI",
+        )
+        assert content.toolTip() == forced_reason
+        assert dialog.findChild(QLabel, "emulatorContentRestrictionHint").text() == forced_reason
         content.setCurrentIndex(other_index)
         assert content.currentData() == target
         return QDialog.Accepted
@@ -180,6 +184,7 @@ def test_builder_custom_destination_keeps_both_format_choices(tmp_path, profile_
     def inspect(dialog):
         content = dialog.findChild(QComboBox, "emulatorContentCombo")
         assert content.currentData() == "midi"
+        assert content.isEnabled()
         assert all(content.model().item(index).isEnabled() for index in range(content.count()))
         assert content.toolTip() == ""
         assert dialog.findChild(QLabel, "emulatorContentRestrictionHint") is None

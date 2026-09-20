@@ -129,3 +129,15 @@ def test_startup_migrates_retired_selection_to_nalbantov(application, monkeypatc
         assert settings.value("emulator_image_starting_number", type=int) == 0
     finally:
         window.close()
+
+    # Once migrated, the user's next choice survives subsequent launches.
+    settings.setValue("emulator_image_starting_number", 200)
+    settings.sync()
+    restored = QSettings(settings.fileName(), QSettings.IniFormat)
+    monkeypatch.setattr(main_window, "QSettings", lambda *_args: restored)
+    restarted = MidiTitleWindow()
+    try:
+        assert restarted._preparation_medium().key == "nalbantov"
+        assert restored.value("emulator_image_starting_number", type=int) == 200
+    finally:
+        restarted.close()

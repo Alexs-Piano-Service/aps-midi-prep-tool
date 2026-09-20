@@ -32,8 +32,50 @@ _add("Keep manual conversion settings; use descriptive filenames and standard ti
 _add("Show Save Destination", "Mostrar destino de guardado|Afficher la destination d’enregistrement|Speicherziel anzeigen|Mostra destinazione di salvataggio|Mostrar destino de salvamento|Показване на местоназначението за запис|Opslagbestemming tonen|Pokaż miejsce zapisu|保存先を表示|저장 대상 표시|显示保存位置")
 _add("Show Preparation Row", "Mostrar fila de preparación|Afficher la ligne de préparation|Vorbereitungszeile anzeigen|Mostra riga di preparazione|Mostrar linha de preparação|Показване на реда за подготовка|Voorbereidingsrij tonen|Pokaż wiersz przygotowania|準備の行を表示|준비 행 표시|显示准备栏")
 _add("Switch to Custom", "Cambiar a Personalizado|Passer à Personnalisé|Zu Benutzerdefiniert wechseln|Passa a Personalizzato|Mudar para Personalizado|Преминаване към По избор|Overschakelen naar Aangepast|Przełącz na Własne|カスタムに切り替え|사용자 지정으로 전환|切换为自定义")
+_add(
+    "Automatic preparation is off. Current preferences and staged changes have been kept.",
+    "La preparación automática está desactivada. Se han conservado las preferencias actuales y los cambios pendientes.|"
+    "La préparation automatique est désactivée. Les préférences actuelles et les modifications en attente ont été conservées.|"
+    "Die automatische Vorbereitung ist deaktiviert. Die aktuellen Einstellungen und vorgemerkten Änderungen wurden beibehalten.|"
+    "La preparazione automatica è disattivata. Le preferenze attuali e le modifiche in attesa sono state mantenute.|"
+    "A preparação automática está desativada. As preferências atuais e as alterações pendentes foram mantidas.|"
+    "Автоматичната подготовка е изключена. Текущите настройки и чакащите промени са запазени.|"
+    "Automatische voorbereiding is uitgeschakeld. De huidige voorkeuren en klaargezette wijzigingen zijn behouden.|"
+    "Automatyczne przygotowanie jest wyłączone. Zachowano bieżące preferencje i oczekujące zmiany.|"
+    "自動準備は無効です。現在の設定と保留中の変更は保持されています。|"
+    "자동 준비가 꺼져 있습니다. 현재 환경 설정과 저장 대기 중인 변경 사항은 유지되었습니다.|"
+    "自动准备已关闭。已保留当前偏好设置和待保存的更改。",
+)
+_add(
+    "Preparing for {profile} sets {option} to {value}. Change the target system or choose Custom to change this option.",
+    "La preparación para {profile} establece {option} en {value}. Cambie el sistema de destino o elija Personalizado para cambiar esta opción.|"
+    "La préparation pour {profile} définit {option} sur {value}. Changez de système cible ou choisissez Personnalisé pour modifier cette option.|"
+    "Die Vorbereitung für {profile} setzt {option} auf {value}. Ändern Sie das Zielsystem oder wählen Sie Benutzerdefiniert, um diese Option zu ändern.|"
+    "La preparazione per {profile} imposta {option} su {value}. Cambia il sistema di destinazione o scegli Personalizzato per modificare questa opzione.|"
+    "A preparação para {profile} define {option} como {value}. Altere o sistema de destino ou escolha Personalizado para alterar esta opção.|"
+    "Подготовката за {profile} задава {option} на {value}. Променете целевата система или изберете По избор, за да промените тази настройка.|"
+    "De voorbereiding voor {profile} stelt {option} in op {value}. Wijzig het doelsysteem of kies Aangepast om deze optie te wijzigen.|"
+    "Przygotowanie dla {profile} ustawia {option} na {value}. Zmień system docelowy lub wybierz Własne, aby zmienić tę opcję.|"
+    "{profile}向けの準備では、{option}を{value}に設定します。このオプションを変更するには、対象システムを変更するか、カスタムを選択してください。|"
+    "{profile}용 준비는 {option}을(를) {value}(으)로 설정합니다. 이 옵션을 변경하려면 대상 시스템을 변경하거나 사용자 지정을 선택하세요.|"
+    "为 {profile} 准备时，{option}设为{value}。请更改目标系统或选择“自定义”以更改此选项。",
+)
+_add(
+    "Some options are set by Preparing for {profile}. Change the target system or choose Custom to change them.",
+    "La preparación para {profile} determina algunas opciones. Cambie el sistema de destino o elija Personalizado para modificarlas.|"
+    "La préparation pour {profile} définit certaines options. Changez de système cible ou choisissez Personnalisé pour les modifier.|"
+    "Die Vorbereitung für {profile} legt einige Optionen fest. Ändern Sie das Zielsystem oder wählen Sie Benutzerdefiniert, um sie zu ändern.|"
+    "La preparazione per {profile} imposta alcune opzioni. Cambia il sistema di destinazione o scegli Personalizzato per modificarle.|"
+    "A preparação para {profile} define algumas opções. Altere o sistema de destino ou escolha Personalizado para alterá-las.|"
+    "Подготовката за {profile} задава някои настройки. Променете целевата система или изберете По избор, за да ги промените.|"
+    "De voorbereiding voor {profile} bepaalt enkele opties. Wijzig het doelsysteem of kies Aangepast om ze te wijzigen.|"
+    "Przygotowanie dla {profile} określa niektóre opcje. Zmień system docelowy lub wybierz Własne, aby je zmienić.|"
+    "{profile}向けの準備により、一部のオプションが設定されています。これらを変更するには、対象システムを変更するか、カスタムを選択してください。|"
+    "{profile}용 준비에서 일부 옵션을 설정합니다. 변경하려면 대상 시스템을 변경하거나 사용자 지정을 선택하세요.|"
+    "为 {profile} 准备时会设定部分选项。请更改目标系统或选择“自定义”以更改这些选项。",
+)
 _add("DOS 8.3 · {count} to rename", "DOS 8.3 · {count} por renombrar|DOS 8.3 · {count} à renommer|DOS 8.3 · {count} umzubenennen|DOS 8.3 · {count} da rinominare|DOS 8.3 · {count} a renomear|DOS 8.3 · {count} за преименуване|DOS 8.3 · {count} te hernoemen|DOS 8.3 · {count} do zmiany nazwy|DOS 8.3・{count}件の名前を変更|DOS 8.3 · 이름 변경 {count}개|DOS 8.3 · {count} 个待重命名")
-_add("Preparing for {profile} uses {format}. Conversion to {other} is disabled. Change the destination or choose Custom to enable it.", "La preparación para {profile} usa {format}. La conversión a {other} está desactivada. Cambie el destino o elija Personalizado para activarla.|La préparation pour {profile} utilise {format}. La conversion vers {other} est désactivée. Changez de destination ou choisissez Personnalisé pour l’activer.|Die Vorbereitung für {profile} verwendet {format}. Die Konvertierung in {other} ist deaktiviert. Ändern Sie das Ziel oder wählen Sie Benutzerdefiniert, um sie zu aktivieren.|La preparazione per {profile} usa {format}. La conversione in {other} è disabilitata. Cambia destinazione o scegli Personalizzato per abilitarla.|A preparação para {profile} usa {format}. A conversão para {other} está desativada. Altere o destino ou escolha Personalizado para ativá-la.|Подготовката за {profile} използва {format}. Преобразуването в {other} е изключено. Променете местоназначението или изберете По избор, за да го включите.|De voorbereiding voor {profile} gebruikt {format}. Conversie naar {other} is uitgeschakeld. Wijzig de bestemming of kies Aangepast om deze in te schakelen.|Przygotowanie dla {profile} używa formatu {format}. Konwersja do {other} jest wyłączona. Zmień miejsce docelowe lub wybierz Własne, aby ją włączyć.|{profile}向けの準備では{format}を使用します。{other}への変換は無効です。有効にするには出力先を変更するか、カスタムを選択してください。|{profile}용 준비에는 {format}을 사용합니다. {other}(으)로의 변환은 비활성화되어 있습니다. 활성화하려면 대상을 변경하거나 사용자 지정을 선택하세요.|为 {profile} 准备时使用 {format}。转换为 {other} 已禁用。请更改目标或选择“自定义”以启用转换。")
+_add("Preparing for {profile} uses {format}. Conversion to {other} is disabled. Change the target system or choose Custom to enable it.", "La preparación para {profile} usa {format}. La conversión a {other} está desactivada. Cambie el sistema de destino o elija Personalizado para activarla.|La préparation pour {profile} utilise {format}. La conversion vers {other} est désactivée. Changez de système cible ou choisissez Personnalisé pour l’activer.|Die Vorbereitung für {profile} verwendet {format}. Die Konvertierung in {other} ist deaktiviert. Ändern Sie das Zielsystem oder wählen Sie Benutzerdefiniert, um sie zu aktivieren.|La preparazione per {profile} usa {format}. La conversione in {other} è disabilitata. Cambia il sistema di destinazione o scegli Personalizzato per abilitarla.|A preparação para {profile} usa {format}. A conversão para {other} está desativada. Altere o sistema de destino ou escolha Personalizado para ativá-la.|Подготовката за {profile} използва {format}. Преобразуването в {other} е изключено. Променете целевата система или изберете По избор, за да го включите.|De voorbereiding voor {profile} gebruikt {format}. Conversie naar {other} is uitgeschakeld. Wijzig het doelsysteem of kies Aangepast om deze in te schakelen.|Przygotowanie dla {profile} używa formatu {format}. Konwersja do {other} jest wyłączona. Zmień system docelowy lub wybierz Własne, aby ją włączyć.|{profile}向けの準備では{format}を使用します。{other}への変換は無効です。有効にするには対象システムを変更するか、カスタムを選択してください。|{profile}용 준비에는 {format}을 사용합니다. {other}(으)로의 변환은 비활성화되어 있습니다. 활성화하려면 대상 시스템을 변경하거나 사용자 지정을 선택하세요.|为 {profile} 准备时使用 {format}。转换为 {other} 已禁用。请更改目标系统或选择“自定义”以启用转换。")
 _add("Piano / controller:", "Piano / controlador:|Piano / contrôleur :|Klavier / Steuereinheit:|Pianoforte / controller:|Piano / controlador:|Пиано / контролер:|Piano / controller:|Pianino / sterownik:|ピアノ／コントローラー:|피아노 / 컨트롤러:|钢琴／控制器：")
 _add("Drive / delivery:", "Unidad / entrega:|Lecteur / support de sortie :|Laufwerk / Ausgabe:|Unità / destinazione:|Unidade / entrega:|Устройство / носител:|Station / uitvoer:|Napęd / nośnik docelowy:|ドライブ／出力先:|드라이브 / 출력 대상:|驱动器／交付方式：")
 _add("Setting", "Ajuste|Réglage|Einstellung|Impostazione|Configuração|Настройка|Instelling|Ustawienie|設定|설정|设置")

@@ -20,7 +20,8 @@ def test_validation_catalog_covers_all_languages_and_preserves_fields():
         for code, copy in copies.items():
             assert copy.strip(), (source, code)
             assert _fields(copy) == _fields(source), (source, code)
-            if code != "en":
+            # Encoding identifiers are standardized names in every language.
+            if code != "en" and source != "Windows-1252":
                 assert copy != source, (source, code)
 
 

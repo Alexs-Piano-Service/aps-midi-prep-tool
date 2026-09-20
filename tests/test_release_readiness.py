@@ -97,6 +97,9 @@ def test_bulgarian_catalog_never_silently_falls_back_to_english():
     for source, translations in COMMON_TEXT_TRANSLATIONS.items():
         # A layout containing only placeholders and punctuation has no English
         # prose to translate. Its inserted labels/values are localized separately.
+        if source == "Windows-1252":
+            # This is a standardized encoding identifier, not English prose.
+            continue
         literal_text = "".join(part for part, _field, _spec, _conversion in Formatter().parse(source))
         if any(character.isalpha() for character in literal_text):
             assert translations["bg"] != source, source

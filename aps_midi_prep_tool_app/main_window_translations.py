@@ -10,6 +10,19 @@ def _translations(*values):
 
 
 MAIN_WINDOW_TRANSLATIONS = {
+    "The ZIP import exceeds the temporary storage budget. Save or clear the current files, then try again.": _translations(
+        "La importación del ZIP supera el límite de almacenamiento temporal. Guarda o vacía la lista de archivos actuales y vuelve a intentarlo.",
+        "L’importation du ZIP dépasse la limite de stockage temporaire. Enregistrez les fichiers actuels ou videz la liste, puis réessayez.",
+        "Der ZIP-Import überschreitet das Limit für temporären Speicherplatz. Speichern Sie die aktuellen Dateien oder leeren Sie die Liste und versuchen Sie es erneut.",
+        "L’importazione ZIP supera il limite di spazio temporaneo. Salva i file attuali o svuota l’elenco, quindi riprova.",
+        "A importação do ZIP excede o limite de armazenamento temporário. Salve os arquivos atuais ou limpe a lista e tente novamente.",
+        "Импортирането на ZIP надвишава ограничението за временно съхранение. Запазете текущите файлове или изчистете списъка и опитайте отново.",
+        "De ZIP-import overschrijdt de limiet voor tijdelijke opslag. Sla de huidige bestanden op of maak de lijst leeg en probeer het opnieuw.",
+        "Import ZIP przekracza limit pamięci tymczasowej. Zapisz bieżące pliki lub wyczyść listę i spróbuj ponownie.",
+        "ZIP のインポートが一時保存領域の上限を超えています。現在のファイルを保存するか一覧をクリアしてから、もう一度お試しください。",
+        "ZIP 가져오기가 임시 저장 공간 한도를 초과합니다. 현재 파일을 저장하거나 목록을 비운 후 다시 시도하세요.",
+        "ZIP 导入超出了临时存储空间上限。请保存当前文件或清空列表，然后重试。",
+    ),
     "MIDI, E-SEQ, ZIP, IMG, HFE, SCP, and other disk images": _translations(
         "MIDI, E-SEQ, ZIP, IMG, HFE, SCP y otras imágenes de disco",
         "MIDI, E-SEQ, ZIP, IMG, HFE, SCP et autres images disque",
@@ -60,6 +73,45 @@ MAIN_WINDOW_TRANSLATIONS = {
         "ZIP ファイル内に対応しているファイルが見つかりませんでした。",
         "ZIP 파일에서 지원되는 파일을 찾을 수 없습니다.",
         "ZIP 文件中未找到支持的文件。",
+    ),
+    (
+        "Only one disk image can be opened at a time. Drop it separately from other files.\n\n"
+        "Nothing from this drop was imported. Extract ZIP files first, then "
+        "drop one image or select the song files separately."
+    ): _translations(
+        "Solo se puede abrir una imagen de disco a la vez. Arrástrala por separado de los demás archivos.\n\n"
+        "No se ha importado nada de lo que has arrastrado. Extrae primero los archivos ZIP y luego "
+        "arrastra una imagen o selecciona los archivos de canciones por separado.",
+        "Une seule image disque peut être ouverte à la fois. Déposez-la séparément des autres fichiers.\n\n"
+        "Aucun des fichiers déposés n'a été importé. Extrayez d'abord les fichiers ZIP, puis "
+        "déposez une image ou sélectionnez les fichiers de morceaux séparément.",
+        "Es kann jeweils nur ein Disketten-Image geöffnet werden. Ziehen Sie es getrennt von anderen Dateien in das Fenster.\n\n"
+        "Keine der abgelegten Dateien wurde importiert. Entpacken Sie zuerst die ZIP-Dateien und "
+        "ziehen Sie dann ein Image in das Fenster oder wählen Sie die Songdateien separat aus.",
+        "È possibile aprire una sola immagine disco alla volta. Trascinala separatamente dagli altri file.\n\n"
+        "Nessuno dei file trascinati è stato importato. Estrai prima i file ZIP, quindi "
+        "trascina una sola immagine o seleziona separatamente i file dei brani.",
+        "Só é possível abrir uma imagem de disco por vez. Arraste-a separadamente dos outros arquivos.\n\n"
+        "Nenhum dos arquivos arrastados foi importado. Extraia os arquivos ZIP primeiro e depois "
+        "arraste uma imagem ou selecione os arquivos de músicas separadamente.",
+        "Може да се отвори само един дисков образ наведнъж. Пуснете го отделно от другите файлове.\n\n"
+        "Нито един от пуснатите файлове не е импортиран. Първо извлечете ZIP файловете, след което "
+        "пуснете един образ или изберете файловете с песни отделно.",
+        "Er kan maar één schijfimage tegelijk worden geopend. Sleep deze apart van andere bestanden naar het venster.\n\n"
+        "Geen van de neergezette bestanden is geïmporteerd. Pak eerst de ZIP-bestanden uit en "
+        "sleep daarna één image naar het venster of selecteer de songbestanden apart.",
+        "Można otworzyć tylko jeden obraz dysku naraz. Przeciągnij go oddzielnie od innych plików.\n\n"
+        "Żaden z przeciągniętych plików nie został zaimportowany. Najpierw wypakuj pliki ZIP, a następnie "
+        "przeciągnij jeden obraz lub wybierz pliki utworów oddzielnie.",
+        "一度に開けるディスクイメージは1つだけです。他のファイルとは別にドロップしてください。\n\n"
+        "今回ドロップしたファイルはインポートされていません。先に ZIP ファイルを展開してから、"
+        "イメージを1つドロップするか、曲ファイルを別に選択してください。",
+        "디스크 이미지는 한 번에 하나만 열 수 있습니다. 다른 파일과 별도로 끌어다 놓으세요.\n\n"
+        "이번에 끌어다 놓은 파일은 가져오지 않았습니다. 먼저 ZIP 파일의 압축을 푼 다음 "
+        "이미지 하나를 끌어다 놓거나 곡 파일을 별도로 선택하세요.",
+        "一次只能打开一个磁盘映像。请将其与其他文件分开拖放。\n\n"
+        "本次拖放的文件均未导入。请先解压 ZIP 文件，然后"
+        "拖放一个映像，或单独选择歌曲文件。",
     ),
     "The ZIP file contains unsafe paths or unsupported entries.": _translations(
         "El archivo ZIP contiene rutas no seguras o entradas no compatibles.",

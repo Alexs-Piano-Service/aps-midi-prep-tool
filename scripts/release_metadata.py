@@ -48,6 +48,11 @@ def validate_release_metadata(root=ROOT, *, tag=None, require_ready=False):
         label = "Current" if ready else "Development"
         if not re.search(rf"^{label} version: `{re.escape(version)}`$", readme, re.MULTILINE):
             raise ReleaseMetadataError("README version/status does not match release metadata.")
+        if ready and re.search(
+            rf"Development version:|changes planned for {re.escape(version)}(?!\d|\.\d)",
+            readme,
+        ):
+            raise ReleaseMetadataError("Remove development wording from the released README.")
         headings = re.findall(r"^## \[([^]]+)\](?: - (.+))?$", changelog, re.MULTILINE)
         expected = (version, release_date if ready else "Unreleased")
         if not headings or headings[0] != expected or sum(v == version for v, _ in headings) != 1:

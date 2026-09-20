@@ -142,6 +142,15 @@ def test_publication_status_must_agree_with_readme_and_appstream(ready_release, 
         validate_release_metadata(ready_release, require_ready=True)
 
 
+def test_released_readme_cannot_keep_planned_changes_wording(ready_release):
+    path = ready_release / "README.md"
+    path.write_text(path.read_text(encoding="utf-8")
+                    + f"\nThis checkout includes changes planned for {VERSION}.\n",
+                    encoding="utf-8")
+    with pytest.raises(ReleaseMetadataError, match="development wording"):
+        validate_release_metadata(ready_release, require_ready=True)
+
+
 @pytest.mark.parametrize("assets", ([], ["app.exe", "app.exe"], ["*.exe"], ["../app.exe"],
                                    [r"folder\app.exe"], [None]))
 def test_required_assets_are_exact_unique_filenames(ready_release, assets):
