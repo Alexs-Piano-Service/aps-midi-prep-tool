@@ -28,6 +28,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Windows file-level floppy saves suppress the host-file overwrite prompt when
+  populating reserved staging files, preventing an `mcopy` timeout during Save.
 - ZIP imports release unused extraction folders after saving, clearing or
   replacing the list, and cancelled imports. Files needed by pending operations,
   image sessions, or Undo remain available. All retained ZIP extractions share

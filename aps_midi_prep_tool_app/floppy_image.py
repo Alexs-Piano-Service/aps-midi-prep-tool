@@ -10453,7 +10453,9 @@ class FloppyImageSession:
                 pass
             _notify_progress(progress_callback, len(staged), max(1, len(replacements)), f"Copying {entry.path} to floppy...")
             self._run_mtools(
-                [mcopy, "-o", "-i", modified_img, mtools_path(entry.path), _windows_mcopy_host_path(root, name)],
+                # This is a host filesystem target, so -n suppresses the
+                # overwrite prompt for our reserved file; -o is for DOS targets.
+                [mcopy, "-n", "-i", modified_img, mtools_path(entry.path), _windows_mcopy_host_path(root, name)],
                 f"Could not copy {entry.path} to the floppy", cancel_callback=cancel_callback,
             )
             floppy_save_recovery.sync_file(path)

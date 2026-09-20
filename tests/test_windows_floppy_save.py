@@ -402,6 +402,11 @@ def test_staged_save_roundtrip_with_real_images_and_mcopy(mounted_drive, tmp_pat
         path = str(Path(root) / name)
         return "//?/" + path.replace("\\", "/") if os.name == "nt" else path
     monkeypatch.setattr(floppy_image, "_windows_mcopy_host_path", host)
+    # A host-overwrite prompt must fail quickly, rather than spending the full
+    # physical-disk timeout waiting for console input on Windows CI.
+    def run_mtools(args, message, cancel_callback=None):
+        return floppy_image._run_command(args, message, cancel_callback=cancel_callback, timeout=10)
+    monkeypatch.setattr(session, "_run_mtools", run_mtools)
     session._sync_modified_image_files_to_windows_drive(str(prepared), "A:")
     assert [path.name for path in mounted_drive.iterdir()] == ["NEW.MID"]
     assert (mounted_drive / "NEW.MID").read_bytes() == replacement.read_bytes()
