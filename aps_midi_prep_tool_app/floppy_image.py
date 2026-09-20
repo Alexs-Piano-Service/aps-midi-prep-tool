@@ -10149,9 +10149,17 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         if os.path.exists(dest_path):
             os.remove(dest_path)
         _raise_if_cancelled(cancel_callback)
+        data = None
         try:
-            data = _read_fat12_file_bytes(source_img, image_path)
+            # The image reader loads the entire source. On a physical floppy
+            # that reads unused sectors (and possibly beyond the filesystem)
+            # for every file comparison. Let bounded, cancellable mcopy read
+            # only the requested file from block devices instead.
+            if not _is_block_device_path(source_img):
+                data = _read_fat12_file_bytes(source_img, image_path)
         except FloppyImageError:
+            pass
+        if data is None:
             mcopy = _require_command("mcopy")
             mcopy_dest_path, cleanup_dir = _mtools_host_destination_path(dest_path, image_path)
             try:

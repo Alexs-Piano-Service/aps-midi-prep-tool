@@ -28,6 +28,9 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Linux floppy saves compare individual files with a cancellable read instead
+  of rereading the entire raw disk for each file, avoiding stalls on unused
+  sectors during **Checking existing**.
 - The shorter **Save To Floppy** hint is translated in every supported language,
   fixing the catalog coverage failures in Windows and Linux CI.
 - Windows **Save To Floppy** works with ordinary loaded files, including pending

@@ -264,7 +264,7 @@ mkdir -p "$PYINSTALLER_BUILD_DIR" "$APPDIR/usr/bin" "$OUT_DIR"
     --clean \
     --windowed \
     --collect-data certifi \
-    --add-data "build/build-info.json:aps_midi_prep_tool_app" \
+    --add-data "$ROOT_DIR/build/build-info.json:aps_midi_prep_tool_app" \
     --name "$APP_BIN" \
     --icon "$APP_ICON_ICO" \
     --distpath "$ROOT_DIR/dist" \
