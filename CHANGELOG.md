@@ -5,7 +5,7 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [0.8.4] - Unreleased
+## [0.8.5] - Unreleased
 
 ### Added
 
@@ -28,6 +28,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- The shorter **Save To Floppy** hint is translated in every supported language,
+  fixing the catalog coverage failures in Windows and Linux CI.
 - Windows **Save To Floppy** works with ordinary loaded files, including pending
   edits, conversions, filenames, and piano catalogs. It preserves unrelated
   files and asks before replacing matching filenames. Prepared files use native
@@ -52,7 +54,7 @@ with release sections grouped by version and date.
 - Modern MIDI destinations allow printable Latin-1 title edits, including
   accented names. Legacy destinations keep conservative ASCII validation.
   Unedited titles retain their original bytes during folder export.
-- Development metadata advances to 0.8.4 after the published 0.8.3 release.
+- Development metadata advances to 0.8.5 after the published 0.8.3 release.
   Release checks reject stale planned-changes wording in a released README.
 - Windows file-level floppy saves retry an unsupported free-space query with
   the older Windows API. Initial directory and file-metadata errors stop saving
