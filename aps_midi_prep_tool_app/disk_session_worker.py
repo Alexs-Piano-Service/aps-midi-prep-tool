@@ -580,7 +580,8 @@ class DiskSessionWriteTargetWorker(_CancellableDiskWorker):
     writeFinished = Signal()
     writeFailed = Signal(str)
 
-    def __init__(self, session, target_kind, target, operations, parent=None, file_level=False, verify_after_write=False):
+    def __init__(self, session, target_kind, target, operations, parent=None, file_level=False, verify_after_write=False,
+                 temporary_directory=None):
         super().__init__(parent)
         self.session = session
         self.target_kind = target_kind
@@ -588,6 +589,7 @@ class DiskSessionWriteTargetWorker(_CancellableDiskWorker):
         self.operations = dict(operations or {})
         self.file_level = bool(file_level)
         self.verify_after_write = bool(verify_after_write)
+        self.temporary_directory = temporary_directory
 
     def run(self):
         try:
@@ -608,3 +610,7 @@ class DiskSessionWriteTargetWorker(_CancellableDiskWorker):
                 self._emit_cancelled(exc)
                 return
             self.writeFailed.emit(str(exc))
+        finally:
+            if self.temporary_directory is not None:
+                self.temporary_directory.cleanup()
+                self.temporary_directory = None

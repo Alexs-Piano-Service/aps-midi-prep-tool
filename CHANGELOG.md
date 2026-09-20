@@ -28,8 +28,13 @@ with release sections grouped by version and date.
 
 ### Fixed
 
-- Windows file-level floppy saves suppress the host-file overwrite prompt when
-  populating reserved staging files, preventing an `mcopy` timeout during Save.
+- Windows **Save To Floppy** works with ordinary loaded files, including pending
+  edits, conversions, filenames, and piano catalogs. It preserves unrelated
+  files and asks before replacing matching filenames. Prepared files use native
+  copying, recovery backups, staging-space checks, and content verification.
+- Editing protected songs in an image clears their DOS protection flags only in
+  the temporary output image, preventing invisible `mdel` confirmation prompts.
+  Original images and unrelated files retain their attributes.
 - ZIP imports release unused extraction folders after saving, clearing or
   replacing the list, and cancelled imports. Files needed by pending operations,
   image sessions, or Undo remain available. All retained ZIP extractions share

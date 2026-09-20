@@ -38,6 +38,12 @@ results can be checked.
 
 ## Changes for stalled operations
 
+- Songs such as `1MOMENT.FIL` can carry the DOS System, Hidden, or Read-only
+  attributes. Before replacing or deleting a song in an image, APS clears those
+  flags on that entry in its temporary output image. This prevents `mdel` from
+  waiting for an invisible protection confirmation. The source image and
+  unrelated entries retain their attributes. A timeout here occurs during image
+  preparation, before the physical floppy write.
 - Drive detection runs in the background with a Cancel button. If a capacity,
   label, or device query does not finish within ten seconds, APS reports it and
   still offers any completed detection results. Reconnect an unresponsive USB
@@ -87,8 +93,15 @@ cannot determine the physical condition or format of a customer's disk.
 
 ## Recovering a failed Windows file save
 
-Before changing a floppy, APS checks its names and song bytes against the opened
-session, reads its actual allocation unit, and saves a persistent recovery package.
+On Windows, **Save To Floppy** is also available for ordinary loaded files. It
+prepares pending edits, conversions, final filenames, and the applicable piano
+catalog without constructing a disk image. Unrelated files and folders remain
+on the floppy; a confirmation lists matching filenames that will be replaced.
+Prepared files are copied through Windows filesystem I/O.
+
+In Image/Floppy Mode, APS still prepares an image, checks the floppy's names and
+song bytes against the opened session, reads its actual allocation unit, and
+saves a persistent recovery package.
 If another disk was inserted or the files changed, read that target again before
 saving. To save an image's songs to another disk, use an empty, formatted disk;
 replacing an existing disk image remains a separate, explicitly selected write.
@@ -107,10 +120,12 @@ methods after a denied raw write.
 
 The failure dialog shows the recovery directory. On Windows, the default is
 `%LOCALAPPDATA%\APS MIDI Prep Tool\floppy-save-recovery\save-...`.
-Each package contains `prepared.img`, original files, replacements, and a
+Each package contains original files, replacements, and a
 `manifest.json` mapping the numbered `.bin` files to their original names and
-checksums. Open `prepared.img` to recover the intended song set; copy an original
-`.bin` to a local folder using its name from the manifest to recover a predecessor.
+checksums. Image/Floppy Mode also retains `prepared.img`, which can be reopened
+to recover the intended song set. For ordinary-file saves, copy replacement
+`.bin` files to a local folder using the names in the manifest. Copy original
+`.bin` files the same way to recover predecessors.
 Keep these copies until the disk has been checked. Packages remain available
 after APS closes, including after successful saves; they can be deleted manually
 once no longer needed. `APS_FLOPPY_SAVE_RECOVERY_DIR` overrides the location.

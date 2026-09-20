@@ -8,6 +8,20 @@ def _add(source, *values):
     WRITE_SAFETY_TRANSLATIONS[source] = dict(zip(_LANGUAGES, values, strict=True))
 
 
+_add("Save the listed files to {target}?\n\nPending edits, conversions, filenames, and the applicable piano catalog will be included. Unrelated files will be kept.\n\nMatching files to replace: {count}\n{files}",
+     "¿Guardar los archivos de la lista en {target}?\n\nSe incluirán los cambios pendientes, las conversiones, los nombres de archivo y el catálogo de piano correspondiente. Los demás archivos se conservarán.\n\nArchivos coincidentes que se reemplazarán: {count}\n{files}",
+     "Enregistrer les fichiers de la liste sur {target} ?\n\nLes modifications en attente, les conversions, les noms de fichiers et le catalogue du piano correspondant seront inclus. Les autres fichiers seront conservés.\n\nFichiers de même nom à remplacer : {count}\n{files}",
+     "Die aufgelisteten Dateien auf {target} speichern?\n\nAusstehende Änderungen, Konvertierungen, Dateinamen und der passende Klavierkatalog werden übernommen. Andere Dateien bleiben erhalten.\n\nZu ersetzende gleichnamige Dateien: {count}\n{files}",
+     "Salvare i file elencati su {target}?\n\nSaranno inclusi le modifiche in sospeso, le conversioni, i nomi dei file e il catalogo del pianoforte pertinente. Gli altri file saranno conservati.\n\nFile con lo stesso nome da sostituire: {count}\n{files}",
+     "Salvar os arquivos listados em {target}?\n\nSerão incluídas as edições pendentes, conversões, nomes de arquivos e o catálogo de piano aplicável. Os demais arquivos serão mantidos.\n\nArquivos com o mesmo nome a substituir: {count}\n{files}",
+     "Да се запишат ли изброените файлове на {target}?\n\nЩе бъдат включени чакащите промени, преобразуванията, имената на файловете и съответният каталог за пиано. Останалите файлове ще се запазят.\n\nФайлове със същите имена за замяна: {count}\n{files}",
+     "De vermelde bestanden opslaan op {target}?\n\nOpenstaande wijzigingen, conversies, bestandsnamen en de toepasselijke pianocatalogus worden meegenomen. Andere bestanden blijven behouden.\n\nBestanden met dezelfde naam om te vervangen: {count}\n{files}",
+     "Zapisać wymienione pliki na {target}?\n\nZostaną uwzględnione oczekujące zmiany, konwersje, nazwy plików i odpowiedni katalog fortepianu. Pozostałe pliki zostaną zachowane.\n\nPliki o tych samych nazwach do zastąpienia: {count}\n{files}",
+     "一覧のファイルを {target} に保存しますか？\n\n保留中の編集、変換、ファイル名、および対応するピアノのカタログが含まれます。その他のファイルは保持されます。\n\n同名のため置き換えるファイル: {count}\n{files}",
+     "목록의 파일을 {target}에 저장하시겠습니까?\n\n대기 중인 편집, 변환, 파일 이름 및 해당 피아노 카탈로그가 포함됩니다. 다른 파일은 유지됩니다.\n\n같은 이름으로 교체할 파일: {count}\n{files}",
+     "将列表中的文件保存到 {target} 吗？\n\n将包含待处理的编辑、转换、文件名和适用的钢琴目录。其他文件将保留。\n\n将替换的同名文件：{count}\n{files}")
+
+
 _add("The floppy may be partially written. Keep the recovery copy before attempting another write.",
      "El disquete puede haberse escrito parcialmente. Conserva la copia de recuperación antes de intentar otra escritura.",
      "La disquette peut être partiellement écrite. Conservez la copie de récupération avant de tenter une nouvelle écriture.",

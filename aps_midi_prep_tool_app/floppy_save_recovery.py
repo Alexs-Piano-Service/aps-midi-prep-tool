@@ -33,7 +33,7 @@ def digest(path):
 
 
 class SaveRecoveryPackage:
-    def __init__(self, drive, prepared_image):
+    def __init__(self, drive, prepared_image=None):
         root = recovery_root()
         root.mkdir(parents=True, exist_ok=True)
         self.directory = Path(tempfile.mkdtemp(prefix="save-", dir=root))
@@ -44,9 +44,10 @@ class SaveRecoveryPackage:
             "originals": {}, "replacements": {}, "actions": [],
         }
         self.checkpoint()
-        shutil.copyfile(prepared_image, self.directory / "prepared.img")
-        sync_file(self.directory / "prepared.img")
-        self.manifest["prepared_sha256"] = digest(self.directory / "prepared.img")
+        if prepared_image is not None:
+            shutil.copyfile(prepared_image, self.directory / "prepared.img")
+            sync_file(self.directory / "prepared.img")
+            self.manifest["prepared_sha256"] = digest(self.directory / "prepared.img")
         self.checkpoint()
 
     def checkpoint(self, **fields):
