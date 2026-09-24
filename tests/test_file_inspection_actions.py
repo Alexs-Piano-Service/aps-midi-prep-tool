@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app.conversion_review import localize_music_error
 from aps_midi_prep_tool_app.eseq_converter import convert_midi_bytes_to_eseq_bytes
+from aps_midi_prep_tool_app.eseq_channel_merger import merge_eseq_channels_to_channel0_bytes
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translate_text
 from aps_midi_prep_tool_app.midi_channel_merger import merge_midi_channels_to_channel0_bytes
 from aps_midi_prep_tool_app.midi_type0_converter import _convert_midi_bytes_to_type0
@@ -245,7 +246,40 @@ def test_type0_is_disabled_for_already_type0_and_piano_noop_remains_reviewable(d
     assert dialog.current_midi_bytes == source.read_bytes()
 
 
-@pytest.mark.parametrize("kind, expected", [("type2", (False, True)), ("empty", (False, False)), ("malformed", (False, False)), ("eseq", (False, False)), ("no_callback", (False, False))])
+@pytest.mark.parametrize("variant", ["disklavier", "clavinova_mda"])
+def test_piano_click_on_eseq_keeps_native_source_and_refreshes_preview(dialog_factory, tmp_path, variant):
+    source = tmp_path / "song.FIL"
+    original = convert_midi_bytes_to_eseq_bytes(
+        _midi(), container_variant=variant, timing_policy="preserve", pedal_policy="preserve",
+    )
+    source.write_bytes(original)
+    staged = tmp_path / "staged.FIL"
+    calls = []
+
+    def edit(item, action):
+        calls.append(action)
+        result, changed = merge_eseq_channels_to_channel0_bytes(Path(item["path"]).read_bytes())
+        staged.write_bytes(result)
+        return {"changed": changed, "item": {**item, "path": str(staged)}, "message": "Merge staged"}
+
+    dialog = dialog_factory([_item(source)], edit_callback=edit)
+    assert not dialog.convert_type0_button.isEnabled()
+    assert dialog.merge_piano_button.isEnabled()
+    assert {note["channel"] for note in dialog.current_notes} == {1, 5}
+    dialog.channel_checkboxes[5].setChecked(False)
+
+    QTest.mouseClick(dialog.merge_piano_button, Qt.LeftButton)
+
+    assert calls == ["piano"]
+    assert staged.read_bytes()[7:15] == b"COM-ESEQ"
+    assert {note["channel"] for note in dialog.current_notes} == {1}
+    assert len(dialog.current_notes) == 2
+    assert not dialog.convert_type0_button.isEnabled()
+    assert dialog.merge_piano_button.isEnabled()
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("kind, expected", [("type2", (False, True)), ("empty", (False, False)), ("malformed", (False, False)), ("eseq", (False, True)), ("no_callback", (False, False))])
 def test_actions_check_actual_source_format_and_content(dialog_factory, tmp_path, kind, expected):
     payload = _midi(2 if kind == "type2" else 1, empty=kind == "empty")
     if kind == "malformed":

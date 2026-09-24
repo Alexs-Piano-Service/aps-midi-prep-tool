@@ -200,13 +200,16 @@ mode. Raw values accompany their meanings, and uncertain fields remain marked
 as uninterpreted. The decoded MIDI preview appears below the source details.
 
 File Inspection also has **Convert to Type 0** and **Merge Channels to Piano**
-buttons for the selected MIDI song. Each applies in one click and refreshes the
-preview. Type 0 combines tracks while keeping channels and instruments; merging
-routes all channels to MIDI channel 1 and selects Acoustic Grand Piano while
-keeping the MIDI file type. These edits use the complete song, including hidden
-or muted preview channels. Use **Save** to write them or **Edit → Undo** to revert.
+buttons. Type 0 conversion accepts MIDI; piano merging accepts MIDI and E-SEQ.
+Each applies in one click and refreshes the preview. Type 0 combines tracks
+while keeping channels and instruments; merging routes note parts to MIDI
+channel 1 and selects Acoustic Grand Piano while
+keeping the source format. E-SEQ edits preserve native timing, titles, song order,
+and Yamaha's separate pedal-detail data. These edits use the complete song,
+including hidden or muted preview channels. Use **Save** to write them or
+**Edit → Undo** to revert.
 **Utilities → Merge Channels to Piano...** applies the same merge to one song or
-all listed MIDI songs, including files being edited inside a disk image.
+all listed MIDI and E-SEQ songs, including files being edited inside a disk image.
 
 Channel merging and Type 0 piano remapping translate All Notes Off (CC123) and
 the related mode commands (CC124–127) into note releases for their source parts.

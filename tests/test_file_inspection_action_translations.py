@@ -34,6 +34,17 @@ SOURCES = (
     "Piano channel merge staged for {count} MIDI file(s).",
     "Already merged: {count} MIDI file(s).",
     "Failed: {count} MIDI file(s).",
+    "Merge all channels into MIDI channel 1 using Acoustic Grand Piano for one song or all listed MIDI or E-SEQ songs.",
+    "Add MIDI or E-SEQ files before using the channel merge tool.",
+    "All listed songs ({count})",
+    "Merge channels in one song or in every listed song as a batch.",
+    "Channel merging will be staged for {count} listed file(s); nothing is written until you save.",
+    "Piano channel merge staged for {count} file(s).",
+    "Already merged: {count} file(s).",
+    "Failed: {count} file(s).",
+    "Channel Merge Issues",
+    "Some files could not be merged",
+    "No MIDI or E-SEQ files are currently listed.",
 )
 
 

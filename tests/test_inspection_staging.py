@@ -332,7 +332,6 @@ def test_replaced_image_session_rejects_same_filename_from_stale_item(window, tm
 @pytest.mark.parametrize("kind,action,match", (
     ("type2", "type0", "format 2"),
     ("eseq", "type0", "require a MIDI file"),
-    ("eseq", "piano", "require a MIDI file"),
     ("malformed", "type0", "Corrupt|truncated|malformed|missing"),
     ("malformed", "piano", "Corrupt|truncated|malformed|missing"),
 ))

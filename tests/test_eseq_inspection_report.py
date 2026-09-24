@@ -76,7 +76,7 @@ def test_file_details_show_original_header_in_every_language_without_changing_pr
     assert translate_text("Write protection", language) in report
     assert "Mark IV" not in report and "Mark-IV" not in report
     assert not dialog.convert_type0_button.isEnabled()
-    assert not dialog.merge_piano_button.isEnabled()
+    assert dialog.merge_piano_button.isEnabled()
     midi = convert_eseq_bytes_to_midi_bytes(source, include_conversion_text=False)
     expected_preview = _inspect_midi_bytes(midi)
     assert dialog.current_midi_bytes == midi

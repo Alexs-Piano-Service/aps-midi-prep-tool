@@ -127,6 +127,7 @@ from .midi_type0_converter import (
     convert_midi_file_to_type0_path,
 )
 from .midi_channel_merger import merge_midi_channels_to_channel0_path
+from .eseq_channel_merger import merge_eseq_channels_to_channel0_path
 from .xf_stripper import XF_CLEANUP_BROAD, XF_CLEANUP_TARGETED, strip_xf_from_midi_path
 from .conversion_review import build_staged_conversion_details, inspect_music_bytes, localize_music_error
 from .write_safety_messages import localize_write_message
@@ -5689,6 +5690,7 @@ class FileInspectionDialog(QDialog):
         self._preview_rendering = False
         self._inspection_rendering = False
         self._source_midi_format = None
+        self._source_is_eseq = False
         self._source_has_channel_events = False
         self.current_notes = []
         self.all_notes = []
@@ -6097,7 +6099,9 @@ class FileInspectionDialog(QDialog):
             and self._current_item()
         )
         self.convert_type0_button.setEnabled(enabled and self._source_midi_format == 1)
-        self.merge_piano_button.setEnabled(enabled and self._source_midi_format in (0, 1, 2))
+        self.merge_piano_button.setEnabled(enabled and (
+            self._source_midi_format in (0, 1, 2) or self._source_is_eseq
+        ))
 
     def _set_edit_status(self, message):
         self.edit_status_label.setText(str(message or ""))
@@ -6631,6 +6635,7 @@ class FileInspectionDialog(QDialog):
 
     def _load_current_file(self):
         self._source_midi_format = None
+        self._source_is_eseq = False
         self._source_has_channel_events = False
         set_edit_status = getattr(self, "_set_edit_status", None)
         if callable(set_edit_status):
@@ -6651,8 +6656,9 @@ class FileInspectionDialog(QDialog):
             with open(path, "rb") as handle:
                 payload = handle.read()
             source_midi_format = int.from_bytes(payload[8:10], "big") if payload[:4] == b"MThd" else None
+            source_is_eseq = is_eseq_file(path)
             source_details = ""
-            if is_eseq_file(path):
+            if source_is_eseq:
                 try:
                     source_details = format_eseq_header_details(
                         payload, source_label=label, language_code=self.language,
@@ -6665,6 +6671,7 @@ class FileInspectionDialog(QDialog):
                 payload = convert_eseq_bytes_to_midi_bytes(payload, include_conversion_text=False)
             inspection = _inspect_midi_bytes(payload, source_label=label, language_code=self.language)
             self._source_midi_format = source_midi_format
+            self._source_is_eseq = source_is_eseq
             self._source_has_channel_events = bool(inspection.get("channels"))
             self.current_midi_bytes = bytes(payload)
             self._program_change_times = (
@@ -9793,7 +9800,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.utilitiesMergeChannelsAction = QAction("Merge Channels to Piano...", self)
         self.utilitiesMergeChannelsAction.setToolTip(
             self._lt(
-                "Merge all channels into MIDI channel 1 using Acoustic Grand Piano for one song or all listed MIDI songs."
+                "Merge all channels into MIDI channel 1 using Acoustic Grand Piano for one song or all listed MIDI or E-SEQ songs."
             )
         )
         self.utilitiesMergeChannelsAction.triggered.connect(self.show_channel_merging_utility)
@@ -12741,7 +12748,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if merge_channels_action is not None:
             merge_channels_action.setToolTip(
                 self._lt(
-                    "Merge all channels into MIDI channel 1 using Acoustic Grand Piano for one song or all listed MIDI songs."
+                    "Merge all channels into MIDI channel 1 using Acoustic Grand Piano for one song or all listed MIDI or E-SEQ songs."
                 )
             )
         strip_xf_action = getattr(self, "utilitiesStripXfAction", None)
@@ -17518,7 +17525,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._apply_pedal_compatibility_to_regular_rows(rows, options)
 
     def _midi_rows_for_channel_merging(self):
-        return self._midi_rows_for_pedal_compatibility()
+        rows = []
+        for row in range(self.table.rowCount()):
+            if self._is_special_pianodir_row(row):
+                continue
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            path = path_item.text()
+            title_mode = (self._image_path_title_mode(path) if self.is_image_mode()
+                          else self._listed_file_title_mode(path))
+            if title_mode in {"midi", "eseq"}:
+                rows.append((row, path))
+        return rows
 
     def _set_channel_merging_enabled(self, enabled, disabled_tooltip=""):
         action = getattr(self, "utilitiesMergeChannelsAction", None)
@@ -17526,10 +17545,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
         if enabled:
             tooltip = (
-                "Merge all channels into MIDI channel 1 using Acoustic Grand Piano for one song or all listed MIDI songs."
+                "Merge all channels into MIDI channel 1 using Acoustic Grand Piano for one song or all listed MIDI or E-SEQ songs."
             )
         else:
-            tooltip = disabled_tooltip or "Add MIDI files before using the channel merge tool."
+            tooltip = disabled_tooltip or "Add MIDI or E-SEQ files before using the channel merge tool."
         action.setEnabled(bool(enabled))
         action.setToolTip(self._lt(tooltip))
         action.setStatusTip(self._lt(tooltip))
@@ -17561,7 +17580,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         target_combo.addItem(
-            self._lt("All listed MIDI songs ({count})").format(count=file_count),
+            self._lt("All listed songs ({count})").format(count=file_count),
             -1,
         )
         current_row = self.table.currentRow()
@@ -17575,7 +17594,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 current_target_index = target_index + 1
         target_combo.setCurrentIndex(current_target_index)
         target_combo.setToolTip(
-            self._lt("Merge channels in one song or in every listed MIDI song as a batch.")
+            self._lt("Merge channels in one song or in every listed song as a batch.")
         )
         target_layout.addWidget(target_combo, stretch=1)
         layout.addWidget(target_group)
@@ -17588,7 +17607,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             target_count = file_count if target_combo.currentData() == -1 else 1
             count_note.setText(
                 self._lt(
-                    "Channel merging will be staged for {count} listed MIDI file(s); nothing is written until you save."
+                    "Channel merging will be staged for {count} listed file(s); nothing is written until you save."
                 ).format(count=target_count)
             )
 
@@ -17625,7 +17644,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         rows = self._midi_rows_for_channel_merging()
         if not rows:
-            QMessageBox.information(self, "No MIDI Files", "No MIDI files are currently listed.")
+            QMessageBox.information(self, self._lt("No Songs"), self._lt("No MIDI or E-SEQ files are currently listed."))
             return
 
         target_index = self._channel_merging_options_dialog(rows)
@@ -18296,7 +18315,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 channel_rows = self._midi_rows_for_channel_merging()
                 self._set_channel_merging_enabled(
                     bool(channel_rows),
-                    "Add MIDI files before using the channel merge tool.",
+                    "Add MIDI or E-SEQ files before using the channel merge tool.",
                 )
             else:
                 self._set_channel_merging_enabled(
@@ -19445,12 +19464,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             target_filename = self._regular_row_output_filename(row)
             scratch_dir = self._ensure_midi_scratch_dir()
             source_material = self._regular_midi_utility_source_material_path(source_path, scratch_dir)
-        with open(source_material, "rb") as handle:
-            if handle.read(4) != b"MThd":
-                raise ValueError(self._lt("These actions require a MIDI file."))
+        source_is_eseq = is_eseq_file(source_material)
+        if action == "type0":
+            with open(source_material, "rb") as handle:
+                if handle.read(4) != b"MThd":
+                    raise ValueError(self._lt("These actions require a MIDI file."))
 
         output_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{os.path.basename(target_filename)}")
         converter = (convert_midi_file_to_type0_path if action == "type0"
+                     else merge_eseq_channels_to_channel0_path if source_is_eseq
                      else merge_midi_channels_to_channel0_path)
         changed = converter(source_material, output_path)
         if changed:
@@ -19471,7 +19493,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 else:
                     self._apply_regular_row_pending_conversion(
                         row, source_path, target_filename, output_path,
-                        "midi_type0" if action == "type0" else "midi",
+                        "midi_type0" if action == "type0" else "eseq" if source_is_eseq else "midi",
                         overwrite_original=True,
                     )
             finally:
@@ -25919,7 +25941,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             scratch_dir,
             f"{uuid.uuid4().hex}_{os.path.basename(full_path)}",
         )
-        error = update_midi_title_to_path(source_material_path, pending_title, titled_source_path)
+        title_writer = update_eseq_title_to_path if is_eseq_file(source_material_path) else update_midi_title_to_path
+        error = title_writer(source_material_path, pending_title, titled_source_path)
         if error:
             raise EseqConversionError(error)
         return titled_source_path
@@ -25965,7 +25988,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     full_path,
                     scratch_dir,
                 )
-                changed = merge_midi_channels_to_channel0_path(
+                source_is_eseq = is_eseq_file(source_material_path)
+                converter = merge_eseq_channels_to_channel0_path if source_is_eseq else merge_midi_channels_to_channel0_path
+                changed = converter(
                     source_material_path,
                     output_temp_path,
                 )
@@ -25977,7 +26002,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     full_path,
                     target_filename,
                     output_temp_path,
-                    "midi",
+                    "eseq" if source_is_eseq else "midi",
                     overwrite_original=True,
                 )
                 changed_count += 1
@@ -25988,21 +26013,21 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 QApplication.processEvents()
         progress_dialog.close()
 
-        status_parts = [self._lt("Piano channel merge staged for {count} MIDI file(s).", count=changed_count)]
+        status_parts = [self._lt("Piano channel merge staged for {count} file(s).", count=changed_count)]
         if unchanged_count:
-            status_parts.append(self._lt("Already merged: {count} MIDI file(s).", count=unchanged_count))
+            status_parts.append(self._lt("Already merged: {count} file(s).", count=unchanged_count))
         if changed_count:
             status_parts.append(self._lt("Piano channel merge staged. Use Save to write it, or Undo to revert."))
         if errors:
-            status_parts.append(self._lt("Failed: {count} MIDI file(s).", count=len(errors)))
+            status_parts.append(self._lt("Failed: {count} file(s).", count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
 
         if errors:
             self._show_error_list(
-                "MIDI Channel Merge Issues",
-                "Some MIDI files could not be merged",
+                "Channel Merge Issues",
+                "Some files could not be merged",
                 errors,
                 warning=True,
                 guidance="The original files were not changed; remove or replace the listed files and try again",
@@ -26111,7 +26136,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.image_session.patched_dir,
             f"{uuid.uuid4().hex}_{os.path.basename(source_path)}",
         )
-        error = update_midi_title_to_path(source_host_path, pending_title, titled_source_path)
+        title_writer = update_eseq_title_to_path if is_eseq_file(source_host_path) else update_midi_title_to_path
+        error = title_writer(source_host_path, pending_title, titled_source_path)
         if error:
             raise EseqConversionError(error)
         return titled_source_path
@@ -26152,7 +26178,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     self.image_session.patched_dir,
                     f"{uuid.uuid4().hex}_{os.path.basename(current_path)}",
                 )
-                changed = merge_midi_channels_to_channel0_path(
+                converter = merge_eseq_channels_to_channel0_path if is_eseq_file(source_host_path) else merge_midi_channels_to_channel0_path
+                changed = converter(
                     source_host_path,
                     output_host_path,
                 )
@@ -26192,9 +26219,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 QApplication.processEvents()
         progress_dialog.close()
 
-        status_parts = [self._lt("Piano channel merge staged for {count} MIDI file(s).", count=changed_count)]
+        status_parts = [self._lt("Piano channel merge staged for {count} file(s).", count=changed_count)]
         if unchanged_count:
-            status_parts.append(self._lt("Already merged: {count} MIDI file(s).", count=unchanged_count))
+            status_parts.append(self._lt("Already merged: {count} file(s).", count=unchanged_count))
         if changed_count:
             status_parts.append(self._lt("Piano channel merge staged. Use Save to write it, or Undo to revert."))
         if self.image_session is not None:
@@ -26203,14 +26230,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 self._lt('Estimated free space after pending changes: {size}.', size=display_bytes(max(0, remaining)))
             )
         if errors:
-            status_parts.append(self._lt("Failed: {count} MIDI file(s).", count=len(errors)))
+            status_parts.append(self._lt("Failed: {count} file(s).", count=len(errors)))
         self.status_label.setText("\n".join(status_parts))
         self._refresh_image_mode_action_state()
 
         if errors:
             self._show_error_list(
-                "MIDI Channel Merge Issues",
-                "Some MIDI files could not be merged",
+                "Channel Merge Issues",
+                "Some files could not be merged",
                 errors,
                 warning=True,
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",
@@ -27033,6 +27060,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         overwrite_original=False,
     ):
         title, midi_type, title_mode, is_midi, order_key = self._probe_regular_file(temp_path)
+        if is_clavinova_mda_file(temp_path):
+            # MDA's display title and catalog key come from its logical name,
+            # never the random filename used for a staged edit.
+            title = os.path.splitext(os.path.basename(target_filename))[0]
+            order_key = (self._listed_file_order_key(source_path)
+                         if is_clavinova_mda_file(self._regular_source_material_path(source_path))
+                         else build_eseq_order_key_from_path(target_filename))
         title_edited = source_path in self.pendingEdits or bool(
             self.pendingRegularConversions.get(source_path, {}).get("title_edited")
         )

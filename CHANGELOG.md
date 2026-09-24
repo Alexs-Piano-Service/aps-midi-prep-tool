@@ -38,6 +38,11 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- **Merge Channels to Piano** now works on E-SEQ songs in File Inspection and
+  the batch utility, including folders, disk images, and pending additions.
+  Edits preserve the native container, timing, titles, order keys, and Yamaha
+  pedal detail, and use the existing Save and Undo workflow. Clavinova staged
+  edits retain the song's logical name and catalog order.
 - Saved E-SEQ catalogs now follow the visible song order instead of stale
   filename-derived keys. Renaming and reordering an existing song in the same
   save also works, and Clavinova catalog ordering remains supported.

@@ -90,12 +90,14 @@ Reset defaults and assignable-controller effects vary by device, so conversion
 reports warn whenever CC121 is removed. Review playback on the intended player.
 
 File Inspection provides one-click Type 0 conversion and piano channel merging
-for the selected MIDI song. These stage real edits with the same Undo and Save
+for the selected song. Type 0 conversion requires MIDI; piano merging also
+supports native E-SEQ, retaining its container, timing, titles, order keys, and
+Yamaha pedal-detail data. These stage real edits with the same Undo and Save
 workflow as other utilities. Preview filters, temporary instrument choices, and
 preview volume do not limit or alter the source used by these actions. The
 preview reloads after an edit; returning to inspection refreshes saved or undone
 changes. **Utilities → Merge Channels to Piano...** offers the same piano merge
-for one song or all listed MIDI songs.
+for one song or all listed MIDI and E-SEQ songs.
 
 Disk-set preview shows the actual prepared and packed songs, including musical
 change reports and title provenance. Collection edits require an updated preview

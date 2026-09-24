@@ -1980,6 +1980,17 @@ Public references used for context and cross-checking:
 
 ## 22. Implementation checklist
 
+**Merge Channels to Piano** edits supported FIL, Q11, and Clavinova MDA
+containers directly. It preserves the source header, title/order bytes, exact
+delay and tempo commands, meter commands, SysEx, and opaque trailing data.
+Channel messages use the same note-termination and controller-reset handling as
+the MIDI utility. Length fields and the supported FIL note-channel mask are
+updated after editing; MDA and Q11 classification bytes retain their original
+values. Standard Disklavier files keep dedicated channel-3 (`B2`) CC64/CC67
+pedal detail, including its reset, when that channel carries no notes. Ordinary
+instrument channels merge to channel 1 with Acoustic Grand Piano. The utility
+stages these changes for Save/Undo and keeps the source container format.
+
 Use this checklist before considering APS MIDI Prep Tool E-SEQ support complete:
 
 - [x] Parse SMF type 0 and type 1 with running status, meta events, sysex, and PPQN division.
