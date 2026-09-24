@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import ceil
 
 from .helpers.file_backup import copy_file_backup, plan_file_backups
+from .smf import parse_smf_layout
 
 _SYSTEM_MESSAGE_DATA_LENGTHS = {
     0xF1: 1,
@@ -80,43 +81,8 @@ def _encode_vlq(value):
 
 
 def _parse_midi_chunks(midi_bytes):
-    if len(midi_bytes) < 14:
-        raise ValueError("File is too small to be a valid MIDI file.")
-    if midi_bytes[:4] != b"MThd":
-        raise ValueError("Missing MThd header chunk.")
-
-    header_len = int.from_bytes(midi_bytes[4:8], "big")
-    if header_len < 6:
-        raise ValueError("Invalid MIDI header length.")
-
-    header_end = 8 + header_len
-    if header_end > len(midi_bytes):
-        raise ValueError("Corrupt MIDI header length.")
-
-    format_type = int.from_bytes(midi_bytes[8:10], "big")
-    declared_track_count = int.from_bytes(midi_bytes[10:12], "big")
-
-    chunks = []
-    pos = header_end
-    midi_len = len(midi_bytes)
-    while pos + 8 <= midi_len:
-        chunk_id = midi_bytes[pos:pos + 4]
-        chunk_len = int.from_bytes(midi_bytes[pos + 4:pos + 8], "big")
-        data_start = pos + 8
-        data_end = data_start + chunk_len
-        if data_end > midi_len:
-            raise ValueError("Corrupt MIDI chunk length.")
-        chunks.append(
-            {
-                "id": chunk_id,
-                "start": pos,
-                "data_start": data_start,
-                "data_end": data_end,
-            }
-        )
-        pos = data_end
-
-    return header_end, format_type, declared_track_count, chunks
+    header, chunks, _ = parse_smf_layout(midi_bytes, include_trailing_chunks=True)
+    return header.header_end, header.format_type, header.track_count, chunks
 
 
 def _parse_track_events(track_data):

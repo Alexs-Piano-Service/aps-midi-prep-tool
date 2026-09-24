@@ -334,7 +334,7 @@ def test_replaced_image_session_rejects_same_filename_from_stale_item(window, tm
     ("eseq", "type0", "require a MIDI file"),
     ("eseq", "piano", "require a MIDI file"),
     ("malformed", "type0", "Corrupt|truncated|malformed|missing"),
-    ("malformed", "piano", "truncated|malformed|missing"),
+    ("malformed", "piano", "Corrupt|truncated|malformed|missing"),
 ))
 def test_invalid_sources_raise_without_pending_changes_or_undo(window, tmp_path, kind, action, match):
     w = window

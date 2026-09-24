@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 from .eseq_header import analyze_eseq_playback_flags
+from .smf import parse_smf_header
 
 from .midi_type0_converter import (
     _parse_midi_chunks,
@@ -859,16 +860,13 @@ def convert_eseq_bytes_to_midi_bytes(
 
 
 def _parse_midi_header(midi_bytes):
-    if len(midi_bytes) < 14 or midi_bytes[:4] != b"MThd":
-        raise EseqConversionError("This does not look like a standard MIDI file; the MThd header chunk is missing.")
-    header_length = int.from_bytes(midi_bytes[4:8], "big")
-    if header_length < 6 or 8 + header_length > len(midi_bytes):
-        raise EseqConversionError("The MIDI header length is invalid; the file may be corrupt or incomplete.")
-    format_type = int.from_bytes(midi_bytes[8:10], "big")
-    division = int.from_bytes(midi_bytes[12:14], "big")
-    if division & 0x8000:
+    try:
+        header = parse_smf_header(midi_bytes)
+    except ValueError as exc:
+        raise EseqConversionError(str(exc)) from exc
+    if header.division & 0x8000:
         raise EseqConversionError("SMPTE MIDI timebases are not supported for E-SEQ conversion.")
-    return format_type, division
+    return header.format_type, header.division
 
 
 def _collect_merged_midi_events(midi_bytes, *, include_end_tick=False):

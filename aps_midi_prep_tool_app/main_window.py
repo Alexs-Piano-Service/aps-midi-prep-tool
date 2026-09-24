@@ -12985,9 +12985,32 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             guidance = self._lt(state) + " " + self._lt(
                 "Keep this session open and use Save As Image to retain the prepared songs."
             )
+            listing = diagnostics.get(diagnostics.get("stage"), {})
+            if (
+                (operation == "save_files" or file_level)
+                and diagnostics.get("method") == "windows_filesystem"
+                and diagnostics.get("status") == "failed"
+                and listing.get("stage") == "list_directory"
+                and listing.get("directory_status") == "failed"
+                and listing.get("error", {}).get("winerror") == 50
+            ):
+                guidance += "\n\n" + self._lt(
+                    "Windows rejected the directory listing for this floppy. "
+                    "Save To Floppy needs Windows file access, even when reading a disk image succeeds."
+                )
             if diagnostics.get("recovery_directory"):
                 guidance += "\n\n" + self._lt(
                     "Recovery copy: {folder}", folder=diagnostics["recovery_directory"],
+                )
+            if diagnostics.get("staging_files_remaining"):
+                guidance += "\n\n" + self._lt(
+                    "Temporary files may remain on the floppy: {files}",
+                    files=", ".join(diagnostics["staging_files_remaining"]),
+                )
+            if diagnostics.get("attributes_pending"):
+                guidance += "\n\n" + self._lt(
+                    "Original file attributes could not be restored: {files}",
+                    files=", ".join(diagnostics["attributes_pending"]),
                 )
             return guidance
         if "could not report filesystem space" in lower:
@@ -13111,7 +13134,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             text = text[:marker_index].rstrip()
         return text
 
-    def _show_reportable_error_message(self, icon, title, message, *, offer_report=True):
+    def _show_reportable_error_message(self, icon, title, message, *, offer_report=True, extra_action=None):
         box = QMessageBox(self)
         apply_window_icon(box)
         box.setIcon(icon)
@@ -13121,6 +13144,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         report_button = None
         if offer_report:
             report_button = box.addButton(self._lt("Report A Bug..."), QMessageBox.ActionRole)
+        action_button = None
+        if extra_action is not None:
+            action_button = box.addButton(self._lt(extra_action[0]), QMessageBox.ActionRole)
         box.setDefaultButton(ok_button)
         self._exec_child_dialog(box)
         if report_button is not None and box.clickedButton() is report_button:
@@ -13129,6 +13155,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 description=self._prefilled_bug_report_details(message),
                 include_logs=True,
             )
+        elif action_button is not None and box.clickedButton() is action_button:
+            extra_action[1]()
 
     def _show_operation_error(
         self,
@@ -13138,6 +13166,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         *,
         guidance=None,
         log_detail=None,
+        offer_floppy_image_recovery=False,
     ):
         detail_text = self._clean_error_detail(detail)
         if is_missing_source_file_error(detail_text):
@@ -13159,7 +13188,72 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 else detail_text
             ),
         )
-        self._show_reportable_error_message(QMessageBox.Critical, title, message)
+        if offer_floppy_image_recovery:
+            message += "\n\n" + self._floppy_image_recovery_explanation()
+            self._show_reportable_error_message(
+                QMessageBox.Critical, title, message,
+                extra_action=("Save Image and Apply to Floppy...", self._request_floppy_image_recovery),
+            )
+        else:
+            self._show_reportable_error_message(QMessageBox.Critical, title, message)
+
+    def _floppy_image_recovery_explanation(self):
+        return self._lt(
+            "Save your current songs as an image, then choose a floppy to replace. "
+            "Applying the image replaces the entire disk, including its boot sector. "
+            "APS will read back and verify the written files."
+        )
+
+    def _source_floppy_needs_image_write(self):
+        session = self.image_session
+        return (
+            getattr(session, "source_kind", "") == "floppy_usb"
+            and getattr(session, "source_boot_sector_repaired", False)
+        )
+
+    def _offer_floppy_image_recovery(self):
+        self._show_reportable_error_message(
+            QMessageBox.Information, "Apply an Image to the Floppy",
+            self._lt(
+                "APS repaired a missing or invalid boot sector in its working copy. "
+                "The original disk may use Yamaha protection that Windows cannot mount."
+            ) + "\n\n" + self._floppy_image_recovery_explanation(),
+            offer_report=False,
+            extra_action=("Save Image and Apply to Floppy...", self._request_floppy_image_recovery),
+        )
+
+    def _request_floppy_image_recovery(self):
+        self._floppy_image_recovery_pending = True
+        self._resume_floppy_image_recovery()
+
+    def _resume_floppy_image_recovery(self):
+        # Failure signals precede worker cleanup. A modal error dialog can also
+        # process finished before the user chooses the recovery action.
+        if not getattr(self, "_floppy_image_recovery_pending", False):
+            return
+        if self.diskCommitWorker is not None or self.diskWriteTargetWorker is not None:
+            return
+        self._floppy_image_recovery_pending = False
+        QTimer.singleShot(0, self._save_image_and_apply_to_floppy)
+
+    def _save_image_and_apply_to_floppy(self):
+        if self._disk_worker_busy():
+            return
+        output_paths = self.save_as_image(for_floppy=True)
+        if not output_paths:
+            return
+        if len(output_paths) != 1:
+            QMessageBox.information(
+                self, self._lt("Apply an Image to the Floppy"),
+                self._lt(
+                    "Several images were saved. Open one of the saved images, "
+                    "then use Disk > Write Current Image to Floppy."
+                ) + "\n\n" + "\n".join(output_paths),
+            )
+            return
+        # A single successful export activates that saved image. Cancellation or
+        # a failed export must never fall through to writing the previous session.
+        self.write_image_to_floppy(verify_after_write=True)
 
     def _limited_message_list(self, messages, *, max_rows=10):
         cleaned = [str(message).strip() for message in messages if str(message).strip()]
@@ -19503,13 +19597,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return edits
 
     def _image_eseq_directory_order(self):
+        # Catalogs must use the keys assigned for this save, not the loaded keys.
+        edits = self._image_eseq_order_key_edits()
         order = {}
         for row in self._image_eseq_rows():
             path_item = self.table.item(row, 1)
             if path_item is None:
                 continue
             image_path = path_item.text()
-            order[self._final_image_path(image_path)] = self._row_eseq_order_key(row)
+            order[self._final_image_path(image_path)] = edits.get(image_path, self._row_eseq_order_key(row))
         return order
 
     def _selected_table_row(self):
@@ -23504,6 +23600,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         target_name = target_options["target_name"]
         drive_size_bytes = target_options.get("drive_size_bytes", 0)
 
+        if (
+            self._source_floppy_needs_image_write()
+            and str(getattr(target, "path", "")).rstrip("\\/").upper()
+            == str(self.image_session.source_path).rstrip("\\/").upper()
+        ):
+            self._offer_floppy_image_recovery()
+            return
+
         if not self._confirm_save_to_floppy_files(target_name, drive_size_bytes=drive_size_bytes):
             return
 
@@ -23548,12 +23652,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         except Exception as exc:
             self._show_operation_error(
                 "Save To Floppy Failed", "The app could not finish saving files to the floppy disk", exc,
+                offer_floppy_image_recovery=True,
             )
         finally:
             if temporary is not None:
                 temporary.cleanup()
 
-    def write_image_to_floppy(self):
+    def write_image_to_floppy(self, *, verify_after_write=None):
         if self.image_session is None:
             QMessageBox.information(self, "No Image", "Open or create an image before writing to a floppy disk.")
             return
@@ -23592,10 +23697,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             target,
             target_name,
             self._collect_current_image_write_operations(),
+            verify_after_write=verify_after_write,
         )
 
     def _start_write_image_to_floppy_worker(self, target_kind, target, target_name, operations, *, file_level=False,
-                                          session=None, temporary_directory=None):
+                                          session=None, temporary_directory=None, verify_after_write=None):
         self._reset_gw_sector_report_dedupe()
         if file_level:
             progress_text = "Saving files to floppy..."
@@ -23616,7 +23722,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             operations,
             parent=self,
             file_level=file_level,
-            verify_after_write=self.verifyFloppyWriteAction.isChecked(),
+            verify_after_write=(self.verifyFloppyWriteAction.isChecked()
+                                if verify_after_write is None else verify_after_write),
             temporary_directory=temporary_directory,
         )
         worker.progressChanged.connect(
@@ -23698,6 +23805,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     operation="save_files",
                     file_level=True,
                 ),
+                offer_floppy_image_recovery=True,
             )
             return
         self._show_operation_error(
@@ -23705,6 +23813,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             "The app could not finish writing the image to the floppy disk",
             message,
             guidance=self._floppy_operation_error_guidance(message, operation="write_image"),
+            offer_floppy_image_recovery=True,
         )
 
     def _on_write_image_to_floppy_cancelled(self, _message, *, file_level=False):
@@ -23735,10 +23844,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.status_label.setText(self._lt("Floppy write cancelled. The current image is still open."))
 
     def _on_write_image_to_floppy_finished(self):
-        self._set_disk_write_busy(False)
         if self.diskWriteTargetWorker is not None:
             self.diskWriteTargetWorker.deleteLater()
             self.diskWriteTargetWorker = None
+        self._set_disk_write_busy(False)
+        self._resume_floppy_image_recovery()
 
     def _prepare_for_disk_load(self, source_label):
         if not self.choose_button.isEnabled():
@@ -29340,6 +29450,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 "Use Save As Image to save an image file, or turn off File > Write Protection > Write-Protect Original.",
             )
             return
+        if self._source_floppy_needs_image_write():
+            self._offer_floppy_image_recovery()
+            return
         if not self._confirm_image_save_deletions():
             return
         if not self._confirm_floppy_write():
@@ -29575,6 +29688,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             "The app could not finish writing changes back to the floppy disk",
             message,
             guidance=guidance,
+            offer_floppy_image_recovery=source_kind.startswith("floppy"),
         )
 
     def _on_floppy_commit_cancelled(self, _message):
@@ -29603,10 +29717,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.status_label.setText(self._lt("Floppy write cancelled. Pending changes are still staged."))
 
     def _on_floppy_commit_finished(self):
-        self._set_disk_write_busy(False)
         if self.diskCommitWorker is not None:
             self.diskCommitWorker.deleteLater()
             self.diskCommitWorker = None
+        self._set_disk_write_busy(False)
+        self._resume_floppy_image_recovery()
 
     def show_disclaimer_dialog(self):
         dialog = QDialog(self)
@@ -29763,6 +29878,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 "source_name": getattr(self.image_session, "source_name", ""),
                 "source_ext": getattr(self.image_session, "source_ext", ""),
                 "disk_format": getattr(getattr(self.image_session, "disk_format", None), "label", ""),
+                "source_boot_sector_repaired": bool(getattr(self.image_session, "source_boot_sector_repaired", False)),
             }
         context = {
             "mode": mode,
@@ -30503,7 +30619,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return selected_filter.split("*.", 1)[1].split(")", 1)[0].strip().lower()
 
     @zip_import_operation
-    def save_image_as(self):
+    def save_image_as(self, *, for_floppy=False):
         if self.image_session is None:
             return
         if not MidiTitleWindow._ensure_preparation_ready(self):
@@ -30554,6 +30670,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             default_disk_format=self.image_session.disk_format,
             default_basename=f"{source_stem}{default_suffix}",
             default_dir=source_dir,
+            raw_only=for_floppy,
         )
         if options is None:
             return
@@ -30610,12 +30727,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 preview = "\n".join(os.path.basename(path) for path in output_paths[:10])
                 if len(output_paths) > 10:
                     preview += "\n" + self._t("error.more_count", count=len(output_paths) - 10)
-                self._show_save_as_image_complete(
-                    "save_as_image.complete.created_multiple",
-                    count=len(output_paths),
-                    preview=preview,
-                    album_subfolder_note=album_subfolder_note,
-                )
+                if not for_floppy:
+                    self._show_save_as_image_complete(
+                        "save_as_image.complete.created_multiple",
+                        count=len(output_paths),
+                        preview=preview,
+                        album_subfolder_note=album_subfolder_note,
+                    )
                 self._show_greaseweazle_sector_reports(export_sector_reports)
                 self._log_event(
                     "Image",
@@ -30625,7 +30743,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     disk_format=self._log_disk_format_label(disk_format),
                     images=len(output_paths),
                 )
-                return
+                return tuple(output_paths)
             progress_callback(5, 9, "Opening saved floppy image...")
             session = FloppyImageSession.load(
                 output_paths[0],
@@ -30637,11 +30755,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._activate_disk_session(session, listing, prepare_destination=False)
             self._remember_save_as_location(selected_output_path)
             self._show_greaseweazle_sector_reports(export_sector_reports)
-            self._show_save_as_image_complete(
-                "save_as_image.complete.saved_as",
-                filename=os.path.basename(output_paths[0]),
-                album_subfolder_note=album_subfolder_note,
-            )
+            if not for_floppy:
+                self._show_save_as_image_complete(
+                    "save_as_image.complete.saved_as",
+                    filename=os.path.basename(output_paths[0]),
+                    album_subfolder_note=album_subfolder_note,
+                )
             self.status_label.setText(self._image_mode_summary())
             self._log_event(
                 "Image",
@@ -30651,6 +30770,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 disk_format=self._log_disk_format_label(disk_format),
                 files=len(getattr(listing, "entries", ()) or ()),
             )
+            return tuple(output_paths)
         except Exception as exc:
             progressDialog.close()
             self._show_operation_error(
@@ -30682,6 +30802,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         default_disk_format=None,
         default_basename="midi_floppy",
         default_dir="",
+        raw_only=False,
     ):
         dialog = QDialog(self)
         apply_window_icon(dialog)
@@ -30724,6 +30845,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             MidiTitleWindow._preparation_medium(self).image_format
             or default_ext or preparation_defaults.get("image_format", "hfe")
         ).lower().lstrip(".")
+        if raw_only:
+            default_ext = "img"
+            type_combo.setEnabled(False)
+            list_all_types_checkbox.setEnabled(False)
         default_disk_key = (
             preparation_defaults.get("disk_format")
             or getattr(default_disk_format, "key", None) or "ibm.720"
@@ -30736,7 +30861,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         def refresh_type_combo():
             current_ext = type_combo.currentData() or default_ext
             options = (
-                PREFERRED_OUTPUT_EXTENSIONS
+                [(ext, label) for ext, label in PREFERRED_OUTPUT_EXTENSIONS if ext == "img"]
+                if raw_only else PREFERRED_OUTPUT_EXTENSIONS
                 if list_all_types_checkbox.isChecked()
                 else self._basic_image_export_types()
             )
@@ -30916,12 +31042,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return context_dir, context_paths
 
     @zip_import_operation
-    def save_as_image(self):
+    def save_as_image(self, *, for_floppy=False):
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
         if self.is_image_mode():
-            self.save_image_as()
-            return
+            if for_floppy:
+                return self.save_image_as(for_floppy=True)
+            return self.save_image_as()
         if not self.choose_button.isEnabled():
             QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
             return
@@ -30936,7 +31063,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self.is_local_eseq_mode() and not self._ensure_pianodir_generation_for_save():
             return
 
-        options = self._prompt_for_save_image_options()
+        options = self._prompt_for_save_image_options(raw_only=True) if for_floppy else self._prompt_for_save_image_options()
         if options is None:
             return
 
@@ -30988,11 +31115,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 self._activate_disk_session(session, listing, prepare_destination=False)
                 self._remember_save_as_location(selected_output_path)
                 self._show_greaseweazle_sector_reports(sector_reports)
-                self._show_save_as_image_complete(
-                    "save_as_image.complete.created",
-                    filename=os.path.basename(output_paths[0]),
-                    album_subfolder_note=album_subfolder_note,
-                )
+                if not for_floppy:
+                    self._show_save_as_image_complete(
+                        "save_as_image.complete.created",
+                        filename=os.path.basename(output_paths[0]),
+                        album_subfolder_note=album_subfolder_note,
+                    )
                 self.status_label.setText(self._image_mode_summary())
                 self._log_event(
                     "Image",
@@ -31001,7 +31129,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     images=1,
                     files=len(getattr(listing, "entries", ()) or ()),
                 )
-                return
+                return tuple(output_paths)
 
             progressDialog.close()
             _, context_paths = self._materialize_export_context_files(file_specs, output_path)
@@ -31017,12 +31145,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             preview = "\n".join(os.path.basename(path) for path in output_paths[:10])
             if len(output_paths) > 10:
                 preview += "\n" + self._t("error.more_count", count=len(output_paths) - 10)
-            self._show_save_as_image_complete(
-                "save_as_image.complete.created_multiple",
-                count=len(output_paths),
-                preview=preview,
-                album_subfolder_note=album_subfolder_note,
-            )
+            if not for_floppy:
+                self._show_save_as_image_complete(
+                    "save_as_image.complete.created_multiple",
+                    count=len(output_paths),
+                    preview=preview,
+                    album_subfolder_note=album_subfolder_note,
+                )
             self._show_greaseweazle_sector_reports(sector_reports)
             self._log_event(
                 "Image",
@@ -31031,6 +31160,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 images=len(output_paths),
                 files=len(file_specs),
             )
+            return tuple(output_paths)
         except Exception as exc:
             progressDialog.close()
             self._show_operation_error(

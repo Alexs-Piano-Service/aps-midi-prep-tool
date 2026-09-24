@@ -24,6 +24,35 @@ def _fail(code):
     return fail
 
 
+@pytest.mark.parametrize("requested,expected", [(0, 0x80), (0x01, 0x01), (0x27, 0x27), (0xA7, 0x27)])
+def test_windows_attribute_api_normalizes_normal_flag_and_verifies_readback(monkeypatch, requested, expected):
+    values = {"attributes": 0x20}
+    calls = []
+    def set_attributes(path, attributes):
+        calls.append((path, attributes))
+        values["attributes"] = attributes
+        return True
+    api = SimpleNamespace(GetFileAttributesW=lambda _: values["attributes"], SetFileAttributesW=set_attributes)
+    monkeypatch.setattr(floppy_image, "_windows_ctypes", lambda: (ctypes, wintypes, api))
+    floppy_image._set_windows_file_attributes("A:\\SONG.FIL", requested)
+    assert calls == [("A:\\SONG.FIL", expected)]
+
+
+@pytest.mark.parametrize("failure", ["get", "set", "readback"])
+def test_windows_attribute_api_reports_failure(monkeypatch, failure):
+    api = SimpleNamespace(
+        GetFileAttributesW=lambda _: 0xFFFFFFFF if failure == "get" else 0x20,
+        SetFileAttributesW=lambda *a: failure != "set",
+    )
+    ctypes_api = SimpleNamespace(WinError=_windows_error, get_last_error=lambda: 5)
+    monkeypatch.setattr(floppy_image, "_windows_ctypes", lambda: (ctypes_api, wintypes, api))
+    with pytest.raises((OSError, floppy_image.FloppyImageError)):
+        if failure == "get":
+            floppy_image._windows_file_attributes("A:\\SONG.FIL")
+        else:
+            floppy_image._set_windows_file_attributes("A:\\SONG.FIL", 0x27)
+
+
 @pytest.mark.parametrize("geometry", [(2, 512, 7, 713), (0, 512, 7, 713), (2, 512, 0, 0), (2, 512, 714, 713)])
 @pytest.mark.parametrize("succeeds", [False, True])
 def test_legacy_space_query_uses_windows_geometry_and_preserves_error(monkeypatch, succeeds, geometry):
@@ -94,6 +123,10 @@ def mounted_drive(tmp_path, monkeypatch):
     monkeypatch.setattr(floppy_image.shutil, "disk_usage", lambda _: SimpleNamespace(free=700000))
     monkeypatch.setattr(floppy_image, "_windows_legacy_disk_space", lambda _: (700000, 1024))
     monkeypatch.setenv("APS_FLOPPY_SAVE_RECOVERY_DIR", str(tmp_path / "recovery"))
+    monkeypatch.setattr(floppy_image, "_windows_volume_identity", lambda _: {"serial": 123, "filesystem": "FAT"})
+    monkeypatch.setattr(floppy_image, "_windows_file_attributes", lambda _: 0x20)
+    monkeypatch.setattr(floppy_image, "_set_windows_file_attributes", lambda *a: None)
+    monkeypatch.setattr(floppy_image, "_windows_free_root_directory_entries", lambda *a, **kw: 112)
     real_listing = floppy_image.read_image_listing
     monkeypatch.setattr(floppy_image, "read_image_listing", lambda path, **kwargs:
         floppy_image._read_windows_filesystem_drive_listing(path, **kwargs) if path == "A:"
@@ -292,6 +325,9 @@ def test_failed_staging_retains_every_original_and_durable_replacement(save_sess
         assert (directory / manifest["replacements"][name]["file"]).read_bytes() == data
     assert manifest["status"] == "failed"
     assert manifest["actions"][-1]["status"] == "started"
+    assert not list(mounted_drive.glob("APS*.TMP"))
+    assert manifest.get("staging_files_remaining", []) == []
+    assert len(manifest["diagnostics"]["staging_cleanup"]["removed"]) == failed_copy - 1
 
 
 def test_insufficient_space_stops_before_mutation_and_retains_recovery(save_session, mounted_drive, monkeypatch):
@@ -334,6 +370,10 @@ def test_cancel_after_deletion_retains_original_and_does_not_publish_catalog(sav
     assert (directory / manifest["originals"]["OLD.MID"]["file"]).read_bytes() == b"original song"
     assert manifest["status"] == "cancelled"
     assert manifest["actions"][-1] == {"operation": "delete", "file": "OLD.MID", "status": "complete"}
+    assert manifest["diagnostics"]["staging_cleanup"]["status"] == "skipped"
+    assert manifest["staging_files_remaining"] == sorted(path.name for path in mounted_drive.glob("APS*.TMP"))
+    assert manifest["staging_files_remaining"]
+    assert (mounted_drive / "SONG.FIL").read_bytes() == b"new song"
 
 
 def test_catalog_is_published_after_songs_and_deletions(save_session):
@@ -377,6 +417,42 @@ def test_directory_is_independently_checked_when_both_space_queries_fail(mounted
         floppy_image._read_windows_filesystem_drive_listing("A:", diagnostics=diagnostics)
     assert diagnostics["directory_status"] == "complete"
     assert len(diagnostics["space_queries"]) == 2
+
+
+def test_unsupported_space_and_directory_access_keeps_prepared_image_without_writing(
+    save_session, mounted_drive, monkeypatch,
+):
+    """Reproduce a raw-readable disk whose Windows file APIs all return error 50."""
+    monkeypatch.setattr(floppy_image.shutil, "disk_usage", _fail(50))
+    monkeypatch.setattr(floppy_image, "_windows_legacy_disk_space", _fail(50))
+
+    def walk(_root, *, onerror):
+        onerror(_windows_error(50))
+        return iter(())
+
+    monkeypatch.setattr(floppy_image.os, "walk", walk)
+    for name in ("_copy_prepared_floppy_file", "_write_block_device", "_set_windows_file_attributes"):
+        monkeypatch.setattr(floppy_image, name, lambda *a, **k: pytest.fail("Unexpected target mutation"))
+
+    with pytest.raises(floppy_image.FloppyImageError, match="Could not list files"):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+
+    diagnostics = save_session.last_floppy_save_diagnostics
+    assert diagnostics["stage"] == "preflight_listing"
+    assert diagnostics["target_mutation_attempted"] is False
+    assert diagnostics["files_staged"] == diagnostics["files_copied"] == diagnostics["files_removed"] == 0
+    assert save_session.last_write_verification["confidence"] == "not_written"
+    listing = diagnostics["preflight_listing"]
+    assert listing["stage"] == "list_directory"
+    assert listing["directory_status"] == "failed"
+    assert listing["error"]["winerror"] == 50
+    assert [query["error"]["winerror"] for query in listing["space_queries"]] == [50, 50]
+    assert {path.name: path.read_bytes() for path in mounted_drive.iterdir()} == save_session.originals
+    directory, manifest = _package(save_session)
+    assert manifest["status"] == "failed"
+    assert manifest["diagnostics"] == diagnostics
+    assert not manifest["actions"]
+    assert (directory / "prepared.img").read_bytes() == Path("prepared.img").read_bytes()
 
 
 def test_staged_save_roundtrip_with_real_images_and_native_staging(mounted_drive, tmp_path, monkeypatch):
@@ -482,3 +558,398 @@ def test_direct_save_rechecks_existing_bytes_before_publication(mounted_drive, t
         job.write_to_floppy_target("floppy_usb", "A:")
     assert original.read_bytes() == b"another process changed this"
     assert not (mounted_drive / "NEW.MID").exists()
+    assert list(mounted_drive.glob("APS*.TMP"))
+    assert job.last_floppy_save_diagnostics["staging_cleanup"]["status"] == "skipped"
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("failure", ["third_copy", "partial_copy", "cancel", "flush", "verify", "publish"])
+def test_failed_save_cleans_owned_stages_and_allows_retry(save_session, mounted_drive, tmp_path, monkeypatch, direct, failure):
+    save_session.prepared = {f"SONG{i}.MID": bytes([i]) * 40 for i in range(3)}
+    session = _prepared_save(tmp_path, save_session.prepared) if direct else save_session
+    def save(**kwargs):
+        session._sync_modified_image_files_to_windows_drive(None if direct else "prepared.img", "A:", **kwargs)
+    copy = floppy_image._copy_prepared_floppy_file
+    staged = []
+    def fail(source, destination, **kwargs):
+        staged.append(destination)
+        if len(staged) == 3 and failure == "third_copy":
+            raise _windows_error(21)
+        if len(staged) == 3 and failure == "partial_copy":
+            with open(destination, "xb") as handle:
+                kwargs["created_callback"]()
+                handle.write(b"partial")
+            raise _windows_error(112)
+        copy(source, destination, **kwargs)
+        if len(staged) == 3 and failure == "verify":
+            Path(destination).write_bytes(b"corrupt staging copy")
+    with monkeypatch.context() as fault:
+        fault.setattr(floppy_image, "_copy_prepared_floppy_file", fail)
+        if failure == "flush":
+            real_sync = floppy_image.floppy_save_recovery.sync_file
+            def sync(path):
+                if Path(path).parent == mounted_drive:
+                    raise _windows_error(21)
+                real_sync(path)
+            fault.setattr(floppy_image.floppy_save_recovery, "sync_file", sync)
+        if failure == "publish":
+            fault.setattr(floppy_image.os, "replace", _fail(5))
+        with pytest.raises((OSError, floppy_image.FloppyImageError)):
+            save(cancel_callback=lambda: failure == "cancel" and len(staged) == 3)
+    assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+    assert list(mounted_drive.iterdir()) == [mounted_drive / "OLD.MID"]
+    directory, manifest = _package(session)
+    assert manifest["status"] == ("cancelled" if failure == "cancel" else "failed")
+    assert manifest["staging_files_remaining"] == []
+    assert manifest["diagnostics"]["staging_cleanup"]["status"] == "complete"
+    assert (directory / manifest["originals"]["OLD.MID"]["file"]).read_bytes() == b"original song"
+    save()
+    assert session.last_write_verification["confidence"] == "contents_verified"
+
+
+def test_cancel_during_native_copy_removes_partial_stage(save_session, mounted_drive):
+    save_session.prepared = {"SONG.MID": b"x" * 150000}
+    def cancelled():
+        return any(path.stat().st_size >= 65536 for path in mounted_drive.glob("APS*.TMP"))
+    with pytest.raises(floppy_image.FloppyOperationCancelled):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:", cancel_callback=cancelled)
+    assert list(mounted_drive.iterdir()) == [mounted_drive / "OLD.MID"]
+    _, manifest = _package(save_session)
+    assert manifest["status"] == "cancelled"
+    assert manifest["staging_files_remaining"] == []
+    assert len(manifest["diagnostics"]["staging_cleanup"]["removed"]) == 1
+
+
+@pytest.mark.parametrize("identity_failure", ["swap", "unreadable", "unavailable_from_start"])
+def test_cleanup_skips_uncertain_disk_even_with_matching_originals(save_session, mounted_drive, monkeypatch, identity_failure):
+    save_session.prepared = {f"SONG{i}.MID": bytes([i]) * 40 for i in range(3)}
+    real_copy = floppy_image._copy_prepared_floppy_file
+    stages = []
+    def identity(_):
+        if identity_failure == "unavailable_from_start" or (len(stages) == 3 and identity_failure == "unreadable"):
+            raise _windows_error(21)
+        return {"serial": 456 if len(stages) == 3 else 123}
+    monkeypatch.setattr(floppy_image, "_windows_volume_identity", identity)
+    def copy(source, destination, **kwargs):
+        stages.append(Path(destination))
+        if len(stages) == 3:
+            raise _windows_error(21)
+        real_copy(source, destination, **kwargs)
+    monkeypatch.setattr(floppy_image, "_copy_prepared_floppy_file", copy)
+    with pytest.raises(OSError):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    _, manifest = _package(save_session)
+    assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+    assert all(path.exists() for path in stages[:2])
+    assert manifest["staging_files_remaining"] == sorted(path.name for path in stages[:2])
+    assert manifest["diagnostics"]["staging_cleanup"]["status"] == "skipped"
+
+
+def test_cleanup_does_not_claim_a_name_when_exclusive_creation_fails(save_session, mounted_drive, monkeypatch):
+    copy = floppy_image._copy_prepared_floppy_file
+    def collide(source, destination, **kwargs):
+        Path(destination).write_bytes(b"another writer owns this")
+        copy(source, destination, **kwargs)
+    monkeypatch.setattr(floppy_image, "_copy_prepared_floppy_file", collide)
+    with pytest.raises(FileExistsError):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    stages = list(mounted_drive.glob("APS*.TMP"))
+    assert len(stages) == 1
+    assert stages[0].read_bytes() == b"another writer owns this"
+    assert save_session.last_floppy_save_diagnostics["staging_cleanup"]["status"] == "not_needed"
+
+
+def test_cleanup_failure_keeps_original_error_and_reports_remaining_names(save_session, mounted_drive, monkeypatch):
+    save_session.prepared = {f"SONG{i}.MID": bytes([i]) for i in range(3)}
+    copy = floppy_image._copy_prepared_floppy_file
+    paths = []
+    def fail(source, destination, **kwargs):
+        paths.append(Path(destination))
+        if len(paths) == 3:
+            raise _windows_error(112)
+        copy(source, destination, **kwargs)
+    remove = floppy_image.os.remove
+    def remove_stage(path):
+        if Path(path) == paths[0]:
+            raise _windows_error(5)
+        remove(path)
+    monkeypatch.setattr(floppy_image, "_copy_prepared_floppy_file", fail)
+    # Install after extraction, so the hook only faults disk cleanup.
+    def progress(*args):
+        monkeypatch.setattr(floppy_image.os, "remove", remove_stage)
+    with pytest.raises(OSError) as caught:
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:", progress_callback=progress)
+    assert caught.value.winerror == 112
+    _, manifest = _package(save_session)
+    assert manifest["staging_files_remaining"] == [paths[0].name]
+    assert paths[0].exists() and not paths[1].exists()
+    assert manifest["diagnostics"]["staging_cleanup"]["status"] == "incomplete"
+
+
+@pytest.mark.parametrize("free_entries", [0, 2, 3])
+def test_staging_preflights_root_slots_separately_from_clusters(save_session, mounted_drive, monkeypatch, free_entries):
+    save_session.prepared = {f"SONG{i}.MID": bytes([i]) for i in range(3)}
+    monkeypatch.setattr(floppy_image, "_windows_free_root_directory_entries", lambda *a, **kw: free_entries)
+    if free_entries < 3:
+        with pytest.raises(floppy_image.FloppyImageError, match="root-directory entries"):
+            save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+        assert list(mounted_drive.iterdir()) == [mounted_drive / "OLD.MID"]
+        assert not save_session.last_floppy_save_diagnostics["target_mutation_attempted"]
+    else:
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+        assert not list(mounted_drive.glob("APS*.TMP"))
+
+
+def test_unavailable_root_slot_query_does_not_require_raw_access(save_session, monkeypatch):
+    monkeypatch.setattr(floppy_image, "_windows_free_root_directory_entries", _fail(5))
+    save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert save_session.last_floppy_save_diagnostics["root_directory_check"]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("has_end_marker", [False, True])
+def test_root_slot_count_includes_labels_long_names_and_deleted_entries(tmp_path, monkeypatch, has_end_marker):
+    path = tmp_path / "test.img"
+    disk_format = next(item for item in floppy_image.DISK_FORMATS if item.key == "ibm.720")
+    floppy_image.create_blank_floppy_image(path, disk_format)
+    data = bytearray(path.read_bytes())
+    geometry = floppy_image._geometry_from_boot_sector(data[:512])
+    for index in range(geometry.root_entries):
+        data[geometry.root_offset + index * 32] = 65
+    data[geometry.root_offset + 11] = 0x08  # volume label occupies one slot
+    data[geometry.root_offset + 32 + 11] = 0x0F  # long-name slot is also occupied
+    data[geometry.root_offset + 64] = 0xE5
+    if has_end_marker:
+        data[geometry.root_offset + 96] = 0
+    class Volume:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def read_at(self, offset, size, label):
+            return data[offset:offset + size]
+    monkeypatch.setattr(floppy_image, "_WindowsRecoveryVolumeHandle", lambda *a, **kw: Volume())
+    expected = 1 + geometry.root_entries - 3 if has_end_marker else 1
+    assert floppy_image._windows_free_root_directory_entries("A:") == expected
+
+
+@pytest.mark.parametrize("outcome", ["complete", "failed", "cancelled"])
+@pytest.mark.parametrize("operation", ["commit", "write_target"])
+def test_package_waits_for_optional_readback_before_completion(save_session, monkeypatch, outcome, operation):
+    save_session.create_modified_image = lambda **kw: "prepared.img"
+    save_session.disk_format = next(item for item in floppy_image.DISK_FORMATS if item.key == "ibm.720")
+    save_session.drive_info = None
+    save_session._extracted_files = {}
+    def sync(image, drive, **kw):
+        save_session._sync_modified_image_files_to_windows_drive(image, drive, finalize_recovery=False, **kw)
+    save_session._sync_modified_image_files_to_floppy_drive = sync
+    def readback(*a, **kw):
+        _, manifest = _package(save_session)
+        assert manifest["status"] == "contents_verified"
+        if outcome == "failed":
+            raise floppy_image.FloppyImageError("Readback failed")
+        if outcome == "cancelled":
+            raise floppy_image.FloppyOperationCancelled("Readback cancelled")
+        return {"confidence": "contents_verified", "hardware_tested": False}
+    monkeypatch.setattr(floppy_image, "_verify_physical_floppy_contents", readback)
+    def save():
+        if operation == "commit":
+            save_session.commit_to_source(verify_after_write=True)
+        else:
+            save_session.write_to_floppy_target(
+                "floppy_usb", floppy_image.FloppyDriveInfo("A:", save_session.disk_format.size_bytes),
+                file_level=True, verify_after_write=True,
+            )
+    if outcome == "complete":
+        save()
+    else:
+        with pytest.raises(floppy_image.FloppyImageError):
+            save()
+    directory, manifest = _package(save_session)
+    assert manifest["status"] == outcome
+    assert (directory / "prepared.img").exists()
+
+
+@pytest.fixture
+def protected_target(save_session, mounted_drive, monkeypatch):
+    (mounted_drive / "OLD.MID").unlink()
+    save_session.originals = {"FIRST.FIL": b"first original", "LAST.FIL": b"last original"}
+    save_session.prepared = {"FIRST.FIL": b"first replacement", "LAST.FIL": b"last replacement"}
+    for name, data in save_session.originals.items():
+        (mounted_drive / name).write_bytes(data)
+    attributes = {"FIRST.FIL": 0x20, "LAST.FIL": 0x27}
+    operations = []
+    def get_attributes(path):
+        if not Path(path).exists():
+            raise FileNotFoundError(path)
+        return attributes.get(Path(path).name, 0x20)
+    def set_attributes(path, value):
+        operations.append(("attributes", Path(path).name, value))
+        attributes[Path(path).name] = (value & ~0x80) or 0x80
+    real_replace = floppy_image.os.replace
+    def replace(source, destination):
+        name = Path(destination).name
+        if Path(destination).parent == mounted_drive:
+            operations.append(("publish", name))
+            if Path(destination).exists() and get_attributes(destination) & 0x01:
+                raise _windows_error(5)
+            real_replace(source, destination)
+            attributes[name] = attributes.pop(Path(source).name, 0x20)
+        else:
+            real_replace(source, destination)
+    real_remove = floppy_image.os.remove
+    def remove(path):
+        if Path(path).parent == mounted_drive and get_attributes(path) & 0x01:
+            raise _windows_error(5)
+        real_remove(path)
+        if Path(path).parent == mounted_drive:
+            attributes.pop(Path(path).name, None)
+    monkeypatch.setattr(floppy_image, "_windows_file_attributes", get_attributes)
+    monkeypatch.setattr(floppy_image, "_set_windows_file_attributes", set_attributes)
+    monkeypatch.setattr(floppy_image.os, "replace", replace)
+    monkeypatch.setattr(floppy_image.os, "remove", remove)
+    return attributes, operations
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("flags", [0x01, 0x07, 0x27])
+def test_protected_replacement_is_preflighted_and_preserves_attributes(
+    save_session, mounted_drive, protected_target, tmp_path, direct, flags,
+):
+    attributes, operations = protected_target
+    attributes["LAST.FIL"] = flags
+    job = _prepared_save(tmp_path, save_session.prepared, save_session.prepared) if direct else save_session
+    job._sync_modified_image_files_to_windows_drive(None if direct else "prepared.img", "A:")
+    for name, payload in save_session.prepared.items():
+        assert (mounted_drive / name).read_bytes() == payload
+    assert attributes["FIRST.FIL"] == 0x20
+    assert attributes["LAST.FIL"] == flags
+    clear = operations.index(("attributes", "LAST.FIL", flags & ~0x01))
+    assert clear < operations.index(("publish", "FIRST.FIL"))
+    _, manifest = _package(job)
+    assert manifest["originals"]["LAST.FIL"]["windows_attributes"] == flags
+    assert manifest["attributes_pending"] == {}
+    assert manifest["status"] == "complete"
+
+
+@pytest.mark.parametrize("failure", ["query", "clear", "cancel", "publish"])
+def test_attribute_rollback_preserves_originals_before_publication(
+    save_session, mounted_drive, protected_target, monkeypatch, failure,
+):
+    attributes, operations = protected_target
+    attributes["FIRST.FIL"] = 0x07
+    original_attributes = dict(attributes)
+    get_attributes, set_attributes = floppy_image._windows_file_attributes, floppy_image._set_windows_file_attributes
+    if failure == "query":
+        def query(path):
+            if Path(path).name == "LAST.FIL":
+                raise _windows_error(5)
+            return get_attributes(path)
+        monkeypatch.setattr(floppy_image, "_windows_file_attributes", query)
+    elif failure == "clear":
+        def set_flags(path, value):
+            if Path(path).name == "LAST.FIL" and not value & 0x01:
+                raise _windows_error(5)
+            set_attributes(path, value)
+        monkeypatch.setattr(floppy_image, "_set_windows_file_attributes", set_flags)
+    elif failure == "publish":
+        monkeypatch.setattr(floppy_image.os, "replace", _fail(5))
+    def cancel():
+        return failure == "cancel" and attributes["FIRST.FIL"] != original_attributes["FIRST.FIL"]
+    with pytest.raises((OSError, floppy_image.FloppyOperationCancelled)):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:", cancel_callback=cancel)
+    assert attributes == original_attributes
+    assert all((mounted_drive / name).read_bytes() == data for name, data in save_session.originals.items())
+    assert not any(operation[0] == "publish" for operation in operations)
+    assert not list(mounted_drive.glob("APS*.TMP"))
+    _, manifest = _package(save_session)
+    assert not manifest.get("attributes_pending")
+    if failure != "query":
+        assert manifest["diagnostics"]["attribute_restoration"]["errors"] == {}
+
+
+def test_failed_attribute_restore_retries_for_the_verified_published_file(
+    save_session, mounted_drive, protected_target, monkeypatch,
+):
+    attributes, _ = protected_target
+    set_attributes = floppy_image._set_windows_file_attributes
+    failed = False
+    def fail_once(path, value):
+        nonlocal failed
+        if Path(path).name == "LAST.FIL" and value == 0x27 and not failed:
+            failed = True
+            raise _windows_error(5)
+        set_attributes(path, value)
+    monkeypatch.setattr(floppy_image, "_set_windows_file_attributes", fail_once)
+    with pytest.raises(OSError):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert failed
+    assert attributes == {"FIRST.FIL": 0x20, "LAST.FIL": 0x27}
+    assert all((mounted_drive / name).read_bytes() == data for name, data in save_session.prepared.items())
+    _, manifest = _package(save_session)
+    assert manifest["status"] == "failed"
+    assert manifest["attributes_pending"] == {}
+    assert manifest["diagnostics"]["attribute_restoration"]["restored"] == ["LAST.FIL"]
+
+
+@pytest.mark.parametrize("change", ["disk_swap", "file_changed", "restore_denied"])
+def test_attribute_rollback_keeps_journal_when_restoration_is_unsafe_or_denied(
+    save_session, mounted_drive, protected_target, monkeypatch, change,
+):
+    attributes, _ = protected_target
+    set_attributes = floppy_image._set_windows_file_attributes
+    def clear_then_fail(path, value):
+        if value & 0x01:
+            if change == "restore_denied":
+                raise _windows_error(5)
+            pytest.fail("Must not restore attributes on an unrecognized target")
+        set_attributes(path, value)
+        if change == "disk_swap":
+            monkeypatch.setattr(floppy_image, "_windows_volume_identity", lambda _: {"serial": 999})
+        elif change == "file_changed":
+            Path(path).write_bytes(b"another file's contents")
+        raise _windows_error(21)
+    monkeypatch.setattr(floppy_image, "_set_windows_file_attributes", clear_then_fail)
+    with pytest.raises(OSError) as caught:
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert caught.value.winerror == 21
+    assert attributes["LAST.FIL"] == 0x26
+    _, manifest = _package(save_session)
+    assert manifest["attributes_pending"]["LAST.FIL"]["attributes"] == 0x27
+    assert manifest["diagnostics"]["attributes_pending"] == ["LAST.FIL"]
+    assert manifest["diagnostics"]["files_copied"] == 0
+
+
+def test_protected_deletion_is_preflighted_before_song_publication(save_session, mounted_drive, protected_target):
+    attributes, operations = protected_target
+    del save_session.prepared["LAST.FIL"]
+    save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert not (mounted_drive / "LAST.FIL").exists()
+    assert operations.index(("attributes", "LAST.FIL", 0x26)) < operations.index(("publish", "FIRST.FIL"))
+    _, manifest = _package(save_session)
+    assert manifest["attributes_pending"] == {}
+
+
+def test_direct_save_preserves_unrelated_protected_file(save_session, mounted_drive, protected_target, tmp_path):
+    attributes, operations = protected_target
+    attributes["FIRST.FIL"] = 0x07
+    job = _prepared_save(tmp_path, {"LAST.FIL": b"last replacement"}, overwrite=["LAST.FIL"])
+    job.write_to_floppy_target("floppy_usb", "A:")
+    assert (mounted_drive / "FIRST.FIL").read_bytes() == b"first original"
+    assert attributes["FIRST.FIL"] == 0x07
+    assert all(operation[1] != "FIRST.FIL" for operation in operations)
+
+
+def test_disk_swap_after_publication_does_not_apply_attributes_to_substituted_media(
+    save_session, protected_target, monkeypatch,
+):
+    _, operations = protected_target
+    replace = floppy_image.os.replace
+    def replace_then_swap(source, destination):
+        replace(source, destination)
+        monkeypatch.setattr(floppy_image, "_windows_volume_identity", lambda _: {"serial": 999})
+    monkeypatch.setattr(floppy_image.os, "replace", replace_then_swap)
+    with pytest.raises(floppy_image.FloppyImageError, match="changed during save"):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert operations == [("attributes", "LAST.FIL", 0x26), ("publish", "FIRST.FIL")]
+    _, manifest = _package(save_session)
+    assert set(manifest["attributes_pending"]) == {"FIRST.FIL", "LAST.FIL"}

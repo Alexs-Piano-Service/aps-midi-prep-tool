@@ -76,11 +76,13 @@ def main():
     from .main_window import MidiTitleWindow, install_tooltip_delay_style
     from .icon_utils import apply_window_icon, load_app_icon
     from .startup_config import StartupConfigError, load_startup_config
+    from .floppy_save_recovery import prune_completed_packages
 
     _set_windows_app_id()
     app = QApplication(sys.argv)
     install_tooltip_delay_style(app)
     install_console_capture()
+    prune_completed_packages()
     _migrate_legacy_settings()
     app.setOrganizationName(SETTINGS_ORG)
     app.setApplicationName(APP_NAME)

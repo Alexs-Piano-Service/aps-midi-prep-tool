@@ -3,6 +3,7 @@ import re
 
 from .message_catalog import translate_text
 from .helpers.atomic_file import atomic_write_bytes
+from .smf import MAX_MIDI_HEADER_BYTES, parse_smf_header, read_smf_layout
 
 from .eseq_converter import (
     is_clavinova_mda_eseq_bytes,
@@ -27,7 +28,6 @@ _LEGACY_TITLE_MAX_CODEPOINT = 0x7E
 _ESEQ_TITLE_START = 0x57
 _ESEQ_TITLE_END = 0x76
 _ESEQ_TITLE_LENGTH = _ESEQ_TITLE_END - _ESEQ_TITLE_START + 1
-_MAX_MIDI_HEADER_BYTES = 64 * 1024
 TITLE_DISPLAY_ENCODINGS = (
     ("latin1", "Latin-1 (default)"),
     ("cp1252", "Windows-1252"),
@@ -42,28 +42,21 @@ class MidiTitleFormatError(ValueError):
 
 
 def normalize_title_spacing(title):
-    """Return a title with Disklavier splits and excess spacing cleaned up."""
+    """Clean existing whitespace without inserting word boundaries."""
     text = str(title or "").replace("\x00", " ")
-    if len(text) > 16 and text[15].islower() and text[16].isupper():
-        text = f"{text[:16]} {text[16:]}"
     return re.sub(r"\s+", " ", text).strip()
 
 
+def normalize_legacy_title_spacing(title):
+    """Repair a known legacy two-row Disklavier title, then clean whitespace."""
+    text = str(title or "").replace("\x00", " ")
+    if len(text) > 16 and text[15].islower() and text[16].isupper():
+        text = f"{text[:16]} {text[16:]}"
+    return normalize_title_spacing(text)
+
+
 def _extract_midi_format_type(midi_bytes):
-    if len(midi_bytes) < 14:
-        raise ValueError("File is too small to be a valid MIDI file.")
-    if midi_bytes[:4] != b"MThd":
-        raise ValueError("Missing MThd header chunk.")
-
-    header_len = int.from_bytes(midi_bytes[4:8], "big")
-    if header_len < 6:
-        raise ValueError("Invalid MIDI header length.")
-
-    header_end = 8 + header_len
-    if header_end > len(midi_bytes):
-        raise ValueError("Corrupt MIDI header length.")
-
-    return int.from_bytes(midi_bytes[8:10], "big")
+    return parse_smf_header(midi_bytes).format_type
 
 
 def extract_midi_type_label_from_midi(midi_path):
@@ -78,23 +71,23 @@ def extract_midi_type_label_from_midi(midi_path):
 
 
 def probe_midi_file_type(midi_path):
-    """Return the SMF type, None for other content, or raise on invalid headers/I/O.
+    """Return the SMF type, None for other content, or raise on invalid files/I/O.
 
-    SMF permits additional header bytes. Bound the allocation and check the
-    declared size against the actual file before reading an extended header.
+    Validate the header and the declared track chunk boundaries while skipping
+    payloads. MIDI event validity remains the responsibility of event parsers.
     """
     with open(midi_path, "rb") as handle:
         prefix = handle.read(8)
         if prefix[:4] != b"MThd":
             return None
-        if len(prefix) != 8:
-            raise MidiTitleFormatError("Corrupt MIDI header length.")
-        length = int.from_bytes(prefix[4:8], "big")
-        if not 6 <= length <= _MAX_MIDI_HEADER_BYTES:
-            raise MidiTitleFormatError("Invalid MIDI header length.")
-        if 8 + length > os.fstat(handle.fileno()).st_size:
-            raise MidiTitleFormatError("Corrupt MIDI header length.")
-        return _extract_midi_format_type(prefix + handle.read(length))
+        try:
+            header, _, _ = read_smf_layout(
+                handle, os.fstat(handle.fileno()).st_size, prefix=prefix,
+                max_header_bytes=MAX_MIDI_HEADER_BYTES,
+            )
+        except ValueError as exc:
+            raise MidiTitleFormatError(str(exc)) from exc
+        return header.format_type
 
 
 def is_midi_file(midi_path):

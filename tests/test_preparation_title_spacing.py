@@ -28,10 +28,19 @@ from aps_midi_prep_tool_app.preparation_profiles import (
     get_preparation_medium,
     get_preparation_profile,
 )
+from aps_midi_prep_tool_app.midi_metadata import normalize_title_spacing, normalize_legacy_title_spacing
 
 
 MODERN_PROFILES = ("midi_export", "e3_850", "enspire")
 SPACED_TITLE = "  Moon    River  "
+
+
+def test_whitespace_cleanup_and_legacy_boundary_repair_are_separate():
+    title = "You Can't AlwaysGet What You..."
+    assert normalize_title_spacing(title) == title
+    assert normalize_legacy_title_spacing(title) == "You Can't Always Get What You..."
+    assert normalize_title_spacing("\tabcdefghijklmnopQrst\n") == "abcdefghijklmnopQrst"
+    assert normalize_title_spacing("  Moon\t \n River\x00") == "Moon River"
 
 
 def _midi_bytes(title=SPACED_TITLE):
@@ -124,6 +133,36 @@ def test_preparation_stages_and_exports_clean_title_preserving_other_events(
     assert exported.type == expected.type
     assert exported.ticks_per_beat == expected.ticks_per_beat
     assert _without_title(exported) == _without_title(expected)
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("profile_key", MODERN_PROFILES)
+@pytest.mark.parametrize("prepare_before_import", (False, True))
+@pytest.mark.parametrize("source_kind", ("midi", "eseq"))
+def test_modern_preparation_preserves_unsplit_words_at_character_17(
+    window, monkeypatch, tmp_path, profile_key, prepare_before_import, source_kind,
+):
+    title = "abcdefghijklmnopQrst"
+    original = _midi_bytes(title)
+    source = tmp_path / ("SOURCE.MID" if source_kind == "midi" else "SOURCE.FIL")
+    if source_kind == "eseq":
+        original = convert_midi_bytes_to_eseq_bytes(original, cc7_policy=CC7_POLICY_PRESERVE)
+    source.write_bytes(original)
+    if prepare_before_import:
+        _apply(window, profile_key)
+    window._load_regular_files([str(source)], "Imported song")
+    if not prepare_before_import:
+        _apply(window, profile_key)
+    QTest.qWait(20)
+    row = next(iter(window._regular_file_rows()))
+    assert window._row_raw_title(row) == title
+    output = tmp_path / "export"
+    filename = window._regular_row_output_filename(row)
+    monkeypatch.setattr(main_window.QFileDialog, "getExistingDirectory", lambda *_a, **_k: str(output))
+    window.save_as_changes()
+    exported = mido.MidiFile(output / filename)
+    assert [message.name for track in exported.tracks for message in track if message.type == "track_name"] == [title]
+    assert not window.title_spacing_test_errors
     assert source.read_bytes() == original
 
 

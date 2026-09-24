@@ -14,14 +14,19 @@ to include the exact operation and log when reporting a failure.
 
 ## Save To Floppy: Windows error 50
 
-If saving reports **The request is not supported**, Windows may have rejected
-the free-space query used by file-level saving even though reading the disk as
-an image succeeded. Those operations use different access paths. This message
-alone does not establish that the disk is damaged or write-protected.
+If saving reports **The request is not supported**, check the `floppy_save`
+diagnostics in the bug report. Windows can reject the free-space query, the
+directory listing, or both, even though APS read the disk as an image. Reading
+an image and copying files through Windows use different access paths. This
+message alone does not establish that the disk is damaged or write-protected.
 
 When `GetDiskFreeSpaceExW` returns error 50, APS tries the older
 [`GetDiskFreeSpaceW` query](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdiskfreespacew).
 Saving proceeds only if the capacity query and directory listing succeed.
+If both queries fail and `directory_status` is `failed` with `winerror: 50`, the
+legacy query cannot help: Windows also rejected listing the files. APS now
+explains this case in the failure dialog and identifies the separate image-write
+workflow. It does not automatically switch to a whole-disk write.
 Other Windows errors still stop the operation. This compatibility fallback needs
 validation with the affected Windows drive and disk.
 
@@ -32,9 +37,56 @@ It distinguishes a failure before changes from a failure in the final directory
 check, which can occur after files have been written. It contains no disk bytes.
 A successful directory check does not replace optional readback verification.
 
-If saving still fails, keep the session open and use **Save As Image** to preserve
-the prepared disk. Include the failure's bug report so the exact stage and API
-results can be checked.
+If saving still fails, keep the session open and use **Save Image and Apply to
+Floppy…** in the failure dialog. This guides you through preserving the prepared
+disk and explicitly choosing a whole-disk write, as described below. If APS has
+already closed, open `prepared.img` from the recovery directory shown in the
+error dialog, then use **Disk → Write Current Image to Floppy…** with a backed-up
+or spare disk. Enable **Disk → Verify floppy contents after writing** for that
+manual write.
+
+For example, `stage: preflight_listing`, `target_mutation_attempted: false`, and
+zero staged/copied/removed files mean APS stopped before changing the floppy.
+If the failure occurs at `post_write_listing`, files may already have changed;
+keep the recovery package. Neither result identifies the underlying disk or
+driver incompatibility from error 50 alone. Include the failure's bug report so
+the exact stage and API results can be checked.
+
+## Applying an image when Windows cannot mount the disk
+
+A missing or invalid boot sector, including a blank first sector, can prevent
+Windows from mounting a floppy even when APS can read its songs through raw disk
+access. Yamaha protection may be involved, but a repaired boot sector alone does
+not prove copy protection or establish the physical condition of the disk.
+
+When APS has repaired the source boot sector in its working copy, **Save** and
+**Save To Floppy** offer **Save Image and Apply to Floppy…**. The same action is
+available after failed file saves and failed image writes. It guides you through
+these steps:
+
+1. Save the current songs, including pending edits and conversions, as a
+   persistent IMG on the computer.
+2. Select the target floppy and confirm the existing whole-disk overwrite
+   warning. Check the drive and image format before confirming. Applying the
+   image replaces the entire disk, including its boot sector; use a backed-up or
+   spare disk.
+3. APS writes the image, reads the floppy back, and verifies the written files.
+   This guided action always verifies, regardless of the normal verification
+   setting. Check the result before using the disk.
+
+There is no separate blank-format step: image preparation completes before the
+write begins. Cancelling image export or failing to save the IMG does not start
+a floppy write. Cancelling drive selection or the overwrite confirmation also
+leaves the floppy untouched by this action, and the saved IMG remains available.
+An earlier failed save or write may already have changed the disk; keep its
+recovery package.
+
+If the songs require several images, APS saves them and asks you to open one of
+the saved images, then use **Disk → Write Current Image to Floppy…**. Select each
+image and target deliberately; the guided action does not choose one for you.
+Enable verification for these manual writes. Successful reading does not
+establish that the drive and disk can write the selected format; physical writes
+still need testing on the affected hardware.
 
 ## Changes for stalled operations
 
@@ -112,8 +164,29 @@ before any original song is replaced. Deliberate deletions follow song publicati
 must match the prepared image. This mounted-filesystem check is distinct from the
 optional physical image readback.
 
-Safe staging needs room for both the old and new files. If there is insufficient
-space, APS stops before changing the floppy. Use **Save As Image** to retain the
+For existing files, APS reads the mounted Windows attributes and records them in
+the recovery manifest as `windows_attributes`. Before publishing any song, it
+temporarily clears Read-only on every file scheduled for replacement or deletion.
+If this preparation fails, no songs have been published. Replacements receive
+their predecessor's attributes, including Read-only, Hidden, and System.
+Unrelated files retain their attributes. This uses the Windows
+[file attribute API](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileattributesw).
+
+On failure or cancellation, APS attempts to restore temporarily changed
+attributes only when the volume identity and the file's expected content hash
+still match. It does not roll back published song bytes. If attribute restoration
+is unsafe or fails, `attributes_pending` in the manifest records the filenames,
+original flags, and expected hashes, and the failure dialog lists those files.
+Keep the recovery package until both the song contents and attributes have been
+checked on the intended disk.
+
+Safe staging needs room for both the old and new files, including a free FAT
+root-directory entry for each temporary file. APS counts free root-directory
+slots when Windows permits reading the FAT metadata; this counts volume labels
+and long-filename entries as occupied. If raw metadata access is denied, APS
+records that the directory capacity could not be checked and continues through
+filesystem I/O without requesting administrator access. If either checked
+capacity is insufficient, APS stops before changing the floppy. Use **Save As Image** to retain the
 prepared disk, then deliberately choose an image write to backed-up or spare media.
 APS does not delete originals to make staging room or automatically switch write
 methods after a denied raw write.
@@ -126,14 +199,24 @@ checksums. Image/Floppy Mode also retains `prepared.img`, which can be reopened
 to recover the intended song set. For ordinary-file saves, copy replacement
 `.bin` files to a local folder using the names in the manifest. Copy original
 `.bin` files the same way to recover predecessors.
-Keep these copies until the disk has been checked. Packages remain available
-after APS closes, including after successful saves; they can be deleted manually
-once no longer needed. `APS_FLOPPY_SAVE_RECOVERY_DIR` overrides the location.
+Keep these copies until the disk has been checked. Failed, cancelled, and
+unfinished packages remain available after APS closes until you delete them
+manually. APS retains at most the five most recent successful packages, for up
+to 30 days, and prunes older completed packages at startup and during saves.
+Packages become complete only after the save and any requested physical
+readback succeed. Copy a successful package elsewhere if you need it longer.
+`APS_FLOPPY_SAVE_RECOVERY_DIR` overrides the location and uses the same retention
+policy. An inaccessible completed package is left for a later cleanup attempt.
 
-Cancellation or failure during staging/publication can leave temporary files or a
-partial song set on the disk. APS keeps the recovery package and identifies the
-failed phase and completed changes. It does not automatically restore files onto
-possibly removed or substituted media. Do not treat a failed save as a usable disk.
+On cancellation or failure, APS attempts to remove only temporary files created
+by that save. Cleanup requires a matching Windows volume identity, the expected
+file listing, and unchanged hashes for every retained original. If those checks
+fail, or a temporary file cannot be deleted, the recovery manifest and failure
+dialog list the temporary names that may remain. Already published files are
+never removed by this cleanup. A failure during publication can still leave a
+partial song set. APS keeps the recovery package and identifies the failed phase
+and completed changes. It does not automatically restore files onto possibly
+removed or substituted media. Do not treat a failed save as a usable disk.
 
 ## Windows raw writes and verification
 

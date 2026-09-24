@@ -190,6 +190,8 @@ class ImageListing:
 class YamahaRepairResult:
     note: str
     changed: bool
+    # Records boot-sector repair specifically; other recovery can also set changed.
+    boot_sector_repaired: bool = False
 
 
 @dataclass(frozen=True)
@@ -1404,40 +1406,66 @@ def _windows_filesystem_root(drive_path):
     return None
 
 
+def _windows_volume_identity(root_path):
+    ctypes, wintypes, kernel32 = _windows_ctypes()
+    kernel32.GetVolumeInformationW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    ]
+    kernel32.GetVolumeInformationW.restype = wintypes.BOOL
+    label_buffer = ctypes.create_unicode_buffer(261)
+    fs_buffer = ctypes.create_unicode_buffer(261)
+    serial = wintypes.DWORD()
+    max_component = wintypes.DWORD()
+    flags = wintypes.DWORD()
+    ok = kernel32.GetVolumeInformationW(
+        root_path,
+        label_buffer,
+        len(label_buffer),
+        ctypes.byref(serial),
+        ctypes.byref(max_component),
+        ctypes.byref(flags),
+        fs_buffer,
+        len(fs_buffer),
+    )
+    if not ok:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return {"serial": serial.value, "label": label_buffer.value.strip(), "filesystem": fs_buffer.value}
+
+
 def _windows_volume_label(root_path):
     try:
-        ctypes, wintypes, kernel32 = _windows_ctypes()
-        kernel32.GetVolumeInformationW.argtypes = [
-            wintypes.LPCWSTR,
-            wintypes.LPWSTR,
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-            ctypes.POINTER(wintypes.DWORD),
-            ctypes.POINTER(wintypes.DWORD),
-            wintypes.LPWSTR,
-            wintypes.DWORD,
-        ]
-        kernel32.GetVolumeInformationW.restype = wintypes.BOOL
-        label_buffer = ctypes.create_unicode_buffer(261)
-        fs_buffer = ctypes.create_unicode_buffer(261)
-        serial = wintypes.DWORD()
-        max_component = wintypes.DWORD()
-        flags = wintypes.DWORD()
-        ok = kernel32.GetVolumeInformationW(
-            root_path,
-            label_buffer,
-            len(label_buffer),
-            ctypes.byref(serial),
-            ctypes.byref(max_component),
-            ctypes.byref(flags),
-            fs_buffer,
-            len(fs_buffer),
-        )
-        if ok:
-            return label_buffer.value.strip()
+        return _windows_volume_identity(root_path)["label"]
     except Exception:
-        pass
-    return ""
+        return ""
+
+
+def _windows_file_attributes(path):
+    ctypes, wintypes, kernel32 = _windows_ctypes()
+    kernel32.GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetFileAttributesW.restype = wintypes.DWORD
+    attributes = kernel32.GetFileAttributesW(os.fspath(path))
+    if attributes == 0xFFFFFFFF:  # INVALID_FILE_ATTRIBUTES
+        raise ctypes.WinError(ctypes.get_last_error())
+    return attributes
+
+
+def _set_windows_file_attributes(path, attributes):
+    ctypes, wintypes, kernel32 = _windows_ctypes()
+    kernel32.SetFileAttributesW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+    kernel32.SetFileAttributesW.restype = wintypes.BOOL
+    # FILE_ATTRIBUTE_NORMAL is valid only when no other flags are set.
+    attributes = (attributes & ~0x80) or 0x80
+    if not kernel32.SetFileAttributesW(os.fspath(path), attributes):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if _windows_file_attributes(path) != attributes:
+        raise FloppyImageError(f"Could not verify file attributes on the floppy: {path}")
 
 
 def _windows_volume_total_size(root_path):
@@ -5327,7 +5355,7 @@ def _read_windows_filesystem_drive_listing(drive_path, *, diagnostics=None, allo
                         path=image_path,
                         size=stat_result.st_size,
                         packed_size=allocated_size(stat_result.st_size, cluster_size) if cluster_size else 0,
-                        attributes="",
+                        attributes=f"{getattr(stat_result, 'st_file_attributes', 0):02X}",
                         modified_time=stat_result.st_mtime,
                     )
                 )
@@ -6494,10 +6522,12 @@ def _clear_fat12_file_protection(img_path, image_path):
     raise FloppyImageError("Invalid image file path.")
 
 
-def _copy_prepared_floppy_file(source, destination, cancel_callback=None):
+def _copy_prepared_floppy_file(source, destination, cancel_callback=None, *, created_callback=None):
     """Own a new staging name throughout a cancellable native filesystem copy."""
     _raise_if_cancelled(cancel_callback)
     with open(source, "rb") as incoming, open(destination, "xb") as outgoing:
+        if created_callback is not None:
+            created_callback()
         while True:
             _raise_if_cancelled(cancel_callback)
             chunk = incoming.read(64 * 1024)
@@ -6774,6 +6804,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                 repair_result = YamahaRepairResult(
                     "Fast floppy read rebuilt a FAT12 boot sector for possible Yamaha copy protection: sector 0 appears blank/corrupt.",
                     True,
+                    boot_sector_repaired=True,
                 )
                 extra_bad_ranges = len(candidate_fat_bad_ranges) + len(candidate_root_bad_ranges)
                 if extra_bad_ranges:
@@ -6782,6 +6813,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         f"{repair_result.note} Reconstructed FAT/root data despite "
                         f"{extra_bad_ranges} unreadable {sector_word}.",
                         True,
+                        boot_sector_repaired=repair_result.boot_sector_repaired,
                     )
             else:
                 _notify_progress(progress_callback, 5, 100, "Fast floppy read: FAT12 boot sector recognized...")
@@ -6806,6 +6838,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         f"{repair_result.note} Reconstructed FAT data despite "
                         f"{len(fat_bad_ranges)} unreadable {sector_word}.",
                         True,
+                        boot_sector_repaired=repair_result.boot_sector_repaired,
                     )
             if root_dir is None:
                 root_dir, root_bad_ranges = _read_device_best_effort(
@@ -6822,6 +6855,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         f"{repair_result.note} Read root directory despite "
                         f"{len(root_bad_ranges)} unreadable {sector_word}.",
                         True,
+                        boot_sector_repaired=repair_result.boot_sector_repaired,
                     )
             if not repair_result.changed:
                 _notify_progress(progress_callback, 10, 100, "Reading floppy file map...")
@@ -6910,6 +6944,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                     f"{repair_result.note} Fast floppy read kept going after "
                     f"{len(bad_file_ranges)} unreadable file-data {sector_word}; those bytes were filled with zeros.",
                     True,
+                    boot_sector_repaired=repair_result.boot_sector_repaired,
                 )
 
             with open(output_path, "wb") as handle:
@@ -7011,6 +7046,7 @@ def prepare_yamaha_bytes(data, output_path):
     return YamahaRepairResult(
         "Yamaha-compatible boot-sector repair applied: " + detection["notes"] + ".",
         True,
+        boot_sector_repaired=True,
     )
 
 
@@ -8238,9 +8274,46 @@ def _finalize_recovery_diagnostics(diagnostics):
     return diagnostics
 
 
+def _windows_free_root_directory_entries(drive_path, cancel_callback=None):
+    """Count actual FAT12 slots, including deleted slots and excluding LFN/labels."""
+    with _WindowsRecoveryVolumeHandle(drive_path, write=False) as volume:
+        boot = _read_device_exact(volume, 0, 512, "boot sector", cancel_callback=cancel_callback)
+        geometry = _geometry_from_boot_sector(boot)
+        if geometry is None or geometry.root_size > 64 * 1024:
+            raise FloppyImageError("Could not determine the floppy root-directory capacity.")
+        directory = _read_device_exact(volume, geometry.root_offset, geometry.root_size,
+                                       "root directory", cancel_callback=cancel_callback)
+    free = 0
+    for index in range(geometry.root_entries):
+        first = directory[index * 32]
+        if first == 0:
+            return free + geometry.root_entries - index
+        if first == 0xE5:
+            free += 1
+    return free
+
+
+def _finish_windows_save_recovery(session, status):
+    """Retain recovery through optional readback and the enclosing save operation."""
+    package = getattr(session, "_pending_windows_save_recovery", None)
+    if package is None:
+        return
+    diagnostics = session.last_floppy_save_diagnostics
+    diagnostics.update(status=status, recovery_directory=str(package.directory))
+    try:
+        if status == "complete":
+            package.complete(diagnostics)
+        else:
+            package.checkpoint(status=status, diagnostics=dict(diagnostics))
+    except OSError as exc:
+        diagnostics["journal_error"] = str(exc)
+    session._pending_windows_save_recovery = None
+
+
 class _WindowsFileSaveMixin:
     def _sync_modified_image_files_to_windows_drive(
         self, modified_img, drive_path, progress_callback=None, cancel_callback=None,
+        *, finalize_recovery=True,
     ):
         diagnostics = self.last_floppy_save_diagnostics = {
             "operation": "save_files", "method": "windows_filesystem",
@@ -8249,17 +8322,22 @@ class _WindowsFileSaveMixin:
             "files_staged": 0, "bytes_staged": 0,
         }
         package = None
+        cleanup = {"owned": {}, "attributes_pending": {}}
         try:
             _raise_if_cancelled(cancel_callback)
             package = floppy_save_recovery.SaveRecoveryPackage(drive_path, modified_img)
             diagnostics["recovery_directory"] = str(package.directory)
             self._sync_windows_drive_files(
-                modified_img, drive_path, diagnostics, package,
+                modified_img, drive_path, diagnostics, package, cleanup,
                 progress_callback=progress_callback, cancel_callback=cancel_callback,
             )
             diagnostics.update(status="complete", stage="complete")
             diagnostics.pop("file", None)
-            package.checkpoint(status="complete", diagnostics=dict(diagnostics))
+            if finalize_recovery:
+                package.complete(diagnostics)
+            else:
+                package.checkpoint(status="contents_verified", diagnostics=dict(diagnostics))
+                self._pending_windows_save_recovery = package
         except Exception as exc:
             diagnostics["status"] = "cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed"
             diagnostics["error"] = _disk_io_error_details(exc)
@@ -8271,6 +8349,8 @@ class _WindowsFileSaveMixin:
                 "hardware_tested": False,
             }
             if package is not None:
+                self._restore_windows_drive_attributes(diagnostics, package, cleanup)
+                self._cleanup_windows_drive_staging(diagnostics, package, cleanup)
                 try:
                     package.checkpoint(status=diagnostics["status"], diagnostics=dict(diagnostics))
                 except OSError as journal_error:
@@ -8280,13 +8360,91 @@ class _WindowsFileSaveMixin:
         diagnostics.pop("file", None)
         self.last_write_verification = {"confidence": "contents_verified", "hardware_tested": False}
 
+    def _restore_windows_drive_attributes(self, diagnostics, package, cleanup):
+        pending = cleanup["attributes_pending"]
+        if not pending:
+            return
+        result = diagnostics["attribute_restoration"] = {"restored": [], "errors": {}}
+        for name, record in list(pending.items()):
+            try:
+                root = cleanup["root"]
+                if cleanup.get("identity") is None or _windows_volume_identity(root) != cleanup["identity"]:
+                    raise FloppyImageError("The target floppy cannot be identified for attribute restoration.")
+                path = _windows_drive_file_path(root, name)
+                if floppy_save_recovery.digest(path) != record["sha256"]:
+                    raise FloppyImageError("The file changed; its attributes were not restored.")
+                if _windows_volume_identity(root) != cleanup["identity"]:
+                    raise FloppyImageError("The target floppy changed during attribute restoration.")
+                if _windows_file_attributes(path) != record["attributes"]:
+                    _set_windows_file_attributes(path, record["attributes"])
+                result["restored"].append(name)
+                del pending[name]
+            except Exception as exc:
+                result["errors"][name] = _disk_io_error_details(exc)
+        diagnostics["attributes_pending"] = sorted(pending)
+        package.manifest["attributes_pending"] = dict(pending)
+
+    def _cleanup_windows_drive_staging(self, diagnostics, package, cleanup):
+        # Ownership starts only after exclusive creation, and ends at publication.
+        # Ignore cancellation here: cleanup is part of stopping safely.
+        owned = cleanup["owned"]
+        result = diagnostics["staging_cleanup"] = {"status": "not_needed", "removed": []}
+        diagnostics["staging_files_remaining"] = sorted(owned)
+        if not owned:
+            return
+        try:
+            identity = cleanup.get("identity")
+            root = cleanup["root"]
+            def check_identity():
+                if identity is None or _windows_volume_identity(root) != identity:
+                    raise FloppyImageError("The target floppy cannot be identified for staging cleanup.")
+            check_identity()
+            actual = {_image_entry_key(entry): entry for entry in cleanup["listing"]().entries}
+            target = cleanup["target"]
+            if set(actual) - set(owned) != set(target):
+                raise FloppyImageError("The target floppy contents changed; staging cleanup was skipped.")
+            for key, entry in target.items():
+                if actual[key].is_directory != entry.is_directory:
+                    raise FloppyImageError("The target floppy contents changed; staging cleanup was skipped.")
+                if not entry.is_directory:
+                    expected = package.manifest["originals"][entry.path]
+                    path = _windows_drive_file_path(root, entry.path)
+                    if actual[key].size != expected["size"] or floppy_save_recovery.digest(path) != expected["sha256"]:
+                        raise FloppyImageError("An original file changed; staging cleanup was skipped.")
+            if any(actual[name].is_directory for name in owned if name in actual):
+                raise FloppyImageError("A staging name now belongs to a folder; cleanup was skipped.")
+            # Check again after all content reads and before each deletion.
+            result["status"] = "complete"
+            for name, path in list(owned.items()):
+                check_identity()
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    result["status"] = "incomplete"
+                    result.setdefault("errors", {})[name] = _disk_io_error_details(exc)
+                    continue
+                result["removed"].append(name)
+                del owned[name]
+        except Exception as exc:
+            result.update(status="skipped" if not result["removed"] else "incomplete",
+                          error=_disk_io_error_details(exc))
+        diagnostics["staging_files_remaining"] = sorted(owned)
+        package.manifest["staging_files_remaining"] = sorted(owned)
+
     def _sync_windows_drive_files(
-        self, modified_img, drive_path, diagnostics, package,
+        self, modified_img, drive_path, diagnostics, package, cleanup,
         progress_callback=None, cancel_callback=None,
     ):
         root = _windows_filesystem_root(drive_path)
         if not root:
             raise FloppyImageError(f"Invalid Windows floppy drive path: {drive_path}")
+        cleanup["root"] = root
+        try:
+            cleanup["identity"] = _windows_volume_identity(root)
+        except (OSError, FloppyImageError) as exc:
+            diagnostics["volume_identity_error"] = _disk_io_error_details(exc)
         prepared_files = getattr(self, "prepared_files", None)
         direct = prepared_files is not None
         if direct:
@@ -8304,6 +8462,7 @@ class _WindowsFileSaveMixin:
         target_listing = target_listing_now(diagnostics=diagnostics["preflight_listing"])
         source = {_image_entry_key(entry): entry for entry in source_listing.entries}
         target = {_image_entry_key(entry): entry for entry in target_listing.entries}
+        cleanup.update(target=target, listing=target_listing_now)
         if not direct and any(entry.directory for entry in (*source.values(), *target.values())):
             raise FloppyImageError(
                 "File-level Save To Floppy only supports root-directory floppy files. "
@@ -8340,6 +8499,10 @@ class _WindowsFileSaveMixin:
             path = _windows_drive_file_path(root, entry.path)
             original = package.retain("originals", entry.path, path)
             originals[key] = original
+            # Query Windows directly; the image's DOS flags need not reflect
+            # the attributes on the currently mounted destination.
+            diagnostics.update(stage="read_file_attributes", file=entry.path)
+            package.manifest["originals"][entry.path]["windows_attributes"] = _windows_file_attributes(path)
             if not direct:
                 expected_bytes = _read_fat12_file_bytes(baseline_path, baseline[key].path)
                 if baseline[key].size != entry.size or hashlib.sha256(expected_bytes).hexdigest() != floppy_save_recovery.digest(original):
@@ -8365,6 +8528,16 @@ class _WindowsFileSaveMixin:
             if key not in originals or floppy_save_recovery.digest(originals[key]) != intended[key]["sha256"]:
                 replacements[key] = saved
 
+        affected = set(replacements) & set(target)
+        if not direct:
+            affected |= set(target) - set(source)
+        original_attributes = {
+            key: package.manifest["originals"][target[key].path]["windows_attributes"]
+            for key in affected
+        }
+        if any(attributes & 0x01 for attributes in original_attributes.values()) and cleanup.get("identity") is None:
+            raise FloppyImageError("The target floppy must be identified before changing read-only file attributes.")
+
         # Retain all predecessors until every new file has been staged and read
         # back. Near-full media is rejected instead of freeing space by deletion.
         needed = sum(allocated_size(source[key].size, target_listing.cluster_size) for key in replacements)
@@ -8375,9 +8548,29 @@ class _WindowsFileSaveMixin:
                 f"Safe floppy saving needs {needed} bytes of staging space; only {target_listing.free_space} are available. "
                 "No files were changed. Save As Image, then write a backed-up or spare disk instead."
             )
+        diagnostics["stage"] = "check_staging_directory_space"
+        try:
+            free_entries = _windows_free_root_directory_entries(drive_path, cancel_callback=cancel_callback)
+        except FloppyOperationCancelled:
+            raise
+        except (OSError, FloppyImageError) as exc:
+            # Some filesystem-only drives deny raw reads. Do not require admin
+            # access for a file save; preserve the limitation in the diagnostics.
+            diagnostics["root_directory_check"] = {"status": "unavailable", "error": _disk_io_error_details(exc)}
+        else:
+            diagnostics["root_directory_check"] = {
+                "status": "complete", "free_entries": free_entries, "required_entries": len(replacements),
+            }
+            if len(replacements) > free_entries:
+                raise FloppyImageError(
+                    f"Safe floppy saving needs {len(replacements)} free root-directory entries; only {free_entries} are available. "
+                    "No files were changed. Save As Image, then write a backed-up or spare disk instead."
+                )
         package.checkpoint(status="ready", expected=intended)
 
         def check_originals(staged_names=()):
+            if cleanup.get("identity") is not None and _windows_volume_identity(root) != cleanup["identity"]:
+                raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
             listing = target_listing_now()
             actual = {_image_entry_key(entry): entry for entry in listing.entries}
             if set(actual) != set(target) | set(staged_names):
@@ -8404,7 +8597,11 @@ class _WindowsFileSaveMixin:
             package.before("stage", name)
             diagnostics["target_mutation_attempted"] = True
             _notify_progress(progress_callback, len(staged), max(1, len(replacements)), f"Copying {entry.path} to floppy...")
-            _copy_prepared_floppy_file(saved, path, cancel_callback=cancel_callback)
+            def stage_created():
+                cleanup["owned"][name] = path
+                package.checkpoint(staging_files_remaining=sorted(cleanup["owned"]))
+            _copy_prepared_floppy_file(saved, path, cancel_callback=cancel_callback,
+                                      created_callback=stage_created)
             floppy_save_recovery.sync_file(path)
             if os.path.getsize(path) != entry.size or floppy_save_recovery.digest(path) != intended[key]["sha256"]:
                 raise FloppyImageError(f"Staged floppy file verification failed: {entry.path}")
@@ -8415,15 +8612,58 @@ class _WindowsFileSaveMixin:
         # Recheck names and contents immediately before publication.
         check_originals(os.path.basename(path).upper() for path in staged.values())
 
+        # Clear every affected Read-only destination before publishing any song.
+        # A failure here can restore metadata without rolling back file contents.
+        for key in sorted(affected):
+            _raise_if_cancelled(cancel_callback)
+            entry = target[key]
+            path = _windows_drive_file_path(root, entry.path)
+            attributes = original_attributes[key]
+            diagnostics.update(stage="prepare_file_attributes", file=entry.path)
+            if _windows_file_attributes(path) != attributes:
+                raise FloppyImageError("The target file attributes changed during save preparation. Saving stopped.")
+            if not attributes & 0x01:
+                continue
+            if _windows_volume_identity(root) != cleanup["identity"]:
+                raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
+            cleanup["attributes_pending"][entry.path] = {
+                "attributes": attributes, "sha256": package.manifest["originals"][entry.path]["sha256"],
+            }
+            package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
+            package.before("clear_readonly", entry.path)
+            diagnostics["target_mutation_attempted"] = True
+            _set_windows_file_attributes(path, attributes & ~0x01)
+            package.after()
+
+        if cleanup["attributes_pending"]:
+            check_originals(os.path.basename(path).upper() for path in staged.values())
+
         def publish(key):
             _raise_if_cancelled(cancel_callback)
             entry = source[key]
             diagnostics.update(stage="publish_file", file=entry.path)
+            destination_name = target[key].path if key in target else entry.path
+            destination = _windows_drive_file_path(root, destination_name)
+            if key in original_attributes:
+                cleanup["attributes_pending"][destination_name] = {
+                    "attributes": original_attributes[key],
+                    "sha256": package.manifest["originals"][destination_name]["sha256"],
+                }
+                package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
             package.before("replace", entry.path)
             diagnostics["target_mutation_attempted"] = True
-            destination_name = target[key].path if key in target else entry.path
-            os.replace(staged[key], _windows_drive_file_path(root, destination_name))
+            os.replace(staged[key], destination)
+            del cleanup["owned"][os.path.basename(staged[key]).upper()]
+            package.manifest["staging_files_remaining"] = sorted(cleanup["owned"])
             diagnostics["files_copied"] += 1
+            if key in original_attributes:
+                cleanup["attributes_pending"][destination_name]["sha256"] = intended[key]["sha256"]
+                package.checkpoint(attributes_pending=dict(cleanup["attributes_pending"]))
+                if cleanup.get("identity") is not None and _windows_volume_identity(root) != cleanup["identity"]:
+                    raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
+                _set_windows_file_attributes(destination, original_attributes[key])
+                del cleanup["attributes_pending"][destination_name]
+                package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
             package.after()
 
         catalogs = [key for key in replacements if is_eseq_directory_path(source[key].path)]
@@ -8437,6 +8677,8 @@ class _WindowsFileSaveMixin:
             package.before("delete", entry.path)
             diagnostics["target_mutation_attempted"] = True
             os.remove(_windows_drive_file_path(root, entry.path))
+            cleanup["attributes_pending"].pop(entry.path, None)
+            package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
             diagnostics["files_removed"] += 1
             package.after()
 
@@ -8460,6 +8702,8 @@ class _WindowsFileSaveMixin:
             diagnostics["file"] = entry.path
             if entry.size != intended[key]["size"] or floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != intended[key]["sha256"]:
                 raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
+            if key in original_attributes and _windows_file_attributes(_windows_drive_file_path(root, entry.path)) != original_attributes[key]:
+                raise FloppyImageError(f"Floppy verification failed: file attributes differ for {entry.path}.")
         diagnostics["file_contents_verified"] = True
 
 
@@ -8536,6 +8780,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         self.recovery_diagnostics = dict(recovery_diagnostics or {})
         self.repair_note = repair_result.note
         self.repair_changed = repair_result.changed
+        self.source_boot_sector_repaired = repair_result.boot_sector_repaired
         self.extracted_dir = os.path.join(temp_dir, "extracted")
         self.patched_dir = os.path.join(temp_dir, "patched")
         self._extracted_files = {}
@@ -8638,6 +8883,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 repair_result = YamahaRepairResult(
                     repair_result.note + f" Fast floppy file-level read was unavailable: {fast_exc}",
                     repair_result.changed,
+                    boot_sector_repaired=repair_result.boot_sector_repaired,
                 )
                 disk_format = _disk_format_for_image(working_img)
                 _notify_progress(progress_callback, 90, 100, "Scanning floppy contents...")
@@ -9704,7 +9950,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         try:
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 72, 100, "Trying Yamaha/FAT repair before carving files...")
-            prepare_yamaha_image(source_img, prepared)
+            repair_result = prepare_yamaha_image(source_img, prepared)
             disk_format = _disk_format_for_image(prepared)
             listing = read_image_listing(prepared)
             if listing.entries:
@@ -9722,7 +9968,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     temp_dir,
                     working_img,
                     disk_format,
-                    YamahaRepairResult(note, True),
+                    YamahaRepairResult(
+                        note, True,
+                        boot_sector_repaired=repair_result.boot_sector_repaired,
+                    ),
                     source_kind="recovered_image",
                     source_name=source_name,
                     gw_sector_reports=gw_sector_reports,
@@ -10479,6 +10728,42 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     cancel_callback=cancel_callback,
                 )
 
+            # Metadata edits use original image paths, just like title edits and
+            # replacements. Apply them before any filenames change.
+            for image_path, order_key in sorted(order_key_edits.items(), key=lambda item: item[0].lower()):
+                _raise_if_cancelled(cancel_callback)
+                if image_path in deletes or image_path in additions or image_path in replacements or image_path in title_edits:
+                    continue
+                extracted_path = os.path.join(
+                    self.extracted_dir,
+                    f"{uuid.uuid4().hex}_{os.path.basename(_normalize_image_path(image_path))}",
+                )
+                self._extract_from_image(
+                    target_img,
+                    image_path,
+                    extracted_path,
+                    cancel_callback=cancel_callback,
+                )
+                patched_path = self._patched_metadata_path(
+                    extracted_path,
+                    image_path=image_path,
+                    order_key=order_key,
+                )
+                _clear_fat12_file_protection(target_img, image_path)
+                self._run_mtools(
+                    [mdel, "-i", target_img, mtools_path(image_path)],
+                    f"Could not replace {image_path} in image",
+                    cancel_callback=cancel_callback,
+                )
+                _run_mcopy_host_to_image(
+                    self._run_mtools,
+                    target_img,
+                    patched_path,
+                    image_path,
+                    f"Could not write updated order for {image_path} into image",
+                    cancel_callback=cancel_callback,
+                )
+
             for source_path, target_path in sorted(renames.items(), key=lambda item: item[0].lower()):
                 _raise_if_cancelled(cancel_callback)
                 if source_path in deletes:
@@ -10526,40 +10811,6 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     source_path,
                     image_path,
                     f"Could not add {os.path.basename(host_path)} to image",
-                    cancel_callback=cancel_callback,
-                )
-
-            for image_path, order_key in sorted(order_key_edits.items(), key=lambda item: item[0].lower()):
-                _raise_if_cancelled(cancel_callback)
-                if image_path in deletes or image_path in additions or image_path in replacements or image_path in title_edits:
-                    continue
-                extracted_path = os.path.join(
-                    self.extracted_dir,
-                    f"{uuid.uuid4().hex}_{os.path.basename(_normalize_image_path(image_path))}",
-                )
-                self._extract_from_image(
-                    target_img,
-                    image_path,
-                    extracted_path,
-                    cancel_callback=cancel_callback,
-                )
-                patched_path = self._patched_metadata_path(
-                    extracted_path,
-                    image_path=image_path,
-                    order_key=order_key,
-                )
-                _clear_fat12_file_protection(target_img, image_path)
-                self._run_mtools(
-                    [mdel, "-i", target_img, mtools_path(image_path)],
-                    f"Could not replace {image_path} in image",
-                    cancel_callback=cancel_callback,
-                )
-                _run_mcopy_host_to_image(
-                    self._run_mtools,
-                    target_img,
-                    patched_path,
-                    image_path,
-                    f"Could not write updated order for {image_path} into image",
                     cancel_callback=cancel_callback,
                 )
 
@@ -10637,6 +10888,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 drive_path,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
+                finalize_recovery=False,
             )
 
         mdel = _require_command("mdel")
@@ -11015,6 +11267,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             self.repair_note = "Floppy saved." if self.source_kind.startswith("floppy") else "Image saved."
             self.latest_gw_sector_reports = reports
             self.last_floppy_save_diagnostics.update(stage="complete", status="complete")
+            _finish_windows_save_recovery(self, "complete")
         except Exception as exc:
             failure = getattr(exc, "diagnostics", {})
             if failure:
@@ -11030,6 +11283,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     status="cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed",
                     error=_disk_io_error_details(exc),
                 )
+            _finish_windows_save_recovery(self, "cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed")
             raise
 
         finally:
@@ -11140,6 +11394,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             _notify_progress(progress_callback, 5, 5, "Floppy write complete.")
             self.latest_gw_sector_reports = reports
             self.last_floppy_save_diagnostics.update(stage="complete", status="complete")
+            _finish_windows_save_recovery(self, "complete")
         except Exception as exc:
             failure = getattr(exc, "diagnostics", {})
             if failure:
@@ -11155,6 +11410,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     status="cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed",
                     error=_disk_io_error_details(exc),
                 )
+            _finish_windows_save_recovery(self, "cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed")
             raise
 
         finally:

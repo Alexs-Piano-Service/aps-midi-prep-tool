@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from .midi_metadata import normalize_title_spacing
+from .midi_metadata import normalize_legacy_title_spacing, normalize_title_spacing
 
 
 SMART_PIANOSOFT_SONG_CATALOG_NAME = "PSONG.MNG"
@@ -141,7 +141,7 @@ def parse_smart_pianosoft_song_catalog(data):
             SmartPianoSoftSong(
                 track_number=record_index + 1,
                 filename=filename,
-                title=normalize_title_spacing(raw_title),
+                title=normalize_legacy_title_spacing(raw_title),
                 raw_record=record,
             )
         )

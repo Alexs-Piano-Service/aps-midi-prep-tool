@@ -9,6 +9,13 @@ with release sections grouped by version and date.
 
 ### Added
 
+- **Save Image and Apply to Floppy…** guides users from a repaired source boot
+  sector or failed floppy save/write to a persistent IMG with pending changes,
+  target selection, explicit whole-disk overwrite confirmation, and mandatory
+  readback verification. Cancelling or failing image export does not start a
+  write, and no separate blank-format step is needed. Multi-image exports retain
+  all images and prompt for manual selection. Guidance is translated in all 12
+  languages; a repaired boot sector is described as possible Yamaha protection.
 - **View → Title display encoding** can display existing title bytes as Latin-1,
   Windows-1252, Shift-JIS, GBK, or Big5 without changing the source files.
 - Dropping a ZIP extracts supported files from its folders and imports them
@@ -18,6 +25,9 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Successful floppy-save recovery packages are limited to the five most recent
+  saves and 30 days. Failed, cancelled, and unfinished packages remain until
+  manually removed.
 - Options controlled by **Preparing for...** show their effective values and
   are disabled, with one note per dialog and explanations in tooltips. This
   includes Read Floppy conversion and title cleanup, filename rules, and image
@@ -28,6 +38,26 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Saved E-SEQ catalogs now follow the visible song order instead of stale
+  filename-derived keys. Renaming and reordering an existing song in the same
+  save also works, and Clavinova catalog ordering remains supported.
+- MIDI discovery and conversion share validation for standard format numbers,
+  declared track counts, timing divisions, and complete declared track chunks.
+  Malformed files are rejected consistently; extended headers remain supported.
+- Windows floppy-save failures now explain unsupported directory access
+  separately from free-space query failures and point to saving an image before
+  an explicitly selected whole-disk write. Recovery paths and partial-write
+  warnings remain visible, with guidance in all 12 supported languages.
+- Windows file saves check and journal file attributes, clear Read-only on all
+  planned replacements and deletions before publication, and restore original
+  attributes on replacements or during guarded metadata rollback.
+- Modern preparation and **Trim Title Spaces** no longer insert a space at a
+  lowercase-to-uppercase transition after character 16. Smart PianoSoft catalog
+  split-title repair remains a separate operation.
+- Failed or cancelled Windows file saves remove their staging files when the
+  target identity and original contents can still be verified. Remaining
+  temporary names appear in the recovery manifest and failure dialog. Saves
+  also check FAT root-directory space when Windows permits metadata access.
 - Linux floppy saves compare individual files with a cancellable read instead
   of rereading the entire raw disk for each file, avoiding stalls on unused
   sectors during **Checking existing**.

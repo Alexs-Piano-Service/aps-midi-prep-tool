@@ -1,6 +1,7 @@
 import os
 import uuid
 
+from .smf import parse_smf_layout
 from .midi_type0_converter import (
     MIDI_ALL_SOUND_OFF_CONTROLLER,
     MIDI_BANK_SELECT_CONTROLLERS,
@@ -22,54 +23,8 @@ _CHANNEL_PREFIX_META_TYPE = 0x20
 
 
 def _parse_smf_layout(midi_bytes):
-    if len(midi_bytes) < 14 or midi_bytes[:4] != b"MThd":
-        raise ValueError("This is not a valid Standard MIDI File.")
-
-    header_length = int.from_bytes(midi_bytes[4:8], "big")
-    header_end = 8 + header_length
-    if header_length < 6 or header_end > len(midi_bytes):
-        raise ValueError("The MIDI header is invalid or truncated.")
-
-    format_type = int.from_bytes(midi_bytes[8:10], "big")
-    track_count = int.from_bytes(midi_bytes[10:12], "big")
-    division = int.from_bytes(midi_bytes[12:14], "big")
-    if format_type not in (0, 1, 2):
-        raise ValueError(f"MIDI format {format_type} is not a Standard MIDI File type.")
-    if (format_type == 0 and track_count != 1) or (
-        format_type in (1, 2) and track_count < 1
-    ):
-        raise ValueError("The MIDI header contains an invalid track count.")
-
-    if division & 0x8000:
-        frame_code = 0x100 - ((division >> 8) & 0xFF)
-        if frame_code not in (24, 25, 29, 30) or (division & 0xFF) == 0:
-            raise ValueError("The MIDI header contains an invalid SMPTE time division.")
-    elif division == 0:
-        raise ValueError("The MIDI header contains an invalid time division of zero.")
-
-    chunks = []
-    found_tracks = 0
-    offset = header_end
-    while found_tracks < track_count:
-        if offset + 8 > len(midi_bytes):
-            raise ValueError("A declared MIDI track is missing or malformed.")
-        chunk_length = int.from_bytes(midi_bytes[offset + 4:offset + 8], "big")
-        data_start = offset + 8
-        data_end = data_start + chunk_length
-        if data_end > len(midi_bytes):
-            raise ValueError("A MIDI chunk is truncated.")
-        chunk = {
-            "id": midi_bytes[offset:offset + 4],
-            "start": offset,
-            "data_start": data_start,
-            "data_end": data_end,
-        }
-        chunks.append(chunk)
-        if chunk["id"] == b"MTrk":
-            found_tracks += 1
-        offset = data_end
-
-    return header_end, format_type, chunks, offset
+    header, chunks, offset = parse_smf_layout(midi_bytes)
+    return header.header_end, header.format_type, chunks, offset
 
 
 def _remap_channel_prefix(raw):

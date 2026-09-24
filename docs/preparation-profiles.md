@@ -54,8 +54,11 @@ characters.
 Standard MIDI export, E3 / DKC-800 / DKC-850, and ENSPIRE / DKC-900 preparation
 automatically removes leading and trailing title spaces and collapses repeated
 spaces. This applies to loaded songs and future imports, including titles embedded
-during E-SEQ-to-MIDI conversion. Title cleanup is staged for review and undo;
-original files change only when saved.
+during E-SEQ-to-MIDI conversion. It does not insert spaces between adjacent
+letters, including at the old 16-character screen boundary: `abcdefghijklmnopQrst`
+stays unchanged. The legacy split-title repair remains specific to Smart PianoSoft
+song catalogs. Title cleanup is staged for review and undo; original files change
+only when saved.
 
 Clavinova MDA songs are staged as Disklavier FIL through a MIDI intermediate;
 the review identifies this container conversion. Files that cannot be converted
