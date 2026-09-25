@@ -5,14 +5,15 @@ import uuid
 from collections import defaultdict
 
 from .eseq_converter import (
+    ESEQ_CONTAINER_CLAVINOVA_MDA,
+    ESEQ_CONTAINER_Q11,
     ESEQ_SIGNATURE,
     EseqConversionError,
     _declared_stream_end,
     _decode_15,
+    _detect_eseq_container,
     _encode_vlq,
     _eseq_event_stream_start,
-    _is_q11_eseq,
-    is_clavinova_mda_eseq_bytes,
 )
 from .midi_channel_merger import (
     _acoustic_grand_program_event,
@@ -21,7 +22,7 @@ from .midi_channel_merger import (
 )
 
 
-def _stream_tokens(data, stream_start):
+def _stream_tokens(data, stream_start, container_variant):
     """Retain original bytes and positions while exposing channel messages.
 
     Four-element merger events keep their token index as their track ID. This
@@ -32,7 +33,7 @@ def _stream_tokens(data, stream_start):
     events = []
     tick = 0
     pos = stream_start
-    declared_end = _declared_stream_end(data, stream_start)
+    declared_end = _declared_stream_end(data, stream_start, container_variant=container_variant)
 
     def require(size):
         if pos + size > len(data):
@@ -114,22 +115,24 @@ def _is_dedicated_pedal(raw):
     return len(raw) == 3 and raw[0] == 0xB2 and raw[1] in (64, 67)
 
 
-def merge_eseq_channels_to_channel0_bytes(eseq_bytes):
+def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename=""):
     """Merge note/instrument channels, retaining native Yamaha pedal detail.
 
     Headers, order keys, title bytes, SysEx, tempo/meter commands, delay
     encodings, and unknown trailing data are copied from the source. Only
     channel commands and the corresponding size/note-channel fields change.
+    The logical source filename enables recognition of MDA header variants.
     """
     data = eseq_bytes
     if len(data) < 0x57 or data[7:15] != ESEQ_SIGNATURE:
         raise EseqConversionError("This does not look like a Yamaha E-SEQ file.")
-    stream_start = _eseq_event_stream_start(data)
+    container_variant = _detect_eseq_container(data, filename)
+    stream_start = _eseq_event_stream_start(data, container_variant=container_variant)
     if len(data) <= stream_start:
         raise EseqConversionError("File is too small to contain Yamaha E-SEQ events.")
-    tokens, events, stream_end = _stream_tokens(data, stream_start)
-    is_mda = is_clavinova_mda_eseq_bytes(data)
-    is_q11 = _is_q11_eseq(data)
+    tokens, events, stream_end = _stream_tokens(data, stream_start, container_variant)
+    is_mda = container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA
+    is_q11 = container_variant == ESEQ_CONTAINER_Q11
     note_channels = {
         raw[0] & 0x0F for _tick, _index, _editable, raw in events
         if 0x80 <= raw[0] <= 0x9F
@@ -174,8 +177,11 @@ def merge_eseq_channels_to_channel0_bytes(eseq_bytes):
         replacements[index].extend(tokens[index])
 
     stream = bytearray()
-    # Retain the F1 start command at byte zero, especially for MDA detection.
+    # Retain the F1 start command and MDA's filename-assisted F1 00 F9
+    # signature so reopening a merged song resolves the same container.
     program_index = 1 if tokens and tokens[0][:1] == b"\xF1" else 0
+    if is_mda and len(tokens) > program_index and tokens[program_index][:1] == b"\xF9":
+        program_index += 1
     for index, token in enumerate(tokens):
         if has_notes and index == program_index:
             stream.extend(_acoustic_grand_program_event())
@@ -224,7 +230,9 @@ def merge_eseq_channels_to_channel0_path(source_path, dest_path):
     source_path = os.fspath(source_path)
     dest_path = os.fspath(dest_path)
     with open(source_path, "rb") as handle:
-        merged, changed = merge_eseq_channels_to_channel0_bytes(handle.read())
+        merged, changed = merge_eseq_channels_to_channel0_bytes(
+            handle.read(), filename=os.fsdecode(os.path.basename(source_path)),
+        )
     if not changed:
         return False
     suffix = f".aps_channel_merge_{uuid.uuid4().hex}.tmp"

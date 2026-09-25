@@ -44,6 +44,7 @@ CC7_POLICY_DROP_EARLY_ZERO = "drop_early_cc7_zero"
 DEFAULT_CC7_POLICY = CC7_POLICY_PRESERVE
 ESEQ_CONTAINER_DISKLAVIER = "disklavier"
 ESEQ_CONTAINER_CLAVINOVA_MDA = "clavinova_mda"
+ESEQ_CONTAINER_Q11 = "q11"
 MIDI_METADATA_POLICY_CLEAN = "clean"
 MIDI_METADATA_POLICY_ARCHIVAL = "archival"
 DEFAULT_MIDI_METADATA_POLICY = MIDI_METADATA_POLICY_CLEAN
@@ -290,6 +291,15 @@ def is_clavinova_mda_eseq_bytes(data, filename=""):
     return filename.upper().endswith(".MDA") and data[0x57:0x5A] == b"\xF1\x00\xF9"
 
 
+def _detect_eseq_container(data, filename=""):
+    """Resolve the layout using bytes and, when available, the source name."""
+    if _is_q11_eseq(data):
+        return ESEQ_CONTAINER_Q11
+    if is_clavinova_mda_eseq_bytes(data, filename):
+        return ESEQ_CONTAINER_CLAVINOVA_MDA
+    return ESEQ_CONTAINER_DISKLAVIER
+
+
 def _eseq_base_bpm(data):
     if _is_q11_eseq(data):
         return _eseq_tempo_byte_to_bpm(data[0x24])
@@ -319,10 +329,12 @@ def _eseq_header_time_signature(data):
     return numerator, denominator.bit_length() - 1
 
 
-def _eseq_event_stream_start(data):
-    if _is_q11_eseq(data):
+def _eseq_event_stream_start(data, *, container_variant=None):
+    if container_variant is None:
+        container_variant = _detect_eseq_container(data)
+    if container_variant == ESEQ_CONTAINER_Q11:
         return min(len(data), Q11_EVENT_STREAM_START)
-    if is_clavinova_mda_eseq_bytes(data):
+    if container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA:
         return min(len(data), CLAVINOVA_MDA_HEADER_SIZE)
     return ESEQ_HEADER_SIZE
 
@@ -337,8 +349,10 @@ def _encode_15(value):
     return bytes([value & 0x7F, (value >> 7) & 0x7F])
 
 
-def _declared_stream_end(data, stream_start):
-    if is_clavinova_mda_eseq_bytes(data) and len(data) >= 0x23:
+def _declared_stream_end(data, stream_start, *, container_variant=None):
+    if container_variant is None:
+        container_variant = _detect_eseq_container(data)
+    if container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA and len(data) >= 0x23:
         used_length = int.from_bytes(data[0x1F:0x23], "little")
         if stream_start < used_length <= len(data):
             return used_length

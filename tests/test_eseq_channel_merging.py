@@ -11,9 +11,12 @@ from aps_midi_prep_tool_app.eseq_channel_merger import (
 from aps_midi_prep_tool_app.eseq_converter import (
     ESEQ_CONTAINER_CLAVINOVA_MDA,
     EseqConversionError,
+    _declared_stream_end,
+    _detect_eseq_container,
     _eseq_event_stream_start,
     convert_midi_bytes_to_eseq_bytes,
     is_clavinova_mda_eseq_bytes,
+    is_eseq_file,
     parse_eseq_bytes,
 )
 
@@ -41,6 +44,82 @@ def _eseq(stream, variant="fil", suffix=b"opaque trailing data"):
 
 def _events(data):
     return [(tick, raw) for tick, _order, raw in parse_eseq_bytes(data).events]
+
+
+@pytest.fixture
+def filename_assisted_mda():
+    # The first 32 bytes contain channel events, but the remainder is also a
+    # valid stream: treating this as FIL would silently leave those untouched.
+    stream = (
+        b"\xF1\x00\xF9\x04\x02\xB2\x40\x2A\xC5\x29"
+        b"\xB5\x00\x01\xB5\x20\x02\xFF\x35\x95\x3C\x64"
+        b"\xA5\x3C\x20\xD5\x30\xE5\x00\x50\xF4\x20\x00"
+        b"\x94\x3E\x50\xF3\x10\x84\x3E\x20\x85\x3C\x40\xB2\x40\x00\xF2"
+    )
+    source = bytearray(_eseq(stream, "mda"))
+    # Fail both parts of the strong signature. Include FIL-like fields that
+    # must remain opaque when the filename resolves this shorter container.
+    source[3:7] = (0x57 + len(stream)).to_bytes(4, "little")
+    source[0x19] = 0x40
+    source[0x1B:0x1F] = (0x50).to_bytes(4, "little")
+    source[0x51] = 1
+    source[0x54:0x56] = b"\xAA\x55"
+    assert not is_clavinova_mda_eseq_bytes(source)
+    assert is_clavinova_mda_eseq_bytes(source, "source.MDA")
+    assert not is_clavinova_mda_eseq_bytes(source, "source.FIL")
+    return bytes(source)
+
+
+@pytest.mark.parametrize("extension", ["MDA", "mDa"])
+@pytest.mark.parametrize("bytes_path", [False, True])
+def test_path_merge_preserves_filename_assisted_mda(tmp_path, filename_assisted_mda, extension, bytes_path):
+    original = filename_assisted_mda
+    source = tmp_path / f"source.{extension}"
+    destination = tmp_path / "staged.tmp"
+    source.write_bytes(original)
+    assert is_eseq_file(source)
+    container = _detect_eseq_container(original, source.name)
+    assert container == ESEQ_CONTAINER_CLAVINOVA_MDA
+    assert _eseq_event_stream_start(original, container_variant=container) == 0x57
+    assert _declared_stream_end(original, 0x57, container_variant=container) == len(original) - len(b"opaque trailing data")
+
+    source_path = os.fsencode(source) if bytes_path else source
+    destination_path = os.fsencode(destination) if bytes_path else destination
+    assert merge_eseq_channels_to_channel0_path(source_path, destination_path)
+    merged = destination.read_bytes()
+    expected_stream = (
+        b"\xF1\x00\xF9\x04\x02\xC0\x00\xB0\x40\x2A\xFF\x30"
+        b"\x90\x3C\x64\xA0\x3C\x20\xD0\x30\xE0\x00\x50\xF4\x20\x00"
+        b"\x90\x3E\x50\xF3\x10\x80\x3E\x20\x80\x3C\x40\xB0\x40\x00\xF2"
+    )
+    assert merged[0x57:] == expected_stream + b"opaque trailing data"
+    assert merged[:0x1F] == original[:0x1F]
+    assert merged[0x23:0x57] == original[0x23:0x57]
+    assert int.from_bytes(merged[0x1F:0x23], "little") == 0x57 + len(expected_stream)
+    assert not is_clavinova_mda_eseq_bytes(merged)
+    assert is_clavinova_mda_eseq_bytes(merged, source.name)
+    assert source.read_bytes() == original
+    assert merge_eseq_channels_to_channel0_bytes(original, filename=source.name) == (merged, True)
+    assert merge_eseq_channels_to_channel0_bytes(merged, filename=source.name) == (merged, False)
+    # Reopening the staged song under its logical name must remain a no-op.
+    staged_song = tmp_path / f"staged.{extension}"
+    destination.rename(staged_song)
+    assert not merge_eseq_channels_to_channel0_path(staged_song, source)
+    assert source.read_bytes() == original
+
+
+def test_mda_filename_fallback_does_not_apply_to_fil_source(tmp_path, filename_assisted_mda):
+    original = filename_assisted_mda
+    source = tmp_path / "source.FIL"
+    destination = tmp_path / "destination.MDA"
+    source.write_bytes(original)
+    container = _detect_eseq_container(original, source.name)
+    assert _eseq_event_stream_start(original, container_variant=container) == 0x77
+    assert merge_eseq_channels_to_channel0_path(source, destination)
+    merged = destination.read_bytes()
+    assert merged == merge_eseq_channels_to_channel0_bytes(original)[0]
+    assert merged[0x57:0x77] == original[0x57:0x77]
+    assert not is_clavinova_mda_eseq_bytes(merged, source.name)
 
 
 @pytest.mark.parametrize("variant", ["fil", "mda", "q11"])
@@ -85,7 +164,7 @@ def test_native_merge_preserves_header_timing_sysex_and_opaque_suffix(variant):
     assert int.from_bytes(merged[0x1F:0x23], "little") == int.from_bytes(source[0x1F:0x23], "little") + delta
     if variant == "mda":
         assert is_clavinova_mda_eseq_bytes(merged)
-        assert merged[0x57:0x5B] == b"\xF1\x00\xC0\x00"
+        assert merged[0x57:0x5E] == b"\xF1\x00\xF9\x03\x02\xC0\x00"
     again, changed_again = merge_eseq_channels_to_channel0_bytes(merged)
     assert not changed_again
     assert again is merged

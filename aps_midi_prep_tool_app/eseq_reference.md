@@ -1990,6 +1990,12 @@ values. Standard Disklavier files keep dedicated channel-3 (`B2`) CC64/CC67
 pedal detail, including its reset, when that channel carries no notes. Ordinary
 instrument channels merge to channel 1 with Acoustic Grand Piano. The utility
 stages these changes for Save/Undo and keeps the source container format.
+Container detection uses the source filename as well as the bytes: MDA variants
+with `COM-ESEQ` and `F1 00 F9` at `0x57` retain the shorter header even when the
+strong MDA signature is absent. The resolved layout controls stream offsets,
+declared lengths, pedal handling, and header edits. The inserted piano program
+follows the initial MDA `F9` command, preserving filename-assisted recognition;
+the same fallback does not apply to a `.FIL` source.
 
 Use this checklist before considering APS MIDI Prep Tool E-SEQ support complete:
 
