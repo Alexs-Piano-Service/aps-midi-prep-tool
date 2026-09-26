@@ -196,6 +196,7 @@ def test_config_reaches_ui_and_onboarding_after_first_run_migrations(
         "language": "de", "appearance_mode": "dark", "font_scale": "small",
         "store_backups": False, "skip_first_time_dialog": True,
         "skip_type0_warning": True, "skip_eseq_to_midi_conversion_prompt": True,
+        "skip_piano_overlap_dialog": True, "piano_overlap_mode": "retrigger",
         "eseq_to_midi_switch_mode": "switch", "hide_gw_sector_report_read_v1": True,
         "emulator_image_starting_number": 12, "keyboard_shortcuts/file.save": "Alt+S",
     })
@@ -213,8 +214,10 @@ def test_config_reaches_ui_and_onboarding_after_first_run_migrations(
             assert settings.value("emulator_image_disk_format") == "ibm.720"
             assert settings.value("emulator_image_prefix") == "DSKA"
             assert settings.value("emulator_image_starting_number", type=int) == 12
-            for key in ("skip_type0_warning", "skip_eseq_to_midi_conversion_prompt", "hide_gw_sector_report_read_v1"):
+            for key in ("skip_type0_warning", "skip_piano_overlap_dialog",
+                        "skip_eseq_to_midi_conversion_prompt", "hide_gw_sector_report_read_v1"):
                 assert settings.value(key, type=bool) is True
+            assert window._piano_overlap_behavior("SONG.MID", 1) == "retrigger"
             assert settings.value("store_backups", type=bool) is False
             assert settings.value("eseq_to_midi_switch_mode") == "switch"
             assert window.keyboardShortcutObjects["file.save"].key().toString() == "Alt+S"

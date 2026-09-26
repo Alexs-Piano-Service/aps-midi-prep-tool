@@ -9902,6 +9902,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         )
         self.settingsUseDos83FilenamesAction.toggled.connect(self.toggle_dos83_filenames)
         self.settingsMenu.addAction(self.settingsUseDos83FilenamesAction)
+        self.settingsPianoOverlapAction = QAction(self._lt("Overlapping Piano Notes..."), self)
+        self.settingsPianoOverlapAction.triggered.connect(self.show_piano_overlap_settings)
+        self.settingsMenu.addAction(self.settingsPianoOverlapAction)
         self.settingsMenu.addSeparator()
         self.settingsKeyboardShortcutsAction = QAction("Keyboard Shortcuts...", self)
         self.settingsKeyboardShortcutsAction.triggered.connect(self.show_keyboard_shortcuts_dialog)
@@ -10854,6 +10857,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             )
         if hasattr(self, "settingsKeyboardShortcutsAction"):
             self.settingsKeyboardShortcutsAction.setText(self._menu_action_text("Keyboard Shortcuts...", "K"))
+        if hasattr(self, "settingsPianoOverlapAction"):
+            self.settingsPianoOverlapAction.setText(self._menu_action_text("Overlapping Piano Notes...", "O"))
         if hasattr(self, "settingsResetHiddenDialogsAction"):
             self.settingsResetHiddenDialogsAction.setText(
                 self._with_mnemonic(self._t("settings.reset_hidden_dialogs"), "R")
@@ -17647,16 +17652,29 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.SETTING_SKIP_PIANO_OVERLAP_DIALOG, False, type=bool,
         ):
             return mode
+        return self._piano_overlap_options_dialog(filename=filename, count=count)
 
+    def show_piano_overlap_settings(self):
+        self._piano_overlap_options_dialog()
+
+    def _piano_overlap_options_dialog(self, *, filename=None, count=0):
+        editing_settings = filename is None
+        mode = self.settings.value(self.SETTING_PIANO_OVERLAP_MODE, "smart", type=str)
         dialog = QDialog(self)
         dialog.setWindowTitle(self._lt("Overlapping Piano Notes"))
         apply_window_icon(dialog)
         dialog.setMinimumWidth(520)
         layout = QVBoxLayout(dialog)
-        intro = QLabel(self._lt(
-            "{filename}: {count} same-key note overlap(s) found. Choose how to merge them.",
-            filename=filename, count=count,
-        ))
+        if editing_settings:
+            intro = QLabel(self._lt(
+                "Choose how to handle overlapping notes when merging channels. "
+                "Leave the box unchecked to be asked for each affected song."
+            ))
+        else:
+            intro = QLabel(self._lt(
+                "{filename}: {count} same-key note overlap(s) found. Choose how to merge them.",
+                filename=filename, count=count,
+            ))
         intro.setTextFormat(Qt.PlainText)
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -17690,21 +17708,29 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         layout.addWidget(description)
         remember = QCheckBox(self._lt("Use this behavior for all future channel merges"), dialog)
         remember.setObjectName("rememberPianoOverlapBehavior")
+        remember.setChecked(editing_settings and mode in OVERLAP_MODES and self.settings.value(
+            self.SETTING_SKIP_PIANO_OVERLAP_DIALOG, False, type=bool,
+        ))
         layout.addWidget(remember)
-        reset_note = QLabel(self._lt("Reset Hidden Dialogs will show this choice again."))
-        reset_note.setWordWrap(True)
-        layout.addWidget(reset_note)
-        buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
-        buttons.button(QDialogButtonBox.Ok).setText(self._lt("Merge Channels"))
+        if not editing_settings:
+            settings_note = QLabel(self._lt(
+                "You can change this any time in Settings → Overlapping Piano Notes..."
+            ))
+            settings_note.setWordWrap(True)
+            layout.addWidget(settings_note)
+        accept_button = QDialogButtonBox.Save if editing_settings else QDialogButtonBox.Ok
+        buttons = self._make_dialog_button_box(accept_button | QDialogButtonBox.Cancel, dialog)
+        if not editing_settings:
+            buttons.button(QDialogButtonBox.Ok).setText(self._lt("Merge Channels"))
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         if self._exec_child_dialog(dialog) != QDialog.Accepted:
             return None
         mode = behavior.currentData()
-        if remember.isChecked():
+        if editing_settings or remember.isChecked():
             self.settings.setValue(self.SETTING_PIANO_OVERLAP_MODE, mode)
-            self.settings.setValue(self.SETTING_SKIP_PIANO_OVERLAP_DIALOG, True)
+            self.settings.setValue(self.SETTING_SKIP_PIANO_OVERLAP_DIALOG, remember.isChecked())
             self.settings.sync()
         return mode
 

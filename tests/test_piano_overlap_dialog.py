@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QLabel
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel
 
 from aps_midi_prep_tool_app.eseq_converter import convert_midi_bytes_to_eseq_bytes
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translate_text
@@ -133,6 +133,90 @@ def test_invalid_remembered_behavior_prompts_again(window, monkeypatch):
     assert len(seen) == 1
 
 
+def test_unchecked_choice_does_not_persist_between_songs(window, monkeypatch):
+    seen = _dialog_choice(monkeypatch, window, "off")
+    for filename in ("FIRST.MID", "SECOND.MID"):
+        assert window._piano_overlap_behavior(filename, 1) == "off"
+    assert len(seen) == 2
+    assert not window.settings.contains(window.SETTING_PIANO_OVERLAP_MODE)
+    assert not window.settings.value(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, False, type=bool)
+
+
+@pytest.mark.parametrize("mode", ["smart", "retrigger", "off"])
+@pytest.mark.parametrize("automatic", [False, True])
+def test_settings_changes_saved_behavior_and_can_restore_prompting(window, monkeypatch, mode, automatic):
+    original_mode = "off" if mode == "smart" else "smart"
+    window.settings.setValue(window.SETTING_PIANO_OVERLAP_MODE, original_mode)
+    window.settings.setValue(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, True)
+    window.settings.setValue(window.SETTING_SKIP_TYPE0_WARNING, True)
+    before = window._staged_signature()
+    seen = []
+
+    def edit(dialog):
+        seen.append(dialog)
+        combo = dialog.findChild(QComboBox, "pianoOverlapBehavior")
+        checkbox = dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior")
+        assert combo.currentData() == original_mode
+        assert checkbox.isChecked()
+        assert dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Save) is not None
+        combo.setCurrentIndex(combo.findData(mode))
+        checkbox.setChecked(automatic)
+        return QDialog.Accepted
+
+    monkeypatch.setattr(window, "_exec_child_dialog", edit)
+    action = window.settingsPianoOverlapAction
+    assert action in window.settingsMenu.actions()
+    assert action.isEnabled()  # Settings are available without loading a song.
+    action.trigger()
+    assert len(seen) == 1
+    assert before == window._staged_signature()
+    restored = QSettings(window.settings.fileName(), QSettings.IniFormat)
+    assert restored.value(window.SETTING_PIANO_OVERLAP_MODE) == mode
+    assert restored.value(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, type=bool) is automatic
+    assert restored.value(window.SETTING_SKIP_TYPE0_WARNING, type=bool)
+    window.settings = restored
+    prompts = _dialog_choice(monkeypatch, window, mode)
+    for filename in ("FIRST.MID", "SECOND.MID"):
+        assert window._piano_overlap_behavior(filename, 1) == mode
+    assert len(prompts) == (0 if automatic else 2)
+
+
+@pytest.mark.parametrize("mode,automatic", [(None, False), ("obsolete", True)])
+def test_settings_defaults_require_opt_in(window, monkeypatch, mode, automatic):
+    if mode is not None:
+        window.settings.setValue(window.SETTING_PIANO_OVERLAP_MODE, mode)
+        window.settings.setValue(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, automatic)
+
+    def save_defaults(dialog):
+        assert dialog.findChild(QComboBox, "pianoOverlapBehavior").currentData() == "smart"
+        assert not dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior").isChecked()
+        return QDialog.Accepted
+
+    monkeypatch.setattr(window, "_exec_child_dialog", save_defaults)
+    window.settingsPianoOverlapAction.trigger()
+    prompts = _dialog_choice(monkeypatch, window)
+    assert window._piano_overlap_behavior("SONG.MID", 1) == "retrigger"
+    assert len(prompts) == 1
+    assert not window.settings.value(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, type=bool)
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_cancelling_settings_preserves_preferences(window, monkeypatch, automatic):
+    window.settings.setValue(window.SETTING_PIANO_OVERLAP_MODE, "off")
+    window.settings.setValue(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, automatic)
+
+    def cancel(dialog):
+        combo = dialog.findChild(QComboBox, "pianoOverlapBehavior")
+        combo.setCurrentIndex(combo.findData("retrigger"))
+        dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior").setChecked(not automatic)
+        return QDialog.Rejected
+
+    monkeypatch.setattr(window, "_exec_child_dialog", cancel)
+    window.settingsPianoOverlapAction.trigger()
+    assert window.settings.value(window.SETTING_PIANO_OVERLAP_MODE) == "off"
+    assert window.settings.value(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, type=bool) is automatic
+
+
 @pytest.mark.parametrize("remap, overlapping, accepted, prompts", [
     (True, True, True, 1), (True, True, False, 1),
     (True, False, True, 0), (False, True, True, 0),
@@ -160,10 +244,16 @@ def test_type0_optional_piano_merge_uses_same_overlap_choice(
 
 
 @pytest.mark.parametrize("language", [language.code for language in SUPPORTED_LANGUAGES])
-def test_overlap_dialog_is_localized(window, monkeypatch, language):
-    window.currentLanguage = language
+@pytest.mark.parametrize("editing_settings", [False, True])
+def test_overlap_dialog_is_localized(window, monkeypatch, language, editing_settings):
+    window._set_language(language)
+    assert window.settingsPianoOverlapAction.text().replace("&", "") == translate_text(
+        "Overlapping Piano Notes...", language,
+    )
+    seen = []
 
     def inspect(dialog):
+        seen.append(dialog)
         expected = lambda source: translate_text(source, language)
         assert dialog.windowTitle() == expected("Overlapping Piano Notes")
         combo = dialog.findChild(QComboBox, "pianoOverlapBehavior")
@@ -171,7 +261,18 @@ def test_overlap_dialog_is_localized(window, monkeypatch, language):
         assert combo.itemText(1) == expected("Keep attacks — trim overlaps")
         assert combo.itemText(2) == expected("Merge only — keep overlaps")
         assert dialog.findChild(QCheckBox).text() == expected("Use this behavior for all future channel merges")
+        note = (
+            "Choose how to handle overlapping notes when merging channels. "
+            "Leave the box unchecked to be asked for each affected song."
+            if editing_settings else
+            "You can change this any time in Settings → Overlapping Piano Notes..."
+        )
+        assert expected(note) in [label.text() for label in dialog.findChildren(QLabel)]
         return QDialog.Rejected
 
     monkeypatch.setattr(window, "_exec_child_dialog", inspect)
-    assert window._piano_overlap_behavior("SONG.MID", 2) is None
+    if editing_settings:
+        window.settingsPianoOverlapAction.trigger()
+    else:
+        assert window._piano_overlap_behavior("SONG.MID", 2) is None
+    assert len(seen) == 1

@@ -221,7 +221,9 @@ as piano during Type 0 conversion.
 
 Check **Use this behavior for all future channel merges** to remember the choice
 across files and app restarts. Without that check, each affected song asks again.
-**Settings → Reset Hidden Dialogs...** restores the prompt for future overlaps.
+Open **Settings → Overlapping Piano Notes...** any time to change the behavior,
+or uncheck the box and save to restore the prompt for each affected song.
+**Settings → Reset Hidden Dialogs...** also restores the prompt for future overlaps.
 
 **Utilities → Merge Channels to Piano...** applies the same merge to one song or
 all listed MIDI and E-SEQ songs, including files being edited inside a disk image.

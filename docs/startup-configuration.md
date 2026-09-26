@@ -168,12 +168,13 @@ The review invitation can also be configured:
 | `review_prompt_after_reads` | Integer: total successful reads required before the next invitation (initially `3`). Remind me later raises this by three from the current count. |
 | `never_ask_for_review` | Boolean: suppress review invitations. This is also set when choosing Never ask again or successfully opening the review page. |
 
-All entries below are booleans except `eseq_to_midi_switch_mode`.
+All entries below are booleans except `eseq_to_midi_switch_mode` and `piano_overlap_mode`.
 
 | Setting | Meaning when `true` |
 | --- | --- |
 | `skip_first_time_dialog` | Skip the welcome screen; Help can still open it. |
 | `skip_type0_warning` | Skip the remembered Type 0 conversion warning. |
+| `skip_piano_overlap_dialog` | Apply `piano_overlap_mode` automatically to future channel merges. Defaults to `false`, asking for each affected song. |
 | `skip_image_remove_warning` | Skip the remembered image removal warning. |
 | `skip_image_delete_on_save_warning` | Skip the remembered image deletion-on-save warning. |
 | `skip_floppy_write_warning` | Skip the remembered floppy write warning. |
@@ -188,6 +189,11 @@ All entries below are booleans except `eseq_to_midi_switch_mode`.
 `eseq_to_midi_switch_mode` accepts `"ask"` or `"switch"` (`"export"` is a legacy
 alias for `"switch"`). This remembers the choice to export converted MIDI and
 leave image mode. A destination is still selected through the usual dialog.
+
+`piano_overlap_mode` accepts `"smart"` (the default), `"retrigger"` (keep attacks
+and trim overlaps), or `"off"` (merge channels and keep overlaps). Choosing a mode
+alone does not enable automatic application. **Settings → Overlapping Piano
+Notes...** lets users change the mode and whether future merges ask again.
 
 ## Saving and filename preferences
 

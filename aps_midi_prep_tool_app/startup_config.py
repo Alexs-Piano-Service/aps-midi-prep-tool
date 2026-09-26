@@ -26,6 +26,7 @@ BOOLEAN_SETTINGS = frozenset({
     "show_compat_warning", "store_backups", "use_dos83_filenames", "hide_status",
     "hide_quick_panel", "hide_album_metadata", "show_save_destination",
     "show_preparation_row", "skip_first_time_dialog", "skip_type0_warning",
+    "skip_piano_overlap_dialog",
     "skip_image_remove_warning", "skip_image_delete_on_save_warning",
     "skip_floppy_write_warning", "hide_recovery_complete_dialog",
     "hide_save_as_image_complete_dialog", "skip_eseq_to_midi_conversion_prompt",
@@ -56,7 +57,7 @@ INTEGER_SETTINGS = frozenset({
 })
 STRING_SETTINGS = PATH_SETTINGS | frozenset({
     "language", "appearance_mode", "font_scale", "eseq_to_midi_switch_mode",
-    "title_display_encoding",
+    "title_display_encoding", "piano_overlap_mode",
     "greaseweazle_device_path", "greaseweazle_drive", "read_floppy_source_kind",
     "read_floppy_gw_image_type", "image_floppy_drive_image_type",
     "read_floppy_gw_format", "disk_recovery_image_format",

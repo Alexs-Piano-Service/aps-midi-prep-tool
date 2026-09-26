@@ -1,4 +1,4 @@
-"""Translations for the conditional piano overlap dialog."""
+"""Translations for the piano overlap prompt and settings."""
 
 
 def _translations(*values):
@@ -91,13 +91,31 @@ PIANO_OVERLAP_TRANSLATIONS = {
         "Dit gedrag voor alle toekomstige kanaalsamenvoegingen gebruiken", "Używaj tego sposobu przy każdym przyszłym scalaniu kanałów",
         "今後のすべてのチャンネル統合でこの動作を使用", "앞으로 모든 채널 병합에 이 동작 사용", "将此行为用于今后的所有通道合并",
     ),
-    "Reset Hidden Dialogs will show this choice again.": _translations(
-        "Restablecer diálogos ocultos volverá a mostrar esta opción.", "Réinitialiser les dialogues masqués affichera à nouveau ce choix.",
-        "„Ausgeblendete Dialoge zurücksetzen“ zeigt diese Auswahl erneut an.", "Ripristina finestre nascoste mostrerà di nuovo questa scelta.",
-        "Redefinir diálogos ocultos mostrará esta escolha novamente.", "Нулирането на скритите диалози ще покаже този избор отново.",
-        "Verborgen dialogen herstellen toont deze keuze opnieuw.", "Resetowanie ukrytych okien dialogowych ponownie wyświetli ten wybór.",
-        "「非表示のダイアログをリセット」で、この選択画面を再表示できます。", "숨긴 대화상자 초기화를 사용하면 이 선택 화면이 다시 표시됩니다.",
-        "重置隐藏对话框后，将再次显示此选项。",
+    "Choose how to handle overlapping notes when merging channels. Leave the box unchecked to be asked for each affected song.": _translations(
+        "Elige cómo tratar las notas superpuestas al combinar canales. Deja la casilla sin marcar para que se pregunte en cada canción afectada.",
+        "Choisissez comment traiter les notes superposées lors de la fusion des canaux. Laissez la case décochée pour choisir à chaque morceau concerné.",
+        "Wählen Sie, wie überlappende Noten beim Zusammenführen von Kanälen behandelt werden. Lassen Sie das Kästchen deaktiviert, um bei jedem betroffenen Stück gefragt zu werden.",
+        "Scegli come gestire le note sovrapposte durante l’unione dei canali. Lascia la casella deselezionata per scegliere per ogni brano interessato.",
+        "Escolha como tratar notas sobrepostas ao mesclar canais. Deixe a caixa desmarcada para escolher em cada música afetada.",
+        "Изберете как да се обработват застъпващите се ноти при обединяване на канали. Оставете отметката изключена, за да бъдете питани за всяка засегната песен.",
+        "Kies hoe overlappende noten worden verwerkt bij het samenvoegen van kanalen. Laat het vakje uitgevinkt om voor elk betrokken nummer te kiezen.",
+        "Wybierz sposób obsługi nakładających się nut podczas scalania kanałów. Pozostaw pole niezaznaczone, aby wybierać dla każdego utworu z nakładającymi się nutami.",
+        "チャンネル統合時に重なる音符をどう処理するか選択します。該当する曲ごとに確認するには、チェックボックスをオフにしてください。",
+        "채널을 병합할 때 겹치는 음표를 처리하는 방법을 선택하세요. 해당하는 곡마다 확인하려면 체크박스를 선택하지 마세요.",
+        "选择合并通道时如何处理重叠音符。不勾选此框即可在每首包含重叠音符的歌曲中重新选择。",
+    ),
+    "You can change this any time in Settings → Overlapping Piano Notes...": _translations(
+        "Puedes cambiarlo en cualquier momento en Configuración → Notas de piano superpuestas...",
+        "Vous pouvez modifier ce choix à tout moment dans Paramètres → Notes de piano superposées...",
+        "Sie können dies jederzeit unter Einstellungen → Überlappende Klaviernoten... ändern.",
+        "Puoi modificare questa scelta in qualsiasi momento in Impostazioni → Note di pianoforte sovrapposte...",
+        "Você pode alterar isso a qualquer momento em Configurações → Notas de piano sobrepostas...",
+        "Можете да промените това по всяко време в Настройки → Застъпващи се ноти на пианото...",
+        "U kunt dit op elk moment wijzigen via Instellingen → Overlappende pianonoten...",
+        "Możesz to zmienić w dowolnym momencie w Ustawienia → Nakładające się nuty fortepianu...",
+        "「設定 → ピアノ音符の重なり...」でいつでも変更できます。",
+        "설정 → 겹치는 피아노 음표...에서 언제든지 변경할 수 있습니다.",
+        "您可以随时在“设置 → 重叠的钢琴音符...”中更改此选项。",
     ),
     "Channel merge canceled.": _translations(
         "Combinación de canales cancelada.", "Fusion des canaux annulée.", "Kanalzusammenführung abgebrochen.",

@@ -27,7 +27,9 @@ with release sections grouped by version and date.
 
 - Piano channel merges prompt only when same-key notes overlap, with smart
   repair, attack-preserving trimming, and merge-only choices. The optional
-  remembered choice applies to future merges, including Type 0 piano remapping;
+  remembered choice requires checking a box and applies to future merges,
+  including Type 0 piano remapping. **Settings → Overlapping Piano Notes...**
+  lets users change the behavior or restore prompting at any time;
   **Reset Hidden Dialogs** restores the prompt. MIDI and native E-SEQ edits keep
   the existing Save and Undo workflow.
 - Successful floppy-save recovery packages are limited to the five most recent
