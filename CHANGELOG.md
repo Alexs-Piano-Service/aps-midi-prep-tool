@@ -25,6 +25,11 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Piano channel merges prompt only when same-key notes overlap, with smart
+  repair, attack-preserving trimming, and merge-only choices. The optional
+  remembered choice applies to future merges, including Type 0 piano remapping;
+  **Reset Hidden Dialogs** restores the prompt. MIDI and native E-SEQ edits keep
+  the existing Save and Undo workflow.
 - Successful floppy-save recovery packages are limited to the five most recent
   saves and 30 days. Failed, cancelled, and unfinished packages remain until
   manually removed.
@@ -38,6 +43,9 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- E-SEQ inspection and conversion now reject incomplete commands at the end
+  of a file instead of silently producing a partial MIDI. Failed conversions
+  create no output and leave existing destinations and staged songs unchanged.
 - **Merge Channels to Piano** now works on E-SEQ songs in File Inspection and
   the batch utility, including folders, disk images, and pending additions.
   Edits preserve the native container, timing, titles, order keys, and Yamaha

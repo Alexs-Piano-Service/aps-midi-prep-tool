@@ -367,6 +367,12 @@ _add("Unexpected standalone F7 in E-SEQ; cannot safely identify the following so
      "E-SEQ 内に予期しない単独の F7 があり、後続の曲イベントを安全に識別できません。",
      "E-SEQ에 예기치 않은 단독 F7이 있어 이후 곡 이벤트를 안전하게 식별할 수 없습니다.",
      "E-SEQ 中出现意外的独立 F7，无法安全识别后续歌曲事件。")
+_add("Encountered an incomplete E-SEQ event.",
+     "Se encontró un evento E-SEQ incompleto.", "Un événement E-SEQ incomplet a été trouvé.",
+     "Unvollständiges E-SEQ-Ereignis gefunden.", "Rilevato un evento E-SEQ incompleto.",
+     "Foi encontrado um evento E-SEQ incompleto.", "Открито е непълно E-SEQ събитие.",
+     "Onvolledig E-SEQ-event aangetroffen.", "Napotkano niekompletne zdarzenie E-SEQ.",
+     "不完全な E-SEQ イベントがあります。", "불완전한 E-SEQ 이벤트가 있습니다.", "存在不完整的 E-SEQ 事件。")
 _add("Encountered an incomplete delay inside E-SEQ SysEx.",
      "Se encontró un retardo incompleto dentro de E-SEQ SysEx.", "Un délai incomplet a été trouvé dans E-SEQ SysEx.",
      "Unvollständige Verzögerung innerhalb von E-SEQ-SysEx gefunden.", "Rilevato un ritardo incompleto all’interno di E-SEQ SysEx.",

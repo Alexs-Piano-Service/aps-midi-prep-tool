@@ -19,6 +19,7 @@ from .music_error_translations import MUSIC_ERROR_TRANSLATIONS
 from .main_window_translations import MAIN_WINDOW_TRANSLATIONS
 from .status_translations import STATUS_TRANSLATIONS
 from .write_safety_translations import WRITE_SAFETY_TRANSLATIONS
+from .piano_overlap_translations import PIANO_OVERLAP_TRANSLATIONS
 
 from .bulgarian_translations import (
     BULGARIAN_MESSAGE_TRANSLATIONS,
@@ -3057,6 +3058,7 @@ COMMON_TEXT_TRANSLATIONS.update(MUSIC_ERROR_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(MAIN_WINDOW_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(STATUS_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(WRITE_SAFETY_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(PIANO_OVERLAP_TRANSLATIONS)
 
 
 def tr(message_id, language_code=None, **kwargs):

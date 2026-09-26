@@ -201,13 +201,28 @@ as uninterpreted. The decoded MIDI preview appears below the source details.
 
 File Inspection also has **Convert to Type 0** and **Merge Channels to Piano**
 buttons. Type 0 conversion accepts MIDI; piano merging accepts MIDI and E-SEQ.
-Each applies in one click and refreshes the preview. Type 0 combines tracks
+Each stages an edit and refreshes the preview. Type 0 combines tracks
 while keeping channels and instruments; merging routes note parts to MIDI
 channel 1 and selects Acoustic Grand Piano while
 keeping the source format. E-SEQ edits preserve native timing, titles, song order,
 and Yamaha's separate pedal-detail data. These edits use the complete song,
 including hidden or muted preview channels. Use **Save** to write them or
 **Edit → Undo** to revert.
+
+When a piano merge finds overlapping notes on the same key, it asks how to
+handle them. **Smart repair** removes long notes covering multiple shorter
+strikes, keeps the shortest simultaneous note, and trims remaining overlaps.
+**Keep attacks** keeps the longest simultaneous note and trims overlaps at the
+next attack. Both combine duplicate unisons and use exact tick boundaries,
+without moving attacks or resuming discarded tails. **Merge only** keeps the
+existing overlapping-note behavior. Chords on different keys and notes that
+only touch do not prompt. The same choice applies when combining instruments
+as piano during Type 0 conversion.
+
+Check **Use this behavior for all future channel merges** to remember the choice
+across files and app restarts. Without that check, each affected song asks again.
+**Settings → Reset Hidden Dialogs...** restores the prompt for future overlaps.
+
 **Utilities → Merge Channels to Piano...** applies the same merge to one song or
 all listed MIDI and E-SEQ songs, including files being edited inside a disk image.
 

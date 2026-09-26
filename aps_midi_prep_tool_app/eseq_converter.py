@@ -566,6 +566,7 @@ def _effective_initial_mpqn(tempo_events):
 
 
 def parse_eseq_bytes(eseq_bytes):
+    """Parse a complete event stream, rejecting commands cut short at EOF."""
     if len(eseq_bytes) < CLAVINOVA_MDA_HEADER_SIZE:
         raise EseqConversionError("File is too small to be a valid Yamaha E-SEQ file.")
     if eseq_bytes[7:15] != ESEQ_SIGNATURE:
@@ -590,6 +591,10 @@ def parse_eseq_bytes(eseq_bytes):
     if last_time_signature is not None:
         time_signature_events.append((0, *last_time_signature))
 
+    def require_event_data(size):
+        if pos + size > len(data):
+            raise EseqConversionError("Encountered an incomplete E-SEQ event.")
+
     while pos < len(data):
         if declared_stream_end is not None and pos >= declared_stream_end:
             if all(byte in (0x00, _ESEQ_PADDING_BYTE) for byte in data[pos:]):
@@ -604,30 +609,27 @@ def parse_eseq_bytes(eseq_bytes):
             continue
 
         if status == 0xF1:
-            if pos < len(data):
-                pos += 1
+            require_event_data(1)
+            pos += 1
             continue
 
         if status == 0xF2:
             break
 
         if status == 0xF3:
-            if pos >= len(data):
-                break
+            require_event_data(1)
             abs_tick += data[pos]
             pos += 1
             continue
 
         if status == 0xF4:
-            if pos + 1 >= len(data):
-                break
+            require_event_data(2)
             abs_tick += _decode_15(data[pos], data[pos + 1])
             pos += 2
             continue
 
         if status == 0xFB:
-            if pos + 1 >= len(data):
-                break
+            require_event_data(2)
             raw_factor = _decode_15(data[pos], data[pos + 1])
             tempo_factors.append((abs_tick, raw_factor))
             factor = max(1, raw_factor)
@@ -638,8 +640,7 @@ def parse_eseq_bytes(eseq_bytes):
             continue
 
         if status == 0xF9:
-            if pos + 1 >= len(data):
-                break
+            require_event_data(2)
             numerator = data[pos]
             denominator_power = data[pos + 1]
             pos += 2
@@ -652,8 +653,7 @@ def parse_eseq_bytes(eseq_bytes):
             continue
 
         if status == 0xFF:
-            if pos >= len(data):
-                break
+            require_event_data(1)
             channel = data[pos]
             pos += 1
             events.append((abs_tick, 1, b"\xFF\x20\x01" + bytes([channel & 0x0F])))
@@ -696,16 +696,14 @@ def parse_eseq_bytes(eseq_bytes):
 
         hi = status & 0xF0
         if hi in (0x80, 0x90, 0xA0, 0xB0, 0xE0):
-            if pos + 1 >= len(data):
-                break
+            require_event_data(2)
             raw = bytes([status]) + data[pos:pos + 2]
             pos += 2
             events.append((abs_tick, 2, raw))
             continue
 
         if hi in (0xC0, 0xD0):
-            if pos >= len(data):
-                break
+            require_event_data(1)
             raw = bytes([status, data[pos]])
             pos += 1
             events.append((abs_tick, 2, raw))

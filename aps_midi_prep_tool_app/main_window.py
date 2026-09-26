@@ -128,6 +128,7 @@ from .midi_type0_converter import (
 )
 from .midi_channel_merger import merge_midi_channels_to_channel0_path
 from .eseq_channel_merger import merge_eseq_channels_to_channel0_path
+from .piano_overlap import ChannelMergeCancelled, OVERLAP_MODES
 from .xf_stripper import XF_CLEANUP_BROAD, XF_CLEANUP_TARGETED, strip_xf_from_midi_path
 from .conversion_review import build_staged_conversion_details, inspect_music_bytes, localize_music_error
 from .write_safety_messages import localize_write_message
@@ -8854,6 +8855,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     SETTING_SHOW_SAVE_DESTINATION = "show_save_destination"
     SETTING_SHOW_PREPARATION_ROW = "show_preparation_row"
     SETTING_SKIP_TYPE0_WARNING = "skip_type0_warning"
+    SETTING_SKIP_PIANO_OVERLAP_DIALOG = "skip_piano_overlap_dialog"
+    SETTING_PIANO_OVERLAP_MODE = "piano_overlap_mode"
     SETTING_SKIP_IMAGE_REMOVE_WARNING = "skip_image_remove_warning"
     SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING = "skip_image_delete_on_save_warning"
     SETTING_SKIP_FLOPPY_WRITE_WARNING = "skip_floppy_write_warning"
@@ -16269,6 +16272,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _hidden_dialog_setting_keys(self):
         return (
             self.SETTING_SKIP_TYPE0_WARNING,
+            self.SETTING_SKIP_PIANO_OVERLAP_DIALOG,
             self.SETTING_SKIP_IMAGE_REMOVE_WARNING,
             self.SETTING_SKIP_IMAGE_DELETE_ON_SAVE_WARNING,
             self.SETTING_SKIP_FLOPPY_WRITE_WARNING,
@@ -17636,6 +17640,82 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self._exec_child_dialog(dialog) != QDialog.Accepted:
             return None
         return int(target_combo.currentData())
+
+    def _piano_overlap_behavior(self, filename, count):
+        mode = self.settings.value(self.SETTING_PIANO_OVERLAP_MODE, "smart", type=str)
+        if mode in OVERLAP_MODES and self.settings.value(
+            self.SETTING_SKIP_PIANO_OVERLAP_DIALOG, False, type=bool,
+        ):
+            return mode
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self._lt("Overlapping Piano Notes"))
+        apply_window_icon(dialog)
+        dialog.setMinimumWidth(520)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(self._lt(
+            "{filename}: {count} same-key note overlap(s) found. Choose how to merge them.",
+            filename=filename, count=count,
+        ))
+        intro.setTextFormat(Qt.PlainText)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        behavior = QComboBox(dialog)
+        behavior.setObjectName("pianoOverlapBehavior")
+        behavior.addItem(self._lt("Smart repair"), "smart")
+        behavior.addItem(self._lt("Keep attacks — trim overlaps"), "retrigger")
+        behavior.addItem(self._lt("Merge only — keep overlaps"), "off")
+        behavior.setCurrentIndex(max(0, behavior.findData(mode)))
+        layout.addWidget(behavior)
+        descriptions = {
+            "smart": self._lt(
+                "Remove long notes covering two or more shorter strikes of the same key. "
+                "Keep the shortest simultaneous note, then trim overlaps at the next attack. "
+                "This can remove a long note's leading portion and tail."
+            ),
+            "retrigger": self._lt(
+                "Keep each distinct attack and the longest simultaneous note. "
+                "Trim overlapping notes to end at the next attack, without moving attacks or resuming tails."
+            ),
+            "off": self._lt(
+                "Keep the existing merge behavior and all attacks. Overlapping notes may mask repeated piano strikes."
+            ),
+        }
+        description = QLabel(dialog)
+        description.setWordWrap(True)
+        behavior.currentIndexChanged.connect(
+            lambda _index: description.setText(descriptions[behavior.currentData()])
+        )
+        description.setText(descriptions[behavior.currentData()])
+        layout.addWidget(description)
+        remember = QCheckBox(self._lt("Use this behavior for all future channel merges"), dialog)
+        remember.setObjectName("rememberPianoOverlapBehavior")
+        layout.addWidget(remember)
+        reset_note = QLabel(self._lt("Reset Hidden Dialogs will show this choice again."))
+        reset_note.setWordWrap(True)
+        layout.addWidget(reset_note)
+        buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.button(QDialogButtonBox.Ok).setText(self._lt("Merge Channels"))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return None
+        mode = behavior.currentData()
+        if remember.isChecked():
+            self.settings.setValue(self.SETTING_PIANO_OVERLAP_MODE, mode)
+            self.settings.setValue(self.SETTING_SKIP_PIANO_OVERLAP_DIALOG, True)
+            self.settings.sync()
+        return mode
+
+    def _merge_piano_channels_to_path(self, source, destination, filename):
+        converter = (merge_eseq_channels_to_channel0_path if is_eseq_file(source)
+                     else merge_midi_channels_to_channel0_path)
+        try:
+            return converter(source, destination, overlap_handler=lambda count:
+                             self._piano_overlap_behavior(filename, count))
+        except ChannelMergeCancelled:
+            return None
 
     def show_channel_merging_utility(self):
         if not self.choose_button.isEnabled():
@@ -19471,10 +19551,18 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     raise ValueError(self._lt("These actions require a MIDI file."))
 
         output_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{os.path.basename(target_filename)}")
-        converter = (convert_midi_file_to_type0_path if action == "type0"
-                     else merge_eseq_channels_to_channel0_path if source_is_eseq
-                     else merge_midi_channels_to_channel0_path)
-        changed = converter(source_material, output_path)
+        if action == "type0":
+            changed = convert_midi_file_to_type0_path(source_material, output_path)
+        else:
+            changed = self._merge_piano_channels_to_path(
+                source_material, output_path, os.path.basename(target_filename),
+            )
+        if changed is None:
+            message = self._lt("Channel merge canceled.")
+            self.status_label.setText(message)
+            current_item = next((candidate for candidate in self._inspection_items()
+                                 if candidate.get("source_path") == source_path), dict(item))
+            return {"changed": False, "item": current_item, "message": message}
         if changed:
             sorting = self.table.isSortingEnabled()
             self.table.setSortingEnabled(False)
@@ -25866,6 +25954,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         unchanged_count = 0
         errors = []
         scratch_dir = self._ensure_midi_scratch_dir()
+        canceled = False
         for index, (_initial_row, full_path) in enumerate(rows_to_convert, start=1):
             if progressDialog.wasCanceled():
                 break
@@ -25887,6 +25976,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     source_material_path,
                     output_temp_path,
                     remap_all_instruments_to_channel0=remap_all_instruments,
+                    overlap_handler=lambda count: self._piano_overlap_behavior(target_filename, count),
                 )
                 if not changed:
                     unchanged_count += 1
@@ -25900,6 +25990,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     overwrite_original=True,
                 )
                 converted_count += 1
+            except ChannelMergeCancelled:
+                canceled = True
+                break
             except Exception as exc:
                 errors.append(f"{os.path.basename(full_path)}: {exc}")
             finally:
@@ -25908,6 +26001,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         progressDialog.close()
 
         status_parts = [self._lt('Staged {converted_count} file(s) for MIDI Type 0 conversion.', converted_count=converted_count)]
+        if canceled:
+            status_parts.append(self._lt("Channel merge canceled."))
         if remap_all_instruments and converted_count:
             status_parts.append(self._lt('Combined instruments on MIDI channel 1 using Acoustic Grand Piano.'))
         if unchanged_count:
@@ -25963,6 +26058,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         changed_count = 0
         unchanged_count = 0
+        canceled = False
         errors = []
         scratch_dir = self._ensure_midi_scratch_dir()
         for index, (_initial_row, full_path) in enumerate(rows, start=1):
@@ -25989,11 +26085,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     scratch_dir,
                 )
                 source_is_eseq = is_eseq_file(source_material_path)
-                converter = merge_eseq_channels_to_channel0_path if source_is_eseq else merge_midi_channels_to_channel0_path
-                changed = converter(
+                changed = self._merge_piano_channels_to_path(
                     source_material_path,
                     output_temp_path,
+                    os.path.basename(target_filename),
                 )
+                if changed is None:
+                    canceled = True
+                    break
                 if not changed:
                     unchanged_count += 1
                     continue
@@ -26014,6 +26113,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         progress_dialog.close()
 
         status_parts = [self._lt("Piano channel merge staged for {count} file(s).", count=changed_count)]
+        if canceled:
+            status_parts.append(self._lt("Channel merge canceled."))
         if unchanged_count:
             status_parts.append(self._lt("Already merged: {count} file(s).", count=unchanged_count))
         if changed_count:
@@ -26166,6 +26267,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         changed_count = 0
         unchanged_count = 0
+        canceled = False
         errors = []
         for index, (row, source_path) in enumerate(rows, start=1):
             if progress_dialog.wasCanceled():
@@ -26178,11 +26280,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     self.image_session.patched_dir,
                     f"{uuid.uuid4().hex}_{os.path.basename(current_path)}",
                 )
-                converter = merge_eseq_channels_to_channel0_path if is_eseq_file(source_host_path) else merge_midi_channels_to_channel0_path
-                changed = converter(
+                changed = self._merge_piano_channels_to_path(
                     source_host_path,
                     output_host_path,
+                    os.path.basename(current_path),
                 )
+                if changed is None:
+                    canceled = True
+                    break
                 if not changed:
                     unchanged_count += 1
                     continue
@@ -26220,6 +26325,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         progress_dialog.close()
 
         status_parts = [self._lt("Piano channel merge staged for {count} file(s).", count=changed_count)]
+        if canceled:
+            status_parts.append(self._lt("Channel merge canceled."))
         if unchanged_count:
             status_parts.append(self._lt("Already merged: {count} file(s).", count=unchanged_count))
         if changed_count:

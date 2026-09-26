@@ -4,6 +4,8 @@ import os
 import uuid
 from collections import defaultdict
 
+from .piano_overlap import resolve_note_overlaps
+
 from .eseq_converter import (
     ESEQ_CONTAINER_CLAVINOVA_MDA,
     ESEQ_CONTAINER_Q11,
@@ -108,14 +110,14 @@ def _stream_tokens(data, stream_start, container_variant):
         if raw is not None:
             events.append((tick, index, int(editable), raw))
 
-    return tokens, events, pos
+    return tokens, events, pos, tick
 
 
 def _is_dedicated_pedal(raw):
     return len(raw) == 3 and raw[0] == 0xB2 and raw[1] in (64, 67)
 
 
-def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename=""):
+def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename="", *, overlap_mode="off", overlap_handler=None):
     """Merge note/instrument channels, retaining native Yamaha pedal detail.
 
     Headers, order keys, title bytes, SysEx, tempo/meter commands, delay
@@ -130,7 +132,7 @@ def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename=""):
     stream_start = _eseq_event_stream_start(data, container_variant=container_variant)
     if len(data) <= stream_start:
         raise EseqConversionError("File is too small to contain Yamaha E-SEQ events.")
-    tokens, events, stream_end = _stream_tokens(data, stream_start, container_variant)
+    tokens, events, stream_end, end_tick = _stream_tokens(data, stream_start, container_variant)
     is_mda = container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA
     is_q11 = container_variant == ESEQ_CONTAINER_Q11
     note_channels = {
@@ -162,10 +164,22 @@ def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename=""):
     if _is_canonical_channel_merge(0, [{"original_events": canonical_events}]):
         return eseq_bytes, False
 
+    end_index = len(tokens) - 1 if tokens and tokens[-1] == b"\xF2" else len(tokens)
+    merge_events, = resolve_note_overlaps(
+        [(merge_events, (end_tick, end_index, 0, b""), False)],
+        overlap_mode, overlap_handler,
+    )
     merged, _changed, has_notes = _merge_track_events(merge_events)
     replacements = defaultdict(bytearray)
+    prefixes = defaultdict(bytearray)
+    suffixes = defaultdict(bytearray)
     for _tick, index, _order, raw in merged:
         if index not in editable_indexes:
+            # SysEx may contain native delays: release at its completion, not
+            # before those delays. End-of-song releases precede the stop token.
+            if raw and raw[0] & 0xF0 in (0x80, 0x90):
+                target = suffixes if index < len(tokens) and tokens[index][:1] == b"\xF0" else prefixes
+                target[index].extend(raw)
             continue
         if raw[:3] == b"\xFF\x20\x01":
             # Preserve reserved high bits of Yamaha's channel prefix byte.
@@ -185,7 +199,10 @@ def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename=""):
     for index, token in enumerate(tokens):
         if has_notes and index == program_index:
             stream.extend(_acoustic_grand_program_event())
+        stream.extend(prefixes[index])
         stream.extend(replacements[index] if index in editable_indexes else token)
+        stream.extend(suffixes[index])
+    stream.extend(prefixes[len(tokens)])
 
     if bytes(stream) == data[stream_start:stream_end]:
         return eseq_bytes, False
@@ -225,13 +242,14 @@ def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename=""):
     return bytes(header) + bytes(stream) + suffix, True
 
 
-def merge_eseq_channels_to_channel0_path(source_path, dest_path):
+def merge_eseq_channels_to_channel0_path(source_path, dest_path, *, overlap_mode="off", overlap_handler=None):
     """Atomically write an E-SEQ merge; leave no-op destinations untouched."""
     source_path = os.fspath(source_path)
     dest_path = os.fspath(dest_path)
     with open(source_path, "rb") as handle:
         merged, changed = merge_eseq_channels_to_channel0_bytes(
             handle.read(), filename=os.fsdecode(os.path.basename(source_path)),
+            overlap_mode=overlap_mode, overlap_handler=overlap_handler,
         )
     if not changed:
         return False

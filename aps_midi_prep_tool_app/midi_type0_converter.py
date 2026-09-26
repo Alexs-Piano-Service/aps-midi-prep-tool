@@ -1534,6 +1534,7 @@ def _convert_midi_bytes_to_type0(
     *,
     normalize_disklavier=False,
     remap_all_instruments_to_channel0=False,
+    overlap_handler=None,
 ):
     header_end, format_type, _, chunks = _parse_midi_chunks(midi_bytes)
     track_chunks = [chunk for chunk in chunks if chunk["id"] == b"MTrk"]
@@ -1562,6 +1563,14 @@ def _convert_midi_bytes_to_type0(
     merged_events.sort(key=lambda item: (item[0], item[1], item[2]))
     changed = format_type != 0
     if remap_all_instruments_to_channel0:
+        if overlap_handler is not None:
+            # The resolver uses this module's event helpers; import only after
+            # initialization to avoid a circular module dependency.
+            from .piano_overlap import resolve_note_overlaps
+            merged_events, = resolve_note_overlaps(
+                [(merged_events, (max_end_tick, 0, 0, b""), True)],
+                choose_mode=overlap_handler,
+            )
         # Resolve source resets before changing channel identities. Normalize
         # afterward so deduplication sees every change on the final channel.
         merged_events, remap_changed = _remap_merged_events_to_piano_channel0(merged_events)
@@ -1621,6 +1630,7 @@ def convert_midi_file_to_type0_path(
     *,
     normalize_disklavier=False,
     remap_all_instruments_to_channel0=False,
+    overlap_handler=None,
 ):
     if not os.path.isfile(source_path):
         raise ValueError("File does not exist.")
@@ -1632,6 +1642,7 @@ def convert_midi_file_to_type0_path(
         midi_bytes,
         normalize_disklavier=normalize_disklavier,
         remap_all_instruments_to_channel0=remap_all_instruments_to_channel0,
+        overlap_handler=overlap_handler,
     )
     if not changed:
         return False

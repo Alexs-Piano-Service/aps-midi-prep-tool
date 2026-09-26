@@ -99,11 +99,26 @@ preview reloads after an edit; returning to inspection refreshes saved or undone
 changes. **Utilities → Merge Channels to Piano...** offers the same piano merge
 for one song or all listed MIDI and E-SEQ songs.
 
+Same-key overlaps prompt for smart repair, trimming, or the existing merge
+behavior. Smart repair follows the piano merger's containment rule: remove a
+long note only when it contains at least two surviving notes at distinct starts,
+each no more than half its duration. It can remove the long note's leading and
+trailing portions. Repair pairs notes before channel routing, combines unisons,
+and releases trimmed notes at the next attack's exact tick (zero release gap).
+Native E-SEQ delay commands remain intact. Independent Type 2 sequences never
+count as overlaps with one another. A checked future-merges preference persists
+across restarts; **Reset Hidden Dialogs** makes affected songs ask again.
+
 Disk-set preview shows the actual prepared and packed songs, including musical
 change reports and title provenance. Collection edits require an updated preview
 before output can be built. See the [disk-set guide](emulator-disk-sets.md).
 
 ## Distinguish verification levels
+
+E-SEQ inspection and conversion reject truncated commands, including incomplete
+notes, controllers, delays, tempo, meter, and channel-prefix events. A preceding
+valid performance does not make a damaged file eligible for partial conversion.
+The failed song is reported without creating or staging MIDI output.
 
 Final image verification reopens IMG files or decodes final HFE files and checks
 every contained file against the prepared output, including catalogs and song

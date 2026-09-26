@@ -2,6 +2,7 @@ import os
 import uuid
 
 from .smf import parse_smf_layout
+from .piano_overlap import resolve_note_overlaps
 from .midi_type0_converter import (
     MIDI_ALL_SOUND_OFF_CONTROLLER,
     MIDI_BANK_SELECT_CONTROLLERS,
@@ -129,7 +130,7 @@ def _is_canonical_channel_merge(format_type, tracks):
     )
 
 
-def merge_midi_channels_to_channel0_bytes(midi_bytes):
+def merge_midi_channels_to_channel0_bytes(midi_bytes, *, overlap_mode="off", overlap_handler=None):
     """Merge every MIDI channel into channel 0 without changing the SMF type."""
     header_end, format_type, chunks, trailing_start = _parse_smf_layout(midi_bytes)
 
@@ -152,16 +153,24 @@ def merge_midi_channels_to_channel0_bytes(midi_bytes):
         return midi_bytes, False
 
     if format_type == 2:
+        groups = [(track["events"], (track["end_tick"], 0, b""), False) for track in tracks]
+    else:
+        end_tick = max((track["end_tick"] for track in tracks), default=0)
+        groups = [(_merge_track_event_groups(tracks), (end_tick, 0, 0, b""), True)]
+    timelines = resolve_note_overlaps(groups, overlap_mode, overlap_handler)
+
+    if format_type == 2:
         # Type 2 tracks are independent sequences, each with its own channels.
-        for track in tracks:
+        for track, timeline in zip(tracks, timelines):
             track["events"], track["changed"], _has_notes = _merge_track_events(
-                track["events"]
+                timeline
             )
+            track["changed"] |= track["events"] != track["original_events"]
     else:
         # Type 1 tracks share channel state. A controller track can terminate
         # notes on another track, so process the complete timeline together.
         merged, _changed, _has_notes = _merge_track_events(
-            _merge_track_event_groups(tracks)
+            timelines[0]
         )
         _replace_track_event_groups_from_merged(tracks, merged)
         for track in tracks:
@@ -213,7 +222,7 @@ def merge_midi_channels_to_channel0_bytes(midi_bytes):
     return rebuilt_bytes, True
 
 
-def merge_midi_channels_to_channel0_path(source_path, dest_path):
+def merge_midi_channels_to_channel0_path(source_path, dest_path, *, overlap_mode="off", overlap_handler=None):
     """Atomically write a channel-merged MIDI file and report whether it changed."""
     source_path = os.fspath(source_path)
     dest_path = os.fspath(dest_path)
@@ -223,7 +232,9 @@ def merge_midi_channels_to_channel0_path(source_path, dest_path):
     with open(source_path, "rb") as handle:
         midi_bytes = handle.read()
 
-    merged_bytes, changed = merge_midi_channels_to_channel0_bytes(midi_bytes)
+    merged_bytes, changed = merge_midi_channels_to_channel0_bytes(
+        midi_bytes, overlap_mode=overlap_mode, overlap_handler=overlap_handler,
+    )
     if not changed:
         return False
 
