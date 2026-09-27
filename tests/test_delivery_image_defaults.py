@@ -236,6 +236,37 @@ def test_unknown_saved_image_format_falls_back_to_delivery_default(window, monke
     assert window._prompt_for_save_image_options(default_ext="img") is None
 
 
+def test_manual_image_format_is_remembered_for_its_destination_only(window, monkeypatch, tmp_path):
+    _choose(window, "mark_iii", "flashfloppy_hfe")
+
+    def choose_img(dialog):
+        combo = dialog.findChildren(QComboBox)[0]
+        assert combo.currentData() == "hfe"
+        combo.setCurrentIndex(combo.findData("img"))
+        return QDialog.Accepted
+
+    monkeypatch.setattr(window, "_exec_child_dialog", choose_img)
+    monkeypatch.setattr(main_window.QFileDialog, "getSaveFileName", lambda *_: (str(tmp_path / "chosen.img"), ""))
+    assert window._prompt_for_save_image_options()[1] == "img"
+    # A newly selected profile receives its own default, despite the old IMG choice.
+    _choose(window, "unsure", "flashfloppy_hfe")
+
+    def inspect(expected):
+        def execute(dialog):
+            assert dialog.findChildren(QComboBox)[0].currentData() == expected
+            return QDialog.Rejected
+        monkeypatch.setattr(window, "_exec_child_dialog", execute)
+        assert window._prompt_for_save_image_options() is None
+
+    inspect("hfe")
+    _choose(window, "mark_iii", "flashfloppy_hfe")
+    inspect("img")
+    # Legacy global choices also stop applying when the destination changes.
+    window.settings.setValue(window.SETTING_SAVE_AS_IMAGE_FORMAT, "img")
+    _choose(window, "mark_i", "flashfloppy_hfe")
+    inspect("hfe")
+
+
 def test_emulator_dialog_override_reaches_builder_without_changing_delivery(window, monkeypatch, tmp_path):
     _choose(window, "unsure", "flashfloppy_hfe")
     monkeypatch.setattr(window, "_emulator_image_default_source_directory", lambda: str(tmp_path))

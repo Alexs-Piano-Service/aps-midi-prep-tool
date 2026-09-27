@@ -39,12 +39,14 @@ class BootSectorRepairWorker(QThread):
 
 
 class BootSectorRepairDialog(QDialog):
-    def __init__(self, parent, initial_path=""):
+    def __init__(self, parent, initial_path="", *, before_repair=None, after_repair=None):
         super().__init__(parent)
         self._lt = parent._lt
         self._browse_path = initial_path
         self.worker = None
         self.results = []
+        self.before_repair = before_repair
+        self.after_repair = after_repair
         self.setWindowTitle(self._lt("Repair Yamaha Boot Sector..."))
         self.resize(690, 520)
         layout = QVBoxLayout(self)
@@ -136,17 +138,20 @@ class BootSectorRepairDialog(QDialog):
         if not source_path:
             self.status_label.setText(self._lt("Choose a regular IMG, IMA, BIN, VFD, or HFE image file."))
             return
+        options = {
+            "directory": bool(self.scope_combo.currentData()),
+            "recursive": self.recursive_check.isChecked(),
+            "target_format": self.target_combo.currentData(),
+            "backup": self.backup_check.isChecked(),
+        }
+        if self.before_repair is not None and not self.before_repair(source_path, options):
+            return
         self.report.clear()
         self.results.clear()
         self.status_label.clear()
         self.progress.setValue(0)
         self._set_running(True)
-        worker = BootSectorRepairWorker(source_path, {
-            "directory": bool(self.scope_combo.currentData()),
-            "recursive": self.recursive_check.isChecked(),
-            "target_format": self.target_combo.currentData(),
-            "backup": self.backup_check.isChecked(),
-        }, self)
+        worker = BootSectorRepairWorker(source_path, options, self)
         self.worker = worker
         worker.progressChanged.connect(self._progress)
         worker.itemFinished.connect(self._item_finished)
@@ -192,7 +197,7 @@ class BootSectorRepairDialog(QDialog):
     def _completed(self, batch):
         changed = sum(bool(item.repaired or item.converted) for item in batch.results)
         failed = sum(bool(item.error) for item in batch.results)
-        if not batch.results and not batch.cancelled:
+        if not batch.results and not batch.cancelled and not batch.scan_errors:
             text = self._lt("No supported image files found.")
         else:
             text = self._lt(
@@ -201,6 +206,13 @@ class BootSectorRepairDialog(QDialog):
             )
         if batch.cancelled:
             text = self._lt("Operation cancelled.") + "\n" + text
+        if batch.scan_errors:
+            text += "\n" + self._lt(
+                "Folder scan incomplete: {count} folder(s) could not be read.", count=len(batch.scan_errors),
+            )
+            for error in batch.scan_errors:
+                self.report.appendPlainText(self._lt("Could not scan folder: {path}", path=error.path))
+                self.report.appendPlainText(error.error)
         self.status_label.setText(text)
 
     @Slot(str)
@@ -212,6 +224,8 @@ class BootSectorRepairDialog(QDialog):
         self.worker.deleteLater()
         self.worker = None
         self._set_running(False)
+        if self.after_repair is not None:
+            self.after_repair()
 
     def reject(self):
         if self.worker is not None:

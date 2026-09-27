@@ -79,11 +79,30 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Main-window headings use the desktop UI font, with button text and spacing
+  proportional to body text. This preserves the Linux layout proportions while
+  avoiding oversized headings and excessive spacing with Windows' smaller
+  default font. Font-size preferences and display scaling remain supported.
 - Image exports preserve non-ASCII DOS filename identities, allowing renames,
   replacements, title edits, deletions, and regenerated song catalogs to find
-  the correct file. Yamaha images with these filenames no longer trigger
+  the correct file. Windows edits use temporary ASCII aliases so mtools cannot
+  lose OEM characters during command-line conversion; saved images retain the
+  original filename bytes. Yamaha images with these filenames no longer trigger
   unnecessary directory recovery
   or changes to original file sizes during boot repair.
+- FAT lookups and regenerated song catalogs preserve exact DOS filename bytes;
+  Unicode case expansion no longer merges distinct names such as STRAßE.FIL
+  and STRASSE.FIL. Ambiguous file lookups are rejected.
+  Image edits also reject case-colliding FAT entries before invoking mtools,
+  preventing an operation on one song from affecting another.
+- Repairing an open image resolves pending edits and reloads the editor after
+  repair. Ordinary image saves reject source changes made since opening,
+  preventing stale working copies from undoing repairs or external edits.
+- Save As Image remembers manual format choices for each preparation profile
+  and destination. Switching destinations restores that destination's default
+  or its own remembered choice.
+- Folder boot repair reports unreadable directories separately from image
+  failures and identifies incomplete scans while repairing accessible files.
 - **Save As Image** remembers the selected image format across dialog openings
   and app restarts. Cancelled dialogs and required IMG exports for floppy
   delivery leave that preference unchanged.

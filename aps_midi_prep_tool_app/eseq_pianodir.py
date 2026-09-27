@@ -66,6 +66,7 @@ class PianodirTrackEntry:
     image_path: str
     local_path: str
     title: str
+    short_name_bytes: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -351,13 +352,18 @@ def _encode_dos83_component(text, length):
     return bytes(encoded[:length]).ljust(length, b" ")
 
 
+def dos_filename_key(name):
+    """Fold ASCII case only: Unicode expansions are not DOS filename identity."""
+    return str(name).translate(str.maketrans("abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+
+
 def build_dos83_name_bytes(path, *, uppercase=False):
     filename = os.path.basename(path or "")
     stem, ext = os.path.splitext(filename)
     ext = ext.lstrip(".")
     if uppercase:
-        stem = stem.upper()
-        ext = ext.upper()
+        stem = dos_filename_key(stem)
+        ext = dos_filename_key(ext)
     # Match the lossless OEM names used by the FAT reader and mtools; replacing
     # high bytes with underscores would make the catalog refer to missing songs.
     stem_bytes = _encode_dos83_component(stem, 8)
@@ -432,7 +438,7 @@ def _build_track_entry(track_entry):
             "build MUSIC.DIR instead of PIANODIR.FIL."
         )
 
-    short_name = build_dos83_name_bytes(track_entry.image_path)
+    short_name = getattr(track_entry, "short_name_bytes", b"") or build_dos83_name_bytes(track_entry.image_path)
     if is_q11_eseq_bytes(data):
         track = bytearray(PIANODIR_TRACK_SIZE)
         track[0x00:0x0B] = short_name
@@ -557,7 +563,7 @@ def music_dir_order_keys(data):
     except Exception:
         return order_keys
     for song in songs:
-        filename = (song.get("filename") or "").upper()
+        filename = dos_filename_key(song.get("filename") or "")
         if filename:
             order_keys[filename] = clavinova_music_order_key(song.get("slot", 1))
     return order_keys
@@ -576,7 +582,8 @@ def _build_musicdir_record(track_entry):
     record = bytearray(data[CLAVINOVA_MDA_RECORD_SOURCE_START:CLAVINOVA_MDA_RECORD_SOURCE_END])
     if len(record) != CLAVINOVA_MUSICDIR_RECORD_SIZE:
         raise ValueError(f"{os.path.basename(track_entry.image_path)} is too small to build a MUSIC.DIR entry.")
-    record[0:11] = build_dos83_name_bytes(track_entry.image_path, uppercase=True)
+    record[0:11] = (getattr(track_entry, "short_name_bytes", b"")
+                    or build_dos83_name_bytes(track_entry.image_path, uppercase=True))
     return bytes(record)
 
 

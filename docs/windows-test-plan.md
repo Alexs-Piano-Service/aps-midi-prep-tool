@@ -64,6 +64,27 @@ the executable's path, hash, signature status, and available commands.
 | 18 | After restarting, repeat create/open/edit IMG, create/open HFE, both conversions, damaged-image recovery, and cancellation. Run `where.exe mformat` (also mcopy, mdir, mdel, mren) outside APS. | All workflows still work; tools are still absent from the machine PATH. |
 | 19 | Select a test song and export MP3 using the built-in piano renderer. Play the exported MP3 in a separate audio player. | Nonempty playable audio with the expected notes; no LAME or development-tool installation required. If the package advertises bundled SoundFonts, repeat with that renderer. |
 
+## Font and spacing checks
+
+Compare the main window with the Linux reference at the same font-size setting.
+At a 12-point desktop body font, action headings remain 18 points, the mode
+banner remains 14 points, and the options panels retain their original padding
+and 40-unit minimum rows. Headings use the desktop UI font family. With a
+smaller Windows body font, headings and spacing should shrink proportionally.
+
+On Windows, check 100%, 150%, and 200% display scaling with both an empty list
+and the test songs loaded. Try Regular, Small, and Compact under
+Settings → Font Size, then return to Regular. Repeat in System, Light, and Dark
+appearance. Button labels, checkboxes, menus, table rows, and the mode banner
+must remain readable without clipping or overlapping. Returning to Regular
+must restore the original proportions without making the window's text
+progressively larger or smaller. Record screenshots and the display scale,
+desktop font, and app font-size setting in the release evidence.
+
+`tests/test_ui_font_scaling.py` checks font proportions, text fit, and layout
+round trips. Running Windows Python under Wine is a useful additional check,
+but does not replace this native Windows display-scaling pass.
+
 ## Release decision
 
 Complete every row in `results.csv` with PASS, FAIL, or an explained N/A. Leave

@@ -38,8 +38,11 @@ class _DialogHarness(QWidget):
     def _center_child_dialog(self, _dialog, **_kwargs):
         pass
 
-    def _make_scaled_font(self, family, size, weight):
-        return QFont(family, size, weight)
+    def _make_heading_font(self, reference_point_size=18):
+        font = QFont(self.font())
+        font.setPointSizeF(font.pointSizeF() * reference_point_size / 12)
+        font.setWeight(QFont.Bold)
+        return font
 
     def show_disclaimer_dialog(self):
         self.disclaimer_opened = True

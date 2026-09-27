@@ -1271,6 +1271,10 @@ The tested program writes the same value at E-SEQ file offset `0x4F` and `PIANOD
 
 ### 13.4 Normal `PIANODIR` song-record generation
 
+When rebuilding a catalog for an existing FAT image, use the original 11-byte
+DOS short name for each record, including OEM bytes. The same rule applies to
+`MUSIC.DIR`; Unicode uppercasing can expand characters and identify a different file.
+
 For a normal E-SEQ file:
 
 ```python

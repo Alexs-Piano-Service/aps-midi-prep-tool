@@ -290,6 +290,28 @@ def test_batch_cancellation_keeps_completed_repairs_and_leaves_later_images_unto
     assert later.read_bytes() == original
 
 
+@pytest.mark.parametrize("unreadable_root", (False, True))
+def test_batch_reports_incomplete_scan_separately_from_image_results(tmp_path, monkeypatch, unreadable_root):
+    source, data, geometry = song_image(tmp_path)
+    source.write_bytes(protect(data, geometry, "blank"))
+    blocked = str(tmp_path if unreadable_root else tmp_path / "unreadable")
+
+    def walk(path, *, onerror):
+        assert str(path) == str(tmp_path)
+        if not unreadable_root:
+            yield str(tmp_path), ["unreadable"], [source.name]
+        onerror(PermissionError(13, "Access denied", blocked))
+
+    monkeypatch.setattr(repair.os, "walk", walk)
+    batch = repair.repair_boot_sector_batch(tmp_path, directory=True, recursive=True)
+    assert len(batch.scan_errors) == 1
+    assert batch.scan_errors[0].path == blocked
+    assert "Access denied" in batch.scan_errors[0].error
+    assert len(batch.results) == (0 if unreadable_root else 1)
+    if batch.results:
+        assert batch.results[0].repaired and not batch.results[0].error
+
+
 def test_symlink_images_are_not_modified_or_followed_by_batch(tmp_path):
     source, data, geometry = song_image(tmp_path)
     original = protect(data, geometry, "blank")

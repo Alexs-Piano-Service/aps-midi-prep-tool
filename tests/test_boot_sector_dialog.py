@@ -7,13 +7,14 @@ import pytest
 
 from aps_midi_prep_tool_app import boot_sector_dialog
 from aps_midi_prep_tool_app.boot_sector_dialog import BootSectorRepairDialog
-from aps_midi_prep_tool_app.boot_sector_repair import ImageRepairBatch
+from aps_midi_prep_tool_app.boot_sector_repair import DirectoryScanError, ImageRepairBatch
+from aps_midi_prep_tool_app import floppy_image as image, main_window
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translate_text
 from test_boot_sector_repair import protect, song_image, visible_song_image
 from test_inspection_staging import _edit_title, _load_folder, window  # noqa: F401
 
 from PySide6.QtCore import QEventLoop, QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QLabel
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 
 
 def wait_for_worker(dialog):
@@ -153,6 +154,74 @@ def test_cancelling_without_run_leaves_source_untouched(window, tmp_path):
     dialog.reject()
     assert source.read_bytes() == original
     assert not list(tmp_path.glob("*.bak*"))
+
+
+@pytest.mark.parametrize("scope", ("file", "folder", "recursive"))
+@pytest.mark.parametrize("decision", ("none", "save", "discard", "cancel"))
+def test_repair_coordinates_with_open_image_and_preserves_repair_on_next_save(
+    window, tmp_path, monkeypatch, scope, decision,
+):
+    folder = tmp_path / "images"
+    folder.mkdir()
+    source, data, _ = song_image(folder)
+    source.write_bytes(data)
+    session = image.FloppyImageSession.load(source)
+    window._activate_disk_session(session, session.list_entries(), prepare_destination=False)
+    window.fileWriteProtectOriginalAction.setChecked(False)
+    if decision != "none":
+        window.pendingImageRenames["SONG.FIL"] = "RENAMED.FIL"
+    replies = {"save": QMessageBox.Save, "discard": QMessageBox.Discard, "cancel": QMessageBox.Cancel}
+    questions = []
+
+    def question(*args):
+        questions.append(args)
+        assert decision != "none"
+        return replies[decision]
+
+    monkeypatch.setattr(main_window.QMessageBox, "question", question)
+    monkeypatch.setattr(window, "_show_operation_error", lambda *a, **k: pytest.fail(str((a, k))))
+
+    def execute(dialog, **_kwargs):
+        assert isinstance(dialog, BootSectorRepairDialog)
+        if scope != "file":
+            dialog.scope_combo.setCurrentIndex(1)
+            dialog.path_edit.setText(str(tmp_path if scope == "recursive" else folder))
+            dialog.recursive_check.setChecked(scope == "recursive")
+        dialog.run_button.click()
+        if decision == "cancel":
+            assert dialog.worker is None
+        else:
+            wait_for_worker(dialog)
+            assert dialog.results[0].repaired
+        dialog.reject()
+
+    monkeypatch.setattr(window, "_exec_child_dialog", execute)
+    window.repair_image_boot_sector_dialog()
+    assert bool(questions) == (decision != "none")
+    if decision == "cancel":
+        assert window.image_session is session
+        assert window.pendingImageRenames == {"SONG.FIL": "RENAMED.FIL"}
+        assert source.read_bytes() == data
+        return
+    assert window.image_session is not session
+    assert not window.pendingImageRenames
+    expected = "RENAMED.FIL" if decision == "save" else "SONG.FIL"
+    entry, = window.image_session.list_entries().entries
+    assert entry.path == expected and entry.attributes == "21"
+    # A subsequent ordinary edit/save must retain the utility's visibility repair.
+    window.image_session.commit_to_source(renames={expected: "NEXT.FIL"})
+    entry, = image.read_image_listing(source).entries
+    assert entry.path == "NEXT.FIL" and entry.attributes == "21"
+
+
+def test_incomplete_folder_scan_is_visible_even_with_no_image_results(window):
+    dialog = BootSectorRepairDialog(window)
+    dialog._completed(ImageRepairBatch((), scan_errors=(DirectoryScanError("blocked", "Access denied"),)))
+    assert "Folder scan incomplete" in dialog.status_label.text()
+    assert "No supported image files found" not in dialog.status_label.text()
+    assert "blocked" in dialog.report.toPlainText()
+    assert "Access denied" in dialog.report.toPlainText()
+    dialog.reject()
 
 
 def test_utility_is_available_without_loaded_songs_and_disabled_while_busy(window):

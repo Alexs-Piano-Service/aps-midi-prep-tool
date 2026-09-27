@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from .eseq_pianodir import (
@@ -33,6 +34,7 @@ from .eseq_pianodir import (
     build_music_dir_bytes,
     build_pianodir_bytes,
     build_eseq_order_key_from_path,
+    dos_filename_key,
     is_clavinova_mda_file,
     is_eseq_directory_path,
     is_pianodir_path,
@@ -55,6 +57,10 @@ from . import floppy_save_recovery, windows_write_guard
 
 class FloppyImageError(Exception):
     """Raised when a floppy image cannot be loaded or edited."""
+
+
+class AmbiguousDosFilenameError(FloppyImageError):
+    """A filename cannot safely identify a single FAT directory entry."""
 
 
 class FloppyOperationCancelled(FloppyImageError):
@@ -169,6 +175,7 @@ class ImageEntry:
     attributes: str = ""
     modified_time: float | None = None
     is_directory: bool = False
+    short_name_bytes: bytes = b""
 
     @property
     def name(self):
@@ -1968,11 +1975,11 @@ def verify_image_payloads(delivered_path, prepared_raw_path, disk_format, *, can
                 cancel_callback=cancel_callback,
             )
         expected = {
-            entry.path.upper(): entry.path
+            entry.path: entry.path
             for entry in _read_fat12_image_listing(prepared_raw_path).entries if not entry.directory
         }
         actual = {
-            entry.path.upper(): entry.path
+            entry.path: entry.path
             for entry in _read_fat12_image_listing(delivered_raw).entries if not entry.directory
         }
         if set(expected) != set(actual):
@@ -2234,7 +2241,8 @@ def _run_mcopy_host_to_image(command_runner, target_img, host_path, image_path, 
     mcopy = _require_command("mcopy")
     mcopy_host_path, cleanup_dir = _mtools_host_source_path(host_path, image_path)
     try:
-        command_runner(
+        _run_mtools_image_command(
+            command_runner,
             [mcopy, "-i", target_img, mcopy_host_path, mtools_path(image_path)],
             error_message,
             cancel_callback=cancel_callback,
@@ -5486,7 +5494,7 @@ def run_windows_raw_write_helper_from_argv(argv=None):
 
 
 def _image_entry_key(entry):
-    return _normalize_image_path(entry.path).upper()
+    return dos_filename_key(_normalize_image_path(entry.path))
 
 
 def _must_refresh_floppy_sync_entry(entry):
@@ -6345,6 +6353,7 @@ def _iter_fat_directory_entries(directory_bytes):
         yield {
             "name": name,
             "short_name": short_name,
+            "short_name_bytes": bytes(entry[:11]),
             "offset": pos,
             "attr": attr,
             "cluster": _u16le(entry, 26),
@@ -6491,6 +6500,7 @@ def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_
                 packed_size=packed_size,
                 attributes=f"{attr:02X}",
                 modified_time=entry.get("modified_time"),
+                short_name_bytes=entry["short_name_bytes"],
             )
         )
     return entries
@@ -6554,17 +6564,25 @@ def _split_image_path_components(image_path):
     return [part for part in _normalize_image_path(image_path).split("/") if part]
 
 
+def _find_fat12_entry(directory_bytes, name, *, original_path):
+    entries = list(_iter_fat_directory_entries(directory_bytes))
+    raw = _oem_short_name_bytes(name)
+    exact = [entry for entry in entries if raw is not None and entry["short_name_bytes"] == raw]
+    if not exact:
+        exact = [entry for entry in entries if name in (entry["name"], entry["short_name"])]
+    matches = exact or [entry for entry in entries if dos_filename_key(name) in
+                        {dos_filename_key(entry["name"]), dos_filename_key(entry["short_name"])}]
+    if len(matches) > 1:
+        raise AmbiguousDosFilenameError(f"Ambiguous DOS filename in {original_path}; no file was selected.")
+    return matches[0] if matches else None
+
+
 def _locate_fat12_entry(data, geometry, fat, directory_bytes, path_parts, *, original_path):
     if not path_parts:
         raise FloppyImageError(f"Could not extract {original_path} from image: invalid image path.")
 
-    target_name = path_parts[0].upper()
-    for entry in _iter_fat_directory_entries(directory_bytes):
-        if (
-            entry["name"].upper() != target_name
-            and entry.get("short_name", "").upper() != target_name
-        ):
-            continue
+    entry = _find_fat12_entry(directory_bytes, path_parts[0], original_path=original_path)
+    if entry is not None:
         if len(path_parts) == 1:
             return entry
         if not (entry["attr"] & 0x10):
@@ -6584,29 +6602,161 @@ def _locate_fat12_entry(data, geometry, fat, directory_bytes, path_parts, *, ori
     raise FloppyImageError(f"Could not extract {original_path} from image: file was not found.")
 
 
-def _clear_fat12_file_protection(img_path, image_path):
-    """Clear protection on one entry in a caller-owned working image only."""
+def _fat12_directory_slots(img_path, directory_path):
+    """Return directory bytes and physical slot offsets, including fragmented folders."""
     data, geometry, fat, directory = _read_fat12_image_context(img_path)
-    parts = _split_image_path_components(image_path)
     offsets = [geometry.root_offset + pos for pos in range(0, len(directory), 32)]
-    for index, part in enumerate(parts):
-        entry = next((entry for entry in _iter_fat_directory_entries(directory)
-                      if part.upper() in {entry["name"].upper(), entry["short_name"].upper()}), None)
+    for part in _split_image_path_components(directory_path):
+        entry = _find_fat12_entry(directory, part, original_path=directory_path)
         if entry is None:
-            raise FloppyImageError(f"Could not find {image_path} in the working image.")
-        if index == len(parts) - 1:
-            if entry["attr"] & 0x07:
-                with open(img_path, "r+b") as handle:
-                    handle.seek(offsets[entry["offset"] // 32] + 11)
-                    handle.write(bytes([entry["attr"] & ~0x07]))
-            return
+            raise FloppyImageError(f"Could not find {directory_path} in the working image.")
         if not entry["attr"] & 0x10:
-            raise FloppyImageError(f"Invalid image directory in {image_path}.")
+            raise FloppyImageError(f"Invalid image directory in {directory_path}.")
         clusters = _fat12_cluster_chain_from_start(fat, entry["cluster"])
         directory = _read_directory_chain_from_image(data, geometry, fat, entry["cluster"])
         offsets = [_cluster_offset(geometry, cluster) + pos
                    for cluster in clusters for pos in range(0, geometry.cluster_size, 32)]
-    raise FloppyImageError("Invalid image file path.")
+    return directory, offsets
+
+
+def _clear_fat12_file_protection(img_path, image_path):
+    """Clear protection on one entry in a caller-owned working image only."""
+    parts = _split_image_path_components(image_path)
+    if not parts:
+        raise FloppyImageError("Invalid image file path.")
+    directory, offsets = _fat12_directory_slots(img_path, "/".join(parts[:-1]))
+    entry = _find_fat12_entry(directory, parts[-1], original_path=image_path)
+    if entry is None:
+        raise FloppyImageError(f"Could not find {image_path} in the working image.")
+    if entry["attr"] & 0x07:
+        with open(img_path, "r+b") as handle:
+            handle.seek(offsets[entry["offset"] // 32] + 11)
+            handle.write(bytes([entry["attr"] & ~0x07]))
+
+
+def _oem_short_name_bytes(name):
+    """Encode only lossless DOS short names; leave long filenames to mtools."""
+    try:
+        stem, separator, extension = name.partition(".")
+        stem, extension = stem.encode("cp850"), extension.encode("cp850")
+    except UnicodeEncodeError:
+        return None
+    if not 1 <= len(stem) <= 8 or len(extension) > 3 or (separator and not extension):
+        return None
+    raw = stem.ljust(8, b" ") + extension.ljust(3, b" ")
+    if raw.startswith(b"\xe5"):
+        raw = b"\x05" + raw[1:]
+    if not _entry_name_looks_plausible(raw) or _decode_dos_directory_name(raw) != name:
+        return None
+    return raw
+
+
+def _check_mtools_filename_ambiguity(img_path, paths):
+    """Reject records that mtools cannot distinguish, even by exact spelling."""
+    for path in paths:
+        parts = _split_image_path_components(path)
+        for index, part in enumerate(parts):
+            directory, _ = _fat12_directory_slots(img_path, "/".join(parts[:index]))
+            key = dos_filename_key(part)
+            matches = [entry for entry in _iter_fat_directory_entries(directory)
+                       if key in {dos_filename_key(entry["name"]), dos_filename_key(entry["short_name"])}]
+            if len(matches) > 1:
+                raise AmbiguousDosFilenameError(
+                    f"Ambiguous DOS filename in {path}; no file was selected."
+                )
+            if not matches or not matches[0]["attr"] & 0x10:
+                break
+
+
+@contextmanager
+def _ascii_mtools_image_paths(img_path, paths):
+    """Temporarily alias OEM short names in a caller-owned image.
+
+    Native Windows mtools receives narrow argv: Unicode box-drawing characters
+    can turn into ASCII punctuation before mtools even sees them. Keep those
+    bytes inside FAT directory records and pass only ASCII aliases to the tool.
+    Locate surviving aliases again afterward because mcopy/mren can move slots.
+    """
+    # Physical floppy writes use their existing device-specific path. Temporary
+    # directory aliases belong only in regular image files.
+    if not os.path.isfile(img_path):
+        yield paths
+        return
+    # Exact native extraction is safe for Foo.FIL alongside FOO.FIL, but
+    # mtools can select both records. A replacement must reject this before
+    # deleting either one, or its later copy can overwrite the remaining file.
+    _check_mtools_filename_ambiguity(img_path, paths)
+    if all(path.isascii() for path in paths):
+        yield paths
+        return
+    aliases = {}
+    staged = []
+    reserved = {dos_filename_key(part) for path in paths for part in _split_image_path_components(path)}
+    try:
+        translated = []
+        for path in paths:
+            parts = []
+            for part in _split_image_path_components(path):
+                parent = "/".join(parts)
+                key = (parent, part)
+                if key in aliases:
+                    parts.append(aliases[key])
+                    continue
+                raw = _oem_short_name_bytes(part) if not part.isascii() else None
+                if raw is None:
+                    parts.append(part)
+                    continue
+                directory, offsets = _fat12_directory_slots(img_path, parent)
+                entries = list(_iter_fat_directory_entries(directory))
+                entry = _find_fat12_entry(directory, part, original_path=path)
+                if entry is not None and entry["name"] != entry["short_name"]:
+                    # A VFAT name has separate UTF-16 records; this workaround
+                    # is for OEM-only directory records.
+                    parts.append(part)
+                    continue
+                occupied = reserved | {dos_filename_key(name) for item in entries
+                                       for name in (item["name"], item["short_name"])}
+                counter = 0
+                while (alias := f"APS{counter:05X}.TMP") in occupied:
+                    counter += 1
+                reserved.add(alias)
+                case_flags = 0
+                if entry is not None:
+                    pos = entry["offset"]
+                    raw = directory[pos:pos + 11]
+                    case_flags = directory[pos + 12]
+                    with open(img_path, "r+b") as handle:
+                        handle.seek(offsets[pos // 32])
+                        handle.write(_oem_short_name_bytes(alias))
+                        handle.seek(offsets[pos // 32] + 12)
+                        handle.write(b"\x00")
+                staged.append((parent, alias, raw, case_flags))
+                aliases[key] = alias
+                parts.append(alias)
+            translated.append("/".join(parts))
+        yield translated
+    finally:
+        for parent, alias, raw, case_flags in reversed(staged):
+            directory, offsets = _fat12_directory_slots(img_path, parent)
+            entry = next((item for item in _iter_fat_directory_entries(directory)
+                          if item["short_name"] == alias), None)
+            if entry is not None:
+                with open(img_path, "r+b") as handle:
+                    handle.seek(offsets[entry["offset"] // 32])
+                    handle.write(raw)
+                    handle.seek(offsets[entry["offset"] // 32] + 12)
+                    handle.write(bytes([case_flags]))
+
+
+def _run_mtools_image_command(command_runner, args, message, cancel_callback=None):
+    img_path = args[args.index("-i") + 1]
+    path_indices = [index for index, arg in enumerate(args) if str(arg).startswith("::/")]
+    paths = [args[index][3:] for index in path_indices]
+    with _ascii_mtools_image_paths(img_path, paths) as translated:
+        args = list(args)
+        for index, path in zip(path_indices, translated):
+            args[index] = mtools_path(path)
+        return command_runner(args, message, cancel_callback=cancel_callback)
 
 
 def _copy_prepared_floppy_file(source, destination, cancel_callback=None, *, created_callback=None):
@@ -8824,6 +8974,14 @@ class PreparedWindowsFileSave(_WindowsFileSaveMixin):
         )
 
 
+def _image_source_fingerprint(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
 class FloppyImageSession(_WindowsFileSaveMixin):
     def __init__(
         self,
@@ -8851,6 +9009,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         self.working_img_path = working_img_path
         self.disk_format = disk_format
         self.source_kind = source_kind
+        self._source_fingerprint = (
+            _image_source_fingerprint(source_path)
+            if source_kind == "image" and os.path.isfile(source_path) else None
+        )
         self.source_name = source_name or os.path.basename(source_path)
         self.drive_info = drive_info
         self.gw_source = gw_source
@@ -8888,23 +9050,28 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         temp_dir = tempfile.mkdtemp(prefix="aps_floppy_image_")
         try:
             _raise_if_cancelled(cancel_callback)
+            source_fingerprint = _image_source_fingerprint(source_path)
             _notify_progress(progress_callback, 0, 4, "Preparing floppy image...")
             if source_ext in RAW_IMAGE_EXTENSIONS:
-                return cls._load_raw(
+                session = cls._load_raw(
                     source_path,
                     source_ext,
                     temp_dir,
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
                 )
-            return cls._load_converted(
-                source_path,
-                source_ext,
-                temp_dir,
-                disk_format_hint=disk_format_hint,
-                progress_callback=progress_callback,
-                cancel_callback=cancel_callback,
-            )
+            else:
+                session = cls._load_converted(
+                    source_path,
+                    source_ext,
+                    temp_dir,
+                    disk_format_hint=disk_format_hint,
+                    progress_callback=progress_callback,
+                    cancel_callback=cancel_callback,
+                )
+            session._source_fingerprint = source_fingerprint
+            session._assert_source_unchanged()
+            return session
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
@@ -10505,6 +10672,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             # only the requested file from block devices instead.
             if not _is_block_device_path(source_img):
                 data = _read_fat12_file_bytes(source_img, image_path)
+        except AmbiguousDosFilenameError:
+            raise
         except FloppyImageError:
             pass
         if data is None:
@@ -10589,7 +10758,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         eseq_variant = _normalized_eseq_variant(eseq_variant)
         directory_filename = _eseq_directory_filename_for_variant(eseq_variant)
         directory_order = {
-            _normalize_image_path(path).upper(): bytes(order_key or b"")
+            dos_filename_key(_normalize_image_path(path)): bytes(order_key or b"")
             for path, order_key in dict(eseq_directory_order or {}).items()
         }
         listing = read_image_listing(target_img)
@@ -10623,11 +10792,12 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     image_path=entry.path,
                     local_path=extracted_path,
                     title=title,
+                    short_name_bytes=getattr(entry, "short_name_bytes", b""),
                 )
             )
 
         def entry_sort_key(item):
-            mapped_key = directory_order.get(_normalize_image_path(item.image_path).upper())
+            mapped_key = directory_order.get(dos_filename_key(_normalize_image_path(item.image_path)))
             if mapped_key:
                 return mapped_key
             if os.path.isfile(item.local_path):
@@ -10753,7 +10923,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             for image_path in sorted(deletes, key=lambda item: item.lower(), reverse=True):
                 _raise_if_cancelled(cancel_callback)
                 _clear_fat12_file_protection(target_img, image_path)
-                self._run_mtools(
+                _run_mtools_image_command(
+                    self._run_mtools,
                     [mdel, "-i", target_img, mtools_path(image_path)],
                     f"Could not delete {image_path} from image",
                     cancel_callback=cancel_callback,
@@ -10784,7 +10955,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     order_key=order_key_edits.get(image_path),
                 )
                 _clear_fat12_file_protection(target_img, image_path)
-                self._run_mtools(
+                _run_mtools_image_command(
+                    self._run_mtools,
                     [mdel, "-i", target_img, mtools_path(image_path)],
                     f"Could not replace {image_path} in image",
                     cancel_callback=cancel_callback,
@@ -10813,7 +10985,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         order_key=order_key_edits.get(image_path),
                     )
                 _clear_fat12_file_protection(target_img, image_path)
-                self._run_mtools(
+                _run_mtools_image_command(
+                    self._run_mtools,
                     [mdel, "-i", target_img, mtools_path(image_path)],
                     f"Could not replace {image_path} in image",
                     cancel_callback=cancel_callback,
@@ -10849,7 +11022,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     order_key=order_key,
                 )
                 _clear_fat12_file_protection(target_img, image_path)
-                self._run_mtools(
+                _run_mtools_image_command(
+                    self._run_mtools,
                     [mdel, "-i", target_img, mtools_path(image_path)],
                     f"Could not replace {image_path} in image",
                     cancel_callback=cancel_callback,
@@ -10875,18 +11049,21 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     directory = os.path.dirname(normalized_source).replace("\\", "/")
                     temp_name = f"APSR{uuid.uuid4().hex[:4].upper()}.TMP"
                     temp_path = f"{directory}/{temp_name}" if directory else temp_name
-                    self._run_mtools(
+                    _run_mtools_image_command(
+                        self._run_mtools,
                         [mren, "-i", target_img, mtools_path(source_path), mtools_path(temp_path)],
                         f"Could not stage case-only rename for {source_path} in image",
                         cancel_callback=cancel_callback,
                     )
-                    self._run_mtools(
+                    _run_mtools_image_command(
+                        self._run_mtools,
                         [mren, "-i", target_img, mtools_path(temp_path), mtools_path(target_path)],
                         f"Could not rename {source_path} in image",
                         cancel_callback=cancel_callback,
                     )
                     continue
-                self._run_mtools(
+                _run_mtools_image_command(
+                    self._run_mtools,
                     [mren, "-i", target_img, mtools_path(source_path), mtools_path(target_path)],
                     f"Could not rename {source_path} in image",
                     cancel_callback=cancel_callback,
@@ -11267,6 +11444,20 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             if os.path.exists(modified_img):
                 os.remove(modified_img)
 
+    def _assert_source_unchanged(self):
+        expected = getattr(self, "_source_fingerprint", None)
+        if self.source_kind != "image" or expected is None:
+            return
+        try:
+            if _image_source_fingerprint(self.source_path) == expected:
+                return
+        except OSError:
+            pass
+        raise FloppyImageError(
+            "Source image changed since it was opened. Reload it or use Save As Image "
+            "to preserve pending edits. No file was overwritten."
+        )
+
     def commit_to_source(
         self,
         renames=None,
@@ -11284,6 +11475,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         cancel_callback=None,
         verify_after_write=False,
     ):
+        FloppyImageSession._assert_source_unchanged(self)
         self.last_floppy_save_diagnostics = {}
         self.last_write_verification = {"confidence": "not_written", "hardware_tested": False}
         modified_img = self.create_modified_image(
@@ -11344,7 +11536,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 report = self._write_image_direct(modified_img, temp_output, output_ext, cancel_callback=cancel_callback)
                 reports = _gw_sector_reports(report)
                 _raise_if_cancelled(cancel_callback)
+                saved_fingerprint = _image_source_fingerprint(temp_output)
+                FloppyImageSession._assert_source_unchanged(self)
                 _finish_temp_output(temp_output, self.source_path)
+                self._source_fingerprint = saved_fingerprint
             if self.source_kind.startswith("floppy"):
                 self.last_write_verification = {"confidence": "written", "hardware_tested": False}
                 if verify_after_write:

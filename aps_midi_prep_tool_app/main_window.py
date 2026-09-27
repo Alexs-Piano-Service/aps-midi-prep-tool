@@ -30,7 +30,7 @@ from math import exp, pi, sin
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QProcess, QRectF, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QPolygonF, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QPolygonF, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -208,6 +208,7 @@ from .eseq_pianodir import (
     build_pianodir_bytes,
     clavinova_music_order_key,
     derive_catalog_number_from_image_filename,
+    dos_filename_key,
     eseq_type_display_label,
     is_clavinova_mda_file,
     is_eseq_directory_path,
@@ -8963,6 +8964,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     CONTROL_PANEL_ROW_HEIGHT = 40
     CONTROL_PANEL_SPACING = 6
     CONTROL_PANEL_MARGINS = (10, 14, 10, 10)
+    # Keep the original Linux proportions (12pt body, 18pt actions, 14pt mode)
+    # while following the desktop's font size and Qt's automatic DPI scaling.
+    REFERENCE_BODY_POINT_SIZE = 12.0
     BUG_REPORT_LOG_TAIL_CHARS = 256 * 1024
     FONT_SCALE_OPTIONS = (
         ("regular", "font_size.regular", 1.0),
@@ -9159,21 +9163,21 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self.choose_button = QPushButton(self._lt("Open MIDI Folder"))
         self.choose_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.choose_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
+        self.choose_button.setFont(self._make_heading_font())
         self._set_static_tooltip(self.choose_button, 'Select a folder to scan for .mid and .midi files.')
         self.choose_button.clicked.connect(self.browse_directory)
         source_layout.addWidget(self.choose_button, stretch=1)
 
         self.open_image_button = QPushButton(self._lt("Open Image"))
         self.open_image_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.open_image_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
+        self.open_image_button.setFont(self._make_heading_font())
         self._set_static_tooltip(self.open_image_button, 'Open a floppy image file for editing in Image Mode.')
         self.open_image_button.clicked.connect(self.open_image_dialog)
         source_layout.addWidget(self.open_image_button, stretch=1)
 
         self.read_floppy_button = QPushButton(self._lt("Read Floppy"))
         self.read_floppy_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.read_floppy_button.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
+        self.read_floppy_button.setFont(self._make_heading_font())
         self._set_static_tooltip(self.read_floppy_button, 'Read a floppy from a floppy drive or from a Greaseweazle-connected drive.')
         self.read_floppy_button.clicked.connect(self.load_floppy_drive)
         source_layout.addWidget(self.read_floppy_button, stretch=1)
@@ -9183,8 +9187,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.preparationBar = QWidget()
         self.preparationBar.setObjectName("preparationBar")
         preparation_layout = QHBoxLayout(self.preparationBar)
-        preparation_layout.setContentsMargins(6, 3, 6, 3)
-        preparation_layout.setSpacing(8)
+        self.preparationLayout = preparation_layout
+        preparation_layout.setContentsMargins(*self._scaled_margins((6, 3, 6, 3)))
+        preparation_layout.setSpacing(self._scaled_int(8, minimum=3))
         self.preparationButton = QPushButton(self._lt("Preparing for..."))
         self.preparationButton.setObjectName("preparationButton")
         self.preparationButton.clicked.connect(self.choose_preparation_profile)
@@ -9354,7 +9359,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self.modeBannerLabel = QLabel("MIDI MODE")
         self.modeBannerLabel.setAlignment(Qt.AlignCenter)
-        mode_font = self._make_scaled_font("Helvetica", 14, QFont.Bold)
+        mode_font = self._make_heading_font(14)
         self.modeBannerLabel.setFont(mode_font)
         self.modeBannerLabel.setWordWrap(True)
         self._set_static_tooltip(self.modeBannerLabel, 'Shows the current editing mode and active source.')
@@ -9409,7 +9414,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         # Clear button (styled to match Save button)
         self.clearButton = QToolButton()
         self.clearButton.setText(self._lt("Clear"))
-        self.clearButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
+        self.clearButton.setFont(self._make_heading_font())
         self.clearButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clearButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self._set_static_tooltip(self.clearButton, 'Remove all files from the current list.')
@@ -9417,14 +9422,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self.saveButton = QToolButton()
         self.saveButton.setText(self._lt("Save"))
-        self.saveButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
+        self.saveButton.setFont(self._make_heading_font())
         self.saveButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.saveButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.saveButton.clicked.connect(self.save_pending_changes)
 
         self.saveAsButton = QToolButton()
         self.saveAsButton.setText(self._lt("Save As"))
-        self.saveAsButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
+        self.saveAsButton.setFont(self._make_heading_font())
         self.saveAsButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.saveAsButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self._set_static_tooltip(self.saveAsButton, 'Save copies with current titles to a selected destination folder.')
@@ -9432,7 +9437,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self.saveAsImageButton = QToolButton()
         self.saveAsImageButton.setText(self._lt("Save As Image"))
-        self.saveAsImageButton.setFont(self._make_scaled_font("Helvetica", 18, QFont.Bold))
+        self.saveAsImageButton.setFont(self._make_heading_font())
         self.saveAsImageButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.saveAsImageButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self._set_static_tooltip(self.saveAsImageButton, 'Create one or more floppy images from the currently listed files.')
@@ -10025,7 +10030,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
     def _layout_scale_factor(self, mode=None):
         mode = self._normalized_font_scale(mode if mode is not None else self._font_scale())
-        return float(self.LAYOUT_SCALE_FACTORS.get(mode, self._font_scale_factor(mode)))
+        density = float(self.LAYOUT_SCALE_FACTORS.get(mode, self._font_scale_factor(mode)))
+        base_font = QFont(getattr(self, "baseApplicationFont", QApplication.font()))
+        reference_font = QFont(base_font)
+        reference_font.setPointSizeF(self.REFERENCE_BODY_POINT_SIZE)
+        # Both metrics use the same paint device: no extra devicePixelRatio
+        # multiplier, and no use of the already-scaled application font.
+        font_ratio = QFontMetricsF(base_font).height() / max(1.0, QFontMetricsF(reference_font).height())
+        return density * font_ratio
 
     def _scaled_int(self, value, *, minimum=0):
         try:
@@ -10081,6 +10093,18 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             font.setStyleHint(style_hint)
         return font
 
+    def _make_heading_font(self, reference_point_size=18):
+        font = self._make_scaled_font()
+        ratio = float(reference_point_size) / self.REFERENCE_BODY_POINT_SIZE
+        if font.pointSizeF() > 0:
+            font.setPointSizeF(font.pointSizeF() * ratio)
+        else:
+            font.setPixelSize(max(1, round(font.pixelSize() * ratio)))
+        # Use the same family as the body instead of asking for Helvetica,
+        # whose substitute can be a very different typeface on Windows.
+        font.setWeight(QFont.Bold)
+        return font
+
     def _set_title_monospace_font(self):
         self.title_monospace_font = self._make_scaled_font(
             "Courier New",
@@ -10122,8 +10146,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             main_layout.setSpacing(self._scaled_int(10, minimum=4))
             main_layout.setContentsMargins(*self._scaled_margins((10, 10, 10, 10)))
 
+        preparation_layout = getattr(self, "preparationLayout", None)
+        if preparation_layout is not None:
+            preparation_layout.setContentsMargins(*self._scaled_margins((6, 3, 6, 3)))
+
         for layout_name, spacing, minimum in (
             ("sourceLayout", 10, 4),
+            ("preparationLayout", 8, 3),
             ("fileListLayout", 6, 2),
             ("usageBarsLayout", 3, 1),
             ("reorderLayout", 8, 3),
@@ -10205,11 +10234,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None:
-                widget.setFont(self._make_scaled_font("Helvetica", point_size, QFont.Bold))
+                widget.setFont(self._make_heading_font(point_size))
 
         mode_banner = getattr(self, "modeBannerLabel", None)
         if mode_banner is not None:
-            mode_banner.setFont(self._make_scaled_font("Helvetica", 14, QFont.Bold))
+            mode_banner.setFont(self._make_heading_font(14))
 
         table = getattr(self, "table", None)
         if table is not None:
@@ -10806,6 +10835,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
     @staged_batch
     def _apply_preparation_profile(self, profile, medium, *, preserve_preferences=False):
+        previous = (MidiTitleWindow._preparation_profile(self).key, MidiTitleWindow._preparation_medium(self).key)
+        if previous != (profile.key, medium.key):
+            # Legacy global choices belong to the previous destination only.
+            self.settings.setValue(MidiTitleWindow.SETTING_SAVE_AS_IMAGE_FORMAT, "")
         changes = {} if preserve_preferences else proposed_settings(profile, medium)
         for key, value in changes.items():
             self.settings.setValue(key, value)
@@ -20660,8 +20693,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             except Exception as exc:
                 probe_errors.append(f"{os.path.basename(full_path) or full_path}: {exc}")
                 continue
-            if title_mode == "eseq" and os.path.basename(full_path).upper() in music_dir_order_keys:
-                order_key = music_dir_order_keys[os.path.basename(full_path).upper()]
+            if title_mode == "eseq" and dos_filename_key(os.path.basename(full_path)) in music_dir_order_keys:
+                order_key = music_dir_order_keys[dos_filename_key(os.path.basename(full_path))]
             regular_specs.append(
                 (
                     full_path,
@@ -21744,9 +21777,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return False
         info = self._image_info_for_path(image_path)
         if not info:
-            normalized_target = image_path.replace("\\", "/").upper()
+            normalized_target = dos_filename_key(image_path.replace("\\", "/"))
             for source_path, source_info in self.imageFileInfo.items():
-                if self._final_image_path(source_path).replace("\\", "/").upper() == normalized_target:
+                if dos_filename_key(self._final_image_path(source_path).replace("\\", "/")) == normalized_target:
                     info = source_info
                     break
         # The file probe checks the header, including songs without extensions.
@@ -24361,7 +24394,69 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         session = self.image_session
         if session is not None and session.source_kind == "image" and os.path.isfile(session.source_path):
             default_path = session.source_path
-        dialog = BootSectorRepairDialog(self, default_path)
+        affected_session = None
+
+        def reload_session(session):
+            refreshed = None
+            try:
+                refreshed = FloppyImageSession.load(session.source_path)
+                listing = refreshed.list_entries()
+            except Exception as exc:
+                if refreshed is not None:
+                    refreshed.cleanup()
+                QMessageBox.warning(self, self._lt("Repair Yamaha Boot Sector..."), str(exc))
+                return False
+            self._activate_disk_session(refreshed, listing, reset_original_write=False, prepare_destination=False)
+            return True
+
+        def prepare(source_path, options):
+            nonlocal affected_session
+            affected_session = None
+            session = self.image_session
+            if session is None or session.source_kind != "image":
+                return True
+            source = os.path.normcase(os.path.realpath(source_path))
+            opened = os.path.normcase(os.path.realpath(session.source_path))
+            if options["directory"]:
+                parent = os.path.dirname(opened)
+                try:
+                    affected = parent == source or (options["recursive"] and os.path.commonpath([source, opened]) == source)
+                except ValueError:
+                    affected = False
+            else:
+                try:
+                    affected = os.path.samefile(source_path, session.source_path)
+                except OSError:
+                    affected = source == opened
+            if not affected:
+                return True
+            if self._has_pending_image_changes():
+                reply = QMessageBox.question(
+                    self, self._lt("Repair Yamaha Boot Sector..."), self._lt(
+                        "This repair includes the open image. Save or discard its pending edits before repairing?"
+                    ), QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Cancel,
+                )
+                if reply == QMessageBox.Save:
+                    self.save_image_changes()
+                    if self._has_pending_image_changes():
+                        return False
+                elif reply == QMessageBox.Discard:
+                    if not reload_session(session):
+                        return False
+                else:
+                    return False
+            # Save As can have switched the active source; reloading that new
+            # session is harmless and keeps its just-saved edits intact.
+            affected_session = self.image_session
+            return True
+
+        def complete():
+            nonlocal affected_session
+            session, affected_session = affected_session, None
+            if session is not None and session is self.image_session:
+                reload_session(session)
+
+        dialog = BootSectorRepairDialog(self, default_path, before_repair=prepare, after_repair=complete)
         apply_window_icon(dialog)
         self._exec_child_dialog(dialog, resize_to_contents=False)
 
@@ -24960,8 +25055,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     info["title"] = title
                     info["title_source"] = "smart_pianosoft_catalog"
                     info["smart_pianosoft_track"] = catalog_song.track_number
-                if entry.name.upper() in image_order_overrides:
-                    order_key = image_order_overrides[entry.name.upper()]
+                if dos_filename_key(entry.name) in image_order_overrides:
+                    order_key = image_order_overrides[dos_filename_key(entry.name)]
             except Exception:
                 self._set_image_file_info(
                     entry.path,
@@ -26964,7 +27059,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             directory = os.path.dirname(current_path).replace("\\", "/")
             target_path = self._join_image_path(directory, export_filename)
             export_filename = ""
-        if target_path.upper() in self._active_image_paths(exclude_row=row):
+        if dos_filename_key(target_path) in self._active_image_paths(exclude_row=row):
             raise EseqConversionError(f"'{os.path.basename(target_path)}' already exists in this image folder.")
 
         source_host_path = self._pending_or_extracted_image_path(source_path)
@@ -28091,13 +28186,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 continue
             source_path = path_item.text()
             active_path = self.pendingImageRenames.get(source_path, source_path)
-            paths.add(active_path.upper())
+            paths.add(dos_filename_key(active_path))
         return paths
 
     def _find_image_row_for_active_path(self, active_path):
-        target_path = str(active_path or "").replace("\\", "/").strip().strip("/").upper()
+        target_path = str(active_path or "").replace("\\", "/").strip().strip("/")
         if not target_path:
             return -1
+        matches = []
         for row in range(self.table.rowCount()):
             if self._is_special_pianodir_row(row):
                 continue
@@ -28105,9 +28201,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             if path_item is None:
                 continue
             source_path = path_item.text()
-            if self._final_image_path(source_path).upper() == target_path:
+            final_path = self._final_image_path(source_path)
+            if final_path == target_path:
                 return row
-        return -1
+            if dos_filename_key(final_path) == dos_filename_key(target_path):
+                matches.append(row)
+        return matches[0] if len(matches) == 1 else -1
 
     def _image_existing_modified_timestamp(self, source_path):
         pending_path = self.pendingImageAdditions.get(source_path) or self.pendingImageReplacements.get(source_path)
@@ -28544,7 +28643,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if target_path == current_target:
             return False
 
-        if target_path.upper() in self._active_image_paths(exclude_row=row):
+        if dos_filename_key(target_path) in self._active_image_paths(exclude_row=row):
             QMessageBox.warning(
                 self,
                 self._lt("Name Already Exists"),
@@ -28993,8 +29092,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if validation_error:
             raise ValueError(validation_error)
 
-        used_names = {str(path).upper() for path in used_paths}
-        if candidate.upper() not in used_names:
+        used_names = {dos_filename_key(path) for path in used_paths}
+        if dos_filename_key(candidate) not in used_names:
             return candidate
 
         stem, ext = os.path.splitext(candidate)
@@ -29002,7 +29101,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             suffix = f" ({counter})"
             available = max(1, 255 - len(ext) - len(suffix))
             unique_candidate = f"{stem[:available]}{suffix}{ext}"
-            if unique_candidate.upper() not in used_names:
+            if dos_filename_key(unique_candidate) not in used_names:
                 return unique_candidate
         raise ValueError(f"Could not create a unique filename for {filename}.")
 
@@ -29269,7 +29368,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 except Exception as exc:
                     skipped.append(f"{original_name}: {exc}")
                     continue
-                used_paths.add(target_path.upper())
+                used_paths.add(dos_filename_key(target_path))
                 replaced.append(target_path)
                 if conversion_kind:
                     converted_count += 1
@@ -29326,7 +29425,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     f"{original_name}: Yamaha E-SEQ supports at most {eseq_limit} files"
                 )
                 continue
-            used_paths.add(target_path.upper())
+            used_paths.add(dos_filename_key(target_path))
             self.pendingImageAdditions[target_path] = staged_host_path
             self.imageFileInfo[target_path].update(MidiTitleWindow._image_conversion_review_details(
                 self, target_path, staged_host_path, added_source_path=host_path,
@@ -30085,7 +30184,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         title_label = QLabel(APP_TITLE_WITH_VERSION, dialog)
         title_label.setAlignment(Qt.AlignCenter)
-        title_label.setFont(self._make_scaled_font("Helvetica", 13, QFont.Bold))
+        title_label.setFont(self._make_heading_font(13))
         layout.addWidget(title_label)
 
         website_label = QLabel(f'<a href="{APP_WEBSITE}">{APP_WEBSITE}</a>', dialog)
@@ -31153,9 +31252,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         dialog_layout.addWidget(buttons)
 
         preparation_defaults = MidiTitleWindow._preparation_export_defaults(self)
-        saved_ext = str(
-            self.settings.value(self.SETTING_SAVE_AS_IMAGE_FORMAT, "") or ""
-        ).strip().lower().lstrip(".")
+        format_setting = (
+            f"{self.SETTING_SAVE_AS_IMAGE_FORMAT}_by_destination/"
+            f"{MidiTitleWindow._preparation_profile(self).key}/{MidiTitleWindow._preparation_medium(self).key}"
+        )
+        saved_ext = str(self.settings.value(
+            format_setting, self.settings.value(self.SETTING_SAVE_AS_IMAGE_FORMAT, ""),
+        ) or "").strip().lower().lstrip(".")
         if saved_ext not in {ext for ext, _label in PREFERRED_OUTPUT_EXTENSIONS}:
             saved_ext = ""
         default_ext = str(
@@ -31239,7 +31342,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         # An IMG required for physical-floppy delivery is not a user preference.
         if not raw_only:
-            self.settings.setValue(self.SETTING_SAVE_AS_IMAGE_FORMAT, output_ext)
+            self.settings.setValue(format_setting, output_ext)
             self.settings.sync()
         base_path = os.path.splitext(output_path)[0]
         return f"{base_path}.{output_ext}", output_ext, disk_format

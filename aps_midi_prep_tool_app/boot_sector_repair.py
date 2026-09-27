@@ -184,9 +184,16 @@ class ImageRepairResult:
 
 
 @dataclass(frozen=True)
+class DirectoryScanError:
+    path: str
+    error: str
+
+
+@dataclass(frozen=True)
 class ImageRepairBatch:
     results: tuple[ImageRepairResult, ...]
     cancelled: bool = False
+    scan_errors: tuple[DirectoryScanError, ...] = ()
 
 
 def _read_container(path):
@@ -374,29 +381,37 @@ def repair_boot_sector_batch(source_path, *, directory=False, recursive=False, t
                              progress_callback=None, result_callback=None, cancel_callback=None):
     """Snapshot directory inputs before writing; report errors without stopping other files."""
     source_path = os.path.abspath(os.fsdecode(source_path))
+    scan_errors = []
+
+    def scan_failed(error):
+        scan_errors.append(DirectoryScanError(os.fsdecode(error.filename or source_path), str(error)))
+
     if directory:
         if not os.path.isdir(source_path):
             raise FloppyImageError("Choose a folder containing image files.")
         paths = []
-        for root, dirs, files in os.walk(source_path):
-            _raise_if_cancelled(cancel_callback)
-            dirs[:] = sorted(name for name in dirs if not name.startswith(".aps_boot_")
-                             and not os.path.islink(os.path.join(root, name))) if recursive else []
-            paths.extend(os.path.join(root, name) for name in sorted(files)
-                         if image_extension(name) in REPAIR_IMAGE_EXTENSIONS
-                         and not name.startswith(".aps_boot_") and not os.path.islink(os.path.join(root, name)))
+        try:
+            for root, dirs, files in os.walk(source_path, onerror=scan_failed):
+                _raise_if_cancelled(cancel_callback)
+                dirs[:] = sorted(name for name in dirs if not name.startswith(".aps_boot_")
+                                 and not os.path.islink(os.path.join(root, name))) if recursive else []
+                paths.extend(os.path.join(root, name) for name in sorted(files)
+                             if image_extension(name) in REPAIR_IMAGE_EXTENSIONS
+                             and not name.startswith(".aps_boot_") and not os.path.islink(os.path.join(root, name)))
+        except FloppyOperationCancelled:
+            return ImageRepairBatch((), cancelled=True, scan_errors=tuple(scan_errors))
     else:
         paths = [source_path]
     results = []
     for index, path in enumerate(paths):
         if cancel_callback and cancel_callback():
-            return ImageRepairBatch(tuple(results), cancelled=True)
+            return ImageRepairBatch(tuple(results), cancelled=True, scan_errors=tuple(scan_errors))
         if progress_callback:
             progress_callback(index, len(paths), path)
         try:
             result = apply_boot_sector_repair(path, target_format=target_format, backup=backup, cancel_callback=cancel_callback)
         except FloppyOperationCancelled:
-            return ImageRepairBatch(tuple(results), cancelled=True)
+            return ImageRepairBatch(tuple(results), cancelled=True, scan_errors=tuple(scan_errors))
         except Exception as exc:
             result = ImageRepairResult(path, error=str(exc))
         results.append(result)
@@ -404,4 +419,4 @@ def repair_boot_sector_batch(source_path, *, directory=False, recursive=False, t
             result_callback(result)
     if progress_callback:
         progress_callback(len(paths), len(paths), "")
-    return ImageRepairBatch(tuple(results))
+    return ImageRepairBatch(tuple(results), scan_errors=tuple(scan_errors))
