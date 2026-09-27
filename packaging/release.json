@@ -4,6 +4,7 @@
   "date": null,
   "development_date": "2026-09-26",
   "required_assets": [
+    "APSMIDIPrepTool.exe",
     "APSMIDIPrepTool-0.8.7-Setup.exe",
     "APSMIDIPrepTool-0.8.7-windows-portable.zip",
     "APSMidiPrepTool-0.8.7-x86_64.AppImage",

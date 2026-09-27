@@ -15,7 +15,7 @@ from scripts.release_gate import ReleaseGateError
 SHA = "a" * 40
 TAG = "v1.2.3"
 REPOSITORY = "example/aps-midi-prep-tool"
-ASSETS = ("APSMIDIPrepTool-1.2.3-Setup.exe", "APSMIDIPrepTool-1.2.3-windows-portable.zip",
+ASSETS = ("APSMIDIPrepTool.exe", "APSMIDIPrepTool-1.2.3-Setup.exe", "APSMIDIPrepTool-1.2.3-windows-portable.zip",
           "APSMidiPrepTool-1.2.3-x86_64.AppImage", "windows-test-kit.zip")
 
 
@@ -121,9 +121,9 @@ def test_all_packaged_image_and_audio_checks_must_pass(accepted_release, check, 
 
 def test_unlisted_additional_binary_also_requires_acceptance(accepted_release):
     metadata, release, acceptance = accepted_release
-    release["assets"].append({"name": "APSMIDIPrepTool.exe", "state": "uploaded", "size": 1234,
+    release["assets"].append({"name": "additional-tool.exe", "state": "uploaded", "size": 1234,
                               "digest": "sha256:" + "c" * 64})
-    with pytest.raises(ReleaseGateError, match="APSMIDIPrepTool.exe"):
+    with pytest.raises(ReleaseGateError, match="additional-tool.exe"):
         release_assets.validate_assets(metadata, release, acceptance, SHA)
 
 

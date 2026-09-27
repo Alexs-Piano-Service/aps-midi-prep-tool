@@ -22,6 +22,7 @@ from .write_safety_translations import WRITE_SAFETY_TRANSLATIONS
 from .piano_overlap_translations import PIANO_OVERLAP_TRANSLATIONS
 from .boot_sector_translations import BOOT_SECTOR_TRANSLATIONS
 from .window_menu_translations import WINDOW_MENU_TRANSLATIONS
+from .update_translations import UPDATE_MESSAGES
 
 from .bulgarian_translations import (
     BULGARIAN_MESSAGE_TRANSLATIONS,
@@ -3048,6 +3049,7 @@ COMMON_TEXT_TRANSLATIONS.update(BULK_JOB_TRANSLATIONS)
 MESSAGES.update(PENDING_CHANGE_MESSAGES)
 MESSAGES.update(REVIEW_PROMPT_MESSAGES)
 MESSAGES.update(MARKIV_BACKUP_MESSAGES)
+MESSAGES.update(UPDATE_MESSAGES)
 MESSAGES["startup_config.error"] = {
     "en": "The startup configuration could not be loaded. APS will use its saved settings. Correct the file and restart APS to try again.",
     "es": "No se pudo cargar la configuración inicial. APS usará sus ajustes guardados. Corrija el archivo y reinicie APS para volver a intentarlo.",

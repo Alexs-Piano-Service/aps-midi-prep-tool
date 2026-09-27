@@ -256,6 +256,29 @@ def _make_synthetic_event_like(reference_event, abs_tick, sequence, raw):
     return (abs_tick, sequence, raw)
 
 
+def _midi_port_number(raw):
+    if len(raw) < 4 or raw[:2] != b"\xFF\x21":
+        return None
+    try:
+        length, start = _parse_vlq(raw, 2, len(raw))
+    except ValueError:
+        return None
+    if length != 1 or start + length != len(raw):
+        return None
+    return raw[start]
+
+
+def _events_with_midi_ports(events):
+    """Iterate in playback order with each source track's current MIDI port."""
+    ports = defaultdict(int)
+    for event in sorted(events, key=lambda item: item[:-1]):
+        track = event[1] if len(event) == 4 else 0
+        port = _midi_port_number(event[-1])
+        if port is not None:
+            ports[track] = port
+        yield event, ports[track]
+
+
 def _is_midi_system_reset(raw):
     """Recognize complete GM/GM2, GS, XG and escaped System Reset messages."""
     if raw == b"\xFF":
@@ -305,11 +328,11 @@ def _expand_channel_note_terminations(events):
     only when no other source part could still sound. Otherwise approximate it
     with note releases; conversion review flags the removed CC120 as lossy.
     """
-    active_notes = Counter()
-    active_pitches = Counter()
-    deferred_releases = defaultdict(list)
-    possibly_sounding_channels = set()
-    seen_notes = set()
+    notes_by_port = defaultdict(Counter)
+    pitches_by_port = defaultdict(Counter)
+    releases_by_port = defaultdict(lambda: defaultdict(list))
+    sounding_channels_by_port = defaultdict(set)
+    seen_notes_by_port = defaultdict(set)
     expanded = []
     changed = False
 
@@ -331,7 +354,12 @@ def _expand_channel_note_terminations(events):
             )
         return releases
 
-    for event in sorted(events, key=lambda item: item[:-1]):
+    for event, port in _events_with_midi_ports(events):
+        active_notes = notes_by_port[port]
+        active_pitches = pitches_by_port[port]
+        deferred_releases = releases_by_port[port]
+        possibly_sounding_channels = sounding_channels_by_port[port]
+        seen_notes = seen_notes_by_port[port]
         raw = event[-1]
         replacements = [raw]
         if _is_midi_system_reset(raw):
@@ -414,19 +442,22 @@ def _expand_channel_controller_resets(events):
     deliberately avoids a global CC121 clearing unrelated parts on the output.
     Only controls observed in this timeline need explicit replacement events.
     """
-    source_values = defaultdict(dict)
-    parameter_values = defaultdict(
-        lambda: dict.fromkeys(MIDI_PARAMETER_SELECT_CONTROLLERS, 127)
+    source_values_by_port = defaultdict(lambda: defaultdict(dict))
+    parameter_values_by_port = defaultdict(
+        lambda: defaultdict(lambda: dict.fromkeys(MIDI_PARAMETER_SELECT_CONTROLLERS, 127))
     )
     parameter_key = (0xB0, None)
     parameter_default = tuple(
         bytes([controller, 127]) for controller in (99, 98, 101, 100)
     )
-    output_values = {}
+    output_values_by_port = defaultdict(dict)
     expanded = []
     changed = False
 
-    for sequence, event in enumerate(sorted(events, key=lambda item: item[:-1])):
+    for sequence, (event, port) in enumerate(_events_with_midi_ports(events)):
+        source_values = source_values_by_port[port]
+        parameter_values = parameter_values_by_port[port]
+        output_values = output_values_by_port[port]
         raw = event[-1]
         replacements = [raw]
         if _is_midi_system_reset(raw):
@@ -1584,7 +1615,19 @@ def _convert_midi_bytes_to_type0(
 
     merged_track = bytearray()
     prev_tick = 0
-    for abs_tick, _, _, raw in merged_events:
+    output_port = 0
+    for event, port in _events_with_midi_ports(merged_events):
+        abs_tick, _, _, raw = event
+        explicit_port = _midi_port_number(raw)
+        if explicit_port is not None:
+            output_port = explicit_port
+        elif raw and raw[0] != 0xFF and port != output_port:
+            # MIDI Port metadata is track-local in the source. Once tracks
+            # are flattened, restore the destination before its next message.
+            merged_track.extend(_encode_vlq(abs_tick - prev_tick))
+            merged_track.extend(b"\xFF\x21\x01" + bytes([port]))
+            prev_tick = abs_tick
+            output_port = port
         merged_track.extend(_encode_vlq(abs_tick - prev_tick))
         merged_track.extend(raw)
         prev_tick = abs_tick

@@ -117,6 +117,11 @@ and folders. Relative paths follow the executable's directory, even if the USB
 drive letter changes. See the [startup configuration guide](docs/startup-configuration.md)
 and [Nalbantov example](docs/examples/aps-midi-prep-tool.json).
 
+Supported standalone Windows EXEs and Linux AppImages can **Update and restart**
+from the update notice, including copies on USB drives. APS verifies the download,
+keeps a recovery copy, and preserves your music and configuration. Keep the drive
+connected through restart. See [self-updates and recovery](docs/self-updates.md).
+
 ## Recover songs from a floppy or disk image
 
 Open common IMG/BIN raw images and HFE images, or read a physical floppy with a
@@ -250,9 +255,10 @@ strikes, keeps the shortest simultaneous note, and trims remaining overlaps.
 **Keep attacks** keeps the longest simultaneous note and trims overlaps at the
 next attack. Both combine duplicate unisons and use exact tick boundaries,
 without moving attacks or resuming discarded tails. **Merge only** keeps the
-existing overlapping-note behavior. Chords on different keys and notes that
-only touch do not prompt. The same choice applies when combining instruments
-as piano during Type 0 conversion.
+existing overlapping-note behavior. Chords on different keys, notes routed to
+different MIDI ports, and notes that only touch do not prompt. Repairs preserve
+each note's MIDI destination, including generated releases. The same choice
+applies when combining instruments as piano during Type 0 conversion.
 
 Check **Use this behavior for all future channel merges** to remember the choice
 across files and app restarts. Without that check, each affected song asks again.
@@ -362,6 +368,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and test commands.
 
 ## Guides and support
 
+- [Update a USB copy and recover a previous version](docs/self-updates.md)
 - [Build a floppy-emulator disk set](docs/emulator-disk-sets.md)
 - [Back up a Mark IV music library](docs/mark-iv-backup.md)
 - [Convert MIDI files and create PIANODIR.FIL](https://www.alexanderpeppe.com/eseq-and-pianodir-fil/)

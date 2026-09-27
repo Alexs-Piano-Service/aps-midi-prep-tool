@@ -49,6 +49,12 @@ def _migrate_legacy_settings() -> None:
 
 
 def main():
+    from .update_installer import mark_update_started, run_update_helper_from_argv
+
+    update_exit_code = run_update_helper_from_argv(sys.argv)
+    if update_exit_code is not None:
+        sys.exit(update_exit_code)
+
     from .package_smoke import run_package_smoke_from_argv
 
     smoke_exit_code = run_package_smoke_from_argv(sys.argv)
@@ -102,8 +108,15 @@ def main():
     window = MidiTitleWindow(initial_settings=initial_settings)
     apply_window_icon(window)
     window.show()
+    update_startup_error = ""
+
+    def confirm_update_startup():
+        nonlocal update_startup_error
+        update_startup_error = mark_update_started()
+        run_startup_dialogs()
 
     def run_startup_dialogs(attempt=0):
+        nonlocal update_startup_error
         window_handle = window.windowHandle()
         if attempt < 20 and (
             not window.isVisible()
@@ -111,6 +124,9 @@ def main():
         ):
             QTimer.singleShot(50, lambda: run_startup_dialogs(attempt + 1))
             return
+        if update_startup_error:
+            window._self_update_show_error(update_startup_error)
+            update_startup_error = ""
         if config_error is not None:
             from PySide6.QtCore import Qt
             from .localized_dialogs import QMessageBox
@@ -126,5 +142,5 @@ def main():
         show_first_time_dialog(app_icon, parent=window)
         window.schedule_startup_update_check()
 
-    QTimer.singleShot(0, run_startup_dialogs)
+    QTimer.singleShot(0, confirm_update_startup)
     sys.exit(app.exec())

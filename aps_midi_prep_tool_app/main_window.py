@@ -159,6 +159,7 @@ from .icon_utils import apply_window_icon
 from .markiv_backup_dialog import MarkIVBackupDialog
 from .onboarding_dialog import onboarding_text, show_first_time_dialog
 from .pending_changes import PendingChangesMixin, staged_batch
+from .self_update_ui import SelfUpdateMixin
 from .helpers.atomic_file import atomic_write_bytes
 from .preview_audio_cache import PreviewAudioCache, file_identity, preview_cache_key
 from .soundfont_network import open_soundfont_url
@@ -8847,7 +8848,7 @@ class BulkExtractionProgressDialog(QDialog):
         return
 
 
-class MidiTitleWindow(PendingChangesMixin, QMainWindow):
+class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
     TITLE_RAW_ROLE = Qt.UserRole + 1
@@ -16958,6 +16959,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return "keep", do_all
 
     def closeEvent(self, event):
+        update_dialog = getattr(self, "selfUpdateDialog", None)
+        if update_dialog is not None and update_dialog.is_running:
+            event.ignore()
+            update_dialog.reject()
+            return
         if self._disk_worker_busy():
             # Keep the event loop, sessions and bundled executables alive until
             # cancellation has returned and the worker's finished slot ran.
@@ -16985,9 +16991,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             event.ignore()
             markiv_dialog.reject()
             return
-        if self.is_image_mode() and not self._confirm_discard_image_changes():
+        if (self.is_image_mode() and not getattr(self, "_self_update_discard_authorized", False)
+                and not self._confirm_discard_image_changes()):
             event.ignore()
             return
+        if getattr(self, "_self_update_close_pending", False):
+            # Keep the session recoverable if the helper cannot authorize the
+            # swap. The updater cleans it only after commit() succeeds.
+            event.accept()
+            return
+        self._cleanup_for_close()
+        super().closeEvent(event)
+
+    def _cleanup_for_close(self):
         if self.bugReportWorker is not None:
             self.bugReportWorker.requestInterruption()
         if self.feedbackWorker is not None:
@@ -17001,7 +17017,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         cleanup_zip_imports = getattr(self.table, "cleanup_zip_imports", None)
         if callable(cleanup_zip_imports):
             cleanup_zip_imports()
-        super().closeEvent(event)
 
     def _handle_section_resized(self, logical_index, old_size, new_size):
         if self._is_adjusting_columns:
@@ -31005,9 +31020,21 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         apply_window_icon(dialog)
         dialog.setIcon(QMessageBox.Information)
         dialog.setWindowTitle(self._t("update.available.title"))
-        dialog.setText(self._update_message_text(data, startup_notice=startup_notice))
+        dialog.setTextFormat(Qt.PlainText)
+        message = self._update_message_text(data, startup_notice=startup_notice)
+        automatic = self._self_update_supported()
+        if automatic:
+            from .self_update import detect_update_target
 
-        download_button = dialog.addButton(self._t("update.open_download"), QMessageBox.AcceptRole)
+            target = detect_update_target()
+            message += "\n\n" + self._t("update.install.copy", path=str(target.path))
+        else:
+            message += "\n\n" + self._t("update.install.manual")
+        dialog.setText(message)
+
+        download_button = dialog.addButton(
+            self._t("update.install.button" if automatic else "update.open_download"), QMessageBox.AcceptRole,
+        )
         later_button = dialog.addButton(self._t("update.remind_later"), QMessageBox.RejectRole)
         disable_button = None
         if startup_notice:
@@ -31017,9 +31044,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         clicked = dialog.clickedButton()
         if clicked is download_button:
-            url = self._update_download_url(data)
-            if url:
-                QDesktopServices.openUrl(QUrl(url))
+            if automatic:
+                self._start_self_update(str(data.get("latest_version") or data.get("version") or ""))
+            else:
+                url = self._update_download_url(data)
+                if url:
+                    QDesktopServices.openUrl(QUrl(url))
         elif disable_button is not None and clicked is disable_button:
             self.settings.setValue(self.SETTING_CHECK_UPDATES_AT_STARTUP, False)
             self.settings.setValue(self.SETTING_SKIP_UPDATE_REMINDERS, True)

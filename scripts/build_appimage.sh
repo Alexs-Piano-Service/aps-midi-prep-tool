@@ -28,7 +28,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 python3 scripts/release_metadata.py
-python3 scripts/write_build_info.py build/build-info.json
+python3 scripts/write_build_info.py build/build-info.json --package-kind linux-appimage --architecture "$APPIMAGE_ARCH"
 
 mapfile -t APP_INFO < <(
     python3 - <<'PY'

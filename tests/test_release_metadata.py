@@ -10,7 +10,7 @@ from scripts.release_metadata import ReleaseMetadataError, validate_release_meta
 
 VERSION = "1.2.3"
 RELEASE_DATE = "2020-01-02"
-ASSETS = ["APSMIDIPrepTool-1.2.3-Setup.exe", "APSMIDIPrepTool-1.2.3-windows-portable.zip",
+ASSETS = ["APSMIDIPrepTool.exe", "APSMIDIPrepTool-1.2.3-Setup.exe", "APSMIDIPrepTool-1.2.3-windows-portable.zip",
           "APSMidiPrepTool-1.2.3-x86_64.AppImage", "windows-test-kit.zip"]
 APPSTREAM = "packaging/com.alexpianoservice.APSMidiPrepTool.metainfo.xml"
 

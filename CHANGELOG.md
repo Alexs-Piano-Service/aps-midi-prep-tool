@@ -9,6 +9,11 @@ with release sections grouped by version and date.
 
 ### Added
 
+- **Update and restart** downloads and verifies a published release, then
+  updates the running standalone Windows EXE or Linux AppImage in place,
+  including copies on USB drives. It resolves pending edits, defers during disk
+  work, preserves adjacent music and configuration, and retains the
+  previous application for recovery. Folder/source builds keep manual updates.
 - **Settings → Font Size → Large** increases text and spacing by 20% over
   Regular, with the selection remembered across app restarts.
 - **Disk → Repair Yamaha Boot Sector...** repairs IMG/IMA/BIN/VFD/HFE
@@ -81,6 +86,10 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Piano overlap repair separates notes by MIDI port and preserves unrelated
+  zero-duration notes and unmatched releases. Generated releases retain their
+  destination, and resets and deferred releases cannot affect another port.
+  Type 0 conversion restores port routing when combining source tracks.
 - Main-window headings use the desktop UI font, with button text and spacing
   proportional to body text. This preserves the Linux layout proportions while
   avoiding oversized headings and excessive spacing with Windows' smaller

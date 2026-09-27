@@ -13,6 +13,28 @@ USB stick for a particular instrument with the right folders and preferences.
 The launcher's working directory and temporary extraction directories are not
 searched. The configuration filename stays the same if you rename the executable.
 
+## Updating a deployed USB copy
+
+Use the signed standalone Windows EXE or a Linux AppImage for deployments that
+can update themselves. When APS offers **Update and restart**, it downloads and
+verifies the new version, asks you to resolve pending edits, and restarts the
+copy in the same USB location with its existing filename. Finish disk writing,
+recovery, and other active work first, and keep the drive connected until APS
+restarts. The drive must be writable and have room for the downloaded version
+and the retained previous executable.
+
+The updater replaces only the application. Your `aps-midi-prep-tool.json`,
+music, output folders, and saved preferences remain in place. Relative paths
+continue to work from the same directory. The previous executable is retained
+alongside it as `<filename>.previous`; an older backup is kept under a unique
+name if that name was already occupied.
+
+Source checkouts, Windows folder builds, older packages without update support,
+and unsupported package types use the manual download option. A USB copy that
+predates the updater needs one manual replacement to install the first version
+with self-update support. See [self-updates and recovery](self-updates.md) for supported packages,
+verification, and recovery details.
+
 ## A Nalbantov USB stick
 
 Copy the [example configuration](examples/aps-midi-prep-tool.json) beside APS

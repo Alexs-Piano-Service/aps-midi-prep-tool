@@ -14,7 +14,8 @@ $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RepoRoot
 & $Python scripts/release_metadata.py
 if ($LASTEXITCODE -ne 0) { throw 'Release metadata validation failed.' }
-& $Python scripts/write_build_info.py build/build-info.json
+$PackageKind = if ($OneFile) { 'windows-onefile' } else { 'windows-onedir' }
+& $Python scripts/write_build_info.py build/build-info.json --package-kind $PackageKind
 if ($LASTEXITCODE -ne 0) { throw 'Build identity generation failed.' }
 
 function Resolve-Executable {
