@@ -73,7 +73,7 @@ and 40-unit minimum rows. Headings use the desktop UI font family. With a
 smaller Windows body font, headings and spacing should shrink proportionally.
 
 On Windows, check 100%, 150%, and 200% display scaling with both an empty list
-and the test songs loaded. Try Regular, Small, and Compact under
+and the test songs loaded. Try Large, Regular, Small, and Compact under
 Settings → Font Size, then return to Regular. Repeat in System, Light, and Dark
 appearance. Button labels, checkboxes, menus, table rows, and the mode banner
 must remain readable without clipping or overlapping. Returning to Regular

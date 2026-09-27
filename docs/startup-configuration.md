@@ -147,7 +147,7 @@ Every entry in this table accepts an absolute or relative path string.
 | --- | --- |
 | `language` | String: `en`, `es`, `fr`, `de`, `it`, `pt-BR`, `bg`, `nl`, `pl`, `ja`, `ko`, `zh-Hans`. |
 | `appearance_mode` | String: `system`, `light`, `dark`. |
-| `font_scale` | String: `regular`, `small`, `compact`. |
+| `font_scale` | String: `large`, `regular`, `small`, `compact`. Large increases text and spacing by 20% over Regular. |
 | `hide_status` | Boolean: hide the status area. |
 | `hide_quick_panel` | Boolean: hide the quick controls. |
 | `hide_album_metadata` | Boolean: hide album metadata controls. |

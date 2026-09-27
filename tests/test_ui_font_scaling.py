@@ -66,7 +66,7 @@ def _margins(layout):
 
 
 @pytest.mark.parametrize("point_size", [9, 12, 16])
-@pytest.mark.parametrize("density,factor", [("regular", 1.0), ("small", 0.92), ("compact", 0.84)])
+@pytest.mark.parametrize("density,factor", [("large", 1.2), ("regular", 1.0), ("small", 0.92), ("compact", 0.84)])
 def test_action_typography_follows_body_font_and_still_fits(make_window, point_size, density, factor):
     window = make_window(point_size, density=density)
     body_font = window.backup_checkbox.font()
@@ -126,6 +126,14 @@ def test_density_changes_return_to_original_font_and_spacing(make_window):
         )
 
     original = snapshot()
+    window.fontSizeActions["large"].trigger()
+    QApplication.processEvents()
+    large = snapshot()
+    assert large[0].pointSizeF() > original[0].pointSizeF()
+    assert large[1].pointSizeF() > original[1].pointSizeF()
+    assert large[2] > original[2]
+    assert window.settings.value("font_scale") == "large"
+    assert window.fontSizeActions["large"].isChecked()
     window._apply_font_scale("compact")
     QApplication.processEvents()
     compact = snapshot()
@@ -138,11 +146,12 @@ def test_density_changes_return_to_original_font_and_spacing(make_window):
     assert snapshot() == original
 
 
-def test_pixel_sized_desktop_font_keeps_heading_proportions(make_window):
-    window = make_window(pixel_size=16)
+@pytest.mark.parametrize("density,body_pixels,heading_pixels", [("regular", 16, 24), ("large", 19, 28)])
+def test_pixel_sized_desktop_font_keeps_heading_proportions(make_window, density, body_pixels, heading_pixels):
+    window = make_window(pixel_size=16, density=density)
     body_font = window.backup_checkbox.font()
     heading_font = window.choose_button.font()
-    assert body_font.pixelSize() == 16
-    assert heading_font.pixelSize() == 24
+    assert body_font.pixelSize() == body_pixels
+    assert heading_font.pixelSize() == heading_pixels
     assert heading_font.family() == body_font.family()
     assert heading_font.bold()

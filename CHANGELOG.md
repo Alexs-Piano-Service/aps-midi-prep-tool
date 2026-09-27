@@ -9,6 +9,8 @@ with release sections grouped by version and date.
 
 ### Added
 
+- **Settings → Font Size → Large** increases text and spacing by 20% over
+  Regular, with the selection remembered across app restarts.
 - **Disk → Repair Yamaha Boot Sector...** repairs IMG/IMA/BIN/VFD/HFE
   files in place, with backups only when checked. An optional target format
   (including HFE for Nalbantov) keeps the repaired original and creates a

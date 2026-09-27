@@ -8969,11 +8969,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     REFERENCE_BODY_POINT_SIZE = 12.0
     BUG_REPORT_LOG_TAIL_CHARS = 256 * 1024
     FONT_SCALE_OPTIONS = (
+        ("large", "font_size.large", 1.2),
         ("regular", "font_size.regular", 1.0),
         ("small", "font_size.small", 0.92),
         ("compact", "font_size.compact", 0.84),
     )
     LAYOUT_SCALE_FACTORS = {
+        "large": 1.2,
         "regular": 1.0,
         "small": 0.9,
         "compact": 0.74,
