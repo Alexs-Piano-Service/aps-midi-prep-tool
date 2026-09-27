@@ -12,7 +12,7 @@ original disk write-protected. Recovery diagnostics help distinguish unreadable
 sectors from image-preparation errors. Use the error dialog's bug-report option
 to include the exact operation and log when reporting a failure.
 
-## Save To Floppy: Windows error 50
+## Save Files to Floppy: Windows error 50
 
 If saving reports **The request is not supported**, check the `floppy_save`
 diagnostics in the bug report. Windows can reject the free-space query, the
@@ -42,8 +42,8 @@ Floppy…** in the failure dialog. This guides you through preserving the prepar
 disk and explicitly choosing a whole-disk write, as described below. If APS has
 already closed, open `prepared.img` from the recovery directory shown in the
 error dialog, then use **Disk → Write Current Image to Floppy…** with a backed-up
-or spare disk. Enable **Disk → Verify floppy contents after writing** for that
-manual write.
+or spare disk. Enable **Settings → Disk Options → Verify Floppy Contents After Writing**
+for that manual write.
 
 For example, `stage: preflight_listing`, `target_mutation_attempted: false`, and
 zero staged/copied/removed files mean APS stopped before changing the floppy.
@@ -60,9 +60,9 @@ access. Yamaha protection may be involved, but a repaired boot sector alone does
 not prove copy protection or establish the physical condition of the disk.
 
 When APS has repaired the source boot sector in its working copy, **Save** and
-**Save To Floppy** offer **Save Image and Apply to Floppy…**. The same action is
-available after failed file saves and failed image writes. It guides you through
-these steps:
+**Disk → Save Files to Floppy...** offer **Save Image and Apply to Floppy…**.
+The same action is available after failed file saves and failed image writes.
+It guides you through these steps:
 
 1. Save the current songs, including pending edits and conversions, as a
    persistent IMG on the computer.
@@ -145,8 +145,8 @@ cannot determine the physical condition or format of a customer's disk.
 
 ## Recovering a failed Windows file save
 
-On Windows, **Save To Floppy** is also available for ordinary loaded files. It
-prepares pending edits, conversions, final filenames, and the applicable piano
+On Windows, **Disk → Save Files to Floppy...** is also available for ordinary
+loaded files. It prepares pending edits, conversions, final filenames, and the applicable piano
 catalog without constructing a disk image. Unrelated files and folders remain
 on the floppy; a confirmation lists matching filenames that will be replaced.
 Prepared files are copied through Windows filesystem I/O.

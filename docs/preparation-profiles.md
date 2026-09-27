@@ -9,7 +9,7 @@ switches to E-SEQ and prepares PIANODIR.FIL with 720 KB defaults. Original files
 are written only when you save. **Edit → Undo** (**Ctrl+Z**) restores the previous
 profile and staged state after applying a destination. **Edit → Undo All**
 discards all staged changes since the current files were loaded or last saved.
-Use **Edit → Review Changes** to inspect proposed filenames, titles, and formats.
+Use **Edit → Review Changes...** to inspect proposed filenames, titles, and formats.
 
 Choices are indented only in the open controller list; the selected controller
 stays aligned normally, and typing a model name selects it. Active preparation
@@ -33,7 +33,7 @@ unchecked and locked. Required filename rules, title cleanup, and song-format
 choices follow the same convention. Choose **Custom** to edit these options.
 Image type, capacity, and screen formatting remain editable defaults.
 
-The preparation row is visible by default. Use **View → Show Preparation Row**
+The preparation row is visible by default. Use **View → Show Preparation Controls**
 to hide or show it. Hiding it keeps
 the selected preparation active; **Settings → Preparing for...** remains available.
 The preparation dialog links to the selected controller's evidence: the **APS
@@ -43,9 +43,12 @@ Disklavier Compatibility Table** for Disklavier and General choices, or the
 Floppy and emulator preparation also stages unique DOS 8.3 names for songs whose
 current filenames are incompatible. Existing valid names remain unchanged;
 USB and app folder preparation keep descriptive filenames.
+**Settings → Use DOS 8.3 Filenames** controls short filenames when the selected
+destination does not require them.
 Long MIDI filenames use the track number and song title and do not require converting
 E-SEQ songs to MIDI. Disklavier screen formatting defaults on for Mark I,
 Mark II (including XG), and Mark III profiles, and off for all other profiles.
+Change it under **Settings → Format for Disklavier screen**.
 With screen formatting enabled, opening the title editor starts with the first
 32 characters so an overlong title can be corrected. Cancelling leaves the title
 unchanged. The **Long** column marks overlong titles without highlighting their

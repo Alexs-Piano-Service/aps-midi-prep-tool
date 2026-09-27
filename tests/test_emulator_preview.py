@@ -1,12 +1,15 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QFont
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QTabWidget
 
 from aps_midi_prep_tool_app.disk_session_worker import EmulatorImageBuildWorker
 from aps_midi_prep_tool_app.emulator_image_builder import (
@@ -16,6 +19,7 @@ from aps_midi_prep_tool_app.emulator_image_builder import (
 from aps_midi_prep_tool_app.emulator_preview_dialog import EmulatorPreviewDialog
 from aps_midi_prep_tool_app.floppy_image import DISK_FORMAT_BY_KEY, FloppyImageSession, FloppyOperationCancelled
 from aps_midi_prep_tool_app.midi_metadata import read_first_title_from_midi
+from test_inspection_staging import window
 
 
 def _midi(title):
@@ -147,3 +151,56 @@ def test_worker_preview_handshake_passes_decision_and_honors_cancellation():
     worker.cancel()
     with pytest.raises(FloppyOperationCancelled):
         worker._request_preview(_preview())
+
+
+@pytest.mark.parametrize("font_size", [9, 14])
+def test_live_preview_keeps_user_geometry_during_resizing_tabs_and_edits(window, monkeypatch, font_size):
+    app = QApplication.instance()
+    original_font = QFont(app.font())
+    app.setFont(QFont(original_font.family(), font_size))
+    decisions = []
+    window.emulatorImageWorker = SimpleNamespace(resolve_preview_request=decisions.append)
+    window.emulatorImageProgressDialog = None
+    execute = window._exec_child_dialog
+    failures = []
+
+    def inspect(dialog, **kwargs):
+        def resize_and_edit():
+            try:
+                assert len(dialog.findChildren(QDialogButtonBox)) == 1
+                tabs = dialog.findChild(QTabWidget)
+                minimum = dialog.minimumSizeHint()
+                for width, height in ((1180, 800), (700, 500), (960, 680)):
+                    size = max(width, minimum.width()), max(height, minimum.height())
+                    dialog.resize(*size)
+                    dialog.move(20, 30)
+                    QTest.qWait(120)
+                    assert dialog.size().toTuple() == size
+                    geometry = dialog.geometry()
+                    for index in (1, 2, 0):
+                        tabs.setCurrentIndex(index)
+                        QTest.qWait(60)
+                        assert dialog.geometry() == geometry
+                        assert dialog.rect().contains(dialog.buttons.geometry())
+                    dialog.albums_table.item(0, 1).setText(f"Edited album {width}")
+                    QTest.qWait(60)
+                    assert dialog.geometry() == geometry
+                    assert dialog.update_button.isEnabled()
+                    assert not dialog.build_button.isEnabled()
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                dialog.reject()
+
+        QTimer.singleShot(150, resize_and_edit)
+        return execute(dialog, **kwargs)
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect)
+    try:
+        window._on_emulator_preview_requested(_preview())
+    finally:
+        app.setFont(original_font)
+    if failures:
+        raise failures[0]
+    assert decisions == [None]
+    app.processEvents()

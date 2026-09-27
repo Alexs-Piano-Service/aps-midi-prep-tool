@@ -60,14 +60,14 @@ holds the contents of a floppy disk.
 
 Edits and conversions in the main list wait until you save. Formatting and
 writing a physical floppy require a separate confirmation. If the floppy is
-irreplaceable, make a disk image before working on it.
+irreplaceable, use **Disk → Create Image from Floppy...** before working on it.
 
 If a floppy drive is missing from a dialog, connect it, insert a disk, and choose
 **Refresh**. The drive list updates without reopening the dialog.
 If your selected drive disappears, choose a drive explicitly before continuing;
 Refresh keeps the action disabled until you make that choice.
 
-Use **Edit → Review Changes** to compare original and proposed filenames,
+Use **Edit → Review Changes...** to compare original and proposed filenames,
 titles, and conversions or discard selected songs' edits. **Edit → Undo**
 (**Ctrl+Z**) reverses the latest staged action. **Edit → Undo All** discards all
 staged changes since the current files were loaded or last saved. Cancelled or
@@ -89,7 +89,7 @@ imported songs and emulator disk sets. Saving stops if a song could not be
 prepared for the selected controller.
 The destination row highlights an active profile. **Custom** turns off automatic
 preparation while keeping changes already staged for review.
-**View → Show Preparation Row** controls its visibility; preparation stays active
+**View → Show Preparation Controls** controls its visibility; preparation stays active
 when the row is hidden. The row is visible by default. View menu visibility
 options use **Show** labels, with a checkmark when the corresponding area is shown.
 Destinations that require DOS 8.3 names select short filenames; other destinations
@@ -107,6 +107,9 @@ numbered from `DSKA0000.HFE`.
 Change the interface language under **Settings → Language**. English, Spanish,
 French, German, Italian, Brazilian Portuguese, Bulgarian, Dutch, Polish,
 Japanese, Korean, and Simplified Chinese are available.
+
+Menu labels omit keyboard shortcut combinations to keep menus compact.
+View or change shortcuts under **Settings → Keyboard Shortcuts...**.
 
 For a USB deployment, place `aps-midi-prep-tool.json` beside the executable to
 preset the instrument, delivery method, saved preferences, remembered dialogs,
@@ -135,7 +138,34 @@ are remembered across launches.
 Recovery tools can retry difficult disks. Greaseweazle hardware also supports
 SCP archives, which capture the disk's magnetic signals for preservation.
 Recovery cannot guarantee that damaged recordings will play correctly.
-If USB-floppy recovery fails or is cancelled, **Disk → Save partial capture...**
+
+For boot-sector repair and file visibility, use **Disk → Repair Yamaha Boot Sector...**.
+It repairs the selected IMG, IMA, BIN, VFD, or HFE file **in place**. Check
+**Create a backup before repairing** to keep the original as `.bak` (or a
+numbered backup if one already exists); backups are off by default. Choose a
+target format, such as **HFE (Nalbantov)** or **IMG (Gotek)**, to keep both the
+repaired original and a converted file beside it. Existing converted files are
+reported as conflicts and left untouched. Choose **Entire folder** to process
+a directory, optionally including subfolders, with a result for each image.
+
+The utility recognizes protected 720 KB, 800 KB, and 1.44 MB FAT12 layouts.
+It repairs the boot sector and clears hidden/system attributes on files and
+folders so Nalbantov/HxC Disk Browser can display them. File contents,
+read-only/archive attributes, FAT copies, and unused space are preserved.
+Directories are not rebuilt. If the first sector was omitted from a raw image,
+it adds one. HFE conversion requires Greaseweazle and verifies decoded sector
+data before saving. Images with valid boot sectors still have hidden/system
+flags removed; images that need neither change are left alone unless conversion
+is requested. Unrecognized layouts are rejected. Pending song edits are not applied.
+If the Yamaha catalog identifies an image whose file directory is also damaged,
+the utility directs you to **Recover Damaged Image** and leaves the image untouched.
+
+**Disk → Recover Damaged Image...** also clears hidden/system attributes in the
+recovered image. Both repair tools make files visible automatically, including
+when processing images that were repaired previously. This visibility change
+leaves the contents of the files unchanged.
+
+If USB-floppy recovery fails or is cancelled, **Disk → Save Partial Capture...**
 keeps the recovered image together with sector coverage and diagnostics, without
 reading the disk again. Unread portions are identified in the diagnostics.
 
@@ -145,6 +175,8 @@ see [Windows disk troubleshooting](docs/windows-disk-troubleshooting.md).
 For collections of images, **Utilities → Bulk Extraction...** can keep a local
 progress record. **Resume extraction job...** retries failed items first and
 reuses completed outputs only after checking input and output hashes.
+Progress JSON files and their lock files are removed after successful extraction.
+Failed or cancelled jobs keep their progress records so you can resume them.
 
 **Utilities → Back Up Mark IV Music...** copies a mounted Mark IV music library
 or copied data folder into named album folders, verifies the originals, and can
@@ -152,11 +184,14 @@ add MIDI copies of legacy E-SEQ songs. See the [Mark IV backup guide](docs/mark-
 
 ## Convert and organize your music
 
+Use the **Edit** menu for title, filename, and playback changes, and
+**Edit → Convert** for song-format conversions.
+
 - **Yamaha E-SEQ ↔ MIDI:** convert songs while keeping titles and playback
   order. E-SEQ exports can include the `PIANODIR.FIL` or `MUSIC.DIR` catalog
   that compatible players use to display songs.
 - **MIDI Type 1 → Type 0:** combine MIDI tracks into the single-track format
-  required by some older players. The app calls these formats SMF1 and SMF0.
+  required by some older players. Choose **Edit → Convert → MIDI Type 1 to Type 0**.
 - **Titles and filenames:** clean up title spacing, name files from song titles,
   or create the short DOS 8.3 filenames required by older hardware.
 - **Playback compatibility:** optionally merge instruments onto one piano
@@ -223,9 +258,9 @@ Check **Use this behavior for all future channel merges** to remember the choice
 across files and app restarts. Without that check, each affected song asks again.
 Open **Settings → Overlapping Piano Notes...** any time to change the behavior,
 or uncheck the box and save to restore the prompt for each affected song.
-**Settings → Reset Hidden Dialogs...** also restores the prompt for future overlaps.
+**Settings → Show Dismissed Messages Again** also restores the prompt for future overlaps.
 
-**Utilities → Merge Channels to Piano...** applies the same merge to one song or
+**Edit → Merge Channels to Piano...** applies the same merge to one song or
 all listed MIDI and E-SEQ songs, including files being edited inside a disk image.
 
 Channel merging and Type 0 piano remapping translate All Notes Off (CC123) and
@@ -275,14 +310,15 @@ USB stick and follow the manufacturer's instructions to prepare the stick.
 ## Protect your originals
 
 - Make an image of an irreplaceable floppy before editing it.
-- Use **File → Write Protection → Write-Protect Original** to prevent **Save**
+- Use **File → Write-Protect Original** to prevent **Save**
   from overwriting the open image or floppy. You can still export copies.
-- Backups are enabled by default under **File → Save Options**; an existing saved
+- Backups are enabled by default under
+  **Settings → Save Options → Back Up Before Saving**; an existing saved
   preference is respected. Title and order updates are checked in a temporary
   file before replacing their destination.
 - Emulator disk builds reopen their final images and verify delivered file
-  contents. Enable **Disk → Verify floppy contents after writing** for physical
-  readback. These checks verify delivery; test playback on your player too.
+  contents. Enable **Settings → Disk Options → Verify Floppy Contents After Writing**
+  for physical readback. These checks verify delivery; test playback on your player too.
 - If your operating system offers to format an old piano disk, cancel that
   prompt and open the disk through APS MIDI Prep Tool instead.
 

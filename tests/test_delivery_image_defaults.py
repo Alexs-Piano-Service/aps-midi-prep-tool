@@ -11,7 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog
 
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app.floppy_image import (
@@ -143,6 +143,97 @@ def test_dialog_override_is_the_export_choice(window, monkeypatch, tmp_path):
     assert options == (str(tmp_path / "chosen.img"), "img", DISK_FORMAT_BY_KEY["ibm.720"])
     assert calls[0][0].endswith(".img") and "*.img" in calls[0][1]
     assert window._preparation_medium().key == "flashfloppy_hfe"
+
+
+@pytest.mark.parametrize("selected_ext", ("img", "hfe", "ima"))
+def test_save_image_remembers_selected_format_on_reopen_and_restart(window, monkeypatch, tmp_path, selected_ext):
+    initial_ext = "img" if selected_ext == "hfe" else "hfe"
+    _choose(window, "mark_iii", "flashfloppy_" + initial_ext)
+    output = str(tmp_path / ("chosen." + selected_ext))
+
+    def choose_format(dialog):
+        image_type, _disk = dialog.findChildren(QComboBox)
+        assert image_type.currentData() == initial_ext
+        if image_type.findData(selected_ext) < 0:
+            next(checkbox for checkbox in dialog.findChildren(QCheckBox)
+                 if checkbox.text() == "List all image formats").setChecked(True)
+        image_type.setCurrentIndex(image_type.findData(selected_ext))
+        return QDialog.Accepted
+
+    monkeypatch.setattr(window, "_exec_child_dialog", choose_format)
+    monkeypatch.setattr(main_window.QFileDialog, "getSaveFileName", lambda *_args: (output, ""))
+    assert window._prompt_for_save_image_options()[1] == selected_ext
+
+    def inspect_remembered(dialog):
+        image_type, _disk = dialog.findChildren(QComboBox)
+        assert image_type.currentData() == selected_ext
+        return QDialog.Rejected
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect_remembered)
+    assert window._prompt_for_save_image_options(default_ext=initial_ext) is None
+    # Reload from disk in a fresh QSettings and window, rather than sharing the
+    # first window's in-memory settings object.
+    restored_settings = QSettings(window.settings.fileName(), QSettings.IniFormat)
+    monkeypatch.setattr(main_window, "QSettings", lambda *_args: restored_settings)
+    restored = main_window.MidiTitleWindow()
+    try:
+        monkeypatch.setattr(restored, "_exec_child_dialog", inspect_remembered)
+        assert restored._prompt_for_save_image_options(default_ext=initial_ext) is None
+        assert restored._preparation_export_defaults()["image_format"] == initial_ext
+    finally:
+        restored._clear_staging_history()
+        restored._cleanup_midi_scratch_dir()
+        restored.deleteLater()
+
+
+@pytest.mark.parametrize("route", ("cancel_options", "cancel_filename", "raw_only"))
+def test_cancelled_or_forced_img_export_keeps_remembered_format(window, monkeypatch, tmp_path, route):
+    _choose(window, "mark_iii", "flashfloppy_img")
+    window.settings.setValue(window.SETTING_SAVE_AS_IMAGE_FORMAT, "hfe")
+
+    def choose_img(dialog):
+        image_type, _disk = dialog.findChildren(QComboBox)
+        if route == "raw_only":
+            assert image_type.currentData() == "img"
+            assert not image_type.isEnabled()
+        else:
+            assert image_type.currentData() == "hfe"
+            image_type.setCurrentIndex(image_type.findData("img"))
+        return QDialog.Rejected if route == "cancel_options" else QDialog.Accepted
+
+    def choose_filename(*_args):
+        assert route != "cancel_options"
+        return ("" if route == "cancel_filename" else str(tmp_path / "forced.img")), ""
+
+    monkeypatch.setattr(window, "_exec_child_dialog", choose_img)
+    monkeypatch.setattr(main_window.QFileDialog, "getSaveFileName", choose_filename)
+    options = window._prompt_for_save_image_options(raw_only=route == "raw_only")
+    if route == "raw_only":
+        assert options[1] == "img"
+    else:
+        assert options is None
+
+    def inspect_remembered(dialog):
+        image_type, _disk = dialog.findChildren(QComboBox)
+        assert image_type.currentData() == "hfe"
+        assert image_type.isEnabled()
+        return QDialog.Rejected
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect_remembered)
+    assert window._prompt_for_save_image_options() is None
+
+
+def test_unknown_saved_image_format_falls_back_to_delivery_default(window, monkeypatch):
+    _choose(window, "unsure", "flashfloppy_hfe")
+    window.settings.setValue(window.SETTING_SAVE_AS_IMAGE_FORMAT, "unknown")
+
+    def inspect(dialog):
+        image_type, _disk = dialog.findChildren(QComboBox)
+        assert image_type.currentData() == "hfe"
+        return QDialog.Rejected
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect)
+    assert window._prompt_for_save_image_options(default_ext="img") is None
 
 
 def test_emulator_dialog_override_reaches_builder_without_changing_delivery(window, monkeypatch, tmp_path):

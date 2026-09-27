@@ -37,7 +37,7 @@ merely because unrelated files are present.
 selected E-SEQ variant. Their output excludes unrelated payloads and regenerates
 the matching catalog, while leaving the original image unchanged.
 
-**Edit → Review Changes** shows original and proposed filenames, titles,
+**Edit → Review Changes...** shows original and proposed filenames, titles,
 formats, playback order, and conversion reports. Select songs to discard their
 edits. **Edit → Undo** (**Ctrl+Z**) reverses the latest staged action; **Edit →
 Undo All** discards every staged change since the current files were loaded or
@@ -96,7 +96,7 @@ Yamaha pedal-detail data. These stage real edits with the same Undo and Save
 workflow as other utilities. Preview filters, temporary instrument choices, and
 preview volume do not limit or alter the source used by these actions. The
 preview reloads after an edit; returning to inspection refreshes saved or undone
-changes. **Utilities → Merge Channels to Piano...** offers the same piano merge
+changes. **Edit → Merge Channels to Piano...** offers the same piano merge
 for one song or all listed MIDI and E-SEQ songs.
 
 Same-key overlaps prompt for smart repair, trimming, or the existing merge
@@ -107,7 +107,8 @@ trailing portions. Repair pairs notes before channel routing, combines unisons,
 and releases trimmed notes at the next attack's exact tick (zero release gap).
 Native E-SEQ delay commands remain intact. Independent Type 2 sequences never
 count as overlaps with one another. A checked future-merges preference persists
-across restarts; **Reset Hidden Dialogs** makes affected songs ask again.
+across restarts; **Settings → Show Dismissed Messages Again** makes affected songs
+ask again.
 
 Disk-set preview shows the actual prepared and packed songs, including musical
 change reports and title provenance. Collection edits require an updated preview
@@ -122,8 +123,9 @@ The failed song is reported without creating or staging MIDI output.
 
 Final image verification reopens IMG files or decodes final HFE files and checks
 every contained file against the prepared output, including catalogs and song
-order. Corrupted final output fails verification. **Disk → Verify floppy contents
-after writing** adds a physical readback comparison. If readback is cancelled,
+order. Corrupted final output fails verification.
+**Settings → Disk Options → Verify Floppy Contents After Writing** adds a physical
+readback comparison. If readback is cancelled,
 the result distinguishes completed writing from unverified contents.
 
 Automated tests use self-created songs, temporary FAT12 images, fault injection,
@@ -138,7 +140,7 @@ Cancel. APS terminates unfinished helpers on timeout or cancellation while
 keeping results from drives that responded. Reconnect an unresponsive drive
 and retry: each attempt starts fresh, without requiring APS to restart.
 
-After a failed or cancelled USB recovery read, **Save partial capture...** saves
+After a failed or cancelled USB recovery read, **Disk → Save Partial Capture...** saves
 the captured image and a JSON diagnostic record, including sector coverage and
 affected files where the filesystem provides enough evidence. Unread regions
 are identified; zero-filled bytes are not recovered song data.
@@ -149,3 +151,8 @@ hashes before skipping completed songs. Failed images are retried first. Modifie
 or unrelated destination files are preserved, and newly extracted copies get
 unused filenames. Keep the original inputs, output folder, and job record together
 until the extraction is complete.
+After successful completion, the progress JSON is removed automatically and the
+resume suggestion is cleared. Lock files are removed when the job stops. Failed
+or cancelled jobs retain their progress JSON for retrying unfinished work. If a
+completed record cannot be deleted, the result reports the cleanup problem and
+retains its path; resuming it retries cleanup after verifying the outputs.

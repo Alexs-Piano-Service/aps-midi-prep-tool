@@ -284,7 +284,8 @@ def test_edit_menu_undo_reverses_title_and_filename_dialog_edits_one_at_a_time(w
 
     assert len(w._staged_undo_stack) == 2
     assert w.pendingRegularRenames[str(paths[0])] == "RENAMED.MID"
-    assert "Ctrl+Z" in w.editUndoAction.text()
+    assert w.editUndoAction.text().replace("&", "") == "Undo"
+    assert w.keyboardShortcutObjects["edit.undo"].key().toString() == "Ctrl+Z"
     w.editUndoAction.trigger()
     assert not w.pendingRegularRenames
     assert w.pendingEdits[str(paths[0])] == "Edited title"

@@ -366,6 +366,19 @@ def is_clavinova_mda_eseq(data, filename=""):
 
 The extension alone is not sufficient for archival tooling, but it is a useful fallback when loose files are dropped into the app.
 
+Parsing, MIDI conversion, inspection, and native channel merging share
+`_detect_eseq_container(data, filename)`. Q11 detection takes precedence. Byte
+APIs accept the logical source `filename`; file conversion supplies the source
+basename automatically and accepts an explicit logical name for staged files.
+Without a source name, detection remains based on bytes. The destination name
+does not affect the input layout.
+
+For filename-assisted MDA, use that resolved layout throughout: events begin
+at `0x57`, base tempo is at `0x24`, the length at `0x1F` is an absolute used-file
+length, and there is no title at `0x57..0x76` or FIL header meter at `0x34..0x35`.
+Archival MIDI timing and header-prefix metadata use the same layout. This
+prevents a valid later stream from hiding the loss of the first 32 event bytes.
+
 ### 6A.2 `.MDA` song-file layout
 
 Observed non-empty `.MDA` files:

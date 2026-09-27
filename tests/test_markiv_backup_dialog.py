@@ -443,7 +443,7 @@ def test_utility_menu_opens_without_loaded_songs(application, window):
     for language in SUPPORTED_LANGUAGES:
         window.currentLanguage = language.code
         window._refresh_translated_ui()
-        assert window.utilitiesMarkIVBackupAction.text() == tr("markiv.action", language.code)
+        assert window.utilitiesMarkIVBackupAction.text().replace("&", "") == tr("markiv.action", language.code)
         assert window.utilitiesMarkIVBackupAction.toolTip() == tr("markiv.tooltip", language.code)
     window.utilitiesMarkIVBackupAction.trigger()
     assert len(opened) == 1

@@ -5664,7 +5664,10 @@ def _fat_signature_at(data, offset, media_descriptor=_YAMAHA_MEDIA_DESCRIPTOR):
 
 def _entry_name_looks_plausible(raw_name):
     allowed = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$%'-_@~`!(){}^#& "
-    return all(byte in allowed for byte in raw_name)
+    # DOS short names can contain OEM bytes, including Yamaha's Japanese names.
+    # 0x05 in the first position represents a literal 0xE5, not a deleted entry.
+    return all(byte in allowed or byte >= 0x80 or (index == 0 and byte == 0x05)
+               for index, byte in enumerate(raw_name))
 
 
 def _root_dir_looks_plausible(data, offset, root_dir_sectors=_YAMAHA_ROOT_DIR_SECTORS):
@@ -6154,10 +6157,14 @@ def _read_fat_area_best_effort(device, geometry, media_descriptor, cancel_callba
 
 
 def _decode_dos_directory_name(raw_name):
-    stem = raw_name[:8].decode("ascii", errors="replace").rstrip()
-    ext = raw_name[8:11].decode("ascii", errors="replace").rstrip()
-    stem = stem.strip()
-    ext = ext.strip()
+    # Use mtools' default DOS code page as a lossless filename identity. ASCII
+    # replacement collapses distinct OEM names and cannot be passed back to
+    # mren/mdel/mcopy. Display encodings for song titles are handled separately.
+    raw_name = bytes(raw_name)
+    if raw_name.startswith(b"\x05"):
+        raw_name = b"\xe5" + raw_name[1:]
+    stem = raw_name[:8].strip(b" ").decode("cp850")
+    ext = raw_name[8:11].strip(b" ").decode("cp850")
     if not stem:
         return ""
     if ext:
@@ -6353,6 +6360,86 @@ def _read_directory_chain_from_image(data, geometry, fat, first_cluster):
     if not clusters:
         return b""
     return _read_cluster_chain_from_image(data, geometry, clusters, len(clusters) * geometry.cluster_size)
+
+
+def _clear_fat12_hidden_system_flags(data):
+    """Make repaired files and folders visible without changing their contents.
+
+    Plan all attribute edits before applying them. Validate directory chains and
+    reject any overlap with file data, so a damaged directory pointer cannot
+    turn a visibility repair into an edit to a song. Deleted entries, long-name
+    records, volume labels, dot entries, and unused directory space stay intact.
+    """
+    failure = "Could not safely read the image directories. Use Recover Damaged Image. No file was changed."
+    geometry = _geometry_from_boot_sector(data[:512])
+    if geometry is None or len(data) < geometry.total_size:
+        raise FloppyImageError(failure)
+    fat = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size]
+    cluster_limit = _fat12_data_cluster_count(geometry) + 2
+    directory_clusters = set()
+    files = []
+    attribute_offsets = []
+    # Each directory is represented by its byte ranges in physical cluster
+    # order. Keeping the mapping supports fragmented directory chains.
+    pending = [([(geometry.root_offset, geometry.root_size)], 0)]
+    while pending:
+        ranges, parent_cluster = pending.pop()
+        directory = b"".join(data[start:start + size] for start, size in ranges)
+        for entry in _iter_fat_directory_entries(directory):
+            attr = entry["attr"]
+            if attr & 0x08:
+                continue
+            if attr & 0xC0:
+                raise FloppyImageError(failure)
+            relative_offset = entry["offset"]
+            for start, size in ranges:
+                if relative_offset < size:
+                    if attr & 0x06:
+                        attribute_offsets.append(start + relative_offset + 11)
+                    break
+                relative_offset -= size
+            if not attr & 0x10:
+                files.append(entry)
+                continue
+
+            first_cluster = entry["cluster"]
+            cluster = first_cluster
+            child_ranges = []
+            while True:
+                if not 2 <= cluster < min(cluster_limit, 0xFF0) or cluster in directory_clusters:
+                    raise FloppyImageError(failure)
+                directory_clusters.add(cluster)
+                child_ranges.append((_cluster_offset(geometry, cluster), geometry.cluster_size))
+                next_cluster = _fat12_next_cluster(fat, cluster)
+                if next_cluster >= 0xFF8:
+                    break
+                cluster = next_cluster
+            first_offset = child_ranges[0][0]
+            dot = data[first_offset:first_offset + 32]
+            dotdot = data[first_offset + 32:first_offset + 64]
+            if (
+                dot[:11] != b".          " or not dot[11] & 0x10
+                or _u16le(dot, 26) != first_cluster
+                or dotdot[:11] != b"..         " or not dotdot[11] & 0x10
+                or _u16le(dotdot, 26) != parent_cluster
+            ):
+                raise FloppyImageError(failure)
+            pending.append((child_ranges, first_cluster))
+
+    if directory_clusters:
+        for entry in files:
+            try:
+                clusters = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
+            except FloppyImageError as exc:
+                raise FloppyImageError(failure) from exc
+            if directory_clusters.intersection(clusters):
+                raise FloppyImageError(failure)
+    if not attribute_offsets:
+        return data
+    result = bytearray(data)
+    for offset in attribute_offsets:
+        result[offset] &= ~0x06
+    return bytes(result)
 
 
 def _fat12_contiguous_file_bytes(data, geometry, first_cluster, size):
@@ -9951,6 +10038,18 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 72, 100, "Trying Yamaha/FAT repair before carving files...")
             repair_result = prepare_yamaha_image(source_img, prepared)
+            with open(prepared, "rb") as handle:
+                prepared_data = handle.read()
+            # Other recovery readers also accept non-FAT filesystems. Their
+            # directory attributes do not share DOS hidden/system semantics.
+            visible_data = (
+                _clear_fat12_hidden_system_flags(prepared_data)
+                if _geometry_from_boot_sector(prepared_data[:512]) is not None
+                else prepared_data
+            )
+            if visible_data != prepared_data:
+                with open(prepared, "wb") as handle:
+                    handle.write(visible_data)
             disk_format = _disk_format_for_image(prepared)
             listing = read_image_listing(prepared)
             if listing.entries:

@@ -11,13 +11,14 @@ from dataclasses import dataclass
 from .eseq_converter import (
     CLAVINOVA_MDA_HEADER_SIZE,
     ESEQ_HEADER_SIZE,
+    ESEQ_CONTAINER_CLAVINOVA_MDA,
+    ESEQ_CONTAINER_Q11,
     ESEQ_MIDI_DIVISION,
     ESEQ_SIGNATURE,
     Q11_EVENT_STREAM_START,
-    Q11_SIGNATURE,
     EseqConversionError,
+    _detect_eseq_container,
     _eseq_header_time_signature,
-    is_clavinova_mda_eseq_bytes,
     parse_eseq_bytes,
 )
 from .eseq_header import analyze_eseq_playback_flags
@@ -97,7 +98,7 @@ def _normal_header_fields(data):
     )
 
 
-def inspect_eseq_header(data) -> EseqHeaderInspection:
+def inspect_eseq_header(data, filename="") -> EseqHeaderInspection:
     """Return original header bytes and decoded stream facts without changing data.
 
     Tempo changes and raw FB factors exclude the implicit initial header tempo.
@@ -114,9 +115,10 @@ def inspect_eseq_header(data) -> EseqHeaderInspection:
     if data[0] != 0xFE:
         raise EseqConversionError("The Yamaha E-SEQ header marker is invalid.")
 
-    if data[0x0F:0x17] == Q11_SIGNATURE:
+    container_variant = _detect_eseq_container(data, filename)
+    if container_variant == ESEQ_CONTAINER_Q11:
         variant, stream_offset, tempo_offset = "q11", Q11_EVENT_STREAM_START, 0x24
-    elif is_clavinova_mda_eseq_bytes(data):
+    elif container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA:
         variant, stream_offset, tempo_offset = "mda", CLAVINOVA_MDA_HEADER_SIZE, 0x24
     else:
         variant, stream_offset, tempo_offset = "fil", ESEQ_HEADER_SIZE, 0x33
@@ -130,13 +132,13 @@ def inspect_eseq_header(data) -> EseqHeaderInspection:
     if variant == "fil" and data[0x19] != 0x40:
         raise EseqConversionError("This E-SEQ program header layout is not supported for inspection.")
 
-    parsed = parse_eseq_bytes(data)
+    parsed = parse_eseq_bytes(data, filename)
     base_mpqn = 60_000_000 // parsed.base_bpm
     effective_initial_mpqn = base_mpqn
     for tick, mpqn in parsed.tempo_events:
         if tick == 0:
             effective_initial_mpqn = mpqn
-    meter = _eseq_header_time_signature(data)
+    meter = _eseq_header_time_signature(data, container_variant=container_variant)
     header_meter = (meter[0], 1 << meter[1]) if meter is not None else None
     flags = analyze_eseq_playback_flags(raw for _tick, _kind, raw in parsed.events)
     actual_note_channels = tuple(

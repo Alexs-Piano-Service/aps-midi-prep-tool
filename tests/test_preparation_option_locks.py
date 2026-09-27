@@ -62,7 +62,7 @@ def test_preparation_locks_filename_setting_and_direct_changes(window, profile_k
     action = window.settingsUseDos83FilenamesAction
     assert action.isChecked()
     assert not action.isEnabled()
-    assert action.text().replace("&", "") == "Use 8.3 filenames"
+    assert action.text().replace("&", "") == "Use DOS 8.3 Filenames"
     assert window._preparation_profile().label in action.toolTip()
     assert "Custom" in action.toolTip()
     assert action.statusTip() == action.toolTip()
@@ -78,7 +78,7 @@ def test_preparation_locks_filename_setting_and_direct_changes(window, profile_k
 
     _apply(window, "custom")
     assert action.isEnabled()
-    assert action.text().replace("&", "") == "Use 8.3 filenames"
+    assert action.text().replace("&", "") == "Use DOS 8.3 Filenames"
     window.toggle_dos83_filenames(False)
     window._set_long_midi_filenames_enabled(True)
     assert not action.isChecked()

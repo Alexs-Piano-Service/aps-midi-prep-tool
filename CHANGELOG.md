@@ -9,6 +9,18 @@ with release sections grouped by version and date.
 
 ### Added
 
+- **Disk → Repair Yamaha Boot Sector...** repairs IMG/IMA/BIN/VFD/HFE
+  files in place, with backups only when checked. An optional target format
+  (including HFE for Nalbantov) keeps the repaired original and creates a
+  converted file beside it. Entire folders can be processed, optionally with
+  subfolders, with cancellation and results per image. Supported 720 KB, 800 KB,
+  and 1.44 MB FAT12 layouts preserve file contents, FAT differences, and unused
+  space while repairing the boot sector and clearing hidden/system attributes
+  so disk browsers can show the files. Other attributes are preserved. A missing
+  first sector is prepended to raw images. Converted sector data is verified
+  before saving; existing outputs and backups are never overwritten. This
+  utility leaves pending song edits untouched and is translated in all 12
+  interface languages.
 - **Save Image and Apply to Floppy…** guides users from a repaired source boot
   sector or failed floppy save/write to a persistent IMG with pending changes,
   target selection, explicit whole-disk overwrite confirmation, and mandatory
@@ -25,12 +37,34 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Window menus group song edits and conversions under **Edit**, physical floppy
+  and image-repair tools under **Disk**, and saved preferences under **Settings**.
+  **File** exposes opening actions directly and adds **Quit**. Menu labels clarify
+  floppy imaging, file saving, preparation controls, and dismissed messages;
+  existing preferences and keyboard shortcuts are preserved. Menu labels omit
+  shortcut combinations to keep menus compact; shortcuts remain configurable
+  under **Settings → Keyboard Shortcuts...**.
+- **Repair Yamaha Boot Sector...** and **Recover Damaged Image...** remove
+  hidden/system flags automatically so Nalbantov/HxC Disk Browser can display
+  files and folders. Boot-sector repair also updates already-valid images that
+  still have these flags, while preserving file contents and other attributes.
+- Boot-sector repair recognizes Yamaha 720 KB images whose file directory also
+  needs recovery and explains that **Recover Damaged Image** is required,
+  instead of reporting an unidentified layout. Raw images are checked before
+  creating working copies; failed identification creates no repaired image,
+  conversion, or backup.
+- Bulk extraction removes its progress JSON after successful completion and
+  removes the job lock when the operation ends. Failed or cancelled jobs retain
+  their progress for resuming; completed jobs no longer leave a stale resume
+  suggestion. Cleanup failures are reported without changing extracted files.
+- **Save As Image** keeps the source filename without appending `_edited`,
+  including floppy and Greaseweazle image exports.
 - Piano channel merges prompt only when same-key notes overlap, with smart
   repair, attack-preserving trimming, and merge-only choices. The optional
   remembered choice requires checking a box and applies to future merges,
   including Type 0 piano remapping. **Settings → Overlapping Piano Notes...**
   lets users change the behavior or restore prompting at any time;
-  **Reset Hidden Dialogs** restores the prompt. MIDI and native E-SEQ edits keep
+  **Show Dismissed Messages Again** restores the prompt. MIDI and native E-SEQ edits keep
   the existing Save and Undo workflow.
 - Successful floppy-save recovery packages are limited to the five most recent
   saves and 30 days. Failed, cancelled, and unfinished packages remain until
@@ -45,6 +79,21 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Image exports preserve non-ASCII DOS filename identities, allowing renames,
+  replacements, title edits, deletions, and regenerated song catalogs to find
+  the correct file. Yamaha images with these filenames no longer trigger
+  unnecessary directory recovery
+  or changes to original file sizes during boot repair.
+- **Save As Image** remembers the selected image format across dialog openings
+  and app restarts. Cancelled dialogs and required IMG exports for floppy
+  delivery leave that preference unchanged.
+- **Review emulator disk set** keeps its size and position when resized,
+  switching tabs, or editing album titles. Automatic content sizing no longer
+  fights window resizing and causes redraw glitches.
+- MDA-to-MIDI conversion now uses the source filename as well as the bytes to
+  identify Clavinova containers, matching native channel merging. Affected
+  variants retain their early notes, tempo, and meter in conversions, previews,
+  and conversion reviews, including after staged piano merges.
 - E-SEQ inspection and conversion now reject incomplete commands at the end
   of a file instead of silently producing a partial MIDI. Failed conversions
   create no output and leave existing destinations and staged songs unchanged.

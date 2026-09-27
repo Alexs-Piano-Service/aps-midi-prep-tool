@@ -338,6 +338,19 @@ def build_eseq_order_key_from_path(path, *, sort_last=False):
     return stem_bytes + ext_bytes + b"\x00"
 
 
+def _encode_dos83_component(text, length):
+    encoded = bytearray()
+    for ch in text:
+        if ch.isascii() and not ch.isprintable():
+            encoded.extend(b"_")
+            continue
+        try:
+            encoded.extend(ch.encode("cp850"))
+        except UnicodeEncodeError:
+            encoded.extend(b"_")
+    return bytes(encoded[:length]).ljust(length, b" ")
+
+
 def build_dos83_name_bytes(path, *, uppercase=False):
     filename = os.path.basename(path or "")
     stem, ext = os.path.splitext(filename)
@@ -345,23 +358,17 @@ def build_dos83_name_bytes(path, *, uppercase=False):
     if uppercase:
         stem = stem.upper()
         ext = ext.upper()
-    stem = "".join(
-        ch if ch.isascii() and ch.isprintable() else "_"
-        for ch in stem
-    )
-    ext = "".join(
-        ch if ch.isascii() and ch.isprintable() else "_"
-        for ch in ext
-    )
-    stem_bytes = stem.encode("ascii", errors="replace")[:8].ljust(8, b" ")
-    ext_bytes = ext.encode("ascii", errors="replace")[:3].ljust(3, b" ")
+    # Match the lossless OEM names used by the FAT reader and mtools; replacing
+    # high bytes with underscores would make the catalog refer to missing songs.
+    stem_bytes = _encode_dos83_component(stem, 8)
+    ext_bytes = _encode_dos83_component(ext, 3)
     return stem_bytes + ext_bytes
 
 
 def decode_dos83_name(raw_name):
     raw_name = bytes(raw_name or b"")[:11].ljust(11, b" ")
-    stem = raw_name[:8].decode("ascii", errors="replace").rstrip(" \x00")
-    ext = raw_name[8:11].decode("ascii", errors="replace").rstrip(" \x00")
+    stem = raw_name[:8].rstrip(b" \x00").decode("cp850")
+    ext = raw_name[8:11].rstrip(b" \x00").decode("cp850")
     if stem and ext:
         return f"{stem}.{ext}"
     return stem or ext

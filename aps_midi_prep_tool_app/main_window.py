@@ -103,6 +103,7 @@ from .eseq_converter import (
     is_eseq_file,
 )
 from .dos83_renamer import apply_midi_dos83_plan, build_dos83_filename, validate_midi_dos83_plan
+from .boot_sector_dialog import BootSectorRepairDialog
 from .emulator_image_builder import sanitize_image_prefix
 from .preparation_profile_dialog import PreparationProfileDialog
 from .emulator_preview_dialog import EmulatorPreviewDialog, localize_emulator_warning
@@ -4410,7 +4411,10 @@ class BatchAudioRenderWorker(QThread):
         with open(path, "rb") as handle:
             payload = handle.read()
         if is_eseq_file(path):
-            payload = convert_eseq_bytes_to_midi_bytes(payload, include_conversion_text=False)
+            payload = convert_eseq_bytes_to_midi_bytes(
+                payload, filename=item.get("display_name") or os.path.basename(path),
+                include_conversion_text=False,
+            )
         if self.channels is not None:
             payload = _filter_midi_bytes_to_channels(
                 payload,
@@ -6660,16 +6664,20 @@ class FileInspectionDialog(QDialog):
             source_is_eseq = is_eseq_file(path)
             source_details = ""
             if source_is_eseq:
+                source_filename = item.get("display_name") or os.path.basename(path)
                 try:
                     source_details = format_eseq_header_details(
                         payload, source_label=label, language_code=self.language,
+                        filename=source_filename,
                     )
                 except EseqConversionError:
                     # An unfamiliar header layout must not disable an already
                     # supported preview or acquire guessed Mark IV meanings.
                     source_details = self.t("Original header details are unavailable for this E-SEQ variant.")
                 source_details += "\n\n" + self.t("Decoded MIDI preview:") + "\n"
-                payload = convert_eseq_bytes_to_midi_bytes(payload, include_conversion_text=False)
+                payload = convert_eseq_bytes_to_midi_bytes(
+                    payload, filename=source_filename, include_conversion_text=False,
+                )
             inspection = _inspect_midi_bytes(payload, source_label=label, language_code=self.language)
             self._source_midi_format = source_midi_format
             self._source_is_eseq = source_is_eseq
@@ -8895,6 +8903,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     SETTING_RECOVERY_IMAGE_FORMAT = "disk_recovery_image_format"
     SETTING_RECOVERY_FLOPPY_FORMAT = "disk_recovery_floppy_format"
     SETTING_SAVE_AS_LOCATION = "save_as_location"
+    SETTING_SAVE_AS_IMAGE_FORMAT = "save_as_image_format"
     SETTING_OPEN_FOLDER_LOCATION = "open_folder_location"
     SETTING_OPEN_IMAGE_LOCATION = "open_image_location"
     SETTING_BULK_EXTRACTION_SOURCE = "bulk_extraction_source"
@@ -9529,7 +9538,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.fileReadFloppyAction = QAction("Read Floppy...", self)
         self.fileReadFloppyAction.triggered.connect(self.load_floppy_drive)
 
-        self.fileImageFloppyAction = QAction("Image Floppy...", self)
+        self.fileImageFloppyAction = QAction(self._lt("Create Image from Floppy..."), self)
         self._set_static_tooltip(self.fileImageFloppyAction, 'Copy a physical floppy to an image file without opening or scanning its contents.')
         self.fileImageFloppyAction.triggered.connect(self.image_floppy_disk)
 
@@ -9545,7 +9554,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.fileClearListAction = QAction("Clear List", self)
         self.fileClearListAction.triggered.connect(self.clear_list)
 
-        self.fileCreateAlbumSubfolderAction = QAction("Create Album Subfolder", self)
+        self.fileCreateAlbumSubfolderAction = QAction(self._lt("Create Album Subfolder for Folder Exports"), self)
         self.fileCreateAlbumSubfolderAction.setCheckable(True)
         self.fileCreateAlbumSubfolderAction.setChecked(self.album_subfolder_checkbox.isChecked())
         self.fileCreateAlbumSubfolderAction.setToolTip(
@@ -9586,7 +9595,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.fileSaveAsImageAction = QAction("Save As Image...", self)
         self.fileSaveAsImageAction.triggered.connect(self.save_as_image)
 
-        self.fileSaveToFloppyAction = QAction("Save To Floppy...", self)
+        self.fileSaveToFloppyAction = QAction(self._lt("Save Files to Floppy..."), self)
         self._set_static_tooltip(self.fileSaveToFloppyAction, 'Save the current listed files directly to a formatted floppy drive without rewriting the whole disk image.')
         self.fileSaveToFloppyAction.triggered.connect(self.save_to_floppy)
 
@@ -9603,18 +9612,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.fileWriteProtectOriginalAction.setCheckable(True)
         self._set_static_tooltip(self.fileWriteProtectOriginalAction, 'Protect the currently open image or floppy from being overwritten by Save.')
         self.fileWriteProtectOriginalAction.toggled.connect(self.toggle_original_write_protection)
-        self.fileBackUpBeforeSavingAction = QAction("Back up before Saving", self)
+        self.fileBackUpBeforeSavingAction = QAction(self._lt("Back Up Before Saving"), self)
         self.fileBackUpBeforeSavingAction.setCheckable(True)
         self.fileBackUpBeforeSavingAction.setChecked(self.backup_checkbox.isChecked())
         self._set_static_tooltip(self.fileBackUpBeforeSavingAction, 'Before overwriting, back up images beside the image and individual files into a backup folder.')
         self.fileBackUpBeforeSavingAction.toggled.connect(self.backup_checkbox.setChecked)
 
+        self.fileQuitAction = QAction(self._lt("Quit"), self)
+        self.fileQuitAction.setMenuRole(QAction.QuitRole)
+        self.fileQuitAction.triggered.connect(self.close)
+
         self.fileMenu.addAction(self.fileNewImageAction)
-        self.fileOpenMenu = self.fileMenu.addMenu(self._lt("Open"))
-        self.fileOpenMenu.addAction(self.fileOpenFolderAction)
-        self.fileOpenMenu.addAction(self.fileOpenImageAction)
-        self.fileOpenMenu.addSeparator()
-        self.fileOpenMenu.addAction(self.fileRecoverImageAction)
+        self.fileMenu.addAction(self.fileOpenFolderAction)
+        self.fileMenu.addAction(self.fileOpenImageAction)
         self.fileMenu.addSeparator()
         self.fileMenu.addAction(self.fileSaveAction)
         self.fileMenu.addAction(self.fileSaveAsAction)
@@ -9622,17 +9632,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.fileMenu.addAction(self.fileSaveAsImageAction)
         self.fileMenu.addSeparator()
         self.fileMenu.addAction(self.fileClearListAction)
+        self.fileMenu.addAction(self.fileWriteProtectOriginalAction)
         self.fileMenu.addSeparator()
-        self.fileSaveOptionsMenu = self.fileMenu.addMenu(self._lt("Save Options"))
+        self.fileMenu.addAction(self.fileQuitAction)
+
+        # Retain the action identities and stored preferences when moving
+        # application-wide save behavior into Settings.
+        self.fileSaveOptionsMenu = QMenu(self._lt("Save Options"), self)
         self.fileSaveOptionsMenu.addAction(self.fileCreateAlbumSubfolderAction)
         self.fileSaveOptionsMenu.addAction(self.fileCreateImageAlbumSubfolderAction)
         self.fileSaveOptionsMenu.addAction(self.fileBackUpBeforeSavingAction)
         self.fileSaveOptionsMenu.addSeparator()
         self.fileSaveOptionsMenu.addAction(self.fileCreateTagSidecarsAction)
         self.fileSaveOptionsMenu.addAction(self.fileCreateMetadataSummaryAction)
-        self.fileWriteProtectionMenu = self.fileMenu.addMenu(self._lt("Write Protection"))
-        self.fileWriteProtectionMenu.addAction(self.fileAutoWriteProtectAction)
-        self.fileWriteProtectionMenu.addAction(self.fileWriteProtectOriginalAction)
 
         self.editMenu = self.menuBar().addMenu(self._lt("&Edit"))
         self.editUndoAction = QAction(self._lt("Undo"), self)
@@ -9642,28 +9654,28 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.editUndoAllAction.triggered.connect(self.undo_all_staged_changes)
         self.editMenu.addAction(self.editUndoAllAction)
         self.editMenu.addSeparator()
-        self.editReviewChangesAction = QAction(self._lt("Review Changes"), self)
+        self.editReviewChangesAction = QAction(self._lt("Review Changes..."), self)
         self.editReviewChangesAction.triggered.connect(self.show_pending_changes)
         self.editMenu.addAction(self.editReviewChangesAction)
 
         self.diskMenu = self.menuBar().addMenu(self._lt("&Disk"))
         self.diskMenu.addAction(self.fileReadFloppyAction)
         self.diskMenu.addAction(self.fileImageFloppyAction)
-        self.savePartialCaptureAction = QAction(self._lt("Save partial capture..."), self)
+        self.savePartialCaptureAction = QAction(self._lt("Save Partial Capture..."), self)
         self.savePartialCaptureAction.triggered.connect(self.save_partial_recovery_capture)
         self.diskMenu.addAction(self.savePartialCaptureAction)
         self.diskMenu.addSeparator()
         self.diskMenu.addAction(self.fileSaveToFloppyAction)
         self.diskMenu.addAction(self.fileWriteImageToFloppyAction)
-        self.verifyFloppyWriteAction = QAction(self._lt("Verify floppy contents after writing"), self)
+        self.verifyFloppyWriteAction = QAction(self._lt("Verify Floppy Contents After Writing"), self)
         self.verifyFloppyWriteAction.setCheckable(True)
         self.verifyFloppyWriteAction.setChecked(self.settings.value("verify_floppy_after_write", False, type=bool))
         self.verifyFloppyWriteAction.setToolTip(self._lt("Read the floppy again and compare every file with the prepared image. This adds time."))
         self.verifyFloppyWriteAction.toggled.connect(lambda enabled: self.settings.setValue("verify_floppy_after_write", enabled))
-        self.diskMenu.addAction(self.verifyFloppyWriteAction)
         self.diskMenu.addSeparator()
 
         self.viewMenu = self.menuBar().addMenu("&View")
+        self.menuBar().insertMenu(self.diskMenu.menuAction(), self.viewMenu)
         self.viewLongTitleWarningAction = QAction("Long title warning", self)
         self.viewLongTitleWarningAction.setCheckable(True)
         self.viewLongTitleWarningAction.setChecked(self.compat_warning_checkbox.isChecked())
@@ -9676,7 +9688,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.viewFormatDisklavierScreenAction.setChecked(self.format_disklavier_checkbox.isChecked())
         self._set_static_tooltip(self.viewFormatDisklavierScreenAction, "When editing titles, use the Disklavier's two 16-character screen rows.")
         self.viewFormatDisklavierScreenAction.toggled.connect(self.format_disklavier_checkbox.setChecked)
-        self.viewMenu.addAction(self.viewFormatDisklavierScreenAction)
 
         self.titleDisplayEncodingMenu = self.viewMenu.addMenu(self._lt("Title display encoding"))
         self.titleDisplayEncodingGroup = QActionGroup(self)
@@ -9730,7 +9741,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.viewShowSaveDestinationAction.toggled.connect(self.toggle_show_save_destination)
         self.viewMenu.addAction(self.viewShowSaveDestinationAction)
 
-        self.viewShowPreparationRowAction = QAction(self._lt("Show Preparation Row"), self)
+        self.viewShowPreparationRowAction = QAction(self._lt("Show Preparation Controls"), self)
         self.viewShowPreparationRowAction.setCheckable(True)
         self.viewShowPreparationRowAction.setChecked(
             self.settings.value(self.SETTING_SHOW_PREPARATION_ROW, True, type=bool)
@@ -9757,6 +9768,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self._set_static_tooltip(self.utilitiesRenderAudioAction, 'Render all currently listed MIDI or E-SEQ files to WAV or MP3 using a selected SoundFont.')
         self.utilitiesRenderAudioAction.triggered.connect(self.show_audio_render_tool)
         self.utilitiesMenu.addAction(self.utilitiesRenderAudioAction)
+        self.utilitiesMenu.addSeparator()
 
         self.utilitiesBulkExtractionAction = QAction(self._t("bulk.action"), self)
         self.utilitiesBulkExtractionAction.setToolTip(
@@ -9777,28 +9789,38 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.utilitiesEmulatorImagesAction.triggered.connect(self.show_emulator_image_utility)
         self.utilitiesMenu.addAction(self.utilitiesEmulatorImagesAction)
 
-        self.utilitiesMenu.addSeparator()
+        self.utilitiesRepairBootSectorAction = QAction(self._lt("Repair Yamaha Boot Sector..."), self)
+        self._set_static_tooltip(
+            self.utilitiesRepairBootSectorAction,
+            "Repair boot sectors and make files visible, with optional backups, format conversion, and folder processing.",
+        )
+        self.utilitiesRepairBootSectorAction.triggered.connect(self.repair_image_boot_sector_dialog)
+        self.diskMenu.addAction(self.utilitiesRepairBootSectorAction)
+        self.diskMenu.addAction(self.fileRecoverImageAction)
+
+        self.editMenu.addSeparator()
 
         self.utilitiesRenameAction = QAction("Rename All to DOS 8.3", self)
         self.utilitiesRenameAction.triggered.connect(self.rename_all_for_disk)
-        self.utilitiesMenu.addAction(self.utilitiesRenameAction)
+        self.editMenu.addAction(self.utilitiesRenameAction)
 
         self.utilitiesLongFilenamesAction = QAction("Name MIDI Files from Song Titles", self)
         self._set_static_tooltip(self.utilitiesLongFilenamesAction, 'Create filenames such as 01 - Moon River.mid from track order and song titles.')
         self.utilitiesLongFilenamesAction.triggered.connect(self.create_long_midi_filenames)
-        self.utilitiesMenu.addAction(self.utilitiesLongFilenamesAction)
+        self.editMenu.addAction(self.utilitiesLongFilenamesAction)
 
         self.utilitiesTrimTitleSpacesAction = QAction("Trim Title Spaces", self)
         self._set_static_tooltip(self.utilitiesTrimTitleSpacesAction, 'Trim leading/trailing title spaces and collapse repeated spaces for all listed titles.')
         self.utilitiesTrimTitleSpacesAction.triggered.connect(self.trim_title_spaces_for_all)
-        self.utilitiesMenu.addAction(self.utilitiesTrimTitleSpacesAction)
+        self.editMenu.addAction(self.utilitiesTrimTitleSpacesAction)
+        self.editMenu.addSeparator()
 
         self.utilitiesPedalCompatibilityAction = QAction("Apply Pedal Compatibility...", self)
         self.utilitiesPedalCompatibilityAction.setToolTip(
             self._lt("Apply optional pedal compatibility transforms to listed MIDI files.")
         )
         self.utilitiesPedalCompatibilityAction.triggered.connect(self.show_pedal_compatibility_utility)
-        self.utilitiesMenu.addAction(self.utilitiesPedalCompatibilityAction)
+        self.editMenu.addAction(self.utilitiesPedalCompatibilityAction)
 
         self.utilitiesMergeChannelsAction = QAction("Merge Channels to Piano...", self)
         self.utilitiesMergeChannelsAction.setToolTip(
@@ -9807,16 +9829,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             )
         )
         self.utilitiesMergeChannelsAction.triggered.connect(self.show_channel_merging_utility)
-        self.utilitiesMenu.addAction(self.utilitiesMergeChannelsAction)
+        self.editMenu.addAction(self.utilitiesMergeChannelsAction)
 
         self.utilitiesStripXfAction = QAction("Strip XF Data...", self)
         self.utilitiesStripXfAction.setToolTip(
             self._lt("Remove Yamaha XF metadata from one listed MIDI file or all listed MIDI files.")
         )
         self.utilitiesStripXfAction.triggered.connect(self.show_xf_stripping_utility)
-        self.utilitiesMenu.addAction(self.utilitiesStripXfAction)
+        self.editMenu.addAction(self.utilitiesStripXfAction)
 
-        self.utilitiesSmfAction = QAction("Convert All SMF1 to SMF0", self)
+        self.utilitiesSmfAction = QAction(self._lt("MIDI Type 1 to Type 0"), self)
         self.utilitiesSmfAction.triggered.connect(self.convert_all_to_type0)
 
         self.utilitiesEseqToMidiAction = QAction("Convert All E-SEQ to MIDI", self)
@@ -9825,8 +9847,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.utilitiesMidiToEseqAction = QAction("Convert All MIDI to E-SEQ", self)
         self.utilitiesMidiToEseqAction.triggered.connect(self.convert_all_midi_to_eseq)
 
-        self.utilitiesMenu.addSeparator()
-        self.utilitiesConvertMenu = self.utilitiesMenu.addMenu(self._lt("Convert"))
+        self.editMenu.addSeparator()
+        self.utilitiesConvertMenu = self.editMenu.addMenu(self._lt("Convert"))
         self.utilitiesConvertMenu.addAction(self.utilitiesSmfAction)
         self.utilitiesConvertMenu.addAction(self.utilitiesEseqToMidiAction)
         self.utilitiesConvertMenu.addAction(self.utilitiesMidiToEseqAction)
@@ -9841,6 +9863,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.preparationAction = QAction(self._lt("Preparing for..."), self)
         self.preparationAction.triggered.connect(self.choose_preparation_profile)
         self.settingsMenu.addAction(self.preparationAction)
+        self.settingsMenu.addAction(self.viewFormatDisklavierScreenAction)
+        self.settingsMenu.addMenu(self.fileSaveOptionsMenu)
+        self.settingsDiskOptionsMenu = self.settingsMenu.addMenu(self._lt("Disk Options"))
+        self.settingsDiskOptionsMenu.addAction(self.fileAutoWriteProtectAction)
+        self.settingsDiskOptionsMenu.addAction(self.verifyFloppyWriteAction)
         self.settingsMenu.addSeparator()
         self.appearanceMenu = self.settingsMenu.addMenu(self._t("menu.appearance"))
         self.appearanceActionGroup = QActionGroup(self)
@@ -9872,7 +9899,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.fontSizeActionGroup.addAction(action)
             self.fontSizeMenu.addAction(action)
             self.fontSizeActions[mode] = action
-        self.settingsMenu.addSeparator()
         self.languageMenu = self.settingsMenu.addMenu(self._t("menu.language"))
         self.languageActionGroup = QActionGroup(self)
         self.languageActionGroup.setExclusive(True)
@@ -9888,9 +9914,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.languageActionGroup.addAction(action)
             self.languageMenu.addAction(action)
             self.languageActions[language.code] = action
-        self.settingsMenu.addSeparator()
         self.settingsUseDos83FilenamesAction = QAction(
-            self._lt("Use 8.3 filenames"),
+            self._lt("Use DOS 8.3 Filenames"),
             self,
         )
         self.settingsUseDos83FilenamesAction.setCheckable(True)
@@ -9901,16 +9926,16 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self._t("filename_policy.dos83.tooltip")
         )
         self.settingsUseDos83FilenamesAction.toggled.connect(self.toggle_dos83_filenames)
-        self.settingsMenu.addAction(self.settingsUseDos83FilenamesAction)
+        self.settingsMenu.insertAction(self.fileSaveOptionsMenu.menuAction(), self.settingsUseDos83FilenamesAction)
         self.settingsPianoOverlapAction = QAction(self._lt("Overlapping Piano Notes..."), self)
         self.settingsPianoOverlapAction.triggered.connect(self.show_piano_overlap_settings)
-        self.settingsMenu.addAction(self.settingsPianoOverlapAction)
+        self.settingsMenu.insertAction(self.fileSaveOptionsMenu.menuAction(), self.settingsPianoOverlapAction)
         self.settingsMenu.addSeparator()
         self.settingsKeyboardShortcutsAction = QAction("Keyboard Shortcuts...", self)
         self.settingsKeyboardShortcutsAction.triggered.connect(self.show_keyboard_shortcuts_dialog)
         self.settingsMenu.addAction(self.settingsKeyboardShortcutsAction)
 
-        self.settingsResetHiddenDialogsAction = QAction(self._t("settings.reset_hidden_dialogs"), self)
+        self.settingsResetHiddenDialogsAction = QAction(self._lt("Show Dismissed Messages Again"), self)
         self.settingsResetHiddenDialogsAction.setToolTip(self._t("settings.reset_hidden_dialogs.tooltip"))
         self.settingsResetHiddenDialogsAction.triggered.connect(self.reset_hidden_dialog_settings)
         self.settingsMenu.addAction(self.settingsResetHiddenDialogsAction)
@@ -9926,6 +9951,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.settings.value(self.SETTING_CHECK_UPDATES_AT_STARTUP, True, type=bool)
         )
         self.helpCheckUpdatesAtStartupAction.toggled.connect(self.toggle_update_checks_at_startup)
+        self.settingsMenu.insertAction(self.settingsResetHiddenDialogsAction, self.helpCheckUpdatesAtStartupAction)
 
         self.helpReportBugAction = QAction("Report a Bug...", self)
         self._set_static_tooltip(self.helpReportBugAction, 'Send a bug report with app details and optional recent console logs.')
@@ -9946,7 +9972,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         help_menu.addAction(self.helpWelcomeAction)
         help_menu.addSeparator()
         help_menu.addAction(self.helpCheckUpdatesAction)
-        help_menu.addAction(self.helpCheckUpdatesAtStartupAction)
         help_menu.addSeparator()
         help_menu.addAction(self.helpFeedbackAction)
         help_menu.addAction(self.helpReportBugAction)
@@ -10414,7 +10439,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if action is None:
             return
         forced = self._preparation_requires_dos83_filenames()
-        label = self._lt("Use 8.3 filenames")
+        label = self._lt("Use DOS 8.3 Filenames")
         action.setText(self._with_mnemonic(label, "8"))
         action.setEnabled(self.choose_button.isEnabled() and not forced)
         blocked = action.blockSignals(True)
@@ -10574,7 +10599,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                         )
                     intermediate = os.path.join(scratch_dir, f"{uuid.uuid4().hex}.mid")
                     output = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
-                    convert_eseq_file_to_midi_path(material, intermediate, title_override=current_title, cc7_policy=CC7_POLICY_PRESERVE)
+                    convert_eseq_file_to_midi_path(
+                        material, intermediate, filename=filename,
+                        title_override=current_title, cc7_policy=CC7_POLICY_PRESERVE,
+                    )
                     convert_midi_file_to_eseq_path(
                         intermediate, output, title_override=current_title, filename_hint=target_filename,
                         cc7_policy=CC7_POLICY_PRESERVE, container_variant=self._eseq_converter_container(ESEQ_VARIANT_DISKLAVIER),
@@ -10847,7 +10875,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.languageMenu.setTitle(self._t("menu.language"))
         if hasattr(self, "settingsUseDos83FilenamesAction"):
             self.settingsUseDos83FilenamesAction.setText(
-                self._with_mnemonic(self._lt("Use 8.3 filenames"), "8")
+                self._with_mnemonic(self._lt("Use DOS 8.3 Filenames"), "8")
             )
             self.settingsUseDos83FilenamesAction.setToolTip(
                 self._t("filename_policy.dos83.tooltip")
@@ -10861,7 +10889,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.settingsPianoOverlapAction.setText(self._menu_action_text("Overlapping Piano Notes...", "O"))
         if hasattr(self, "settingsResetHiddenDialogsAction"):
             self.settingsResetHiddenDialogsAction.setText(
-                self._with_mnemonic(self._t("settings.reset_hidden_dialogs"), "R")
+                self._with_mnemonic(self._lt("Show Dismissed Messages Again"), "R")
             )
             self.settingsResetHiddenDialogsAction.setToolTip(self._t("settings.reset_hidden_dialogs.tooltip"))
         for language in language_options():
@@ -10895,33 +10923,34 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         return (
             {"id": "edit.undo", "category": "Edit", "label": "Undo", "action": "editUndoAction", "default": "Ctrl+Z"},
             {"id": "edit.undo_all", "category": "Edit", "label": "Undo All", "action": "editUndoAllAction", "default": ""},
-            {"id": "edit.review", "category": "Edit", "label": "Review Changes", "action": "editReviewChangesAction", "default": ""},
+            {"id": "edit.review", "category": "Edit", "label": "Review Changes...", "action": "editReviewChangesAction", "default": ""},
             {"id": "file.new_image", "category": "File", "label": "New Image...", "action": "fileNewImageAction", "default": "Ctrl+N"},
             {"id": "file.open_folder", "category": "File", "label": "Open MIDI Folder...", "action": "fileOpenFolderAction", "default": "Ctrl+O"},
             {"id": "file.open_image", "category": "File", "label": "Open Image...", "action": "fileOpenImageAction", "default": "Ctrl+Shift+O"},
             {"id": "file.read_floppy", "category": "Disk", "label": "Read Floppy...", "action": "fileReadFloppyAction", "default": "Ctrl+R"},
-            {"id": "file.image_floppy", "category": "Disk", "label": "Image Floppy...", "action": "fileImageFloppyAction", "default": "Ctrl+I"},
+            {"id": "file.image_floppy", "category": "Disk", "label": "Create Image from Floppy...", "action": "fileImageFloppyAction", "default": "Ctrl+I"},
             {"id": "file.save", "category": "File", "label": "Save", "action": "fileSaveAction", "default": "Ctrl+S"},
             {"id": "file.save_as", "category": "File", "label": "Save As...", "action": "fileSaveAsAction", "default": "Ctrl+Shift+S"},
             {"id": "file.save_as_zip", "category": "File", "label": "Save As ZIP...", "action": "fileSaveAsZipAction", "default": ""},
             {"id": "file.save_as_image", "category": "File", "label": "Save As Image...", "action": "fileSaveAsImageAction", "default": "Ctrl+Shift+I"},
+            {"id": "file.quit", "category": "File", "label": "Quit", "action": "fileQuitAction", "default": "Ctrl+Q"},
             {"id": "file.clear_list", "category": "File", "label": "Clear List", "action": "fileClearListAction", "default": "Ctrl+Shift+Delete"},
-            {"id": "file.save_to_floppy", "category": "Disk", "label": "Save To Floppy...", "action": "fileSaveToFloppyAction", "default": "Ctrl+F"},
+            {"id": "file.save_to_floppy", "category": "Disk", "label": "Save Files to Floppy...", "action": "fileSaveToFloppyAction", "default": "Ctrl+F"},
             {"id": "file.write_image_to_floppy", "category": "Disk", "label": "Write Current Image to Floppy...", "action": "fileWriteImageToFloppyAction", "default": "Ctrl+Shift+F"},
-            {"id": "file.auto_write_protect", "category": "File", "label": "Auto Write-Protect", "action": "fileAutoWriteProtectAction", "default": "Ctrl+Shift+P"},
+            {"id": "file.auto_write_protect", "category": "Settings", "label": "Auto Write-Protect", "action": "fileAutoWriteProtectAction", "default": "Ctrl+Shift+P"},
             {"id": "file.write_protect_original", "category": "File", "label": "Write-Protect Original", "action": "fileWriteProtectOriginalAction", "default": "Ctrl+Alt+P"},
-            {"id": "file.create_album_subfolder", "category": "File", "label": "Create Album Subfolder", "action": "fileCreateAlbumSubfolderAction", "default": "Ctrl+Shift+A"},
-            {"id": "file.create_image_album_subfolder", "category": "File", "label": "Create Album Subfolder for Save As Image", "action": "fileCreateImageAlbumSubfolderAction", "default": ""},
-            {"id": "file.back_up_before_saving", "category": "File", "label": "Back up before Saving", "action": "fileBackUpBeforeSavingAction", "default": "Ctrl+Alt+B"},
-            {"id": "file.create_tag_sidecars", "category": "File", "label": "Create Tag Sidecars When Saving", "action": "fileCreateTagSidecarsAction", "default": "Ctrl+Shift+T"},
-            {"id": "file.create_metadata_summary", "category": "File", "label": "Create Metadata Summary When Saving", "action": "fileCreateMetadataSummaryAction", "default": "Ctrl+Shift+Y"},
+            {"id": "file.create_album_subfolder", "category": "Settings", "label": "Create Album Subfolder for Folder Exports", "action": "fileCreateAlbumSubfolderAction", "default": "Ctrl+Shift+A"},
+            {"id": "file.create_image_album_subfolder", "category": "Settings", "label": "Create Album Subfolder for Save As Image", "action": "fileCreateImageAlbumSubfolderAction", "default": ""},
+            {"id": "file.back_up_before_saving", "category": "Settings", "label": "Back Up Before Saving", "action": "fileBackUpBeforeSavingAction", "default": "Ctrl+Alt+B"},
+            {"id": "file.create_tag_sidecars", "category": "Settings", "label": "Create Tag Sidecars When Saving", "action": "fileCreateTagSidecarsAction", "default": "Ctrl+Shift+T"},
+            {"id": "file.create_metadata_summary", "category": "Settings", "label": "Create Metadata Summary When Saving", "action": "fileCreateMetadataSummaryAction", "default": "Ctrl+Shift+Y"},
             {"id": "view.long_title_warning", "category": "View", "label": "Long title warning", "action": "viewLongTitleWarningAction", "default": "Ctrl+Alt+W"},
-            {"id": "view.format_disklavier_screen", "category": "View", "label": "Format for Disklavier screen", "action": "viewFormatDisklavierScreenAction", "default": "Ctrl+Alt+D"},
+            {"id": "view.format_disklavier_screen", "category": "Settings", "label": "Format for Disklavier screen", "action": "viewFormatDisklavierScreenAction", "default": "Ctrl+Alt+D"},
             {"id": "view.hide_status", "category": "View", "label": "Show Status", "action": "viewShowStatusAction", "default": "Ctrl+Alt+S"},
             {"id": "view.hide_quick_panel", "category": "View", "label": "Show Quick Panel", "action": "viewShowQuickPanelAction", "default": "Ctrl+Alt+Q"},
             {"id": "view.hide_album_metadata", "category": "View", "label": "Show Album Info", "action": "viewShowAlbumMetadataAction", "default": "Ctrl+Alt+A"},
             {"id": "view.show_save_destination", "category": "View", "label": "Show Save Destination", "action": "viewShowSaveDestinationAction", "default": ""},
-            {"id": "view.show_preparation_row", "category": "View", "label": "Show Preparation Row", "action": "viewShowPreparationRowAction", "default": ""},
+            {"id": "view.show_preparation_row", "category": "View", "label": "Show Preparation Controls", "action": "viewShowPreparationRowAction", "default": ""},
             {"id": "view.logs", "category": "View", "label": "View Logs...", "action": "viewLogsAction", "default": "F8"},
             {"id": "utilities.song_list", "category": "Utilities", "label": "Song List...", "action": "utilitiesSongListAction", "default": "F3"},
             {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
@@ -10929,18 +10958,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             {"id": "utilities.bulk_extraction", "category": "Utilities", "label": "Bulk Extraction...", "action": "utilitiesBulkExtractionAction", "default": ""},
             {"id": "utilities.markiv_backup", "category": "Utilities", "label": "Back Up Mark IV Music...", "action": "utilitiesMarkIVBackupAction", "default": ""},
             {"id": "utilities.emulator_images", "category": "Utilities", "label": "Build Emulator Disk Set...", "action": "utilitiesEmulatorImagesAction", "default": ""},
-            {"id": "utilities.rename", "category": "Utilities", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
-            {"id": "utilities.long_filenames", "category": "Utilities", "label": "Name MIDI Files from Song Titles", "action": "utilitiesLongFilenamesAction", "default": ""},
-            {"id": "utilities.trim_title_spaces", "category": "Utilities", "label": "Trim Title Spaces", "action": "utilitiesTrimTitleSpacesAction", "default": "Ctrl+Shift+Space"},
-            {"id": "utilities.smf0", "category": "Utilities", "label": "Convert All SMF1 to SMF0", "action": "utilitiesSmfAction", "default": "Ctrl+Shift+0"},
-            {"id": "utilities.eseq_to_midi", "category": "Utilities", "label": "Convert All E-SEQ to MIDI", "action": "utilitiesEseqToMidiAction", "default": "Ctrl+Shift+M"},
-            {"id": "utilities.midi_to_eseq", "category": "Utilities", "label": "Convert All MIDI to E-SEQ", "action": "utilitiesMidiToEseqAction", "default": "Ctrl+Shift+E"},
-            {"id": "utilities.pedal_compatibility", "category": "Utilities", "label": "Apply Pedal Compatibility...", "action": "utilitiesPedalCompatibilityAction", "default": ""},
-            {"id": "utilities.merge_channels", "category": "Utilities", "label": "Merge Channels to Piano...", "action": "utilitiesMergeChannelsAction", "default": ""},
-            {"id": "utilities.strip_xf", "category": "Utilities", "label": "Strip XF Data...", "action": "utilitiesStripXfAction", "default": ""},
-            {"id": "utilities.recover_image", "category": "File", "label": "Recover Damaged Image...", "action": "fileRecoverImageAction", "default": "Ctrl+Shift+D"},
+            {"id": "utilities.repair_boot_sector", "category": "Disk", "label": "Repair Yamaha Boot Sector...", "action": "utilitiesRepairBootSectorAction", "default": ""},
+            {"id": "utilities.rename", "category": "Edit", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
+            {"id": "utilities.long_filenames", "category": "Edit", "label": "Name MIDI Files from Song Titles", "action": "utilitiesLongFilenamesAction", "default": ""},
+            {"id": "utilities.trim_title_spaces", "category": "Edit", "label": "Trim Title Spaces", "action": "utilitiesTrimTitleSpacesAction", "default": "Ctrl+Shift+Space"},
+            {"id": "utilities.smf0", "category": "Edit", "label": "MIDI Type 1 to Type 0", "action": "utilitiesSmfAction", "default": "Ctrl+Shift+0"},
+            {"id": "utilities.eseq_to_midi", "category": "Edit", "label": "Convert All E-SEQ to MIDI", "action": "utilitiesEseqToMidiAction", "default": "Ctrl+Shift+M"},
+            {"id": "utilities.midi_to_eseq", "category": "Edit", "label": "Convert All MIDI to E-SEQ", "action": "utilitiesMidiToEseqAction", "default": "Ctrl+Shift+E"},
+            {"id": "utilities.pedal_compatibility", "category": "Edit", "label": "Apply Pedal Compatibility...", "action": "utilitiesPedalCompatibilityAction", "default": ""},
+            {"id": "utilities.merge_channels", "category": "Edit", "label": "Merge Channels to Piano...", "action": "utilitiesMergeChannelsAction", "default": ""},
+            {"id": "utilities.strip_xf", "category": "Edit", "label": "Strip XF Data...", "action": "utilitiesStripXfAction", "default": ""},
+            {"id": "utilities.recover_image", "category": "Disk", "label": "Recover Damaged Image...", "action": "fileRecoverImageAction", "default": "Ctrl+Shift+D"},
             {"id": "utilities.format_floppy", "category": "Disk", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
-            {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
+            {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Show Dismissed Messages Again", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
             {"id": "help.welcome", "category": "Help", "label": "Show Welcome Screen", "action": "helpWelcomeAction", "default": "F1"},
             {"id": "help.check_updates", "category": "Help", "label": "Check for Updates...", "action": "helpCheckUpdatesAction", "default": "F9"},
             {"id": "help.feedback", "category": "Help", "label": "Send Feedback...", "action": "helpFeedbackAction", "default": "F11"},
@@ -10957,7 +10987,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _shortcut_text_for_spec(self, spec):
         stored = self.settings.value(self._shortcut_settings_key(spec["id"]), None)
         if stored is None:
-            return self._normalized_shortcut_text(spec["default"])
+            default = self._normalized_shortcut_text(spec["default"])
+            if spec["id"] == "file.quit":
+                # Quit is newly available. Preserve an existing custom Ctrl+Q
+                # binding instead of making both commands ambiguous in Qt.
+                for other in self._keyboard_shortcut_specs():
+                    if other["id"] == spec["id"]:
+                        continue
+                    assigned = self.settings.value(
+                        self._shortcut_settings_key(other["id"]), other["default"],
+                    )
+                    if self._normalized_shortcut_text(assigned) == default:
+                        return ""
+            return default
         return self._normalized_shortcut_text(stored)
 
     def _shortcut_sequence_for_spec(self, spec):
@@ -11238,6 +11280,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         form_layout.addWidget(retention_hint, 7, 1, 1, 2)
 
         save_progress_checkbox = QCheckBox(self._lt("Save progress for verified resume"))
+        save_progress_checkbox.setToolTip(self._lt(
+            "Progress records are removed after successful extraction. Failed or cancelled jobs keep their records for resuming."
+        ))
         save_progress_checkbox.setChecked(True)
         form_layout.addWidget(save_progress_checkbox, 8, 1, 1, 2)
         resume_button = QPushButton(self._lt("Resume extraction job..."))
@@ -11679,6 +11724,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
     def _on_bulk_extraction_success(self, result):
         self._close_bulk_extraction_progress()
+        job_path = self.bulkExtractionContext.get("job_record_path")
+        if (
+            job_path and not getattr(result, "job_record_path", "")
+            and not os.path.lexists(job_path)
+            and self.settings.value(self.SETTING_BULK_EXTRACTION_LAST_JOB, "") == job_path
+        ):
+            self.settings.remove(self.SETTING_BULK_EXTRACTION_LAST_JOB)
         if result.images_found == 0:
             self.status_label.setText(self._t("bulk.no_images.status"))
             QMessageBox.information(
@@ -12402,7 +12454,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             progress_dialog.hide()
         dialog = EmulatorPreviewDialog(preview, self)
         try:
-            accepted = self._exec_child_dialog(dialog) == QDialog.Accepted
+            # The table review owns its size. Repeated adjustSize() calls
+            # would fight interactive resizing and tab layout changes.
+            accepted = self._exec_child_dialog(dialog, resize_to_contents=False) == QDialog.Accepted
             worker.resolve_preview_request(dialog.decision if accepted else None)
         finally:
             if progress_dialog is not None:
@@ -12559,6 +12613,63 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
     def _menu_action_text(self, text, mnemonic=""):
         return self._with_mnemonic(self._lt(text), mnemonic)
 
+    def _refresh_menu_mnemonics(self):
+        """Keep Alt-key navigation unambiguous within each translated menu."""
+        def refresh(actions):
+            entries = []
+            used = set()
+            for action in actions:
+                if action.isSeparator():
+                    continue
+                label, tab, shortcut = action.text().partition("\t")
+                plain = []
+                preferred = None
+                index = 0
+                while index < len(label):
+                    char = label[index]
+                    if char == "&" and index + 1 < len(label):
+                        index += 1
+                        char = label[index]
+                        if char != "&" and preferred is None:
+                            preferred = len(plain)
+                    plain.append(char)
+                    index += 1
+                text = "".join(plain)
+                chosen = None
+                if preferred is not None:
+                    key = text[preferred].casefold()
+                    if key not in used:
+                        chosen = preferred
+                        used.add(key)
+                entries.append((action, text, tab + shortcut, chosen))
+
+            # Reserve existing mnemonics before filling gaps so adding a
+            # submenu doesn't displace familiar choices such as File > Save.
+            for action, text, suffix, chosen in entries:
+                if chosen is None:
+                    chosen = next((
+                        index for index, char in enumerate(text)
+                        if char.isalnum() and char.casefold() not in used
+                    ), None)
+                    if chosen is not None:
+                        used.add(text[chosen].casefold())
+                label = "".join(
+                    ("&" if index == chosen else "") + ("&&" if char == "&" else char)
+                    for index, char in enumerate(text)
+                )
+                if action.text() != label + suffix:
+                    action.setText(label + suffix)
+        # Use the menus we own directly. Traversing QAction.menu() can change
+        # submenu wrapper ownership in PySide and invalidate a stored QMenu.
+        for menu in (
+            self.menuBar(), self.fileMenu, self.editMenu, self.viewMenu,
+            self.diskMenu, self.utilitiesMenu, self.settingsMenu, self.helpMenu,
+            self.fileSaveOptionsMenu, self.settingsDiskOptionsMenu,
+            self.utilitiesConvertMenu, self.titleDisplayEncodingMenu,
+            self.appearanceMenu, self.fontSizeMenu, self.languageMenu,
+        ):
+            refresh(menu.actions())
+
     def _set_static_tooltip(self, widget, source):
         """Remember fixed tooltips so changing language updates existing controls."""
         if not hasattr(self, "_static_tooltips"):
@@ -12576,9 +12687,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.fileMenu.setTitle(self._lt("&File"))
         for menu_name, text in (
             ("editMenu", "&Edit"),
-            ("fileOpenMenu", "Open"),
             ("fileSaveOptionsMenu", "Save Options"),
-            ("fileWriteProtectionMenu", "Write Protection"),
+            ("settingsDiskOptionsMenu", "Disk Options"),
             ("diskMenu", "&Disk"),
             ("utilitiesConvertMenu", "Convert"),
         ):
@@ -12696,39 +12806,46 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
     def _refresh_static_action_text(self):
         action_texts = (
+            ("editUndoAction", "Undo", "U"),
+            ("editUndoAllAction", "Undo All", "A"),
+            ("editReviewChangesAction", "Review Changes...", "R"),
             ("fileNewImageAction", "New Image...", "N"),
             ("fileOpenFolderAction", "Open MIDI Folder...", "F"),
             ("fileOpenImageAction", "Open Image...", "O"),
             ("fileReadFloppyAction", "Read Floppy...", "R"),
-            ("fileImageFloppyAction", "Image Floppy...", "I"),
+            ("fileImageFloppyAction", "Create Image from Floppy...", "I"),
             ("fileClearListAction", "Clear List", "C"),
+            ("fileQuitAction", "Quit", "Q"),
+            ("savePartialCaptureAction", "Save Partial Capture...", "P"),
+            ("verifyFloppyWriteAction", "Verify Floppy Contents After Writing", "V"),
             ("fileSaveAsZipAction", "Save As ZIP...", "Z"),
-            ("fileCreateAlbumSubfolderAction", "Create Album Subfolder", "A"),
+            ("fileCreateAlbumSubfolderAction", "Create Album Subfolder for Folder Exports", "A"),
             ("fileCreateImageAlbumSubfolderAction", "Create Album Subfolder for Save As Image", "I"),
-            ("fileBackUpBeforeSavingAction", "Back up before Saving", "B"),
+            ("fileBackUpBeforeSavingAction", "Back Up Before Saving", "B"),
             ("fileCreateTagSidecarsAction", "Create Tag Sidecars When Saving", "G"),
             ("fileCreateMetadataSummaryAction", "Create Metadata Summary When Saving", "D"),
-            ("fileSaveToFloppyAction", "Save To Floppy...", "T"),
+            ("fileSaveToFloppyAction", "Save Files to Floppy...", "T"),
             ("fileWriteImageToFloppyAction", "Write Current Image to Floppy...", "W"),
             ("fileAutoWriteProtectAction", "Auto Write-Protect", "P"),
-            ("fileWriteProtectOriginalAction", "Write-Protect Original", "O"),
+            ("fileWriteProtectOriginalAction", "Write-Protect Original", "P"),
             ("viewLongTitleWarningAction", "Long title warning", "L"),
             ("viewFormatDisklavierScreenAction", "Format for Disklavier screen", "F"),
             ("viewShowStatusAction", "Show Status", "S"),
             ("viewShowQuickPanelAction", "Show Quick Panel", "Q"),
             ("viewShowAlbumMetadataAction", "Show Album Info", "A"),
             ("viewShowSaveDestinationAction", "Show Save Destination", "D"),
-            ("viewShowPreparationRowAction", "Show Preparation Row", "P"),
+            ("viewShowPreparationRowAction", "Show Preparation Controls", "P"),
             ("viewLogsAction", "View Logs...", "V"),
             ("utilitiesSongListAction", "Song List...", "S"),
             ("utilitiesFileInspectionAction", "File Inspection...", "I"),
             ("utilitiesRenderAudioAction", "Render Audio...", "A"),
             ("utilitiesBulkExtractionAction", "Bulk Extraction...", "B"),
             ("fileRecoverImageAction", "Recover Damaged Image...", "D"),
-            ("utilitiesRenameAction", "Rename All to DOS 8.3", "R"),
+            ("utilitiesRenameAction", "Rename All to DOS 8.3", "N"),
+            ("utilitiesRepairBootSectorAction", "Repair Yamaha Boot Sector...", "B"),
             ("utilitiesLongFilenamesAction", "Name MIDI Files from Song Titles", "L"),
             ("utilitiesTrimTitleSpacesAction", "Trim Title Spaces", "T"),
-            ("utilitiesSmfAction", "Convert All SMF1 to SMF0", "0"),
+            ("utilitiesSmfAction", "MIDI Type 1 to Type 0", "0"),
             ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
             ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ", "M"),
             ("utilitiesPedalCompatibilityAction", "Apply Pedal Compatibility...", "P"),
@@ -12766,11 +12883,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             )
         emulator_images_action = getattr(self, "utilitiesEmulatorImagesAction", None)
         if emulator_images_action is not None:
-            emulator_images_action.setText(self._t("emulator.action"))
+            emulator_images_action.setText(self._with_mnemonic(self._t("emulator.action"), "E"))
             emulator_images_action.setToolTip(self._t("emulator.description"))
         markiv_backup_action = getattr(self, "utilitiesMarkIVBackupAction", None)
         if markiv_backup_action is not None:
-            markiv_backup_action.setText(self._t("markiv.action"))
+            markiv_backup_action.setText(self._with_mnemonic(self._t("markiv.action"), "M"))
             markiv_backup_action.setToolTip(self._t("markiv.tooltip"))
 
     def eventFilter(self, obj, event):
@@ -16600,7 +16717,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         for source_path in source_paths:
             try:
                 with open(source_path, "rb") as handle:
-                    volume_candidates += count_eseq_zero_volume_candidates(handle.read())
+                    volume_candidates += count_eseq_zero_volume_candidates(
+                        handle.read(), filename=os.fsdecode(os.path.basename(source_path)),
+                    )
             except (OSError, ValueError):
                 # Conversion reports its own read/format failures; preserve by default.
                 continue
@@ -18250,13 +18369,6 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
     def _update_menu_actions(self):
         self._refresh_pending_changes_ui()
-        for spec in self._keyboard_shortcut_specs():
-            if spec["category"] != "Edit":
-                continue
-            action = getattr(self, spec["action"], None)
-            if action is not None:
-                shortcut = self._shortcut_text_for_spec(spec)
-                action.setText(self._lt(spec["label"]) + ("\t" + shortcut if shortcut else ""))
         refresh_conversions = getattr(self, "_refresh_preparation_conversion_actions", None)
         if callable(refresh_conversions):
             refresh_conversions()
@@ -18267,6 +18379,11 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             return
 
         open_enabled = self.choose_button.isEnabled()
+        has_files = any(
+            self.table.item(row, 1) is not None
+            for row in range(self.table.rowCount())
+        )
+        has_session = self.is_image_mode() or has_files
         for name in ("preparationButton", "preparationCustomButton", "preparationAction"):
             widget = getattr(self, name, None)
             if widget is not None:
@@ -18296,19 +18413,19 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             self.fileImageFloppyAction.setStatusTip(self._lt(capture_tooltip))
 
         self.fileSaveAction.setText(self._menu_action_text("Save", "S"))
-        self.fileSaveAction.setEnabled(self.saveButton.isEnabled())
+        self.fileSaveAction.setEnabled(open_enabled and has_session and self.saveButton.isEnabled())
         self.fileSaveAction.setToolTip(self.saveButton.toolTip())
         self.fileSaveAction.setStatusTip(self.saveButton.toolTip())
 
         self.fileSaveAsAction.setText(self._menu_action_text("Save As...", "A"))
-        self.fileSaveAsAction.setEnabled(self.saveAsButton.isEnabled())
+        self.fileSaveAsAction.setEnabled(open_enabled and has_files and self.saveAsButton.isEnabled())
         self.fileSaveAsAction.setToolTip(self.saveAsButton.toolTip())
         self.fileSaveAsAction.setStatusTip(self.saveAsButton.toolTip())
 
         if hasattr(self, "fileSaveAsZipAction"):
             zip_tooltip = self._lt("Save copies with current titles into a ZIP archive.")
             self.fileSaveAsZipAction.setText(self._menu_action_text("Save As ZIP...", "Z"))
-            self.fileSaveAsZipAction.setEnabled(self.saveAsButton.isEnabled())
+            self.fileSaveAsZipAction.setEnabled(open_enabled and has_files and self.saveAsButton.isEnabled())
             self.fileSaveAsZipAction.setToolTip(zip_tooltip)
             self.fileSaveAsZipAction.setStatusTip(zip_tooltip)
 
@@ -18316,12 +18433,12 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self.is_image_mode():
             image_action_text = self._menu_action_text("Save As Image...", "M")
         self.fileSaveAsImageAction.setText(image_action_text)
-        self.fileSaveAsImageAction.setEnabled(self.saveAsImageButton.isEnabled())
+        self.fileSaveAsImageAction.setEnabled(open_enabled and has_session and self.saveAsImageButton.isEnabled())
         self.fileSaveAsImageAction.setToolTip(self.saveAsImageButton.toolTip())
         self.fileSaveAsImageAction.setStatusTip(self.saveAsImageButton.toolTip())
 
         if hasattr(self, "fileClearListAction"):
-            self.fileClearListAction.setEnabled(self.clearButton.isEnabled())
+            self.fileClearListAction.setEnabled(open_enabled and has_session and self.clearButton.isEnabled())
             self.fileClearListAction.setToolTip(self.clearButton.toolTip())
             self.fileClearListAction.setStatusTip(self.clearButton.toolTip())
 
@@ -18351,7 +18468,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
 
         self._refresh_trim_title_spaces_action_state()
 
-        self.utilitiesRenameAction.setEnabled(self.renameAllButton.isEnabled())
+        self.utilitiesRenameAction.setEnabled(open_enabled and self.renameAllButton.isEnabled())
         self.utilitiesRenameAction.setToolTip(self.renameAllButton.toolTip())
         self.utilitiesRenameAction.setStatusTip(self.renameAllButton.toolTip())
 
@@ -18380,7 +18497,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 )
             forced_short_names = not self.is_image_mode() and self._preparation_requires_dos83_filenames()
             long_name_enabled = open_enabled and bool(long_name_rows) and not forced_short_names
-            action_label = self._lt("Name MIDI Files from Song Titles")
+            action_label = self._menu_action_text("Name MIDI Files from Song Titles", "L")
             self.utilitiesLongFilenamesAction.setText(action_label)
             self.utilitiesLongFilenamesAction.setEnabled(long_name_enabled)
             self.utilitiesLongFilenamesAction.setToolTip(
@@ -18391,7 +18508,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 self.utilitiesLongFilenamesAction.toolTip()
             )
 
-        self.utilitiesSmfAction.setEnabled(self.convertType0Button.isEnabled())
+        self.utilitiesSmfAction.setEnabled(open_enabled and self.convertType0Button.isEnabled())
         self.utilitiesSmfAction.setToolTip(self.convertType0Button.toolTip())
         self.utilitiesSmfAction.setStatusTip(self.convertType0Button.toolTip())
 
@@ -18460,6 +18577,8 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     else "Please wait for the current operation to finish before recovering a damaged image."
                 )
             )
+        if hasattr(self, "utilitiesRepairBootSectorAction"):
+            self.utilitiesRepairBootSectorAction.setEnabled(self.choose_button.isEnabled())
         if hasattr(self, "fileCreateTagSidecarsAction"):
             enabled = self.choose_button.isEnabled()
             self.fileCreateTagSidecarsAction.setEnabled(enabled)
@@ -18574,6 +18693,15 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if hasattr(self, "utilitiesMarkIVBackupAction"):
             self.utilitiesMarkIVBackupAction.setEnabled(self.choose_button.isEnabled())
             self.utilitiesMarkIVBackupAction.setToolTip(self._t("markiv.tooltip"))
+        if hasattr(self, "savePartialCaptureAction"):
+            diagnostics = getattr(self, "lastPartialRecoveryDiagnostics", {}) or {}
+            capture_path = diagnostics.get("partial_capture_path", "")
+            self.savePartialCaptureAction.setEnabled(
+                open_enabled and bool(capture_path) and os.path.isfile(capture_path)
+            )
+        if hasattr(self, "verifyFloppyWriteAction"):
+            self.verifyFloppyWriteAction.setEnabled(open_enabled)
+        self._refresh_menu_mnemonics()
 
     def _set_loaded_image_pianodir_metadata(self, metadata=None):
         metadata = metadata or PianodirMetadata()
@@ -20253,6 +20381,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             convert_eseq_file_to_midi_path(
                 source_material_path,
                 output_temp_path,
+                filename=os.path.basename(full_path),
                 title_override=title_override,
             )
         else:
@@ -24119,11 +24248,9 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         drive_name = "1"
         if self.image_session.gw_source is not None:
             drive_name = str(getattr(self.image_session.gw_source, "drive", "") or "1").lower()
-        catalog_stem = self._catalog_filename_stem()
-        source_stem = catalog_stem or f"gw_drive_{drive_name}"
-        default_suffix = "" if catalog_stem else "_edited"
+        source_stem = self._catalog_filename_stem() or f"gw_drive_{drive_name}"
         source_dir = self._last_save_as_location(os.path.expanduser("~"))
-        default_path = os.path.join(source_dir, f"{source_stem}{default_suffix}.{preferred_ext or fallback_ext}")
+        default_path = os.path.join(source_dir, f"{source_stem}.{preferred_ext or fallback_ext}")
         output_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             self._lt("Save As Image"),
@@ -24227,6 +24354,17 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         self.settings.setValue(self.SETTING_OPEN_IMAGE_LOCATION, os.path.dirname(image_path))
         self.load_image_file(image_path)
 
+    def repair_image_boot_sector_dialog(self):
+        default_path = self._existing_directory_for_dialog_path(
+            self.settings.value(self.SETTING_OPEN_IMAGE_LOCATION, "")
+        ) or os.path.expanduser("~")
+        session = self.image_session
+        if session is not None and session.source_kind == "image" and os.path.isfile(session.source_path):
+            default_path = session.source_path
+        dialog = BootSectorRepairDialog(self, default_path)
+        apply_window_icon(dialog)
+        self._exec_child_dialog(dialog, resize_to_contents=False)
+
     def recover_damaged_image_dialog(self):
         dialog = QDialog(self)
         apply_window_icon(dialog)
@@ -24237,6 +24375,14 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(8)
+
+        visibility_note = QLabel(self._lt(
+            "Recovered images clear hidden and system file flags so disk browsers can show the files. "
+            "File contents are unchanged by this step."
+        ), dialog)
+        visibility_note.setObjectName("recoveryVisibilityNote")
+        visibility_note.setWordWrap(True)
+        layout.addWidget(visibility_note)
 
         image_row = QHBoxLayout()
         image_edit = QLineEdit(dialog)
@@ -26834,6 +26980,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
             convert_eseq_file_to_midi_path(
                 source_host_path,
                 output_host_path,
+                filename=os.path.basename(current_path),
                 title_override=title_override,
                 cc7_policy=cc7_policy,
             )
@@ -26971,6 +27118,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                 convert_eseq_file_to_midi_path(
                     source_host_path,
                     dest_path,
+                    filename=os.path.basename(final_image_path),
                     title_override=title_override,
                 )
             else:
@@ -27378,6 +27526,7 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
                     convert_eseq_file_to_midi_path(
                         source_material_path,
                         output_temp_path,
+                        filename=os.path.basename(full_path),
                         title_override=title_override,
                         cc7_policy=getattr(self, "_eseq_conversion_cc7_policy", CC7_POLICY_PRESERVE),
                     )
@@ -30821,21 +30970,17 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if self.image_session.source_kind.startswith("floppy"):
             source_dir = os.path.expanduser("~")
             source_stem = "floppy_capture"
-            catalog_stem = ""
             if self.image_session.source_kind == "floppy_gw":
-                catalog_stem = self._catalog_filename_stem()
-                source_stem = catalog_stem or f"gw_drive_{self.image_session.gw_source.drive.lower()}"
+                source_stem = self._catalog_filename_stem() or f"gw_drive_{self.image_session.gw_source.drive.lower()}"
         else:
             source_path = self.image_session.source_path
             source_dir = os.path.dirname(MidiTitleWindow._zip_source_for_path(self, source_path) or source_path)
             source_stem = os.path.splitext(os.path.basename(self.image_session.source_path))[0]
-            catalog_stem = ""
         source_dir = self._last_save_as_location(source_dir)
-        default_suffix = "" if catalog_stem else "_edited"
         options = self._prompt_for_save_image_options(
             default_ext=default_ext,
             default_disk_format=self.image_session.disk_format,
-            default_basename=f"{source_stem}{default_suffix}",
+            default_basename=source_stem,
             default_dir=source_dir,
             raw_only=for_floppy,
         )
@@ -31008,8 +31153,13 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         dialog_layout.addWidget(buttons)
 
         preparation_defaults = MidiTitleWindow._preparation_export_defaults(self)
+        saved_ext = str(
+            self.settings.value(self.SETTING_SAVE_AS_IMAGE_FORMAT, "") or ""
+        ).strip().lower().lstrip(".")
+        if saved_ext not in {ext for ext, _label in PREFERRED_OUTPUT_EXTENSIONS}:
+            saved_ext = ""
         default_ext = str(
-            MidiTitleWindow._preparation_medium(self).image_format
+            saved_ext or MidiTitleWindow._preparation_medium(self).image_format
             or default_ext or preparation_defaults.get("image_format", "hfe")
         ).lower().lstrip(".")
         if raw_only:
@@ -31087,6 +31237,10 @@ class MidiTitleWindow(PendingChangesMixin, QMainWindow):
         if not output_path:
             return None
 
+        # An IMG required for physical-floppy delivery is not a user preference.
+        if not raw_only:
+            self.settings.setValue(self.SETTING_SAVE_AS_IMAGE_FORMAT, output_ext)
+            self.settings.sync()
         base_path = os.path.splitext(output_path)[0]
         return f"{base_path}.{output_ext}", output_ext, disk_format
 

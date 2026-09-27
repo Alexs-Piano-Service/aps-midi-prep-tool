@@ -468,6 +468,9 @@ def test_resume_retries_failed_song_without_reextracting_verified_outputs(tmp_pa
     first = bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
     assert first.files_extracted == 2
     assert first.errors
+    assert first.job_record_path == str(checkpoint)
+    assert checkpoint.is_file()
+    assert not Path(str(checkpoint) + ".lock").exists()
     fail_second = False
     extracted.clear()
 
@@ -478,6 +481,8 @@ def test_resume_retries_failed_song_without_reextracting_verified_outputs(tmp_pa
     assert resumed.files_reused == 2
     assert resumed.errors == ()
     assert {path.name: path.read_bytes() for path in (output / "disk").iterdir()} == files
+    assert not checkpoint.exists()
+    assert resumed.job_record_path == ""
 
 
 def test_cancelled_extraction_keeps_checkpoint_and_resumes_completed_songs(tmp_path):
@@ -498,6 +503,7 @@ def test_cancelled_extraction_keeps_checkpoint_and_resumes_completed_songs(tmp_p
             progress_detail_callback=cancel_during_second_song,
         )
     saved = json.loads(checkpoint.read_text())
+    assert not Path(str(checkpoint) + ".lock").exists()
     assert saved["images"]["disk.img"]["entries"]["ONE.TXT"]["state"] == "complete"
     assert (output / "disk" / "ONE.TXT").read_bytes() == b"one"
 
@@ -506,6 +512,20 @@ def test_cancelled_extraction_keeps_checkpoint_and_resumes_completed_songs(tmp_p
     assert resumed.files_extracted == 1
     assert resumed.files_reused == 1
     assert resumed.errors == ()
+    assert not checkpoint.exists()
+    assert resumed.job_record_path == ""
+
+
+def _interrupt_after_completed_image(source, output, checkpoint, loader):
+    # Even a cancellation after the final output must retain a resumable record.
+    def cancel_at_completion(detail):
+        if detail["stage"] == "finished":
+            raise FloppyOperationCancelled("cancelled before job completion")
+
+    with pytest.raises(FloppyOperationCancelled):
+        bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader,
+                            progress_detail_callback=cancel_at_completion)
+    assert checkpoint.is_file()
 
 
 def test_resume_preserves_user_modified_output_and_writes_a_new_name(tmp_path):
@@ -514,7 +534,7 @@ def test_resume_preserves_user_modified_output_and_writes_a_new_name(tmp_path):
     (source / "disk.img").write_bytes(b"image")
     checkpoint = output / "job.json"
     loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"original"})
-    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    _interrupt_after_completed_image(source, output, checkpoint, loader)
     (output / "disk" / "ONE.TXT").write_bytes(b"user edited this")
 
     resumed = bulk_extract_images(source, output, job_record_path=checkpoint, resume=True, session_loader=loader)
@@ -532,7 +552,7 @@ def test_resume_rejects_changed_inputs_or_conversion_options(tmp_path, change):
     image.write_bytes(b"image")
     checkpoint = output / "job.json"
     loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"original"})
-    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    _interrupt_after_completed_image(source, output, checkpoint, loader)
     old_job = checkpoint.read_bytes()
     if change == "input":
         image.write_bytes(b"other image")
@@ -581,7 +601,7 @@ def test_resume_does_not_follow_output_symlinks(tmp_path):
     (source / "disk.img").write_bytes(b"image")
     checkpoint = output / "job.json"
     loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"original"})
-    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    _interrupt_after_completed_image(source, output, checkpoint, loader)
     actual = output / "disk" / "ONE.TXT"
     actual.unlink()
     outside = tmp_path / "unrelated.txt"
@@ -685,7 +705,7 @@ def test_resume_rejects_malformed_checkpoint_without_skipping_unverified_songs(t
     (source / "disk.img").write_bytes(b"image")
     checkpoint = output / "job.json"
     loader = lambda path, **kwargs: FakeImageSession(path, {"ONE.TXT": b"one", "TWO.TXT": b"two"})
-    bulk_extract_images(source, output, job_record_path=checkpoint, session_loader=loader)
+    _interrupt_after_completed_image(source, output, checkpoint, loader)
     data = json.loads(checkpoint.read_text())
     image = data["images"]["disk.img"]
     entry = image["entries"]["ONE.TXT"]

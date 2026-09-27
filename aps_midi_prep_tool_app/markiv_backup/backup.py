@@ -454,7 +454,9 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                     title = item.metadata.get('title')
                     if item.metadata.get('metadata_source') == 'Original filename':
                         title = None
-                    payload = convert_eseq_bytes_to_midi_bytes(data, title_override=title)
+                    payload = convert_eseq_bytes_to_midi_bytes(
+                        data, filename=original.name, title_override=title,
+                    )
                     check_cancel(cancel)
                     if shutil.disk_usage(folder).free < len(payload) + _manifest_allowance(plan):
                         raise ValueError('Not enough free space for the MIDI conversion and manifest.')

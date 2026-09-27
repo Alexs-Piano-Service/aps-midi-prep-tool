@@ -2,10 +2,14 @@
 
 from collections import Counter
 from dataclasses import asdict, dataclass
+import os
 import re
 from string import Formatter
 
-from .eseq_converter import ESEQ_MIDI_DIVISION, is_clavinova_mda_eseq_bytes, parse_eseq_bytes
+from .eseq_converter import (
+    ESEQ_CONTAINER_CLAVINOVA_MDA, ESEQ_MIDI_DIVISION,
+    _detect_eseq_container, parse_eseq_bytes,
+)
 from .eseq_legacy import is_legacy_eseq_bytes
 from .midi_type0_converter import (
     MIDI_ALL_SOUND_OFF_CONTROLLER,
@@ -242,16 +246,16 @@ def _meta_payload(raw):
     return raw[offset:offset + size]
 
 
-def _read_events(data):
+def _read_events(data, filename=""):
     """Return timed channel events and raw metadata, including independent Type 2 timing."""
     if data[:4] != b"MThd":
-        parsed = parse_eseq_bytes(data)
+        parsed = parse_eseq_bytes(data, filename)
         tempos = [(tick, 0, order, tempo) for order, (tick, tempo) in enumerate(parsed.tempo_events)]
         time_map = _MidiTimeMap(ESEQ_MIDI_DIVISION, tempos)
         events = [(time_map.tick_to_milliseconds(tick) / 1000, raw) for tick, _, raw in parsed.events]
         metadata = [_meta_event(0x51, tempo.to_bytes(3, "big")) for _, tempo in parsed.tempo_events]
         metadata.extend(_meta_event(0x58, bytes([numerator, denominator, 24, 8])) for _, numerator, denominator in parsed.time_signature_events)
-        if not is_clavinova_mda_eseq_bytes(data):
+        if _detect_eseq_container(data, filename) != ESEQ_CONTAINER_CLAVINOVA_MDA:
             metadata.append(_meta_event(0x03, parsed.title.encode("latin1")))
         metadata.extend(item for _, raw in events if (item := _canonical_metadata(raw, eseq=True)) is not None)
         return "E-SEQ", events, time_map.tick_to_milliseconds(parsed.end_tick) / 1000, (parsed.title,), metadata, 0
@@ -304,8 +308,8 @@ def _read_events(data):
     return label, timed, cumulative if format_type == 2 else max(durations, default=0), tuple(titles), metadata, len(data) - offset
 
 
-def _summary(data):
-    kind, timed, duration, titles, metadata, trailing = _read_events(data)
+def _summary(data, filename=""):
+    kind, timed, duration, titles, metadata, trailing = _read_events(data, filename)
     channel_events = [(tick, raw) for tick, raw in timed if raw and 0x80 <= raw[0] <= 0xEF]
     notes = [
         (tick, bytes([raw[0] - 0x10]) + raw[1:] if raw[0] & 0xF0 == 0x90 and raw[2] == 0 else raw)
@@ -332,8 +336,8 @@ def _summary(data):
     return summary, metadata, notes, pedals, channel_events
 
 
-def inspect_music_bytes(data):
-    return _summary(data)[0]
+def inspect_music_bytes(data, filename=""):
+    return _summary(data, filename)[0]
 
 
 def _events_changed(before, after, tolerance_seconds):
@@ -445,9 +449,9 @@ def _verified_yamaha_pedals(before_bytes, after_bytes, old_channels, new_channel
     return verified, counts, expected, _ordered_events_changed(expected, new_channels, tolerance_seconds)
 
 
-def compare_music_bytes(before_bytes, after_bytes, *, tolerance_seconds=None):
-    before, old_meta, old_notes, old_pedals, old_channels = _summary(before_bytes)
-    after, new_meta, new_notes, new_pedals, new_channels = _summary(after_bytes)
+def compare_music_bytes(before_bytes, after_bytes, *, tolerance_seconds=None, before_filename="", after_filename=""):
+    before, old_meta, old_notes, old_pedals, old_channels = _summary(before_bytes, before_filename)
+    after, new_meta, new_notes, new_pedals, new_channels = _summary(after_bytes, after_filename)
     if tolerance_seconds is None:
         tolerance_seconds = 0.002
         old_division = int.from_bytes(before_bytes[12:14], "big") if before_bytes[:4] == b"MThd" else ESEQ_MIDI_DIVISION
@@ -468,7 +472,8 @@ def compare_music_bytes(before_bytes, after_bytes, *, tolerance_seconds=None):
         removed_labels[_metadata_label(raw)] += count
     routed_pedals = ()
     yamaha_pedals, pedal_counts, yamaha_expected, expected_changed = (), {}, None, None
-    if before_bytes[:4] == b"MThd" and after_bytes[:4] != b"MThd" and not is_clavinova_mda_eseq_bytes(after_bytes):
+    if (before_bytes[:4] == b"MThd" and after_bytes[:4] != b"MThd"
+            and _detect_eseq_container(after_bytes, after_filename) != ESEQ_CONTAINER_CLAVINOVA_MDA):
         routed_pedals = _verified_pedal_routing(old_pedals, new_pedals)
         yamaha_pedals, pedal_counts, yamaha_expected, expected_changed = _verified_yamaha_pedals(
             before_bytes, after_bytes, old_channels, new_channels, tolerance_seconds,
@@ -512,7 +517,10 @@ def build_conversion_report(source_path, output_path):
         before = handle.read()
     with open(output_path, "rb") as handle:
         after = handle.read()
-    return compare_music_bytes(before, after)
+    return compare_music_bytes(
+        before, after, before_filename=os.fsdecode(os.path.basename(source_path)),
+        after_filename=os.fsdecode(os.path.basename(output_path)),
+    )
 
 
 def build_staged_conversion_details(source_path, output_path, *, baseline_bytes=None, retain_baseline=False):
@@ -530,7 +538,10 @@ def build_staged_conversion_details(source_path, output_path, *, baseline_bytes=
         if retain_baseline:
             details["change_report_baseline"] = baseline_bytes
         with open(output_path, "rb") as handle:
-            report = compare_music_bytes(baseline_bytes, handle.read())
+            report = compare_music_bytes(
+                baseline_bytes, handle.read(), before_filename=os.fsdecode(os.path.basename(source_path)),
+                after_filename=os.fsdecode(os.path.basename(output_path)),
+            )
         details["change_report"] = report.as_dict()
         details["change_report"]["text"] = report.to_text()
     except (OSError, ValueError) as exc:

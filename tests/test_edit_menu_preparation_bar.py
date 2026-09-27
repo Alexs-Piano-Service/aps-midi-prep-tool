@@ -40,12 +40,12 @@ def _prepare(window, key="mark_i"):
 def test_edit_menu_replaces_buttons_and_ctrl_z_undoes_last_change(window):
     w, app, _song = window
     menu_names = [action.text().replace("&", "") for action in w.menuBar().actions()]
-    assert menu_names[:3] == ["File", "Edit", "Disk"]
+    assert menu_names[:3] == ["File", "Edit", "View"]
     assert not hasattr(w, "pendingChangesButton")
     assert not hasattr(w, "undoBatchButton")
     assert not any(button.text() in {"No unsaved song changes", "Undo Last Batch"}
                    for button in w.findChildren(QPushButton))
-    assert w.editUndoAction.text() == "Undo\tCtrl+Z"
+    assert w.editUndoAction.text() == "&Undo"
     assert not w.editUndoAction.isEnabled()
     w.trim_title_spaces_for_all(show_summary=False)
     assert w.pendingEdits
@@ -129,7 +129,7 @@ def test_preparation_bar_refreshes_profile_delivery_controls_and_tooltips_in_eve
         w._refresh_translated_ui()
         app.processEvents()
         assert w.preparationButton.text() == translate_text("Preparing for...", language.code)
-        assert w.preparationAction.text() == translate_text("Preparing for...", language.code)
+        assert w.preparationAction.text().replace("&", "") == translate_text("Preparing for...", language.code)
         assert w.preparationCustomButton.text() == translate_text("Custom", language.code)
         assert w.preparationCustomButton.toolTip() == translate_text("Switch to Custom", language.code)
         assert w.preparationLabel.text() == " · ".join((

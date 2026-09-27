@@ -58,6 +58,7 @@ INTEGER_SETTINGS = frozenset({
 STRING_SETTINGS = PATH_SETTINGS | frozenset({
     "language", "appearance_mode", "font_scale", "eseq_to_midi_switch_mode",
     "title_display_encoding", "piano_overlap_mode",
+    "save_as_image_format",
     "greaseweazle_device_path", "greaseweazle_drive", "read_floppy_source_kind",
     "read_floppy_gw_image_type", "image_floppy_drive_image_type",
     "read_floppy_gw_format", "disk_recovery_image_format",

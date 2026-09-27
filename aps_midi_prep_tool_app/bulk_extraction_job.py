@@ -40,36 +40,69 @@ def localize_extraction_job_error(error, language_code=None):
 
 @contextmanager
 def _job_lock(path):
-    """Hold an OS lock, which is released automatically if the process exits."""
+    """Hold an OS lock and remove its sidecar after the operation ends.
+
+    A contender may have opened the old inode before its owner removed it.
+    Check identity after locking so it cannot run against an unlinked lock.
+    """
     lock_path = os.path.abspath(os.fspath(path)) + ".lock"
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(descriptor, "a+b") as handle:
-        if os.name == "nt":
-            import msvcrt
-            if os.fstat(handle.fileno()).st_size == 0:
-                handle.write(b"\0")
-                handle.flush()
-            handle.seek(0)
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as exc:
-                raise ValueError("This extraction job is already running in another process.") from exc
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                raise ValueError("This extraction job is already running in another process.") from exc
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    while True:
+        if os.path.islink(lock_path):
+            raise ValueError("An extraction job cannot be written through a symbolic link.")
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        current = False
+        try:
+            with os.fdopen(descriptor, "a+b") as handle:
+                if os.name == "nt":
+                    import msvcrt
+                    if os.fstat(handle.fileno()).st_size == 0:
+                        handle.write(b"\0")
+                        handle.flush()
+                    handle.seek(0)
+                    acquire = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    release = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    acquire = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    release = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                try:
+                    acquire()
+                except OSError as exc:
+                    raise ValueError("This extraction job is already running in another process.") from exc
+                try:
+                    current = _same_lock_file(lock_path, handle)
+                    if not current:
+                        continue
+                    yield
+                finally:
+                    if os.name != "nt" and current and _same_lock_file(lock_path, handle):
+                        # Unlink while still locked. Later contenders must reopen
+                        # the path rather than using this now-unlinked inode.
+                        _remove_lock_file(lock_path)
+                    release()
+        finally:
+            if os.name == "nt" and current:
+                # Windows refuses deletion while an ordinary open handle remains.
+                # If another process already opened it, that owner cleans it later.
+                _remove_lock_file(lock_path)
+        return
+
+
+def _same_lock_file(path, handle):
+    try:
+        return os.path.samestat(os.stat(path, follow_symlinks=False), os.fstat(handle.fileno()))
+    except FileNotFoundError:
+        return False
+
+
+def _remove_lock_file(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        # A locked/unwritable sidecar must not turn successful extraction into
+        # a failure. A later run can reuse and remove it.
+        pass
 
 
 def serialized_extraction(function):
@@ -171,6 +204,7 @@ class ExtractionJob:
             raise ValueError("An extraction job cannot be written through a symbolic link.")
         self.root = os.path.realpath(output_directory)
         self.check_cancelled = check_cancelled
+        self._saved_payload = None
         if resume:
             self.data = read_extraction_job(self.path)
             if (
@@ -189,7 +223,31 @@ class ExtractionJob:
             }
 
     def save(self):
-        atomic_write_bytes(self.path, (json.dumps(self.data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+        payload = (json.dumps(self.data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        atomic_write_bytes(self.path, payload)
+        self._saved_payload = payload
+
+    def remove_completed(self):
+        """Discard only our own checkpoint after every image has completed."""
+        if self._saved_payload is None or not self.data["images"] or any(
+            image.get("state") != "complete"
+            or image.get("entry_count") != len(image["entries"])
+            or any(entry.get("state") not in {"complete", "skipped"} for entry in image["entries"].values())
+            for image in self.data["images"].values()
+        ):
+            return False
+        if os.path.islink(self.path):
+            raise ValueError(f"The extraction job changed before cleanup: {self.path}")
+        try:
+            with open(self.path, "rb") as handle:
+                if handle.read(len(self._saved_payload) + 1) != self._saved_payload:
+                    raise ValueError(f"The extraction job changed before cleanup: {self.path}")
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ValueError(f"Could not remove completed extraction job: {self.path} ({exc})") from exc
+        return True
 
     def prepare_images(self, paths):
         names = {os.path.basename(path) for path in paths}

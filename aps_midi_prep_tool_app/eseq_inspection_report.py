@@ -20,9 +20,9 @@ _FIELD_LABELS = {
 }
 
 
-def format_eseq_header_details(data, *, source_label="", language_code="en"):
+def format_eseq_header_details(data, *, source_label="", language_code="en", filename=""):
     """Describe original bytes without changing the performance or source file."""
-    info = inspect_eseq_header(data)
+    info = inspect_eseq_header(data, filename)
 
     def report(text, **values):
         return translate_text(text, language_code, **values)

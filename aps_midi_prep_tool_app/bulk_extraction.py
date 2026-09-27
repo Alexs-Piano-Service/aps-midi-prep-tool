@@ -574,6 +574,14 @@ def bulk_extract_images(
             image=image_name,
         )
 
+    remaining_job_path = job.path if job is not None else ""
+    if job is not None and not errors:
+        try:
+            if job.remove_completed():
+                remaining_job_path = ""
+        except ValueError as exc:
+            errors.append(str(exc))
+
     return BulkExtractionResult(
         source_directory=source_directory,
         output_directory=output_directory,
@@ -586,5 +594,5 @@ def bulk_extract_images(
         errors=tuple(errors),
         files_reused=files_reused,
         images_skipped=images_skipped,
-        job_record_path=job.path if job is not None else "",
+        job_record_path=remaining_job_path,
     )

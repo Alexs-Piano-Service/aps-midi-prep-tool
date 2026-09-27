@@ -91,6 +91,7 @@ entries from an invalid file are applied. The file can be read-only.
 | `preparation_profile` | An instrument key from the table below. |
 | `preparation_medium` | `original`, `nalbantov`, `flashfloppy_img`, `flashfloppy_hfe`, `emulator_custom`, `usb`, `pianodisc_app`, or `custom`, as supported by the instrument. Set it together with the profile for a reproducible deployment. |
 | `preparation_image_format` | `img` or `hfe`; initial New Image / Save As Image type. |
+| `save_as_image_format` | Last selected Save As Image type, such as `img` or `hfe`. Overrides the initial type for that dialog and remembers subsequent selections. |
 | `preparation_disk_format` | `ibm.720` or `ibm.1440`; initial New Image / Save As Image capacity. |
 
 | Instrument key | Instrument / purpose | Default delivery |
@@ -270,7 +271,7 @@ preset the [Mark IV backup utility](mark-iv-backup.md); they do not start a back
 | `read_floppy_source_kind` | String: the remembered source kind, `floppy_usb` or `floppy_gw`. |
 | `read_floppy_gw_archival` | Boolean: legacy archival SCP capture preference. |
 | `read_floppy_gw_image_type` | String: preferred retained capture type, such as `none`, `img`, `hfe`, or `scp`. |
-| `image_floppy_drive_image_type` | String: preferred direct-drive Image Floppy output type: `img`, `hfe`, `bin`, or `ima`. |
+| `image_floppy_drive_image_type` | String: preferred output type for Disk → Create Image from Floppy: `img`, `hfe`, `bin`, or `ima`. |
 | `read_floppy_gw_format` | String: disk format key, normally `ibm.720` or `ibm.1440`. |
 | `read_floppy_gw_revs` | Integer: capture revolutions, `0` through `20`. |
 | `read_floppy_gw_retries` | Integer: retries, `0` through `20`. |

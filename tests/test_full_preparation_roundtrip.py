@@ -107,10 +107,7 @@ def test_midi_to_eseq_image_extraction_roundtrip_preserves_values_and_legacy_tim
     assert preparation_report.expected_channel_events_changed is False
     assert source_path.read_bytes() == original
 
-    resumed = bulk_extract_images(
-        image_directory, output, convert_eseq=True, job_record_path=output / "job.json", resume=True,
-    )
-    assert resumed.errors == ()
-    assert resumed.images_skipped == 1
-    assert resumed.files_reused == 1
-    assert [Path(path) for path in resumed.output_directories] == [midi_paths[0].parent]
+    assert extracted.job_record_path == ""
+    assert not (output / "job.json").exists()
+    assert not (output / "job.json.lock").exists()
+    assert [Path(path) for path in extracted.output_directories] == [midi_paths[0].parent]

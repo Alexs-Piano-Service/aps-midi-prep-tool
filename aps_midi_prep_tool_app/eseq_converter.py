@@ -300,10 +300,10 @@ def _detect_eseq_container(data, filename=""):
     return ESEQ_CONTAINER_DISKLAVIER
 
 
-def _eseq_base_bpm(data):
-    if _is_q11_eseq(data):
-        return _eseq_tempo_byte_to_bpm(data[0x24])
-    if is_clavinova_mda_eseq_bytes(data):
+def _eseq_base_bpm(data, *, container_variant=None):
+    if container_variant is None:
+        container_variant = _detect_eseq_container(data)
+    if container_variant in (ESEQ_CONTAINER_Q11, ESEQ_CONTAINER_CLAVINOVA_MDA):
         return _eseq_tempo_byte_to_bpm(data[0x24])
     return _eseq_tempo_byte_to_bpm(data[0x33])
 
@@ -314,11 +314,13 @@ def _eseq_tempo_byte_to_bpm(value):
     return value + 29 if value else ESEQ_DEFAULT_BPM
 
 
-def _eseq_header_time_signature(data):
+def _eseq_header_time_signature(data, *, container_variant=None):
     # Only the normal FIL program block has these meter fields. MDA and
     # Q11 use different layouts; their explicit F9 events remain authoritative.
+    if container_variant is None:
+        container_variant = _detect_eseq_container(data)
     if (
-        _is_q11_eseq(data) or is_clavinova_mda_eseq_bytes(data)
+        container_variant != ESEQ_CONTAINER_DISKLAVIER
         or data[0x19] != 0x40
         or int.from_bytes(data[0x1B:0x1F], "little") != 0x50
     ):
@@ -537,9 +539,9 @@ def _apply_cc7_policy(raw, should_adjust, cc7_policy):
     raise EseqConversionError(f"Unsupported CC7 policy '{cc7_policy}'.")
 
 
-def count_eseq_zero_volume_candidates(eseq_bytes):
+def count_eseq_zero_volume_candidates(eseq_bytes, filename=""):
     """Count CC7 zeros followed by notes before volume is restored on that channel."""
-    return len(_zero_cc7_indexes_needing_playback_fix(parse_eseq_bytes(eseq_bytes).events))
+    return len(_zero_cc7_indexes_needing_playback_fix(parse_eseq_bytes(eseq_bytes, filename).events))
 
 
 def _normalize_midi_metadata_policy(midi_metadata_policy):
@@ -565,29 +567,34 @@ def _effective_initial_mpqn(tempo_events):
     return initial_mpqn
 
 
-def parse_eseq_bytes(eseq_bytes):
-    """Parse a complete event stream, rejecting commands cut short at EOF."""
+def parse_eseq_bytes(eseq_bytes, filename=""):
+    """Parse a complete stream using the logical source name for MDA variants.
+
+    Commands cut short at EOF are rejected. Without a filename, container
+    detection retains the byte-only behavior.
+    """
     if len(eseq_bytes) < CLAVINOVA_MDA_HEADER_SIZE:
         raise EseqConversionError("File is too small to be a valid Yamaha E-SEQ file.")
     if eseq_bytes[7:15] != ESEQ_SIGNATURE:
         raise EseqConversionError("This does not look like a Yamaha E-SEQ file; the COM-ESEQ signature is missing.")
 
     data = eseq_bytes
-    is_clavinova_mda = is_clavinova_mda_eseq_bytes(data)
+    container_variant = _detect_eseq_container(data, filename)
+    is_clavinova_mda = container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA
     if not is_clavinova_mda and len(data) < ESEQ_HEADER_SIZE:
         raise EseqConversionError("File is too small to be a valid Yamaha E-SEQ file.")
     title = "" if is_clavinova_mda else _decode_title_bytes(data[ESEQ_TITLE_START:ESEQ_TITLE_END + 1])
-    base_bpm = _eseq_base_bpm(data)
+    base_bpm = _eseq_base_bpm(data, container_variant=container_variant)
 
     abs_tick = 0
-    pos = _eseq_event_stream_start(data)
-    declared_stream_end = _declared_stream_end(data, pos)
+    pos = _eseq_event_stream_start(data, container_variant=container_variant)
+    declared_stream_end = _declared_stream_end(data, pos, container_variant=container_variant)
     events = []
     initial_mpqn = 60_000_000 // base_bpm
     tempo_events = [(0, initial_mpqn)]
     tempo_factors = []
     time_signature_events = []
-    last_time_signature = _eseq_header_time_signature(data)
+    last_time_signature = _eseq_header_time_signature(data, container_variant=container_variant)
     if last_time_signature is not None:
         time_signature_events.append((0, *last_time_signature))
 
@@ -722,8 +729,8 @@ def parse_eseq_bytes(eseq_bytes):
     )
 
 
-def derive_eseq_timing_fields(eseq_bytes):
-    parsed = parse_eseq_bytes(eseq_bytes)
+def derive_eseq_timing_fields(eseq_bytes, filename=""):
+    parsed = parse_eseq_bytes(eseq_bytes, filename)
     event_ticks = [tick for tick, _, _ in parsed.events]
     note_ticks = [tick for tick, _, raw in parsed.events if _is_note_on_event(raw)]
     if event_ticks:
@@ -739,10 +746,10 @@ def derive_eseq_timing_fields(eseq_bytes):
     )
 
 
-def _explorer_visible_delay_ticks(eseq_bytes, which):
+def _explorer_visible_delay_ticks(eseq_bytes, which, *, container_variant=None):
     data = bytes(eseq_bytes)
-    stream_start = _eseq_event_stream_start(data)
-    stream_end = _declared_stream_end(data, stream_start)
+    stream_start = _eseq_event_stream_start(data, container_variant=container_variant)
+    stream_end = _declared_stream_end(data, stream_start, container_variant=container_variant)
     if which == "before":
         pos = stream_start + 2
     elif which == "after":
@@ -783,13 +790,14 @@ def refresh_eseq_timing_fields_in_bytes(eseq_bytes):
 def convert_eseq_bytes_to_midi_bytes(
     eseq_bytes,
     *,
+    filename="",
     title_override=None,
     cc7_policy=DEFAULT_CC7_POLICY,
     midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
     include_conversion_text=True,
 ):
     midi_metadata_policy = _normalize_midi_metadata_policy(midi_metadata_policy)
-    parsed = parse_eseq_bytes(eseq_bytes)
+    parsed = parse_eseq_bytes(eseq_bytes, filename)
     track_events = []
     event_sequence = 0
     title_candidate = title_override if title_override is not None else parsed.title
@@ -816,9 +824,15 @@ def convert_eseq_bytes_to_midi_bytes(
         add_track_event(0, _write_midi_text(ESEQ_TO_MIDI_CONVERSION_TEXT))
 
     if midi_metadata_policy == MIDI_METADATA_POLICY_ARCHIVAL:
-        timing = derive_eseq_timing_fields(eseq_bytes)
-        visible_before_ticks = _explorer_visible_delay_ticks(eseq_bytes, "before")
-        visible_after_ticks = _explorer_visible_delay_ticks(eseq_bytes, "after")
+        container_variant = _detect_eseq_container(eseq_bytes, filename)
+        stream_start = _eseq_event_stream_start(eseq_bytes, container_variant=container_variant)
+        timing = derive_eseq_timing_fields(eseq_bytes, filename)
+        visible_before_ticks = _explorer_visible_delay_ticks(
+            eseq_bytes, "before", container_variant=container_variant,
+        )
+        visible_after_ticks = _explorer_visible_delay_ticks(
+            eseq_bytes, "after", container_variant=container_variant,
+        )
         add_track_event(
             0,
             _write_midi_text(
@@ -834,7 +848,7 @@ def convert_eseq_bytes_to_midi_bytes(
                 f"{_ESEQ_HEADER_META_PREFIX} slice27_77="
                 f"{bytes(eseq_bytes[ESEQ_ORDER_KEY_START:ESEQ_TITLE_END + 1]).hex()} "
                 f"prefix00_stream="
-                f"{bytes(eseq_bytes[:_eseq_event_stream_start(eseq_bytes)]).hex()}"
+                f"{bytes(eseq_bytes[:stream_start]).hex()}"
             ),
         )
 
@@ -1649,15 +1663,18 @@ def convert_eseq_file_to_midi_path(
     source_path,
     dest_path,
     *,
+    filename="",
     title_override=None,
     cc7_policy=DEFAULT_CC7_POLICY,
     midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
     include_conversion_text=True,
 ):
+    """Convert using the source basename, or its logical name when staged."""
     with open(source_path, "rb") as handle:
         eseq_bytes = handle.read()
     payload = convert_eseq_bytes_to_midi_bytes(
         eseq_bytes,
+        filename=filename or os.fsdecode(os.path.basename(source_path)),
         title_override=title_override,
         cc7_policy=cc7_policy,
         midi_metadata_policy=midi_metadata_policy,
