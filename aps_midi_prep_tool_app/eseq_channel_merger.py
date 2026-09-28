@@ -36,15 +36,13 @@ def _stream_tokens(data, stream_start, container_variant):
     tick = 0
     pos = stream_start
     declared_end = _declared_stream_end(data, stream_start, container_variant=container_variant)
+    stream_end = declared_end if declared_end is not None else len(data)
 
     def require(size):
-        if pos + size > len(data):
+        if pos + size > stream_end:
             raise EseqConversionError("Encountered an incomplete E-SEQ event.")
 
-    while pos < len(data):
-        if declared_end is not None and pos >= declared_end:
-            if all(value in (0, 0xF6) for value in data[pos:]):
-                break
+    while pos < stream_end:
         start = pos
         status = data[pos]
         pos += 1
@@ -72,7 +70,7 @@ def _stream_tokens(data, stream_start, container_variant):
             pos += 2
         elif status == 0xF0:
             wire = bytearray(b"\xF0")
-            while pos < len(data):
+            while pos < stream_end:
                 value = data[pos]
                 pos += 1
                 if value in (0xF3, 0xF4):

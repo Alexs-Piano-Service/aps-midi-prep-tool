@@ -86,6 +86,16 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Image saves stage and sync completed output beside the destination before
+  replacing it. Cross-filesystem copy failures leave existing images intact.
+- E-SEQ conversion and channel merging respect valid declared stream lengths,
+  ignore opaque binary trailers, and reject incomplete commands at the stream
+  boundary. Conversion also rejects illegal MIDI channel data bytes before
+  writing output. CC7 playback analysis now runs in linear time.
+- FAT12 image loading rejects cyclic cluster chains and reused directory
+  clusters with recovery guidance, including deeply nested directory cycles.
+- DOS 8.3 renames reject existing case-equivalent target names on every host
+  platform before moving any files.
 - Piano overlap repair separates notes by MIDI port and preserves unrelated
   zero-duration notes and unmatched releases. Generated releases retain their
   destination, and resets and deferred releases cannot affect another port.

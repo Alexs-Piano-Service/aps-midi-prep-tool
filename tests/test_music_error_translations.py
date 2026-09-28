@@ -21,6 +21,16 @@ def _fields(template):
     return sorted(field for _, field, _, _ in Formatter().parse(template) if field)
 
 
+def _eseq_with_invalid_channel_data():
+    stream = bytes.fromhex("95 3C 90 F2")
+    header = bytearray(0x77)
+    header[0] = 0xFE
+    header[3:7] = (len(header) + len(stream)).to_bytes(4, "little")
+    header[7:15] = b"COM-ESEQ"
+    header[0x1F:0x23] = len(stream).to_bytes(4, "little")
+    return bytes(header) + stream
+
+
 def test_parser_error_catalog_covers_every_language_and_preserves_parameters():
     for source, translations in MUSIC_ERROR_TRANSLATIONS.items():
         assert set(translations) == set(LANGUAGES) - {"en"}, source
@@ -54,7 +64,8 @@ def test_every_static_music_parser_diagnostic_has_a_translation():
     (_parse_track_events, b"\x81"),
     (parse_eseq_bytes, b"short"),
     (parse_eseq_bytes, b"\x00" * 160),
-), ids=("short-midi", "unknown-midi-format", "short-note", "unknown-status", "short-vlq", "short-eseq", "missing-eseq-signature"))
+    (parse_eseq_bytes, _eseq_with_invalid_channel_data()),
+), ids=("short-midi", "unknown-midi-format", "short-note", "unknown-status", "short-vlq", "short-eseq", "missing-eseq-signature", "invalid-eseq-channel-data"))
 def test_real_parser_failures_translate_and_preserve_path_context(language, parse, data):
     with pytest.raises(ValueError) as caught:
         parse(data)

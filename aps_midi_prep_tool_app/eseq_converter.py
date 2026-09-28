@@ -498,30 +498,21 @@ def _midi_channel(raw):
 
 
 def _zero_cc7_indexes_needing_playback_fix(events, tick_limit=None):
+    """Find un-restored zeros in a chronologically ordered event sequence."""
     candidates = set()
-    indexed_events = list(enumerate(events))
-    for index, (abs_tick, _, raw) in indexed_events:
-        if tick_limit is not None and abs_tick > tick_limit:
-            continue
-        if not _is_zero_channel_volume_event(raw):
-            continue
+    next_is_note = [False] * 16
+    for index in range(len(events) - 1, -1, -1):
+        abs_tick, _, raw = events[index]
         channel = _midi_channel(raw)
         if channel is None:
             continue
-
-        note_later = False
-        restored_before_note = False
-        for _, (later_tick, _, later_raw) in indexed_events[index + 1:]:
-            if later_tick < abs_tick or _midi_channel(later_raw) != channel:
-                continue
-            if _is_channel_volume_event(later_raw) and later_raw[2] > 0:
-                restored_before_note = True
-                break
-            if _is_note_on_event(later_raw):
-                note_later = True
-                break
-        if note_later and not restored_before_note:
-            candidates.add(index)
+        if _is_channel_volume_event(raw):
+            if raw[2] > 0:
+                next_is_note[channel] = False
+            elif next_is_note[channel] and (tick_limit is None or abs_tick <= tick_limit):
+                candidates.add(index)
+        elif _is_note_on_event(raw):
+            next_is_note[channel] = True
     return candidates
 
 
@@ -570,8 +561,9 @@ def _effective_initial_mpqn(tempo_events):
 def parse_eseq_bytes(eseq_bytes, filename=""):
     """Parse a complete stream using the logical source name for MDA variants.
 
-    Commands cut short at EOF are rejected. Without a filename, container
-    detection retains the byte-only behavior.
+    A sane declared length bounds the stream, including command payloads;
+    otherwise physical EOF is used. Incomplete commands are rejected. Without
+    a filename, container detection retains the byte-only behavior.
     """
     if len(eseq_bytes) < CLAVINOVA_MDA_HEADER_SIZE:
         raise EseqConversionError("File is too small to be a valid Yamaha E-SEQ file.")
@@ -589,6 +581,7 @@ def parse_eseq_bytes(eseq_bytes, filename=""):
     abs_tick = 0
     pos = _eseq_event_stream_start(data, container_variant=container_variant)
     declared_stream_end = _declared_stream_end(data, pos, container_variant=container_variant)
+    stream_end = declared_stream_end if declared_stream_end is not None else len(data)
     events = []
     initial_mpqn = 60_000_000 // base_bpm
     tempo_events = [(0, initial_mpqn)]
@@ -599,13 +592,10 @@ def parse_eseq_bytes(eseq_bytes, filename=""):
         time_signature_events.append((0, *last_time_signature))
 
     def require_event_data(size):
-        if pos + size > len(data):
+        if pos + size > stream_end:
             raise EseqConversionError("Encountered an incomplete E-SEQ event.")
 
-    while pos < len(data):
-        if declared_stream_end is not None and pos >= declared_stream_end:
-            if all(byte in (0x00, _ESEQ_PADDING_BYTE) for byte in data[pos:]):
-                break
+    while pos < stream_end:
         status = data[pos]
         pos += 1
 
@@ -676,12 +666,12 @@ def parse_eseq_bytes(eseq_bytes, filename=""):
             # advances the clock, then resumes with an SMF F7 continuation.
             # The F7 packet marker is not part of the transmitted wire bytes.
             packet = bytearray(b"\xF0")
-            while pos < len(data):
+            while pos < stream_end:
                 byte = data[pos]
                 pos += 1
                 if byte in (0xF3, 0xF4):
                     delay_size = 1 if byte == 0xF3 else 2
-                    if pos + delay_size > len(data):
+                    if pos + delay_size > stream_end:
                         raise EseqConversionError("Encountered an incomplete delay inside E-SEQ SysEx.")
                     events.append((abs_tick, 3, bytes(packet)))
                     abs_tick += data[pos] if byte == 0xF3 else _decode_15(data[pos], data[pos + 1])
@@ -701,18 +691,13 @@ def parse_eseq_bytes(eseq_bytes, filename=""):
                 raise EseqConversionError("Encountered an unterminated E-SEQ SysEx event.")
             continue
 
-        hi = status & 0xF0
-        if hi in (0x80, 0x90, 0xA0, 0xB0, 0xE0):
-            require_event_data(2)
-            raw = bytes([status]) + data[pos:pos + 2]
-            pos += 2
-            events.append((abs_tick, 2, raw))
-            continue
-
-        if hi in (0xC0, 0xD0):
-            require_event_data(1)
-            raw = bytes([status, data[pos]])
-            pos += 1
+        if 0x80 <= status <= 0xEF:
+            size = 1 if status & 0xF0 in (0xC0, 0xD0) else 2
+            require_event_data(size)
+            if any(value >= 0x80 for value in data[pos:pos + size]):
+                raise EseqConversionError("Invalid data byte in an E-SEQ channel event.")
+            raw = bytes([status]) + data[pos:pos + size]
+            pos += size
             events.append((abs_tick, 2, raw))
             continue
 

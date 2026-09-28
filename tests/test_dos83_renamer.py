@@ -50,6 +50,138 @@ def _make_plan(tmp_path, shape):
     return plan, originals
 
 
+@pytest.mark.parametrize("existing_name", ["00songdk.mid", "00SongDk.Mid"])
+@pytest.mark.parametrize("operation", ["validate_midi_dos83_plan", "apply_midi_dos83_plan"])
+def test_unrelated_dos_equivalent_target_is_rejected_before_any_moves(
+    tmp_path, monkeypatch, recovery_locations, existing_name, operation,
+):
+    source = tmp_path / "song.mid"
+    existing = tmp_path / existing_name
+    originals = {source: b"selected recording", existing: b"unrelated recording"}
+    for path, contents in originals.items():
+        path.write_bytes(contents)
+    plan = renamer.build_midi_dos83_plan([source])
+    assert Path(plan[0][1]).name == "00SONGDK.MID"
+    monkeypatch.setattr(renamer.os, "replace", lambda *_: pytest.fail("Moved before validation"))
+
+    with pytest.raises(FileExistsError, match="target 00SONGDK.MID already exists"):
+        getattr(renamer, operation)(plan)
+
+    assert {path: path.read_bytes() for path in tmp_path.iterdir()} == originals
+    assert recovery_locations == []
+
+
+def test_duplicate_dos_targets_in_one_plan_are_rejected(tmp_path):
+    sources = [tmp_path / name for name in ("first.mid", "second.mid")]
+    for source in sources:
+        source.write_bytes(source.name.encode())
+    plan = list(zip(sources, [tmp_path / "00SONG.MID", tmp_path / "00song.mid"]))
+
+    with pytest.raises(ValueError, match="duplicate target filename"):
+        renamer.apply_midi_dos83_plan(plan)
+
+    assert {path: path.read_bytes() for path in tmp_path.iterdir()} == {
+        path: path.name.encode() for path in sources
+    }
+
+
+def test_planned_source_with_dos_equivalent_target_is_vacated(tmp_path):
+    first = tmp_path / "00A.mid"
+    second = tmp_path / "00adkson.mid"
+    first.write_bytes(b"first recording")
+    second.write_bytes(b"second recording")
+    plan = renamer.build_midi_dos83_plan([first, second])
+
+    result = renamer.apply_midi_dos83_plan(plan)
+
+    assert result.renamed == plan
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == {
+        "00ADKSON.MID": b"first recording", "01ADKSON.MID": b"second recording",
+    }
+
+
+def test_case_only_rename_on_case_sensitive_host_is_applied(tmp_path):
+    source = tmp_path / "00songdk.mid"
+    source.write_bytes(b"recording")
+    target = tmp_path / "00SONGDK.MID"
+    if target.exists():
+        pytest.skip("Requires a case-sensitive filesystem")
+
+    result = renamer.apply_midi_dos83_plan([(source, target)])
+
+    assert result.renamed == [(str(source), str(target))]
+    assert not source.exists()
+    assert target.read_bytes() == b"recording"
+
+
+def test_unselected_case_variant_of_a_selected_source_is_still_a_collision(tmp_path):
+    source = tmp_path / "00songdk.mid"
+    source.write_bytes(b"selected recording")
+    target = tmp_path / "00SONGDK.MID"
+    if target.exists():
+        pytest.skip("Requires a case-sensitive filesystem")
+    target.write_bytes(b"unrelated recording")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        renamer.apply_midi_dos83_plan([(source, target)])
+
+    assert source.read_bytes() == b"selected recording"
+    assert target.read_bytes() == b"unrelated recording"
+
+
+def test_distinct_case_variant_sources_are_not_dropped_from_the_plan(tmp_path):
+    lower = tmp_path / "song.mid"
+    lower.write_bytes(b"lowercase recording")
+    upper = tmp_path / "SONG.MID"
+    if upper.exists():
+        pytest.skip("Requires a case-sensitive filesystem")
+    upper.write_bytes(b"uppercase recording")
+    plan = renamer.build_midi_dos83_plan([lower, upper])
+
+    assert len(plan) == 2
+    result = renamer.apply_midi_dos83_plan(plan)
+
+    assert len(result.renamed) == 2
+    assert sorted(path.read_bytes() for path in tmp_path.iterdir()) == [
+        b"lowercase recording", b"uppercase recording",
+    ]
+
+
+def test_dos_target_identity_keeps_distinct_parent_directories(tmp_path):
+    directories = [tmp_path / "songs", tmp_path / "Songs"]
+    directories[0].mkdir()
+    if directories[1].exists():
+        pytest.skip("Requires a case-sensitive filesystem")
+    directories[1].mkdir()
+    sources = [directory / "song.mid" for directory in directories]
+    for index, source in enumerate(sources):
+        source.write_bytes(f"recording {index}".encode())
+    plan = renamer.build_midi_dos83_plan(sources)
+
+    result = renamer.apply_midi_dos83_plan(plan)
+
+    assert len(result.renamed) == 2
+    for index, directory in enumerate(directories):
+        assert (directory / "00SONGDK.MID").read_bytes() == f"recording {index}".encode()
+
+
+def test_duplicate_dos_targets_through_directory_alias_are_rejected(tmp_path):
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(tmp_path, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symbolic links are unavailable")
+    sources = [tmp_path / name for name in ("first.mid", "second.mid")]
+    for source in sources:
+        source.write_bytes(source.name.encode())
+
+    with pytest.raises(ValueError, match="duplicate target filename"):
+        renamer.validate_midi_dos83_plan([
+            (sources[0], tmp_path / "00SONG.MID"),
+            (sources[1], alias / "00song.mid"),
+        ])
+
+
 @pytest.mark.parametrize("shape", ["chain", "swap", "cycle", "independent"])
 @pytest.mark.parametrize("failure_position", range(3))
 def test_publication_failure_restores_all_original_bytes(

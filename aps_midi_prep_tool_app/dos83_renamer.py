@@ -6,6 +6,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from .eseq_pianodir import dos_filename_key
 from .helpers.file_backup import (
     copy_file_backup as _copy_backup,
     default_backup_path as _default_backup_path,
@@ -58,7 +59,14 @@ def is_dos83_filename(filename):
 
 
 def _normalize_path_key(path):
-    return os.path.normcase(os.path.abspath(path))
+    """Identify a host directory entry, preserving distinct Linux filenames."""
+    directory, filename = os.path.split(os.path.abspath(path))
+    return os.path.normcase(os.path.join(os.path.realpath(directory), filename))
+
+
+def _dos_path_key(path):
+    directory, filename = os.path.split(os.path.abspath(path))
+    return os.path.normcase(os.path.realpath(directory)), dos_filename_key(filename)
 
 
 def _letters_only_upper(filename):
@@ -143,18 +151,25 @@ def _validate_plan(plan):
 
     for source, target in plan:
         source_key = _normalize_path_key(source)
-        target_key = _normalize_path_key(target)
+        target_key = _dos_path_key(target)
         existing_source_key = target_map.get(target_key)
         if existing_source_key is not None and existing_source_key != source_key:
             raise ValueError(f"Generated duplicate target filename: {os.path.basename(target)}")
         target_map[target_key] = source_key
 
+    directory_entries = {}
     for source, target in plan:
-        source_key = _normalize_path_key(source)
-        target_key = _normalize_path_key(target)
-        if target_key == source_key:
-            continue
-        if os.path.exists(target) and target_key not in source_keys:
+        directory_key, filename_key = _dos_path_key(target)
+        if directory_key not in directory_entries:
+            entries = defaultdict(list)
+            with os.scandir(directory_key) as directory:
+                for entry in directory:
+                    entries[dos_filename_key(entry.name)].append(_normalize_path_key(entry.path))
+            directory_entries[directory_key] = entries
+        # Only selected source entries may occupy a target: staging vacates
+        # those before publication. A DOS-equivalent sibling remains a conflict.
+        occupants = directory_entries[directory_key].get(filename_key, ())
+        if any(occupant not in source_keys for occupant in occupants):
             raise FileExistsError(
                 f"Cannot rename {os.path.basename(source)}: target {os.path.basename(target)} already exists."
             )

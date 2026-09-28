@@ -78,15 +78,18 @@ def test_reconstruction_preserves_song_larger_than_saturated_ffff_header():
     assert len(parse_eseq_bytes(recovered).events) == 18000
 
 
-def test_reconstruction_keeps_valid_trailer_after_both_declared_lengths():
+def test_reconstruction_preserves_trailer_without_parsing_past_declared_lengths():
     prefix = b"\x90\x3c\x40\xf3\x20\x80\x3c\x00"
     trailer = b"\xf4\x20\x03\xb0\x40\x00\xf2"
     payload = _song(prefix + trailer, total_length=0x77 + len(prefix), stream_length=len(prefix))
     entry, recovered, _allocated = _rebuild(payload)
     assert entry["size"] == len(payload)
+    # Recovery retains all bytes even though normal playback obeys the sane
+    # declared stream boundary and must not interpret the opaque suffix.
+    assert recovered == payload
     parsed = parse_eseq_bytes(recovered)
-    assert parsed.end_tick == 448
-    assert parsed.events[-1][2] == b"\xb0\x40\x00"
+    assert parsed.end_tick == 32
+    assert parsed.events == [(0, 2, b"\x90\x3c\x40"), (32, 2, b"\x80\x3c\x00")]
 
 
 def test_reconstruction_never_reads_past_fat_chain_for_oversized_lengths_or_missing_end():

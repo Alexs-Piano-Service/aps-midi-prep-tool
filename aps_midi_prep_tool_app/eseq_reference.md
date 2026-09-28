@@ -302,8 +302,16 @@ Recommended reader policy:
 1. Locate and verify `COM-ESEQ`.
 2. Detect known variant.
 3. Choose event start (`0x77` for normal, `0x0200` for Q11, `0x57` for Clavinova/CVP `.MDA`).
-4. Parse until opcode `F2`, with the file size and stream-length field as safety bounds.
+4. Parse until opcode `F2` or a sane declared stream end, whichever comes first.
+   The declared end is authoritative even without `F2`: bytes after it are
+   opaque trailing data, regardless of whether they resemble commands or padding.
+   Command payloads and SysEx must fit wholly within that boundary. Only scan
+   to physical EOF when no declared length resolves to a valid in-file boundary.
 5. Treat `0x03` as metadata, not as the only authoritative EOF.
+
+Both conversion and native channel merging reject channel-message data bytes
+with the high bit set (`0x80` or above), as well as truncated commands. Invalid
+input is rejected before a converted MIDI file is published.
 
 ### 5.4 Padding and slack
 

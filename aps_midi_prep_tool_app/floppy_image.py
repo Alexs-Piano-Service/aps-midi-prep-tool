@@ -63,6 +63,10 @@ class AmbiguousDosFilenameError(FloppyImageError):
     """A filename cannot safely identify a single FAT directory entry."""
 
 
+class _Fat12DirectoryCorruptionError(FloppyImageError):
+    """Directory corruption must not be bypassed by another image reader."""
+
+
 class FloppyOperationCancelled(FloppyImageError):
     """Raised when the user cancels a long floppy operation."""
 
@@ -2026,12 +2030,45 @@ def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_fo
 
 
 def _finish_temp_output(temp_path, output_path):
+    temp_mode = stat.S_IMODE(os.stat(temp_path).st_mode)
+    readonly_windows_stage = os.name == "nt" and not temp_mode & stat.S_IWUSR
+    # Windows needs a writable descriptor to sync. copy2 may have inherited
+    # read-only permissions from the source; change only this private stage.
+    if readonly_windows_stage:
+        os.chmod(temp_path, temp_mode | stat.S_IWUSR)
+    try:
+        with open(temp_path, "rb+" if os.name == "nt" else "rb") as handle:
+            os.fsync(handle.fileno())
+    finally:
+        if readonly_windows_stage:
+            os.chmod(temp_path, temp_mode)
     try:
         os.replace(temp_path, output_path)
     except OSError as exc:
         if exc.errno != errno.EXDEV:
             raise
-        shutil.copy2(temp_path, output_path)
+        # Never copy directly onto an existing destination: a short write or
+        # disconnected drive must leave the previous image intact.
+        fd, local_temp = tempfile.mkstemp(
+            prefix=".aps_image_", suffix=".tmp",
+            dir=os.path.dirname(os.path.abspath(output_path)),
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                shutil.copy2(temp_path, local_temp)
+                os.fsync(handle.fileno())
+            os.replace(local_temp, output_path)
+        finally:
+            try:
+                if os.name == "nt":
+                    os.chmod(local_temp, stat.S_IRUSR | stat.S_IWUSR)
+                os.remove(local_temp)
+            except OSError:
+                # A disconnected drive can prevent cleanup too; preserve the
+                # original copy, sync, or replacement failure for the caller.
+                pass
+        if readonly_windows_stage:
+            os.chmod(temp_path, temp_mode | stat.S_IWUSR)
         os.remove(temp_path)
     return output_path
 
@@ -2376,9 +2413,8 @@ def create_floppy_images_from_files(
                 f"Writing image {index} of {total_images}...",
             )
 
-            temp_output = os.path.join(
-                temp_dir,
-                f".aps_image_{uuid.uuid4().hex}.{output_ext.lower().lstrip('.')}",
+            temp_output = _capture_temp_output_path(
+                final_path, suffix=f".{output_ext.lower().lstrip('.')}",
             )
             try:
                 report = _write_image_direct(raw_img, temp_output, output_ext, disk_format)
@@ -3794,6 +3830,7 @@ def _capture_temp_output_path(output_path, *, suffix=None):
     fd, temp_path = tempfile.mkstemp(
         prefix=f".aps_capture_{uuid.uuid4().hex}.",
         suffix=temp_suffix or ".tmp",
+        dir=output_dir,
     )
     os.close(fd)
     os.remove(temp_path)
@@ -5569,6 +5606,8 @@ def read_image_listing(img_path, *, diagnostics=None):
         return _read_fat12_block_device_listing(img_path)
     try:
         return _read_fat12_image_listing(img_path)
+    except _Fat12DirectoryCorruptionError:
+        raise
     except FloppyImageError as fat_exc:
         if not shutil.which("7z"):
             raise fat_exc
@@ -6254,7 +6293,12 @@ def _fat12_cluster_chain_from_start(fat, first_cluster):
     clusters = []
     seen = set()
     cluster = first_cluster
-    while 2 <= cluster < 0xFF0 and cluster not in seen:
+    while 2 <= cluster < 0xFF0:
+        if cluster in seen:
+            raise _Fat12DirectoryCorruptionError(
+                "The FAT12 cluster chain contains a cycle; the disk or image is corrupt. "
+                "Use Recover Damaged Image."
+            )
         clusters.append(cluster)
         seen.add(cluster)
         next_cluster = _fat12_next_cluster(fat, cluster)
@@ -6362,12 +6406,19 @@ def _iter_fat_directory_entries(directory_bytes):
         }
 
 
-def _read_directory_chain_from_image(data, geometry, fat, first_cluster):
+def _read_directory_chain_from_image(data, geometry, fat, first_cluster, *, directory_clusters=None):
     if first_cluster < 2:
         return b""
     clusters = _fat12_cluster_chain_from_start(fat, first_cluster)
     if not clusters:
         return b""
+    if directory_clusters is not None:
+        if directory_clusters.intersection(clusters):
+            raise _Fat12DirectoryCorruptionError(
+                "The FAT12 directories reuse a cluster or contain a cycle; the disk or image is corrupt. "
+                "Use Recover Damaged Image."
+            )
+        directory_clusters.update(clusters)
     return _read_cluster_chain_from_image(data, geometry, clusters, len(clusters) * geometry.cluster_size)
 
 
@@ -6463,7 +6514,17 @@ def _fat12_contiguous_file_bytes(data, geometry, first_cluster, size):
 
 def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_path="", *, allow_contiguous_fallback=False):
     entries = []
-    for entry in _iter_fat_directory_entries(directory_bytes):
+    directory_clusters = set()
+    # Preserve depth-first order without using Python recursion for damaged or
+    # unusually deep directory trees. Every directory-chain cluster is unique
+    # across the entire traversal, including chains shared by sibling folders.
+    pending = [(iter(_iter_fat_directory_entries(directory_bytes)), parent_path)]
+    while pending:
+        directory_entries, parent_path = pending[-1]
+        entry = next(directory_entries, None)
+        if entry is None:
+            pending.pop()
+            continue
         attr = entry["attr"]
         image_path = entry["name"] if not parent_path else f"{parent_path}/{entry['name']}"
         image_path = _normalize_image_path(image_path)
@@ -6472,17 +6533,10 @@ def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_
         if attr & 0x08:
             continue
         if attr & 0x10:
-            child_dir = _read_directory_chain_from_image(data, geometry, fat, entry["cluster"])
-            entries.extend(
-                _collect_fat12_listing_entries(
-                    data,
-                    geometry,
-                    fat,
-                    child_dir,
-                    image_path,
-                    allow_contiguous_fallback=allow_contiguous_fallback,
-                )
+            child_dir = _read_directory_chain_from_image(
+                data, geometry, fat, entry["cluster"], directory_clusters=directory_clusters,
             )
+            pending.append((iter(_iter_fat_directory_entries(child_dir)), image_path))
             continue
 
         try:
@@ -11134,9 +11188,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         output_path = os.path.abspath(output_path)
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
-        temp_output = os.path.join(
-            self.temp_dir,
-            f".aps_image_{uuid.uuid4().hex}.{output_ext.lower().lstrip('.')}",
+        temp_output = _capture_temp_output_path(
+            output_path, suffix=f".{output_ext.lower().lstrip('.')}",
         )
         try:
             if output_ext.lower().lstrip(".") in RAW_IMAGE_EXTENSIONS:
@@ -11525,9 +11578,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 )
             else:
                 output_ext = self.source_ext if self.source_ext else "img"
-                temp_output = os.path.join(
-                    self.temp_dir,
-                    f".aps_image_{uuid.uuid4().hex}.{output_ext}",
+                temp_output = _capture_temp_output_path(
+                    self.source_path, suffix=f".{output_ext}",
                 )
                 if output_ext.lower().lstrip(".") in RAW_IMAGE_EXTENSIONS:
                     _notify_progress(progress_callback, 4, 5, "Saving raw floppy image...")
