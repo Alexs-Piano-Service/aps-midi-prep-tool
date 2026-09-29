@@ -125,7 +125,7 @@ The most important implementation findings are:
 8. A second E-SEQ header variant, marked `Q11V1.00`, exists. Its event stream begins at `0x0200`, and its `PIANODIR.FIL` record must be built by a special recipe.
 9. Clavinova/CVP `.MDA` files in the analyzed corpus are E-SEQ at the event level, but not Disklavier `.FIL` containers. They still contain `COM-ESEQ` at `0x07`, but their event stream begins at `0x57`, their initial tempo byte is at `0x24`, and bytes `0x57..0x76` are event data, not title text.
 10. `MUSIC.DIR` replaces `PIANODIR.FIL` for these Clavinova/CVP disks. It uses a `MUSICDIR` header, a logical-slot map, and 48-byte song records usually copied from `.MDA file[0x27:0x57]`.
-11. Early MIDI `CC7 Channel Volume = 0` events on piano channels are significant. In generic MIDI playback they mute the channel, but in Yamaha/Disklavier workflows they may be intentional playback-control or compatibility behavior. APS MIDI Prep Tool should detect them and offer explicit handling policies.
+11. Yamaha startup `CC7 Channel Volume = 0` commands can mute otherwise valid notes in generic MIDI playback. E-SEQ-to-MIDI conversion removes these commands automatically at or before each part's first note; later volume changes remain intact. Explicit preservation is available to analysis callers.
 
 ---
 
@@ -492,7 +492,7 @@ For conversion to Standard MIDI, one E-SEQ event tick maps to one MIDI tick in a
 | `0x80..0x8F` | 3 | MIDI Note Off | Copy status and two data bytes. |
 | `0x90..0x9F` | 3 | MIDI Note On | Copy status and two data bytes. Velocity `0` is note-off by MIDI convention. |
 | `0xA0..0xAF` | 3 | MIDI Polyphonic Key Pressure | Copy. |
-| `0xB0..0xBF` | 3 | MIDI Control Change | Copy, except optional policies for un-restored CC7=0 before later notes. |
+| `0xB0..0xBF` | 3 | MIDI Control Change | Copy, except automatic startup CC7=0 removal for MIDI output or an explicit analysis policy. |
 | `0xC0..0xCF` | 2 | MIDI Program Change | Copy or optionally insert/remove in compatibility modes. |
 | `0xD0..0xDF` | 2 | MIDI Channel Pressure | Copy. |
 | `0xE0..0xEF` | 3 | MIDI Pitch Bend | Copy. |
@@ -755,7 +755,7 @@ Tempo is a header/tempo-map property. Event delays are tick counts. Do not attem
 
 ---
 
-## 9. Channel events, piano channels, and CC7 playback-control warning
+## 9. Channel events, piano channels, and CC7 startup cleanup
 
 ### 9.1 Direct MIDI channel-event mapping
 
@@ -764,7 +764,7 @@ For normal musical conversion, copy MIDI channel messages between E-SEQ and MIDI
 | MIDI/E-SEQ event | Copy rule |
 |---|---|
 | Note On / Note Off | Copy status and data bytes. |
-| Control Change | Copy status and data bytes unless a user-selected policy rewrites known playback-control events. |
+| Control Change | Remove Yamaha startup volume mutes when exporting MIDI; preserve other events unless an explicit policy changes them. |
 | Program Change | Copy or omit according to compatibility mode. |
 | Pressure / Pitch Bend | Copy. |
 | Sysex | Preserve as sysex where possible. |
@@ -780,51 +780,43 @@ In most Disklavier-prepared files, channel 0 is the main piano channel, but do n
 3. Channels named or assigned to piano by track/instrument metadata.
 4. Default to channel 0 if no better evidence exists.
 
-### 9.3 Early CC7 = 0 warning and policies
+### 9.3 Automatic Yamaha startup-mute cleanup
 
-A MIDI file may contain normal piano note data but also send `CC7 Channel Volume = 0` near the beginning of the piano channel:
-
-```text
-B0 07 00    ; channel 0, controller 7, value 0
-```
-
-A standards-compliant MIDI player or synthesizer will treat controller 7 as channel volume, and value zero may mute that channel. Such a file can appear silent in generic playback even though note events are present.
-
-In a Disklavier/E-SEQ context, `CC7 = 0` may have one of several meanings:
-
-- Intentional Yamaha-specific playback setup.
-- A compatibility barrier or crude copy-protection behavior.
-- A conversion artifact where Yamaha hardware or Yamaha-oriented software restores, ignores, or interprets the volume differently.
-- A legitimate musical mute, though this is less likely if dense piano note data follows and no later volume restoration occurs.
-
-APS MIDI Prep Tool should flag this condition when all are true:
+Yamaha E-SEQ songs can contain `CC7 Channel Volume = 0` setup commands that
+leave a part silent when carried into ordinary MIDI playback:
 
 ```text
-controller == 7
-value == 0
-channel has note events later in the same stream
-no later CC7 restoration before the first notes, or restoration is ambiguous
+B0 07 00    ; MIDI channel 1, controller 7, volume 0
 ```
 
-Recommended policies:
+E-SEQ-to-MIDI conversion defaults to `remove_startup_mutes`. It removes zero
+channel-volume commands at or before each channel's first positive-velocity
+Note On, including commands stored at that same tick. This uses musical onset
+rather than a fixed time limit, so long preparation delays do not defeat the
+cleanup. Positive volume settings, later mutes, note velocities, timing, and
+pedals are retained. Channels without notes are left unchanged.
+
+The cleanup is automatic in manual conversion, controller preparation (including
+ENSPIRE), extraction, MIDI emulator output, preview, and Mark IV MIDI copies.
+The confirmation dialog explains automatic removal; it does not offer a volume
+checkbox. Hidden conversion dialogs do not disable cleanup. Conversion reports
+record the before/after count of zero-volume commands.
+
+MIDI-to-E-SEQ conversion still preserves volume commands by default. Native
+E-SEQ container changes that use intermediate MIDI explicitly preserve them.
+The original input bytes are not edited by conversion.
+
+The lower-level API retains explicit policies for analysis and compatibility:
 
 | Policy | Behavior |
 |---|---|
-| `preserve` | Leave `CC7=0` unchanged. Best for archival conversion. |
-| `warn_only` | Preserve but report a warning. Default for analysis. |
-| `playback_fix_100` | Rewrite un-restored `CC7=0` before later notes to `CC7=100`. Good for generic MIDI preview. |
-| `playback_fix_127` | Rewrite to `127`. Louder preview; less conservative. |
-| `drop_early_cc7_zero` | Remove the mute event. Legacy name retained for compatibility. |
-| `yamaha_profile` | Apply a future Yamaha-specific rule if proven by hardware/corpus behavior. |
+| `remove_startup_mutes` | Remove startup `CC7=0`; default for E-SEQ-to-MIDI. |
+| `preserve` | Leave `CC7=0` unchanged; default for MIDI-to-E-SEQ and native container changes. |
+| `warn_only` | Preserve volume commands for analysis. |
+| `playback_fix_100` | Rewrite un-restored zero volume before later notes to 100, anywhere in the song. |
+| `playback_fix_127` | Rewrite those commands to 127. |
+| `drop_early_cc7_zero` | Legacy policy: remove un-restored zero volume before later notes anywhere in the song. |
 
-Store this in conversion reports because it may explain “silent MIDI” complaints.
-
-The conversion API defaults to `preserve`. Interactive E-SEQ-to-MIDI conversion
-counts zero-volume events that occur before later notes without an intervening
-positive CC7 value on the same channel. When detected, the dialog offers an
-unchecked `playback_fix_100` choice for that batch. This condition is shown even
-when the ordinary conversion prompt was previously hidden. Staged change reports
-include the before/after zero-volume count alongside notes, timing, and pedals.
 
 ---
 
@@ -1000,7 +992,7 @@ For SMPTE-timed MIDI divisions, require a special conversion mode because E-SEQ 
 | `FF 58` Time Signature | Header display bytes and `F9` markers | 4/4 proven; other meters provisional. |
 | `FF 59` Key Signature | Drop or store only in external metadata | No proven normal E-SEQ field. |
 | Track/text/instrument names | 32-byte title field if appropriate | Use conservative single-byte encoding. |
-| `FF 20 01 cc` Channel Prefix | `FF cc` | The SMF spec notes this capability is also present in Yamaha ESEQ. |
+| `FF 20 01 cc` Channel Prefix | `FF cc` | The SMF spec notes this capability is also present in Yamaha E-SEQ. |
 | Sysex | `F0 ... F7` | Preserve where possible. |
 | Other meta events | Drop/report | No proven E-SEQ representation. |
 
@@ -1699,9 +1691,10 @@ For every Clavinova/CVP disk image or folder:
 
 For every MIDI pair:
 
-- Detect `CC7=0` on channels with later notes and no intervening positive CC7 restoration.
-- Record whether notes follow before volume restoration.
-- Test whether E-SEQ conversion preserves, removes, or rewrites the event.
+- Verify default E-SEQ-to-MIDI conversion removes `CC7=0` at or before each channel's first sounding note.
+- Cover long opening pauses, same-tick setup, repeated zeros, and independent channel onsets.
+- Verify later mutes and positive volume settings are retained with their original timing.
+- Verify explicit analysis policies preserve, remove, or rewrite the intended events.
 - Compare audible generic MIDI playback before/after policy modes.
 - If hardware results are available, determine whether Disklavier playback ignores or honors the mute.
 
@@ -1764,7 +1757,7 @@ class PianoDirEntry:
 | MIDI output metadata | `clean_canonical` default for hardware playback with a short APS conversion text note; `archival_verbose` only when embedding `APS-ESEQ-TIMING` / `APS-ESEQ-HEADER` round-trip metadata |
 | End tick policy | `trim`, `preserve_eseq_end`, `next_bar`, `midi_eot` |
 | Note-off policy | `preserve`, `normalize_to_note_on_zero`, `normalize_to_8n` |
-| CC7 zero policy | `preserve`, `warn_only`, `playback_fix_100`, `playback_fix_127`, `drop_early_cc7_zero` |
+| CC7 zero policy | `remove_startup_mutes`, `preserve`, `warn_only`, `playback_fix_100`, `playback_fix_127`, `drop_early_cc7_zero` |
 | Padding policy | `compat_f6`, `zero`, `compact`, `preserve` |
 | PIANODIR size | `0x1800` default, `preserve_existing` for edits |
 | E-SEQ container | `disklavier_fil`, `clavinova_mda` |
@@ -1993,7 +1986,7 @@ These items should be resolved with the next, larger corpus and, ideally, hardwa
 
 Public references used for context and cross-checking:
 
-- Standard MIDI File format reference, including `FF 51 03` tempo, `FF 2F 00` end-of-track, `FF 58` time signature, and Yamaha ESEQ mention in the channel-prefix discussion: <https://midimusic.github.io/tech/midispec.html>
+- Standard MIDI File format reference, including `FF 51 03` tempo, `FF 2F 00` end-of-track, `FF 58` time signature, and Yamaha E-SEQ mention in the channel-prefix discussion: <https://midimusic.github.io/tech/midispec.html>
 - MIDI Association, MIDI 1.0 Control Change Messages, including controller 7 as Channel Volume and controller 64 as Damper/Sustain: <https://midi.org/midi-1-0-control-change-messages>
 - Yamaha FAQ, “Using E-SEQ Format on a Disklavier II XG”: <https://faq.yamaha.com/usa/s/article/U0001636>
 - Alexander Peppe, “Converting MIDI Files and Creating PIANODIR.FIL for E-SEQ Files”: <https://www.alexanderpeppe.com/eseq-and-pianodir-fil/>

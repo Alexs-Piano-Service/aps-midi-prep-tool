@@ -1,10 +1,34 @@
 # Updating this copy of APS MIDI Prep Tool
 
-Supported packaged copies offer **Update and restart** when a newer stable
-release is available. The update replaces the executable you launched, including
-a renamed copy on a USB drive, and reopens that same path. It preserves music,
+[All user guides](README.md) · [Getting started](getting-started.md)
+
+Use **Help → Check for Updates…** to check for a newer stable release. Supported
+packaged copies offer **Update and restart**. The update preserves your music,
 startup configuration, and saved preferences. Nothing is installed until you
-choose the update action.
+choose that action.
+
+<a id="download-restart-and-recovery"></a>
+
+## Install an update
+
+1. Finish active work and close other APS tool windows.
+2. Choose **Help → Check for Updates…**, then **Update and restart** if offered.
+   Check the application path shown in the dialog: this is the copy that will
+   be replaced. Renamed copies and copies on a USB drive are supported.
+3. If APS asks about pending edits, choose **Save**, **Discard**, or **Cancel**.
+   If saving starts a disk operation, wait for it to finish and try the update
+   again.
+4. Keep the USB drive connected, if applicable, and wait for APS to download,
+   verify, and install the update. You can cancel during preparation.
+5. APS restarts from the same path. The previous executable remains beside it
+   as `<filename>.previous`.
+
+The application folder must be writable and have room for both the new and
+previous copies. The system temporary directory also needs space for the update
+helper. The running executable stays unchanged during download and verification.
+
+To control startup reminders, use **Settings → Check for Updates at Startup**.
+You can still check manually when this setting is off.
 
 ## Supported copies
 
@@ -14,46 +38,52 @@ choose the update action.
 | Official Linux AppImage (x86_64 or aarch64) | In-place replacement with an AppImage for the same architecture. |
 | Windows folder build, source checkout, unsupported package or platform | Manual download. |
 
+If the dialog offers **Open Download Page**, use it to download the package for
+your operating system and follow the [download and launch instructions](getting-started.md).
+Copies predating self-update support need one manual replacement first.
+
+## If an update fails
+
+If downloading or verification fails, your existing executable is unchanged.
+Check the error details, your internet connection, free space, and whether the
+application folder is writable, then try again.
+
+If replacement fails, the helper restores the old executable. If the new
+application fails to confirm startup, the helper attempts recovery after the
+new process has exited; it never replaces an executable that is still running.
+A disconnected or failing USB drive can prevent recovery writes. Reconnect it
+before trying recovery.
+
+To restore the previous version manually:
+
+1. Close APS, including the new copy if it is still running.
+2. Find `<filename>.previous` beside the application. Keep the failed/new
+   executable separately if you need it for diagnosis.
+3. Restore the previous copy to the original executable filename. For example,
+   restore `My Piano Tool.exe.previous` as `My Piano Tool.exe`, then launch it.
+
+Your startup JSON and music folders require no restoration because the updater
+does not replace them. Existing `.previous` backups are retained under unique
+suffixes rather than silently overwritten.
+
+Failure details remain in `failure.json` inside the `.aps-update-*` staging
+directory beside the executable. Include those details when asking for help.
+Successful startup removes temporary update files and retains the previous
+application.
+
+## How supported copies are recognized
+
 Windows updater releases contain `APSMIDIPrepTool.exe`; Linux releases contain
 `APSMidiPrepTool-VERSION-ARCH.AppImage`. Current packages declare their format
 and architecture in the build identity. Builds that include the updater but
 lack these markers can still qualify when their running bundle is recognized
 as a supported standalone Windows EXE or Linux AppImage. Renaming an executable
 is supported; renaming an installer or an arbitrary program does not make it
-eligible. Copies predating self-update support need one manual replacement first.
-
-## Download, restart, and recovery
-
-1. Finish active work and close other tool windows. APS checks for pending
-   edits before restarting; you can save, discard, or cancel as usual.
-2. APS downloads to a separate staging directory beside the executable, with
-   progress and cancellation. The running executable remains unchanged while
-   the download and verification take place.
-3. A separate helper waits for APS to exit before replacing it. Keep the USB
-   drive connected. The destination must be writable and have room for the
-   new application and previous copy; the system temporary directory also
-   needs room for the helper copy.
-4. APS reopens from its existing path. The prior executable remains beside it
-   as `<filename>.previous`. An existing backup is retained under a unique
-   suffix rather than silently overwritten.
+eligible.
 
 APS also keeps a small `<filename>.update-lock` file to prevent two running
 copies from updating the same application at once. It continues to work when
 the USB drive's letter or mount point changes.
-
-If replacement fails, the helper restores the old executable. If the new
-application fails to confirm startup, the helper attempts recovery after the
-new process has exited; it never replaces an executable that is still running.
-Failure details remain in `failure.json` inside the `.aps-update-*` staging
-directory beside the executable. Successful startup removes temporary update
-files while retaining the previous application.
-
-For manual recovery, close APS and restore `<filename>.previous` to the
-original executable filename. For example, restore `My Piano Tool.exe.previous`
-as `My Piano Tool.exe`. Keep the failed/new copy separately if you need it for
-diagnosis. Startup JSON and music folders require no restoration because the
-updater does not replace them. A disconnected or failing USB drive can prevent
-recovery writes; reconnect it before trying recovery.
 
 ## Verification and trust
 

@@ -1,39 +1,36 @@
 # Startup configuration for USB deployments
 
-Place a UTF-8 file named **`aps-midi-prep-tool.json`** in the same directory as
-APS MIDI Prep Tool's executable. APS reads it automatically at every launch,
-before displaying its main window or welcome dialog. This lets you prepare a
-USB stick for a particular instrument with the right folders and preferences.
+[All user guides](README.md) · [Getting started](getting-started.md)
 
-- **Windows:** beside `APSMidiPrepTool.exe`, including a standalone one-file build.
+Use an optional startup configuration to prepare a USB copy of APS MIDI Prep
+Tool with the right instrument, folders, and preferences. For normal use on
+your own computer, choose settings in APS; you do not need this file.
+
+Start with the [setup steps](#set-up-a-usb-copy) and
+[Nalbantov example](#a-nalbantov-usb-stick). The
+[setting reference](#setting-reference) lists all supported options.
+
+## Set up a USB copy
+
+1. Close APS if it is running.
+2. Copy the [example configuration](examples/aps-midi-prep-tool.json) into the
+   same directory as the application. Keep the filename
+   **`aps-midi-prep-tool.json`**.
+3. Edit the file in a text editor for the recipient's instrument and folders.
+   Save it as UTF-8 JSON. You can remove settings you do not need.
+4. Start APS and check the selected instrument, delivery method, and starting
+   folders in the relevant dialogs. APS reads the file at every launch,
+   before displaying its main window or welcome dialog.
+
+Put the configuration file in the following location for your build:
+
+- **Windows:** beside `APSMIDIPrepTool.exe`, including a standalone one-file build.
 - **Linux AppImage:** beside the `.AppImage` file, outside the AppImage.
 - **Other packaged builds:** beside the executable.
 - **Running Python source:** beside `aps_midi_prep_tool.py`.
 
 The launcher's working directory and temporary extraction directories are not
 searched. The configuration filename stays the same if you rename the executable.
-
-## Updating a deployed USB copy
-
-Use the signed standalone Windows EXE or a Linux AppImage for deployments that
-can update themselves. When APS offers **Update and restart**, it downloads and
-verifies the new version, asks you to resolve pending edits, and restarts the
-copy in the same USB location with its existing filename. Finish disk writing,
-recovery, and other active work first, and keep the drive connected until APS
-restarts. The drive must be writable and have room for the downloaded version
-and the retained previous executable.
-
-The updater replaces only the application. Your `aps-midi-prep-tool.json`,
-music, output folders, and saved preferences remain in place. Relative paths
-continue to work from the same directory. The previous executable is retained
-alongside it as `<filename>.previous`; an older backup is kept under a unique
-name if that name was already occupied.
-
-Source checkouts, Windows folder builds, older packages without update support,
-and unsupported package types use the manual download option. A USB copy that
-predates the updater needs one manual replacement to install the first version
-with self-update support. See [self-updates and recovery](self-updates.md) for supported packages,
-verification, and recovery details.
 
 ## A Nalbantov USB stick
 
@@ -42,7 +39,7 @@ and edit it for the recipient's instrument. For example:
 
 ```text
 USB stick/
-  APSMidiPrepTool.exe
+  APSMIDIPrepTool.exe
   aps-midi-prep-tool.json
   Music/
   Nalbantov/
@@ -106,7 +103,36 @@ keys, incorrect value types, or an invalid instrument/delivery pair, APS ignores
 the entire file and displays an explanation. Correct it and restart APS. No
 entries from an invalid file are applied. The file can be read-only.
 
-## Instrument and delivery
+## Updating a deployed USB copy
+
+Use the signed standalone Windows EXE or a Linux AppImage for deployments that
+can update themselves. When APS offers **Update and restart**, it downloads and
+verifies the new version, asks you to resolve pending edits, and restarts the
+copy in the same USB location with its existing filename. Finish disk writing,
+recovery, and other active work first, and keep the drive connected until APS
+restarts. The drive must be writable and have room for the downloaded version
+and the retained previous executable.
+
+The updater replaces only the application. Your `aps-midi-prep-tool.json`,
+music, output folders, and saved preferences remain in place. Relative paths
+continue to work from the same directory. The previous executable is retained
+alongside it as `<filename>.previous`; an older backup is kept under a unique
+name if that name was already occupied.
+
+Source checkouts, Windows folder builds, older packages without update support,
+and unsupported package types use the manual download option. A USB copy that
+predates the updater needs one manual replacement to install the first version
+with self-update support. See [self-updates and recovery](self-updates.md) for
+supported packages, verification, and recovery details.
+
+## Setting reference
+
+Use only the settings you need. For most USB deployments, start with
+[instrument and delivery](#instrument-and-delivery),
+[remembered paths](#remembered-paths), and
+[appearance, interface, and updates](#appearance-interface-and-updates).
+
+### Instrument and delivery
 
 | Setting | Values |
 | --- | --- |
@@ -144,7 +170,7 @@ and QRS Chili offer `original` and `emulator_custom`. USB-only profiles use
 defaults to long MIDI filenames, and turns off Disklavier screen formatting. See
 [preparation profiles](preparation-profiles.md) for controller behavior.
 
-## Remembered paths
+### Remembered paths
 
 Every entry in this table accepts an absolute or relative path string.
 
@@ -163,7 +189,7 @@ Every entry in this table accepts an absolute or relative path string.
 | `emulator_image_output` | Build Emulator Disk Set output folder, such as `./Nalbantov`. |
 | `disk_recovery_image_path` | Initial image path in Recover Damaged Image. |
 
-## Appearance, interface, and updates
+### Appearance, interface, and updates
 
 | Setting | Type / purpose |
 | --- | --- |
@@ -181,7 +207,7 @@ Every entry in this table accepts an absolute or relative path string.
 | `check_updates_at_startup` | Boolean: check for updates automatically. |
 | `skip_update_reminders` | Boolean: suppress update reminders. Set this to `true` and `check_updates_at_startup` to `false` for an offline deployment. |
 
-## Remembered dialog choices
+### Remembered dialog choices
 
 The review invitation can also be configured:
 
@@ -218,7 +244,7 @@ and trim overlaps), or `"off"` (merge channels and keep overlaps). Choosing a mo
 alone does not enable automatic application. **Settings → Overlapping Piano
 Notes...** lets users change the mode and whether future merges ask again.
 
-## Saving and filename preferences
+### Saving and filename preferences
 
 | Setting | Meaning when `true` (all booleans) |
 | --- | --- |
@@ -246,7 +272,7 @@ older unchecked defaults and obsolete 8.3 preferences. Later manual choices,
 including turning descriptive naming off, are remembered. Explicit startup
 configuration entries apply after this migration.
 
-## Bulk extraction
+### Bulk extraction
 
 These are booleans; source, output, and job paths are listed above.
 
@@ -258,7 +284,7 @@ These are booleans; source, output, and job paths are listed above.
 | `bulk_extraction_include_eseq_sources` | Include original E-SEQ sources alongside converted songs. |
 | `bulk_extraction_use_album_names` | Use album names for output folders. |
 
-## Mark IV music backup
+### Mark IV music backup
 
 Source, destination, and last backup paths are listed above. These settings
 preset the [Mark IV backup utility](mark-iv-backup.md); they do not start a backup.
@@ -268,7 +294,7 @@ preset the [Mark IV backup utility](mark-iv-backup.md); they do not start a back
 | `markiv_backup_convert_eseq` | Boolean: convert supported E-SEQ songs to MIDI during Mark IV backup. Defaults to `false`. |
 | `markiv_backup_keep_originals` | Boolean: keep verified E-SEQ originals alongside converted MIDI files. Defaults to `true`; applies only when conversion is enabled. |
 
-## Emulator disk sets
+### Emulator disk sets
 
 | Setting | Type / values |
 | --- | --- |
@@ -284,7 +310,7 @@ preset the [Mark IV backup utility](mark-iv-backup.md); they do not start a back
 | `emulator_image_shuffle` | Boolean: shuffle songs. |
 | `emulator_image_include_song_lists` | Boolean: include song lists. |
 
-## Floppy reading and recovery
+### Floppy reading and recovery
 
 | Setting | Type / values |
 | --- | --- |
@@ -306,7 +332,7 @@ preset the [Mark IV backup utility](mark-iv-backup.md); they do not start a back
 Numeric dialog controls apply their usual limits. Optional hardware/tool choices
 are available only when the corresponding device or tool is available.
 
-## Keyboard shortcuts and migration markers
+### Keyboard shortcuts and migration markers
 
 Shortcut keys use `keyboard_shortcuts/<action-id>` with a string in Qt portable
 shortcut notation. For example:

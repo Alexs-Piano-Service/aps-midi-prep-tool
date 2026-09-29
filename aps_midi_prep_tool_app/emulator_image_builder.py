@@ -619,7 +619,9 @@ def _prepare_song_files(
                     temp_directory,
                     f"{index:05d}_{uuid.uuid4().hex}.mid",
                 )
-                eseq_to_midi_converter(source_path, intermediate_midi)
+                # This is an E-SEQ container change, not MIDI delivery. Keep
+                # its volume commands when passing through intermediate MIDI.
+                eseq_to_midi_converter(source_path, intermediate_midi, cc7_policy="preserve")
                 converter_options = {"filename_hint": image_path}
                 if title_override is not None:
                     converter_options["title_override"] = title_override

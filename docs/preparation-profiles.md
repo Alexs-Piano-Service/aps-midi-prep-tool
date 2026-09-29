@@ -1,22 +1,37 @@
 # Preparing for your piano
 
-Choose **Preparing for...** above the song list, or in **Settings**. Controllers
-are grouped under **General**, **Disklavier**, **PianoDisc**, and **QRS**. Select
-the controller and delivery method, review **Current → Proposed**, then choose
-**Apply and Prepare**. Required MIDI/E-SEQ conversions are staged, the editing
-mode changes, and future imports follow that destination. For Mark II, the list
-switches to E-SEQ and prepares PIANODIR.FIL with 720 KB defaults. Original files
-are written only when you save. **Edit → Undo** (**Ctrl+Z**) restores the previous
-profile and staged state after applying a destination. **Edit → Undo All**
-discards all staged changes since the current files were loaded or last saved.
-Use **Edit → Review Changes...** to inspect proposed filenames, titles, and formats.
+[All user guides](README.md) · [Getting started](getting-started.md)
 
-Choices are indented only in the open controller list; the selected controller
-stays aligned normally, and typing a model name selects it. Active preparation
-also applies the required song format and, where required, MIDI Type 0 when
-adding or replacing songs in an image and when building emulator disk sets.
-If a file cannot be prepared, saving and export stop until it is prepared or
-removed, or you choose **Custom**.
+Use a preparation profile to choose the song format and delivery defaults for
+your piano's controller. Changes are **staged**: they remain pending in the app
+until you save or export them.
+
+## Start here
+
+1. Choose **Preparing for...** above the song list, or **Settings → Preparing for...**.
+2. Select your **Piano / controller** and **Drive / delivery**. Controllers are
+   grouped under **General**, **Disklavier**, **PianoDisc**, and **QRS**; typing a
+   model name selects it. If you do not know your model, choose **I'm not sure**
+   and check the [controller defaults](#controller-defaults) before converting songs.
+3. Compare the **Current** and **Proposed** settings, then choose **Apply and Prepare**.
+4. Open **Edit → Review Changes...** to inspect proposed filenames, titles,
+   formats, and conversion reports. Use **Edit → Undo** (**Ctrl+Z**) to restore
+   the previous profile and staged state if needed.
+5. Save or export for your [delivery method](#choose-a-delivery-method).
+
+Applying a profile prepares loaded songs and changes the editing mode; future
+imports follow the same destination. For Mark II, the list switches to E-SEQ
+with 720 KB defaults, and saving creates its `PIANODIR.FIL` song catalog.
+Preparation also applies when adding or replacing songs in an image and when
+building emulator disk sets, including MIDI Type 0 conversion where required.
+If a song cannot be prepared, saving and export stop until it is prepared or
+removed, or you choose **Custom**. Its original file stays intact.
+
+**Edit → Undo All** discards all staged changes since the current files were
+loaded or last saved. See [reviewing and saving changes](preparation-reliability.md)
+for the differences between Save, Save As, and Save As Image.
+
+## Change or turn off automatic preparation
 
 The destination row highlights active preparation. Click **Custom** in that row
 to turn off automatic preparation and allow conversion to either format. Changes
@@ -34,11 +49,13 @@ choices follow the same convention. Choose **Custom** to edit these options.
 Image type, capacity, and screen formatting remain editable defaults.
 
 The preparation row is visible by default. Use **View → Show Preparation Controls**
-to hide or show it. Hiding it keeps
-the selected preparation active; **Settings → Preparing for...** remains available.
+to hide or show it. Hiding it keeps the selected preparation active;
+**Settings → Preparing for...** remains available.
 The preparation dialog links to the selected controller's evidence: the **APS
 Disklavier Compatibility Table** for Disklavier and General choices, or the
 **PianoDisc user manual** or **QRS user manual** for those manufacturers.
+
+## Filenames and title formatting
 
 Floppy and emulator preparation also stages unique DOS 8.3 names for songs whose
 current filenames are incompatible. Existing valid names remain unchanged;
@@ -63,13 +80,18 @@ stays unchanged. The legacy split-title repair remains specific to Smart PianoSo
 song catalogs. Title cleanup is staged for review and undo; original files change
 only when saved.
 
-Clavinova MDA songs are staged as Disklavier FIL through a MIDI intermediate;
-the review identifies this container conversion. Files that cannot be converted
-remain visible as unprepared, with an error, and their originals stay intact.
+## Choose a delivery method
+
+| What you want to create | Where to go |
+| --- | --- |
+| A folder of songs for USB or an app | **File → Save As...** |
+| One disk image for an emulator | **File → Save As Image...** |
+| A numbered collection of disk images | **Utilities → Build Emulator Disk Set...** ([guide](emulator-disk-sets.md)) |
+| A physical floppy from the current image | **Disk → Write Current Image to Floppy...** |
 
 The controller determines song format and disk capacity. Emulator configuration
 separately determines image type and numbering. Defaults feed **New Image**,
-**Save As Image**, and **Build Emulator Disk Sets**. Selecting an HFE delivery
+**Save As Image**, and **Build Emulator Disk Set**. Selecting an HFE delivery
 starts those dialogs in HFE even when an open source image is IMG or a different
 format was used previously. You can change the format in the export dialog.
 An **Unsure** controller can still select a generic delivery format without
@@ -79,19 +101,44 @@ USB and PianoDisc app preparation use **Save As** to
 export a folder. For QRS USB profiles, copy the MIDI files to a USB drive and
 select it on the controller. For Prodigy, import the exported MIDI files into
 the PianoDisc iQ Player app and use its supported connection to the piano.
+
+## What format conversion changes
+
+Clavinova MDA songs are staged as Disklavier FIL through a MIDI intermediate;
+the review identifies this container conversion. Files that cannot be converted
+remain visible as unprepared, with an error, and their originals stay intact.
+
 Review the staged result before saving. Fresh MIDI-to-Disklavier E-SEQ conversion
 automatically generates Yamaha's channel-1 binary and channel-3 continuous pedal
 layers; see the [conversion policy](mid2eseq-compatibility.md). Instrument merging,
-the separate Pedal Compatibility utility, zero-volume fixes, and broad metadata
-cleanup remain separate choices.
+the separate Pedal Compatibility utility, and broad metadata cleanup remain
+separate choices.
+
+ENSPIRE and other MIDI profiles automatically remove Yamaha startup volume
+mutes when converting E-SEQ songs. See [startup-mute cleanup](preparation-reliability.md#automatic-yamaha-startup-mute-cleanup)
+for the exact rule; later volume changes stay intact.
+
+## Controller defaults
+
+### Disklavier
 
 Disklavier capabilities follow the [APS compatibility table](https://www.alexanderpeppe.com/disklavier-compatibility-table/),
-reviewed September 7, 2026. Early Mark I and uncertain Mark II units default to
-E-SEQ on 720 KB disks. DSR1, Mark II XG, and Mark III default to MIDI on 1.44 MB.
-Mark IV, E3, DKC-850, and ENSPIRE default to MIDI folder export. ENSPIRE/DKC-900
-requires converting E-SEQ to MIDI; E3 and DKC-850 can play E-SEQ. Unit-dependent
-Mark II MIDI support stays explicit in the guidance. Keep one song format per
-floppy.
+reviewed September 7, 2026.
+
+| Controller | Prepared format | Default delivery |
+| --- | --- | --- |
+| Mark I | E-SEQ | 720 KB floppy |
+| Mark II | E-SEQ | 720 KB floppy |
+| DSR1 upgrade, Mark II XG, Mark III | MIDI | 1.44 MB floppy |
+| Mark IV / PRO | MIDI | USB folder export |
+| E3 / DKC-800 / DKC-850 | MIDI | USB folder export |
+| ENSPIRE / DKC-900 | MIDI | USB folder export |
+
+These are preparation defaults. Mark II MIDI support varies by unit or firmware,
+so its profile uses E-SEQ. ENSPIRE/DKC-900 requires converting E-SEQ to MIDI;
+E3 and DKC-850 can play E-SEQ. Keep one song format per floppy.
+
+### PianoDisc and QRS
 
 PianoDisc and QRS profiles add these destinations, based on manufacturer manuals
 reviewed September 8, 2026:
@@ -120,6 +167,8 @@ similarly named Plus and Prodigy profiles. See the
 [controller evidence and limitations](controller-compatibility-research.md) for
 manufacturer links and page references.
 
+## Emulator presets and USB sticks
+
 **Nalbantov** is available for floppy-capable **Disklavier** profiles, including
 Mark I and Mark III. Use the single Nalbantov option to prepare HFE images.
 For another installed emulator, use its preset or
@@ -142,13 +191,15 @@ Profiles distinguish documented requirements from unverified configurations.
 None claims hardware playback testing. Generated files still need checking on
 the actual controller, firmware, and drive combination.
 
+## Accented and non-Latin titles
+
 Edited MIDI titles accept printable Latin-1 characters, including accented names,
 for Standard MIDI export, Mark IV, E3/DKC-850, ENSPIRE, Prodigy, and modern QRS
 profiles. Early hardware profiles, E-SEQ titles, and Smart PianoSoft catalog
 titles retain printable ASCII restrictions. Custom uses Latin-1 for MIDI when
 Disklavier screen formatting is off; an unknown destination remains conservative.
 
-Use **View > Title display encoding** to interpret existing titles as Latin-1
+Use **View → Title display encoding** to interpret existing titles as Latin-1
 (the default), Windows-1252, Japanese Shift-JIS, Simplified Chinese GBK, or
 Traditional Chinese Big5. This is an explicit display choice, without encoding
 detection. Viewing a title or exporting it without an edit preserves its original
@@ -156,3 +207,6 @@ bytes. Accepting an unchanged decoded title in the editor also preserves it.
 Edited titles use Latin-1 and the destination's restrictions; this choice does
 not add Japanese or Chinese title writing. Automatic spacing cleanup leaves
 non-ASCII titles alone when another display encoding is selected.
+
+Next: [review and save changes](preparation-reliability.md), or
+[build an emulator disk set](emulator-disk-sets.md).

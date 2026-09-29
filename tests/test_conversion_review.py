@@ -1,10 +1,14 @@
+import io
 import struct
 
+import mido
 import pytest
 
 from aps_midi_prep_tool_app.conversion_review import ConversionReport, compare_music_bytes, inspect_music_bytes
 from aps_midi_prep_tool_app.eseq_converter import (
+    CC7_POLICY_DROP_EARLY_ZERO,
     CC7_POLICY_PLAYBACK_FIX_100,
+    CC7_POLICY_REMOVE_STARTUP_MUTES,
     convert_eseq_bytes_to_midi_bytes,
     convert_midi_bytes_to_eseq_bytes,
     count_eseq_zero_volume_candidates,
@@ -73,11 +77,16 @@ def test_type2_uses_each_sequences_own_tempo_and_reports_total():
     assert "independent sequences, total" in summary.format
 
 
-def test_eseq_conversion_preserves_zero_volume_unless_playback_fix_is_requested():
+def test_eseq_conversion_removes_startup_mutes_by_default_and_can_preserve_for_analysis():
     eseq = convert_midi_bytes_to_eseq_bytes(_volume_song())
     assert count_eseq_zero_volume_candidates(eseq) == 1
 
-    preserved = convert_eseq_bytes_to_midi_bytes(eseq)
+    cleaned = convert_eseq_bytes_to_midi_bytes(eseq)
+    cleaned_report = compare_music_bytes(eseq, cleaned)
+    assert cleaned_report.after.zero_volume_events == 0
+    assert not cleaned_report.notes_changed
+    assert not cleaned_report.pedals_changed
+    preserved = convert_eseq_bytes_to_midi_bytes(eseq, cc7_policy="preserve")
     fixed = convert_eseq_bytes_to_midi_bytes(eseq, cc7_policy=CC7_POLICY_PLAYBACK_FIX_100)
     preserved_report = compare_music_bytes(eseq, preserved)
     fixed_report = compare_music_bytes(eseq, fixed)
@@ -91,6 +100,81 @@ def test_eseq_conversion_preserves_zero_volume_unless_playback_fix_is_requested(
     assert not fixed_report.notes_changed
     assert not fixed_report.pedals_changed
     assert "Zero-volume CC7: 2 → 1" in fixed_report.to_text()
+
+
+def test_mid_song_volume_off_is_preserved_unless_explicitly_changed():
+    source = _midi(_track([
+        (0, b"\xb0\x07\x28"),  # previous volume is 40, not 100
+        (0, b"\x90\x3c\x40"),
+        (96, b"\x80\x3c\x00"),
+        (192, b"\xb0\x07\x00"),
+        (240, b"\xb0\x07\x00"),  # repeated mute, potentially intentional
+        (384, b"\x90\x40\x40"),
+        (480, b"\x80\x40\x00"),
+        (576, b"\xb0\x07\x50"),
+        (672, b"\x90\x43\x40"),
+        (768, b"\x80\x43\x00"),
+        (864, b"\xb0\x07\x00"),  # ending mute must remain in every policy
+    ], 960))
+    eseq = convert_midi_bytes_to_eseq_bytes(source)
+    assert count_eseq_zero_volume_candidates(eseq) == 2
+
+    for policy, expected_volumes in (
+        (CC7_POLICY_REMOVE_STARTUP_MUTES, [40, 0, 0, 80, 0]),
+        ("preserve", [40, 0, 0, 80, 0]),
+        (CC7_POLICY_PLAYBACK_FIX_100, [40, 100, 100, 80, 0]),
+        (CC7_POLICY_DROP_EARLY_ZERO, [40, 80, 0]),
+    ):
+        output = convert_eseq_bytes_to_midi_bytes(eseq, cc7_policy=policy)
+        messages = mido.merge_tracks(mido.MidiFile(file=io.BytesIO(output)).tracks)
+        assert [message.value for message in messages
+                if message.type == "control_change" and message.control == 7] == expected_volumes
+        assert not compare_music_bytes(eseq, output).notes_changed
+
+
+def test_startup_mute_cleanup_uses_each_parts_first_note_and_keeps_other_events():
+    source = _midi(_track([
+        (0, b"\xb0\x07\x00"),
+        (0, b"\x91\x3c\x40"),
+        (1, b"\xb1\x07\x00"),  # channel 2 already started: keep this mute
+        (2, b"\x91\x40\x40"),
+        (96, b"\x81\x3c\x00"),
+        (96, b"\x81\x40\x00"),
+        (1200, b"\xb0\x07\x00"),  # long lead-in, repeated startup mute
+        (1400, b"\xb3\x07\x00"),
+        (1400, b"\xb3\x07\x50"),  # startup zeros are removed even if restored
+        (1400, b"\xb4\x07\x00"),
+        (1500, b"\x94\x3c\x00"),  # zero-velocity note is not a first attack
+        (2000, b"\x90\x3c\x40"),
+        (2000, b"\x92\x3c\x40"),
+        (2000, b"\xb2\x07\x00"),  # initialization at the first-note tick
+        (2000, b"\x93\x3c\x40"),
+        (2000, b"\x94\x3c\x40"),
+        (2100, b"\x80\x3c\x00"),
+        (2100, b"\x82\x3c\x00"),
+        (2100, b"\x83\x3c\x00"),
+        (2100, b"\x84\x3c\x00"),
+        (2100, b"\xb0\x07\x00"),  # ending mute stays
+    ], 2200))
+    eseq = convert_midi_bytes_to_eseq_bytes(source, timing_policy="preserve")
+    cleaned = convert_eseq_bytes_to_midi_bytes(eseq)
+    preserved = convert_eseq_bytes_to_midi_bytes(eseq, cc7_policy="preserve")
+
+    def events(payload):
+        tick = 0
+        result = []
+        for message in mido.merge_tracks(mido.MidiFile(file=io.BytesIO(payload)).tracks):
+            tick += message.time
+            result.append((tick, message.copy(time=0)))
+        return result
+
+    actual = events(cleaned)
+    assert [(message.channel, message.value) for _tick, message in actual
+            if message.type == "control_change" and message.control == 7] == [(1, 0), (3, 80), (0, 0)]
+    assert [(tick, message) for tick, message in actual
+            if message.type != "control_change"] == [
+        (tick, message) for tick, message in events(preserved) if message.type != "control_change"
+    ]
 
 
 def test_report_shows_removed_metadata_and_title_changes_without_claiming_note_changes():
@@ -260,19 +344,17 @@ def test_preserved_timing_is_not_described_as_mid2eseq_compatibility():
     assert "MID2ESEQ" not in report.to_text()
 
 
-@pytest.mark.parametrize("choose_fix", [False, True])
-def test_detected_volume_condition_requires_fresh_choice_even_when_prompt_was_hidden(tmp_path, monkeypatch, choose_fix):
+@pytest.mark.parametrize("hidden", [False, True])
+def test_startup_cleanup_is_automatic_even_when_conversion_prompt_is_hidden(tmp_path, monkeypatch, hidden):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QWidget
+    from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QWidget
     from aps_midi_prep_tool_app.main_window import MidiTitleWindow
 
     app = QApplication.instance() or QApplication([])
-    source = tmp_path / "song.fil"
-    source.write_bytes(convert_midi_bytes_to_eseq_bytes(_volume_song()))
 
     class Settings:
         def value(self, key, default=None, **kwargs):
-            return key == "hidden"
+            return hidden if key == "hidden" else default
 
         def setValue(self, *args):
             pass
@@ -284,7 +366,7 @@ def test_detected_volume_condition_requires_fresh_choice_even_when_prompt_was_hi
         SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES = "trim"
         SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT = "hidden"
         settings = Settings()
-        _eseq_conversion_cc7_policy = CC7_POLICY_PLAYBACK_FIX_100
+        _eseq_conversion_cc7_policy = "preserve"
         shown = False
 
         def _long_midi_filenames_enabled(self):
@@ -304,19 +386,23 @@ def test_detected_volume_condition_requires_fresh_choice_even_when_prompt_was_hi
 
         def _exec_child_dialog(self, dialog):
             self.shown = True
-            checkbox = next(box for box in dialog.findChildren(QCheckBox) if box.text().startswith("Set these"))
-            assert not checkbox.isChecked()
-            checkbox.setChecked(choose_fix)
+            assert any("mutes are removed automatically" in label.text() for label in dialog.findChildren(QLabel))
+            assert not any("volume" in box.text().lower() for box in dialog.findChildren(QCheckBox))
             return QDialog.Accepted
 
     window = Window()
     try:
         result = MidiTitleWindow._confirm_eseq_to_midi_conversion(
-            window, title="Convert", message="Review", source_paths=[source],
+            window, title="Convert", message="Review",
         )
         assert result[0]
-        assert window.shown
-        assert window._eseq_conversion_cc7_policy == ("playback_fix_100" if choose_fix else "preserve")
+        assert window.shown is not hidden
+        assert window._eseq_conversion_cc7_policy == CC7_POLICY_REMOVE_STARTUP_MUTES
+        # This is the policy used for the staged conversion, including when the
+        # previously hidden dialog returns without asking any questions.
+        eseq = convert_midi_bytes_to_eseq_bytes(_volume_song())
+        converted = convert_eseq_bytes_to_midi_bytes(eseq, cc7_policy=window._eseq_conversion_cc7_policy)
+        assert inspect_music_bytes(converted).zero_volume_events == 0
     finally:
         window.close()
     assert app is not None

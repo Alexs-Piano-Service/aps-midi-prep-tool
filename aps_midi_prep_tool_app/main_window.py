@@ -131,11 +131,11 @@ from .midi_channel_merger import merge_midi_channels_to_channel0_path
 from .eseq_channel_merger import merge_eseq_channels_to_channel0_path
 from .piano_overlap import ChannelMergeCancelled, OVERLAP_MODES
 from .xf_stripper import XF_CLEANUP_BROAD, XF_CLEANUP_TARGETED, strip_xf_from_midi_path
-from .conversion_review import build_staged_conversion_details, inspect_music_bytes, localize_music_error
+from .conversion_review import build_staged_conversion_details, inspect_music_bytes, localize_music_error, localize_music_format
 from .write_safety_messages import localize_write_message
 from .eseq_inspection_report import format_eseq_header_details
 from .bulk_extraction_job import localize_extraction_job_error, read_extraction_job
-from .eseq_converter import CC7_POLICY_PRESERVE, CC7_POLICY_PLAYBACK_FIX_100, count_eseq_zero_volume_candidates
+from .eseq_converter import CC7_POLICY_PRESERVE, DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
 from .ui_utils import (
     center_dialog_on_parent,
     embedded_logo_dt,
@@ -10744,7 +10744,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
         self._preparing_destination = True
         try:
-            self._eseq_conversion_cc7_policy = CC7_POLICY_PRESERVE
+            self._eseq_conversion_cc7_policy = DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
             if profile.trim_title_spaces:
                 # Clean titles before conversion embeds them and builds filenames.
                 sorting_enabled = self.table.isSortingEnabled()
@@ -16747,18 +16747,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.settings.sync()
         return confirmed
 
-    def _confirm_eseq_to_midi_conversion(self, *, title, message, source_paths=()):
-        self._eseq_conversion_cc7_policy = CC7_POLICY_PRESERVE
-        volume_candidates = 0
-        for source_path in source_paths:
-            try:
-                with open(source_path, "rb") as handle:
-                    volume_candidates += count_eseq_zero_volume_candidates(
-                        handle.read(), filename=os.fsdecode(os.path.basename(source_path)),
-                    )
-            except (OSError, ValueError):
-                # Conversion reports its own read/format failures; preserve by default.
-                continue
+    def _confirm_eseq_to_midi_conversion(self, *, title, message):
+        self._eseq_conversion_cc7_policy = DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
         use_long_filenames = self._long_midi_filenames_enabled()
         trim_title_spaces = self.settings.value(
             self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES,
@@ -16773,7 +16763,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
             False,
             type=bool,
-        ) and not volume_candidates:
+        ):
             return True, use_long_filenames, trim_title_spaces
 
         dialog = QDialog(self)
@@ -16787,17 +16777,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         summary.setWordWrap(True)
         layout.addWidget(summary)
 
-        volume_checkbox = None
-        if volume_candidates:
-            volume_note = QLabel(self._lt(
-                "Detected {count} zero-volume CC7 events before notes. Keeping them may leave those notes silent.",
-                count=volume_candidates,
-            ))
-            volume_note.setWordWrap(True)
-            layout.addWidget(volume_note)
-            volume_checkbox = QCheckBox(self._lt("Set these zero-volume events to 100 for playback"))
-            volume_checkbox.setChecked(False)
-            layout.addWidget(volume_checkbox)
+        volume_note = QLabel(self._lt(
+            "Yamaha startup volume mutes are removed automatically for MIDI playback."
+        ))
+        volume_note.setWordWrap(True)
+        layout.addWidget(volume_note)
 
         long_name_checkbox = QCheckBox(
             self._lt("Name MIDI files by track number and song title")
@@ -16854,8 +16838,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         use_long_filenames = long_name_checkbox.isChecked()
         trim_title_spaces = trim_title_spaces_checkbox.isChecked()
-        if volume_checkbox is not None and volume_checkbox.isChecked():
-            self._eseq_conversion_cc7_policy = CC7_POLICY_PLAYBACK_FIX_100
         if not force_short_names:
             self._set_long_midi_filenames_enabled(use_long_filenames)
         if not force_title_trim:
@@ -20570,14 +20552,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return {
                 "status": "converted",
                 "path": full_path,
-                "message": f"Staged {title_mode.upper()} -> {target_kind.upper()} conversion.",
+                "message": f"Staged {localize_music_format(title_mode.upper())} -> {localize_music_format(target_kind.upper())} conversion.",
             }
         except Exception as exc:
             self._remove_regular_row_for_path(full_path)
             return {
                 "status": "error",
                 "path": full_path,
-                "message": f"Could not stage automatic {title_mode.upper()} -> {target_kind.upper()} conversion: {exc}",
+                "message": f"Could not stage automatic {localize_music_format(title_mode.upper())} -> {localize_music_format(target_kind.upper())} conversion: {exc}",
             }
 
     def finish_regular_file_drop(self, results):
@@ -27055,7 +27037,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
         self._update_compat_indicator(row, raw_title)
 
-    def _queue_image_format_conversion(self, row, target_kind, *, export_filename="", cc7_policy=CC7_POLICY_PRESERVE):
+    def _queue_image_format_conversion(self, row, target_kind, *, export_filename="", cc7_policy=DEFAULT_ESEQ_TO_MIDI_CC7_POLICY):
         reason = MidiTitleWindow._preparation_conversion_restriction(self, target_kind)
         if reason:
             raise EseqConversionError(reason)
@@ -27547,7 +27529,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._lt(
                 "Convert {count} {source} files to {target}?\n\n"
                 "Review the results in the list, then use Save, Save As, or Save As Image to write them.",
-                count=len(applicable_paths), source=source_kind.upper(), target=target_kind.upper(),
+                count=len(applicable_paths), source=localize_music_format(source_kind.upper()), target=localize_music_format(target_kind.upper()),
             )
         )
         use_long_filenames = False
@@ -27559,7 +27541,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             confirmed, use_long_filenames, trim_title_spaces = self._confirm_eseq_to_midi_conversion(
                 title=prompt_title,
                 message=prompt_message,
-                source_paths=[self._regular_source_material_path(path) for path in applicable_paths],
             )
         else:
             confirmed = (
@@ -27581,7 +27562,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.pendingExportPianodirMetadata = PianodirMetadata()
 
         progressDialog = QProgressDialog(
-            self._lt("Converting {format} files...", format=source_kind.upper()),
+            self._lt("Converting {format} files...", format=localize_music_format(source_kind.upper())),
             "Cancel",
             0,
             len(applicable_paths),
@@ -27640,7 +27621,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         output_temp_path,
                         filename=os.path.basename(full_path),
                         title_override=title_override,
-                        cc7_policy=getattr(self, "_eseq_conversion_cc7_policy", CC7_POLICY_PRESERVE),
+                        cc7_policy=getattr(self, "_eseq_conversion_cc7_policy", DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
                     )
                 else:
                     source_material_path = self._type0_midi_source_for_eseq_conversion(
@@ -27692,7 +27673,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         if converted_count:
             status_text = (
-                self._lt('Staged {converted_count} file(s) for {source_kind} -> {target_kind} conversion.\nUse Save, Save As, or Save As Image to write the converted files.', converted_count=converted_count, source_kind=source_kind.upper(), target_kind=target_kind.upper())
+                self._lt('Staged {converted_count} file(s) for {source_kind} -> {target_kind} conversion.\nUse Save, Save As, or Save As Image to write the converted files.', converted_count=converted_count, source_kind=localize_music_format(source_kind.upper()), target_kind=localize_music_format(target_kind.upper()))
             )
             if use_long_filenames:
                 status_text += "\nMIDI filenames use track numbers and song titles."
@@ -27703,7 +27684,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if errors:
             self._show_error_list(
                 "Conversion Issues",
-                self._lt("Some {source} files could not be prepared for {target} conversion", source=source_kind.upper(), target=target_kind.upper()),
+                self._lt("Some {source} files could not be prepared for {target} conversion", source=localize_music_format(source_kind.upper()), target=localize_music_format(target_kind.upper())),
                 errors,
                 warning=True,
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",
@@ -27764,7 +27745,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._lt(
                 "Convert {count} {source} files to {target}?\n\n"
                 "Review the results in the list, then use Save, Save As, or Save As Image to write them.",
-                count=len(applicable_rows), source=source_kind.upper(), target=target_kind.upper(),
+                count=len(applicable_rows), source=localize_music_format(source_kind.upper()), target=localize_music_format(target_kind.upper()),
             )
         )
         if target_kind == "eseq":
@@ -27783,10 +27764,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             confirmed, use_long_filenames, trim_title_spaces = self._confirm_eseq_to_midi_conversion(
                 title=prompt_title,
                 message=summary,
-                source_paths=[
-                    self._pending_or_extracted_image_path(self.table.item(row, 1).text())
-                    for row in applicable_rows
-                ],
             )
         else:
             confirmed = (
@@ -27808,7 +27785,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.pendingExportPianodirMetadata = PianodirMetadata()
 
         progressDialog = QProgressDialog(
-            self._lt("Converting {format} files...", format=source_kind.upper()),
+            self._lt("Converting {format} files...", format=localize_music_format(source_kind.upper())),
             "Cancel",
             0,
             len(applicable_rows),
@@ -27842,7 +27819,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         row,
                         target_kind,
                         export_filename=export_filename,
-                        cc7_policy=getattr(self, "_eseq_conversion_cc7_policy", CC7_POLICY_PRESERVE),
+                        cc7_policy=getattr(self, "_eseq_conversion_cc7_policy", DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
                     )
                 )
             except Exception as exc:
@@ -27870,7 +27847,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 self.pendingDeletePianodir = self.imageHasPianodir
         self._refresh_pianodir_row()
 
-        status_parts = [self._lt('Queued {count} file(s) for {source_kind} -> {target_kind} conversion.', count=len(converted), source_kind=source_kind.upper(), target_kind=target_kind.upper())]
+        status_parts = [self._lt('Queued {count} file(s) for {source_kind} -> {target_kind} conversion.', count=len(converted), source_kind=localize_music_format(source_kind.upper()), target_kind=localize_music_format(target_kind.upper()))]
         if use_long_filenames and converted:
             status_parts.append(
                 "Save As exports use track numbers and song titles; internal names remain DOS 8.3."
@@ -27890,7 +27867,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if errors:
             self._show_error_list(
                 "Conversion Issues",
-                self._lt("Some {source} files could not be prepared for {target} conversion", source=source_kind.upper(), target=target_kind.upper()),
+                self._lt("Some {source} files could not be prepared for {target} conversion", source=localize_music_format(source_kind.upper()), target=localize_music_format(target_kind.upper())),
                 errors,
                 warning=True,
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",

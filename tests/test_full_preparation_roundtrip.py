@@ -39,7 +39,7 @@ def _musical_fixture():
     return struct.pack(">4sIHHH", b"MThd", 6, 0, 1, 480) + b"MTrk" + len(track).to_bytes(4, "big") + track
 
 
-def test_midi_to_eseq_image_extraction_roundtrip_preserves_values_and_legacy_timing(tmp_path):
+def test_midi_to_eseq_image_extraction_roundtrip_removes_startup_mute_and_keeps_legacy_timing(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     original = bytes(_musical_fixture())
@@ -81,14 +81,15 @@ def test_midi_to_eseq_image_extraction_roundtrip_preserves_values_and_legacy_tim
     assert report.after.channels == (1, 2, 3)
     assert report.before.pedals == {64: 3, 66: 2}
     assert report.after.pedals == {64: 5, 66: 2}
-    assert report.before.zero_volume_events == report.after.zero_volume_events == 1
+    assert report.before.zero_volume_events == 1
+    assert report.after.zero_volume_events == 0
     assert report.before.duration_seconds == pytest.approx(1.166666, abs=0.00001)
     # Independent expected clock positions: legacy onset preparation adds
     # one second here, later tempo changes are integrated, and the last pedal
     # release at tick 1497 is followed by the fixed 1498-tick trailer.
     events, end_tick = _parse_track_events(restored[22:])
     assert [(tick, raw) for tick, _order, raw in events if 0x80 <= raw[0] < 0xF0] == [
-        (0, b"\xb0\x07\x00"), (748, b"\x90\x3c\x50"),
+        (748, b"\x90\x3c\x50"),
         (842, b"\xb2\x40\x24"), (936, b"\xb0\x40\x7f"), (936, b"\xb2\x40\x58"),
         (936, b"\x91\x40\x60"), (1029, b"\xb0\x42\x7f"),
         (1123, b"\x80\x3c\x00"), (1372, b"\x81\x40\x00"),

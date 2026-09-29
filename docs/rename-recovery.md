@@ -1,25 +1,63 @@
 # Interrupted filename renames
 
-APS keeps each new rename transaction in a persistent recovery directory, rather
-than system TEMP. On startup, an incomplete transaction offers **Restore originals**,
-**Resume rename**, or **Later**. Restore returns the files to their original names;
-Resume finishes the planned names. Later retains all files and recovery copies.
-An unfinished transaction blocks another rename until it has been resolved.
+[All user guides](README.md) · [Getting started](getting-started.md)
 
-The default location is:
+If APS closes unexpectedly during a filename rename, reopen APS to recover it.
+Keep the original music drive connected and leave any temporary files in place
+until recovery finishes. APS keeps recovery copies in a persistent folder, so
+they remain available after the application closes.
+
+## Choose how to recover
+
+The **Recover interrupted rename** dialog appears at startup. Choose the result
+you want:
+
+| Choice | Result |
+| --- | --- |
+| **Restore originals** | Returns the files to their original names. |
+| **Resume rename** | Finishes the planned filename changes. |
+| **Later** | Leaves files in their current locations and keeps recovery copies. Reopen APS to try again. |
+
+Wait for **Rename recovery complete** before opening the files. APS removes the
+recovery copies after successful recovery. An unfinished rename blocks another
+rename until it has been resolved.
+
+## If recovery cannot finish
+
+Open the error dialog's details and keep the recovery folder. Check that the
+original drive is connected, the files and recovery folder are accessible, and
+another APS instance is not still working on the rename. Close the other instance
+normally before retrying.
+
+Unexpected or changed files stop recovery; APS does not overwrite those conflicts
+automatically. Do not delete temporary files or recovery copies to clear the
+message. If the problem continues, use **Help → Report a Bug…** and include the
+error details and recovery location. Recovery can be retried after another
+interruption.
+
+## Find the recovery copies
+
+The startup recovery dialog includes the folder path in its details. The default
+locations are:
 
 - Windows: `%LOCALAPPDATA%\APS MIDI Prep Tool\rename-recovery`
 - macOS: `~/Library/Application Support/APS MIDI Prep Tool/rename-recovery`
 - Linux: `$XDG_STATE_HOME/APS MIDI Prep Tool/rename-recovery`, or
   `~/.local/state/APS MIDI Prep Tool/rename-recovery` if that variable is unset.
 
-Set `APS_MIDI_RENAME_RECOVERY_DIR` before launching APS to choose another persistent
+## If there is not enough recovery space
+
+The error message includes the recovery location and approximate required space.
+Free space there before trying again. For an advanced setup, set the environment
+variable `APS_MIDI_RENAME_RECOVERY_DIR` before launching APS to choose another persistent
 location, including a volume with more free space. Keep that setting until all
-pending transactions there have been recovered. The error message includes the
-recovery location and approximate required space. The estimate includes the moving
+pending renames there have been recovered. Changing this setting does not move
+existing recovery copies. The estimate includes the moving
 files plus allocation and journal overhead; optional user backups need additional
 space at their own destinations. Space can change after preflight, so write errors
 are still handled without deleting the recovery data.
+
+## Technical details
 
 Staging uses exclusively reserved `.aps_midi_rename_<UUID>_<index>.tmp` files beside
 originals. It does not create subdirectories in source folders. APS still needs
@@ -41,7 +79,9 @@ on the filesystem, network share, and storage hardware honoring flushes. Older
 version-1 recovery snapshots created by previous builds in system TEMP are not
 migrated by this journal format; keep those copies for manual restoration.
 
-## Verification
+<a id="verification"></a>
+
+## Maintainer verification
 
 ```sh
 QT_QPA_PLATFORM=offscreen python3 -m pytest -q tests/test_dos83_renamer.py tests/test_rename_process_recovery.py tests/test_filename_policy.py

@@ -1,36 +1,56 @@
 # Build a floppy-emulator disk set
 
+[All user guides](README.md) · [Getting started](getting-started.md)
+
 Use **Utilities → Build Emulator Disk Set...** to turn MIDI or Yamaha E-SEQ
 songs into numbered IMG or HFE disk images. The source songs are left unchanged.
 
+Before starting, choose your piano and emulator in
+[Preparing for...](preparation-profiles.md). That sets the song format, disk
+capacity, and image-format defaults. The builder reads songs from a folder on
+disk, so save any pending edits in the main song list first.
+
 ## Create a set
 
-1. Choose the folder containing your songs.
+1. Open **Utilities → Build Emulator Disk Set...** and choose the folder
+   containing your songs.
 2. Choose **One album per folder** to keep albums separate, or **Fill disks
    automatically** to combine songs across folders.
-3. Choose an output folder, MIDI or Yamaha E-SEQ contents, IMG or HFE format,
-   and the disk capacity supported by your player and emulator.
+3. Choose an output folder and check the song format (MIDI or Yamaha E-SEQ),
+   image format (IMG or HFE), and disk capacity. An active preparation profile
+   locks the required song format; image format and capacity remain editable.
 4. Optionally enable **Include Song Lists** to create a text list for the whole
    set. Expand **Naming and capacity options** to change the filename prefix,
    starting disk number, or free-space reserve. For E-SEQ output, you can also
    set a shared album title.
-5. Start preparation and review the proposed disks, songs, title sources, and
-   musical changes. Exclude albums, change album order, or correct album/song
-   titles as needed. Choose **Update Preview** after edits, then **Build Reviewed
-   Output** to write the reviewed set. The app asks before replacing existing
-   output files.
+5. Choose **Build Disk Set** to prepare a preview. Review the proposed disks,
+   songs, title sources, and musical changes. Exclude albums, change album order,
+   or correct album/song titles as needed.
+6. Choose **Update Preview** after edits, then **Build Reviewed Output** to
+   write the reviewed set. The app asks before replacing existing output files.
+7. Copy the resulting images to your emulator USB stick, keeping its existing
+   setup files. Follow the emulator manufacturer's instructions and test the
+   images on your player.
 
-New disk sets start at `DSKA0000.hfe` by default. To append to an existing set,
-choose its next unused disk number under **Naming and capacity options**.
-Keep the setup files from an existing emulator USB stick and follow the emulator
-manufacturer's instructions when preparing the stick. Test the images on your
-player before relying on them.
+New installations start at `DSKA0000.hfe` unless a preparation profile supplies
+different defaults. The app remembers your numbering and format choices; check
+the filename example in the dialog before building. To append to an existing
+set, choose its next unused disk number under **Naming and capacity options**.
+
+## Preview and verify the output
 
 Preview uses the actual conversion and packing results, including catalog space
 and the free-space reserve. Editing the collection rebuilds the proposal; the
 build button stays disabled until the updated proposal is shown. Every final
 IMG/HFE is reopened and its song and catalog contents are checked against the
 prepared output. This verifies delivered contents, not physical piano playback.
+
+## Choose image format and capacity
+
+Use the image format and capacity supported by both your player and emulator.
+The preparation profile supplies defaults; see
+[emulator presets](preparation-profiles.md#emulator-presets-and-usb-sticks) for
+Nalbantov and FlashFloppy configuration notes.
 
 HFE exports also set the interface density to match the selected disk capacity.
 For example, 720 KB images use double density and 1.44 MB images use high
@@ -59,7 +79,7 @@ album, including songs directly in the selected folder. Folders and songs use
 natural number order, so `Album 2` comes before `Album 10`. Shuffle randomizes
 songs within each album.
 
-For example, with a Nalbantov or Gotek/FlashFloppy preset:
+For example, with a Nalbantov or FlashFloppy HFE preset:
 
 ```text
 Music/
@@ -127,4 +147,5 @@ Review the completion dialog and combined song list for the affected images and
 files. Preserving these files does not repair missing music, and playback may
 fail. Converting to E-SEQ still requires readable MIDI data.
 
-[Back to the README](../README.md)
+Related: [preparation profiles](preparation-profiles.md) and
+[reviewing, saving, and verification](preparation-reliability.md).

@@ -20,9 +20,9 @@ September 9 while GitHub's latest release was
 [v0.8.3, published September 18](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/tag/v0.8.3).
 The website is maintained separately from this repository; its current release
 labels need to say **v0.8.3** and **September 18, 2026**. The pending fixes here
-are **0.8.7 development**, not an update to the existing v0.8.3 packages.
+are **0.8.8 development**, not an update to the existing v0.8.3 packages.
 
-The 0.8.7 package list requires the signed standalone `APSMIDIPrepTool.exe`,
+The 0.8.8 package list requires the signed standalone `APSMIDIPrepTool.exe`,
 Windows installer, portable ZIP, Linux AppImage, and Windows test kit. Their
 exact filenames are in the metadata. The standalone EXE is the Windows
 self-update payload and must be present even when the installer and ZIP exist.
@@ -60,11 +60,11 @@ Any extra uploaded EXE, ZIP, or AppImage also needs acceptance.
 
 ```json
 {
-  "tag": "v0.8.7",
+  "tag": "v0.8.8",
   "commit": "FULL_VALIDATED_COMMIT_SHA",
   "packages": [
     {
-      "asset": "APSMIDIPrepTool-0.8.7-windows-portable.zip",
+      "asset": "APSMIDIPrepTool-0.8.8-windows-portable.zip",
       "sha256": "SHA256_OF_UPLOADED_ZIP",
       "platform": "windows-11",
       "clean_machine": true,

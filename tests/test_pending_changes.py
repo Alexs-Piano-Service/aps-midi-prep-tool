@@ -217,16 +217,17 @@ def test_review_retains_other_rows_when_one_original_cannot_be_read(window, monk
     assert rows[1][1] == "two.mid\n  Song 1  "
 
 
-def test_review_displays_original_format_and_serialized_conversion_details(window):
+@pytest.mark.parametrize("format_label, displayed_format", [("FIL", "FIL"), ("", "E-SEQ")])
+def test_review_displays_original_format_and_serialized_conversion_details(window, format_label, displayed_format):
     w, paths = window
     source = str(paths[0])
     w.pendingRegularConversions[source] = {"change_report": {"notes_removed": 2}, "target_filename": "ONE.FIL"}
-    w.listedFileInfo[source]["midi_type"] = "FIL"
+    w.listedFileInfo[source]["midi_type"] = format_label
     w.listedFileInfo[source]["title_mode"] = "eseq"
 
     row = w._pending_review_rows()[0]
 
-    assert "→ FIL" in row[3]
+    assert f"→ {displayed_format}" in row[3]
     assert '"notes_removed": 2' in row[4]
 
 

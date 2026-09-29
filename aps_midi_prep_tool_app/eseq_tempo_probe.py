@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract tempo information from Yamaha/Disklavier-style ESEQ .FIL/.ESQ files
+"""Extract tempo information from Yamaha/Disklavier-style E-SEQ .FIL/.ESQ files
 as used by the 1998 ESEQ2MID.EXE converter bundled by the user.
 
 Reverse-engineered rules:

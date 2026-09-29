@@ -1,49 +1,81 @@
-# Windows image creation and temporary-file warnings
+<a id="windows-image-creation-and-temporary-file-warnings"></a>
 
-If image creation stops progressing, note the text below the progress bar as
-well as the percentage. Different operations use different progress scales.
+# Windows floppy and image troubleshooting
+
+[All user guides](README.md) · [Getting started](getting-started.md)
+
+Start with the symptom you see:
+
+| Symptom | What to do |
+| --- | --- |
+| Reading or image creation stops progressing | [Check the current operation and try a local IMG](#if-reading-or-image-creation-stalls). |
+| Saving reports “The request is not supported” (error 50) | [Preserve the prepared songs and check the save result](#save-files-to-floppy-windows-error-50). |
+| APS reads the songs but Windows cannot open the disk | [Save an image, then apply it to a backed-up or spare floppy](#applying-an-image-when-windows-cannot-mount-the-disk). |
+| A file save fails or is cancelled | [Keep the recovery package](#recovering-a-failed-windows-file-save). |
+| Closing shows “Failed to remove temporary directory … _MEI…” | [Check the operation result before using the disk](#temporary-directory-warning-when-closing). |
+
+## If reading or image creation stalls
+
+Different operations use different progress scales.
 In the fast floppy reader, 25% is the start of reading song data after the file
 map has been read. A pause there can involve the disk or drive. Image preparation
 also runs helper programs, so the percentage alone does not identify the cause.
 
-Try saving an IMG to a folder on the computer first. If reading an original
-floppy fails, use **Disk → Read Floppy… → Start in recovery mode**. Keep the
-original disk write-protected. Recovery diagnostics help distinguish unreadable
-sectors from image-preparation errors. Use the error dialog's bug-report option
-to include the exact operation and log when reporting a failure.
+1. Note the text below the progress bar and the percentage.
+2. If the songs are already loaded, try **File → Save As Image…** and save an IMG
+   to a folder on the computer. This preserves the prepared songs and helps
+   identify whether the problem occurs before writing to the floppy.
+3. If reading an original floppy fails, choose **Disk → Read Floppy…**, select
+   **Start in recovery mode**, and keep the original disk write-protected.
+4. If drive detection stalls, cancel, reconnect the USB drive, and retry.
+   Each detection attempt starts fresh; you do not need to restart APS.
+5. If the problem continues, use the error dialog's bug-report option, or
+   **Help → Report a Bug…**, and include the exact operation, error, and log.
+
+When closing during disk work, APS shows **Stopping Disk Work**. Wait for the
+operation to stop, then close APS again. [Timeouts and cancellation](#timeouts-and-cancellation)
+explains what APS waits for.
 
 ## Save Files to Floppy: Windows error 50
 
-If saving reports **The request is not supported**, check the `floppy_save`
-diagnostics in the bug report. Windows can reject the free-space query, the
+If **Disk → Save Files to Floppy…** reports **The request is not supported**,
+keep the session open and choose **Save Image and Apply to Floppy…** in the
+failure dialog. This saves your prepared songs on the computer before offering
+to replace a whole floppy. Follow the [image-write steps below](#applying-an-image-when-windows-cannot-mount-the-disk)
+and use a backed-up or spare disk.
+
+If APS has already closed, open `prepared.img` from the recovery folder shown
+in the error dialog, if that file is present. Then use **Disk → Write Current
+Image to Floppy…** with a backed-up or spare disk. Enable **Settings → Disk
+Options → Verify Floppy Contents After Writing** for that manual write. See
+[recovery packages](#recovering-a-failed-windows-file-save) for saves that do not
+include `prepared.img`.
+
+This error alone does not mean that the disk is damaged or write-protected.
+Include the failure's bug report so the save stage and Windows results can be
+checked. Windows can reject the free-space query, the
 directory listing, or both, even though APS read the disk as an image. Reading
 an image and copying files through Windows use different access paths. This
-message alone does not establish that the disk is damaged or write-protected.
+also means a successful read does not guarantee that a file save will work.
+
+### What the diagnostics mean
 
 When `GetDiskFreeSpaceExW` returns error 50, APS tries the older
 [`GetDiskFreeSpaceW` query](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdiskfreespacew).
 Saving proceeds only if the capacity query and directory listing succeed.
 If both queries fail and `directory_status` is `failed` with `winerror: 50`, the
-legacy query cannot help: Windows also rejected listing the files. APS now
+legacy query cannot help: Windows also rejected listing the files. APS
 explains this case in the failure dialog and identifies the separate image-write
 workflow. It does not automatically switch to a whole-disk write.
 Other Windows errors still stop the operation. This compatibility fallback needs
 validation with the affected Windows drive and disk.
 
-Bug reports now include a `floppy_save` diagnostic block with the save stage,
+Bug reports include a `floppy_save` diagnostic block with the save stage,
 both capacity-query results and Windows error codes, whether a change to the
 target was attempted, and the numbers of files successfully removed and copied.
 It distinguishes a failure before changes from a failure in the final directory
 check, which can occur after files have been written. It contains no disk bytes.
 A successful directory check does not replace optional readback verification.
-
-If saving still fails, keep the session open and use **Save Image and Apply to
-Floppy…** in the failure dialog. This guides you through preserving the prepared
-disk and explicitly choosing a whole-disk write, as described below. If APS has
-already closed, open `prepared.img` from the recovery directory shown in the
-error dialog, then use **Disk → Write Current Image to Floppy…** with a backed-up
-or spare disk. Enable **Settings → Disk Options → Verify Floppy Contents After Writing**
-for that manual write.
 
 For example, `stage: preflight_listing`, `target_mutation_attempted: false`, and
 zero staged/copied/removed files mean APS stopped before changing the floppy.
@@ -88,7 +120,9 @@ Enable verification for these manual writes. Successful reading does not
 establish that the drive and disk can write the selected format; physical writes
 still need testing on the affected hardware.
 
-## Changes for stalled operations
+<a id="changes-for-stalled-operations"></a>
+
+## Timeouts and cancellation
 
 - Songs such as `1MOMENT.FIL` can carry the DOS System, Hidden, or Read-only
   attributes. Before replacing or deleting a song in an image, APS clears those
@@ -96,12 +130,11 @@ still need testing on the affected hardware.
   waiting for an invisible protection confirmation. The source image and
   unrelated entries retain their attributes. A timeout here occurs during image
   preparation, before the physical floppy write.
-- Drive detection runs in the background with a Cancel button. If a capacity,
-  label, or device query does not finish within ten seconds, APS reports it and
-  still offers any completed detection results. Reconnect an unresponsive USB
-  drive and retry. Retrying reuses an outstanding query so stuck drivers cannot
-  create more background threads. A stalled detection query does not prevent
-  APS from closing; restarting APS can help when Windows never releases it.
+- Drive detection runs in separate helper processes with a Cancel button. If a
+  capacity, label, or device query does not finish within ten seconds, APS reports
+  it and still offers any completed detection results. Unfinished helpers are
+  terminated on timeout or cancellation. Reconnect an unresponsive USB drive and
+  retry: each attempt starts fresh, without requiring APS to restart.
 - Image tools such as mformat, mcopy, and the Greaseweazle format converter stop
   after two minutes per command and report which tool timed out. They receive
   no console input, so an unseen command-line question cannot hold up the app.
@@ -115,12 +148,19 @@ still need testing on the affected hardware.
 - Cancelling an external tool on Windows stops its process tree, including
   children of packaged helpers that could otherwise keep temporary files open.
 
-The Windows bundle includes mtools. A missing-tool error now explains that a
-complete APS build is needed; installing a developer toolchain on the recipient's
-computer is unnecessary. The resolver checks PATH first and then bundled tool
-folders, including `bin/mtools` and `aps_midi_prep_tool_app/bin/mtools`.
+The Windows bundle includes mtools. If an error says a tool is missing, download
+and extract a complete APS build using the [download and launch instructions](getting-started.md).
+You do not need to install a developer toolchain. APS checks PATH first and then
+bundled tool folders, including `bin/mtools` and `aps_midi_prep_tool_app/bin/mtools`.
 
-## “Failed to remove temporary directory … _MEI…”
+<a id="failed-to-remove-temporary-directory--_mei"></a>
+
+## Temporary directory warning when closing
+
+If you see **Failed to remove temporary directory … _MEI…**, check the saved
+image and the operation's result before using the disk. If the warning persists
+after a normal shutdown, restart Windows and send the error text and APS log
+with a bug report.
 
 The `_MEI…` directory holds unpacked application files. This message comes from
 PyInstaller's single-file launcher when it cannot remove those files during
@@ -128,22 +168,52 @@ shutdown. A helper process or another program holding a file open can cause it.
 It does not establish why a disk copy stalled or whether that copy completed.
 Check the saved image and the operation's result before using it.
 
-APS now gives a plain-language explanation when closing during disk work and
+APS gives a plain-language explanation when closing during disk work and
 waits for that work to stop before allowing exit. The launcher's own warning
 runs outside APS's Qt dialogs, after the Python application exits, so these
-changes do not replace its wording. If the warning persists after a normal
-shutdown, restart Windows and send the error text and APS log with a bug report.
+changes do not replace its wording.
 
 See PyInstaller's documentation on [subprocess lifetime and single-file cleanup](https://pyinstaller.org/en/stable/common-issues-and-pitfalls.html#using-sys-executable-to-spawn-subprocesses-that-outlive-the-application-process-implementing-application-restart)
 and its [Windows cleanup issue](https://github.com/pyinstaller/pyinstaller/issues/8701).
 
-These fixes have automated tests for responsive drive detection, its timeout and
-cancellation, tool discovery, command timeout/cancellation,
-a simulated read stalled at 25%, and resource retention during shutdown. A real
-Windows executable and the affected disks still need validation; these tests
-cannot determine the physical condition or format of a customer's disk.
-
 ## Recovering a failed Windows file save
+
+1. Keep the recovery folder shown in the failure dialog. A failed or cancelled
+   save can leave a partial song set; do not treat that floppy as ready to use.
+2. If the failure dialog offers **Save Image and Apply to Floppy…**, use it to
+   preserve the intended songs, then follow the [image-write steps](#applying-an-image-when-windows-cannot-mount-the-disk).
+   Otherwise, while APS is still open, use **File → Save As Image…** to retain
+   the prepared songs.
+3. If APS has closed, recover the prepared songs from the package as described
+   below. Check the recovered files before writing them to another disk.
+4. Include the error and recovery location in a bug report if you need help.
+   Keep the package until the disk's songs and any reported file-attribute
+   changes have been checked.
+
+### Find and use the recovery package
+
+The failure dialog shows the recovery directory. On Windows, the default is
+`%LOCALAPPDATA%\APS MIDI Prep Tool\floppy-save-recovery\save-...`.
+
+| Package contents | How to recover them |
+| --- | --- |
+| `prepared.img` (Image/Floppy Mode only) | Open it in APS to recover the intended song set. |
+| Replacement `.bin` files | Copy them to a local folder using the filenames in the `replacements` section of `manifest.json`. These are the intended new files. |
+| Original `.bin` files | Copy them to a local folder using their original filenames from `manifest.json` to recover the previous files. |
+| `manifest.json` | Maps the numbered `.bin` files to names and checksums and records completed changes and any remaining cleanup. |
+
+Failed, cancelled, and unfinished packages remain available after APS closes
+until you delete them manually. APS retains at most the five most recent
+successful packages, for up to 30 days. Copy a successful package elsewhere if
+you need it longer. A package becomes complete only after the save and any
+requested physical readback succeed.
+
+For advanced setups, `APS_FLOPPY_SAVE_RECOVERY_DIR` overrides the location and
+uses the same retention policy. Older completed packages are pruned at startup
+and during saves; an inaccessible completed package is left for a later cleanup
+attempt.
+
+### How file saves protect existing songs
 
 On Windows, **Disk → Save Files to Floppy...** is also available for ordinary
 loaded files. It prepares pending edits, conversions, final filenames, and the applicable piano
@@ -191,23 +261,6 @@ prepared disk, then deliberately choose an image write to backed-up or spare med
 APS does not delete originals to make staging room or automatically switch write
 methods after a denied raw write.
 
-The failure dialog shows the recovery directory. On Windows, the default is
-`%LOCALAPPDATA%\APS MIDI Prep Tool\floppy-save-recovery\save-...`.
-Each package contains original files, replacements, and a
-`manifest.json` mapping the numbered `.bin` files to their original names and
-checksums. Image/Floppy Mode also retains `prepared.img`, which can be reopened
-to recover the intended song set. For ordinary-file saves, copy replacement
-`.bin` files to a local folder using the names in the manifest. Copy original
-`.bin` files the same way to recover predecessors.
-Keep these copies until the disk has been checked. Failed, cancelled, and
-unfinished packages remain available after APS closes until you delete them
-manually. APS retains at most the five most recent successful packages, for up
-to 30 days, and prunes older completed packages at startup and during saves.
-Packages become complete only after the save and any requested physical
-readback succeed. Copy a successful package elsewhere if you need it longer.
-`APS_FLOPPY_SAVE_RECOVERY_DIR` overrides the location and uses the same retention
-policy. An inaccessible completed package is left for a later cleanup attempt.
-
 On cancellation or failure, APS attempts to remove only temporary files created
 by that save. Cleanup requires a matching Windows volume identity, the expected
 file listing, and unchanged hashes for every retained original. If those checks
@@ -240,3 +293,11 @@ independent statistics-query and directory results, failure phase, Windows API/e
 staged file/byte counts, and whether mutation was attempted. They include recovery
 paths and metadata, not the backed-up disk bytes. These automated checks still
 need validation on the affected Windows drive and actual floppy media.
+
+## Maintainer verification
+
+Automated tests cover responsive drive detection, its timeout and cancellation,
+tool discovery, command timeout/cancellation, a simulated read stalled at 25%,
+and resource retention during shutdown. A real Windows executable and the
+affected disks still need validation; these tests cannot determine the physical
+condition or format of a disk.

@@ -5,7 +5,7 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [0.8.7] - Unreleased
+## [0.8.8] - Unreleased
 
 ### Added
 
@@ -44,6 +44,14 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Conversion dialogs, progress messages, and change reviews consistently use
+  **E-SEQ**. E-SEQ-to-MIDI conversion automatically removes Yamaha startup
+  volume mutes, including for ENSPIRE preparation, extraction, and MIDI copies.
+  Later volume changes are preserved. The confusing optional volume-fix
+  checkbox is replaced by an explanation of automatic cleanup.
+- User documentation now starts with a short workflow and a task-based guide
+  index. Separate guides cover installation, saving, recovery, and audio, with
+  clearer setup steps and troubleshooting navigation.
 - Window menus group song edits and conversions under **Edit**, physical floppy
   and image-repair tools under **Disk**, and saved preferences under **Settings**.
   **File** exposes opening actions directly and adds **Quit**. Menu labels clarify
@@ -193,7 +201,7 @@ with release sections grouped by version and date.
 - Modern MIDI destinations allow printable Latin-1 title edits, including
   accented names. Legacy destinations keep conservative ASCII validation.
   Unedited titles retain their original bytes during folder export.
-- Development metadata advances to 0.8.7 after the published 0.8.3 release.
+- Development metadata advances to 0.8.8 after the published 0.8.3 release.
   Release checks reject stale planned-changes wording in a released README.
 - Windows file-level floppy saves retry an unsupported free-space query with
   the older Windows API. Initial directory and file-metadata errors stop saving

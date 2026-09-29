@@ -41,7 +41,9 @@ CC7_POLICY_WARN_ONLY = "warn_only"
 CC7_POLICY_PLAYBACK_FIX_100 = "playback_fix_100"
 CC7_POLICY_PLAYBACK_FIX_127 = "playback_fix_127"
 CC7_POLICY_DROP_EARLY_ZERO = "drop_early_cc7_zero"
+CC7_POLICY_REMOVE_STARTUP_MUTES = "remove_startup_mutes"
 DEFAULT_CC7_POLICY = CC7_POLICY_PRESERVE
+DEFAULT_ESEQ_TO_MIDI_CC7_POLICY = CC7_POLICY_REMOVE_STARTUP_MUTES
 ESEQ_CONTAINER_DISKLAVIER = "disklavier"
 ESEQ_CONTAINER_CLAVINOVA_MDA = "clavinova_mda"
 ESEQ_CONTAINER_Q11 = "q11"
@@ -516,12 +518,39 @@ def _zero_cc7_indexes_needing_playback_fix(events, tick_limit=None):
     return candidates
 
 
+def _startup_zero_cc7_indexes(events):
+    """Find Yamaha volume mutes at or before each part's first sounding note.
+
+    Use musical onset instead of an absolute time window so a long lead-in
+    does not leave the startup mute in the exported MIDI. Commands at the
+    first-note tick are initialization even if stored after that note.
+    Later volume changes retain their original musical meaning.
+    """
+    first_note_ticks = {}
+    for abs_tick, _order, raw in events:
+        if _is_note_on_event(raw):
+            first_note_ticks.setdefault(_midi_channel(raw), abs_tick)
+    return {
+        index
+        for index, (abs_tick, _order, raw) in enumerate(events)
+        if _is_channel_volume_event(raw) and raw[2] == 0
+        and _midi_channel(raw) in first_note_ticks
+        and abs_tick <= first_note_ticks[_midi_channel(raw)]
+    }
+
+
+def _cc7_indexes_for_policy(events, cc7_policy):
+    if cc7_policy == CC7_POLICY_REMOVE_STARTUP_MUTES:
+        return _startup_zero_cc7_indexes(events)
+    return _zero_cc7_indexes_needing_playback_fix(events)
+
+
 def _apply_cc7_policy(raw, should_adjust, cc7_policy):
     if not should_adjust:
         return raw
     if cc7_policy in (CC7_POLICY_PRESERVE, CC7_POLICY_WARN_ONLY):
         return raw
-    if cc7_policy == CC7_POLICY_DROP_EARLY_ZERO:
+    if cc7_policy in (CC7_POLICY_DROP_EARLY_ZERO, CC7_POLICY_REMOVE_STARTUP_MUTES):
         return None
     if cc7_policy == CC7_POLICY_PLAYBACK_FIX_100:
         return raw[:2] + bytes([100])
@@ -777,7 +806,7 @@ def convert_eseq_bytes_to_midi_bytes(
     *,
     filename="",
     title_override=None,
-    cc7_policy=DEFAULT_CC7_POLICY,
+    cc7_policy=DEFAULT_ESEQ_TO_MIDI_CC7_POLICY,
     midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
     include_conversion_text=True,
 ):
@@ -852,7 +881,7 @@ def convert_eseq_bytes_to_midi_bytes(
         seen_signatures.add(marker)
         add_track_event(tick, _write_midi_time_signature(numerator, denominator_power))
 
-    cc7_indexes = _zero_cc7_indexes_needing_playback_fix(parsed.events)
+    cc7_indexes = _cc7_indexes_for_policy(parsed.events, cc7_policy)
     for index, (abs_tick, order, raw) in enumerate(parsed.events):
         raw = _apply_cc7_policy(raw, index in cc7_indexes, cc7_policy)
         if raw is None:
@@ -1313,7 +1342,7 @@ def convert_midi_bytes_to_eseq_bytes(
             for index, (tick, _track, order, raw) in enumerate(merged_events)
             if raw and raw[0] != 0xFF
         ]
-        cc7_indexes = _zero_cc7_indexes_needing_playback_fix([event for _, event in musical])
+        cc7_indexes = _cc7_indexes_for_policy([event for _, event in musical], cc7_policy)
         replacements = {
             index: _apply_cc7_policy(event[2], position in cc7_indexes, cc7_policy)
             for position, (index, event) in enumerate(musical)
@@ -1393,7 +1422,7 @@ def convert_midi_bytes_to_eseq_bytes(
     tempo_events.sort(key=lambda item: item[0])
     time_signature_events.sort(key=lambda item: item[0])
     normalized_events.sort(key=lambda item: (item[0], item[1]))
-    cc7_indexes = _zero_cc7_indexes_needing_playback_fix(normalized_events)
+    cc7_indexes = _cc7_indexes_for_policy(normalized_events, cc7_policy)
     adjusted_events = []
     for index, (tick, order, raw) in enumerate(normalized_events):
         raw = _apply_cc7_policy(raw, index in cc7_indexes, cc7_policy)
@@ -1650,7 +1679,7 @@ def convert_eseq_file_to_midi_path(
     *,
     filename="",
     title_override=None,
-    cc7_policy=DEFAULT_CC7_POLICY,
+    cc7_policy=DEFAULT_ESEQ_TO_MIDI_CC7_POLICY,
     midi_metadata_policy=DEFAULT_MIDI_METADATA_POLICY,
     include_conversion_text=True,
 ):

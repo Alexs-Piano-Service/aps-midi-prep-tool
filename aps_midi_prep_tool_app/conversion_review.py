@@ -53,6 +53,8 @@ _MUSIC_ERROR_PATTERNS = tuple(_music_error_patterns())
 def localize_music_format(label, language_code=None):
     """Translate display labels without changing stored format identifiers."""
     label = str(label or "")
+    if label.casefold() == "eseq":
+        label = "E-SEQ"
     match = re.fullmatch(r"(MIDI )?Type (\d+)( \(independent sequences, total\))?", label)
     if match:
         source = "MIDI Type {type}" if match[1] else "Type {type}"

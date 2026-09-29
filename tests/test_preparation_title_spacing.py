@@ -76,6 +76,44 @@ def _without_title(midi):
     ]
 
 
+def _timed_events(midi):
+    tick = 0
+    events = []
+    for message in mido.merge_tracks(midi.tracks):
+        tick += message.time
+        events.append((tick, message.copy(time=0)))
+    return events
+
+
+def _eseq_with_startup_and_later_mutes(startup_delay):
+    song = mido.MidiFile(type=0, ticks_per_beat=480)
+    song.tracks = [mido.MidiTrack([
+        mido.MetaMessage("track_name", name="Volume cleanup"),
+        mido.Message("control_change", channel=0, control=7, value=91),
+        mido.Message("control_change", channel=0, control=7, value=0, time=startup_delay),
+        mido.Message("note_on", channel=0, note=60, velocity=73, time=110),
+        mido.Message("control_change", channel=0, control=7, value=0, time=120),
+        mido.Message("note_off", channel=0, note=60, velocity=34, time=240),
+        mido.Message("control_change", channel=0, control=7, value=100),
+    ])]
+    buffer = io.BytesIO()
+    song.save(file=buffer)
+    original = convert_midi_bytes_to_eseq_bytes(
+        buffer.getvalue(), cc7_policy=CC7_POLICY_PRESERVE, timing_policy="preserve",
+    )
+    preserved = mido.MidiFile(file=io.BytesIO(convert_eseq_bytes_to_midi_bytes(
+        original, cc7_policy=CC7_POLICY_PRESERVE,
+    )))
+    expected = _timed_events(preserved)
+    zero_volume_positions = [
+        index for index, (_tick, message) in enumerate(expected)
+        if message.type == "control_change" and message.control == 7 and message.value == 0
+    ]
+    assert len(zero_volume_positions) == 2
+    del expected[zero_volume_positions[0]]
+    return original, expected
+
+
 @pytest.fixture
 def window(monkeypatch, tmp_path):
     app = QApplication.instance() or QApplication([])
@@ -133,6 +171,62 @@ def test_preparation_stages_and_exports_clean_title_preserving_other_events(
     assert exported.type == expected.type
     assert exported.ticks_per_beat == expected.ticks_per_beat
     assert _without_title(exported) == _without_title(expected)
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("profile_key", MODERN_PROFILES)
+@pytest.mark.parametrize("prepare_before_import", (False, True))
+@pytest.mark.parametrize("startup_delay", (10, 960), ids=("short-lead-in", "long-lead-in"))
+def test_modern_preparation_removes_startup_eseq_mutes_and_preserves_later_volume(
+    window, monkeypatch, tmp_path, profile_key, prepare_before_import, startup_delay,
+):
+    original, expected = _eseq_with_startup_and_later_mutes(startup_delay)
+    source = tmp_path / "SOURCE.FIL"
+    source.write_bytes(original)
+
+    if prepare_before_import:
+        _apply(window, profile_key)
+    window._load_regular_files([str(source)], "Imported E-SEQ song")
+    if not prepare_before_import:
+        _apply(window, profile_key)
+    QTest.qWait(20)
+
+    staged = mido.MidiFile(window._regular_source_material_path(str(source)))
+    assert _timed_events(staged) == expected
+    assert source.read_bytes() == original
+    output = tmp_path / "export"
+    filename = window._regular_row_output_filename(next(iter(window._regular_file_rows())))
+    monkeypatch.setattr(main_window.QFileDialog, "getExistingDirectory", lambda *_a, **_k: str(output))
+
+    window.save_as_changes()
+
+    assert not window.title_spacing_test_errors
+    assert _timed_events(mido.MidiFile(output / filename)) == expected
+    assert source.read_bytes() == original
+
+
+def test_enspire_image_preparation_removes_startup_mutes_without_changing_source(
+    window, tmp_path,
+):
+    original, expected = _eseq_with_startup_and_later_mutes(960)
+    source = tmp_path / "SOURCE.FIL"
+    source.write_bytes(original)
+    image_path = tmp_path / "source.img"
+    create_floppy_images_from_files(
+        [(str(source), source.name)], str(image_path), "img", DISK_FORMAT_BY_KEY["ibm.720"],
+    )
+    original_image = image_path.read_bytes()
+    session = FloppyImageSession.load(image_path)
+    window._on_disk_load_success(session, session.list_entries())
+    window._on_disk_load_finished()
+
+    _apply(window, "enspire")
+    QTest.qWait(20)
+
+    staged = window._pending_or_extracted_image_path(source.name)
+    assert _timed_events(mido.MidiFile(staged)) == expected
+    assert not window.title_spacing_test_errors
+    assert image_path.read_bytes() == original_image
     assert source.read_bytes() == original
 
 
