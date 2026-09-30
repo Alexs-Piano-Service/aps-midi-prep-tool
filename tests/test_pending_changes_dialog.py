@@ -238,14 +238,19 @@ def test_live_review_keeps_user_geometry_through_resizing_and_selection(window, 
 
 
 @pytest.mark.parametrize("language", [language.code for language in SUPPORTED_LANGUAGES])
-def test_translated_buttons_fit_large_font_and_follow_user_resizing(window, monkeypatch, language):
+@pytest.mark.parametrize("font_stretch", [100, 200])
+def test_translated_buttons_fit_large_font_and_follow_user_resizing(
+    window, monkeypatch, language, font_stretch,
+):
     w, _paths = window
     app = QApplication.instance()
     original_font = QFont(app.font())
-    app.setFont(QFont(original_font.family(), 14))
+    font = QFont(original_font.family(), 14)
+    font.setStretch(font_stretch)
+    app.setFont(font)
     w.currentLanguage = language
     w.trim_title_spaces_for_all(show_summary=False)
-    w.setFont(QFont(w.font().family(), 14))
+    w.setFont(font)
     execute = w._exec_child_dialog
     failures = []
 
@@ -266,14 +271,20 @@ def test_translated_buttons_fit_large_font_and_follow_user_resizing(window, monk
         def resize_and_inspect():
             try:
                 available = dialog.screen().availableGeometry()
-                assert dialog.width() <= available.width()
-                assert dialog.height() <= available.height()
+                minimum = dialog.minimumSizeHint()
+                # A native translated button can itself exceed the offscreen
+                # screen's width. Qt must preserve that minimum to keep its
+                # caption visible, even when the requested size is smaller.
+                assert dialog.width() <= max(available.width(), minimum.width())
+                assert dialog.height() <= max(available.height(), minimum.height())
                 assert_buttons_fit()
                 for width, height in ((1180, 800), (700, 520), (960, 680)):
-                    dialog.resize(width, height)
+                    minimum = dialog.minimumSizeHint()
+                    size = max(width, minimum.width()), max(height, minimum.height())
+                    dialog.resize(*size)
                     dialog.move(20, 30)
                     QTest.qWait(130)
-                    assert dialog.size().toTuple() == (width, height)
+                    assert dialog.size().toTuple() == size
                     assert dialog.pos().toTuple() == (20, 30)
                     assert_buttons_fit()
             except BaseException as exc:

@@ -11272,7 +11272,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         table.setSelectionMode(QTableWidget.SingleSelection)
         table.verticalHeader().setVisible(False)
         table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
 
@@ -11298,6 +11298,20 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             table.setCellWidget(row, 2, editor)
             editors[spec["id"]] = editor
             table.setRowHeight(row, max(shortcut_row_height, editor.sizeHint().height() + 8))
+
+        def fit_category_column():
+            # Native fonts and translated categories must not consume all of
+            # the stretch column. Elide categories when necessary, retaining
+            # their full text in the existing tooltips.
+            header = table.horizontalHeader()
+            category_width = max(header.sectionSizeHint(0), table.sizeHintForColumn(0))
+            command_width = max(100, header.minimumSectionSize())
+            available = table.viewport().width() - table.columnWidth(2) - command_width
+            table.setColumnWidth(0, min(category_width, max(header.minimumSectionSize(), available)))
+
+        table.horizontalHeader().geometriesChanged.connect(fit_category_column)
+        table.horizontalHeader().sectionResized.connect(fit_category_column)
+        fit_category_column()
 
         layout.addWidget(table, stretch=1)
 
@@ -30656,7 +30670,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._add_dialog_form_row(form_grid, 1, "Details:", description_edit),
             self._add_dialog_form_row(form_grid, 2, "Email (optional):", contact_edit),
         ]
-        self._align_dialog_form_labels(labels)
+        # The shared grid column already aligns these labels. Let translated
+        # captions wrap instead of fixing their minimum to one full line.
+        for label in labels:
+            label.setWordWrap(True)
         content_layout.addLayout(form_grid)
 
         recovery_diagnostics = self._json_safe_disk_recovery_diagnostics(
@@ -30665,13 +30682,27 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         recovery_context = getattr(self, "diskRecoveryContext", {}) or {}
         recovery_is_floppy = str(recovery_context.get("load_kind") or "").startswith("floppy")
 
-        floppy_context_group = QGroupBox("Floppy context (optional)", dialog)
-        floppy_context_group.setCheckable(True)
-        floppy_context_group.setChecked(
+        # Native group-box titles cannot wrap and can make the scroll body
+        # wider than its viewport with translated text and larger font metrics.
+        # Keep the frame, with a wrapping opt-in caption above its fields.
+        floppy_context_group = QGroupBox(dialog)
+        floppy_context_group.setAccessibleName(self._lt("Floppy context (optional)"))
+        floppy_group_layout = QVBoxLayout(floppy_context_group)
+        floppy_group_layout.setContentsMargins(12, 12, 12, 12)
+        floppy_group_layout.setSpacing(8)
+        floppy_context_checkbox = WrappedCheckBox(
+            self._lt("Floppy context (optional)"), floppy_context_group,
+        )
+        floppy_context_checkbox.setChecked(
             bool(recovery_diagnostics) or recovery_is_floppy or self.is_floppy_mode()
         )
-        floppy_context_layout = QVBoxLayout(floppy_context_group)
-        floppy_context_layout.setContentsMargins(12, 12, 12, 12)
+        floppy_group_layout.addWidget(floppy_context_checkbox)
+        floppy_context_fields = QWidget(floppy_context_group)
+        floppy_context_fields.setEnabled(floppy_context_checkbox.isChecked())
+        floppy_context_checkbox.toggled.connect(floppy_context_fields.setEnabled)
+        floppy_group_layout.addWidget(floppy_context_fields)
+        floppy_context_layout = QVBoxLayout(floppy_context_fields)
+        floppy_context_layout.setContentsMargins(0, 0, 0, 0)
         floppy_context_layout.setSpacing(8)
 
         floppy_context_note = QLabel(
@@ -30778,7 +30809,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
 
         floppy_user_context = None
-        if floppy_context_group.isChecked():
+        if floppy_context_checkbox.isChecked():
             floppy_user_context = {
                 "disk_kind": disk_kind_combo.currentData(),
                 "works_in_original_instrument": original_instrument_combo.currentData(),
@@ -30841,7 +30872,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._add_dialog_form_row(form_grid, 1, "Details:", description_edit),
             self._add_dialog_form_row(form_grid, 2, "Contact:", contact_edit),
         ]
-        self._align_dialog_form_labels(labels)
+        for label in labels:
+            label.setWordWrap(True)
         form_grid.setRowStretch(1, 1)
         content_layout.addLayout(form_grid, 1)
 

@@ -174,6 +174,29 @@ def test_bug_report_long_questions_remain_fully_visible_with_wide_font(
     _run_dialog(window, monkeypatch, "show_bug_report_dialog", exercise)
 
 
+def test_bug_report_main_form_labels_wrap_with_wide_native_metrics(
+    window, monkeypatch, dialog_font,
+):
+    window.currentLanguage = "es"
+    dialog_font(14)
+
+    def exercise(dialog):
+        caption = next(
+            label for label in dialog.findChildren(QLabel)
+            if label.text() == window._lt("Email (optional):")
+        )
+        font = QFont(caption.font())
+        font.setStretch(round(100 * 850 / caption.fontMetrics().horizontalAdvance(caption.text())))
+        caption.setFont(font)
+        for size in ((700, 480), (950, 650), (700, 480)):
+            _resize(dialog, size)
+            assert caption.wordWrap()
+            assert caption.height() >= caption.heightForWidth(caption.width())
+        assert caption.height() >= 2 * caption.fontMetrics().height()
+
+    _run_dialog(window, monkeypatch, "show_bug_report_dialog", exercise)
+
+
 def test_bug_report_questions_use_available_width_and_wrap_with_wide_metrics(
     window, monkeypatch, dialog_font,
 ):
@@ -202,6 +225,81 @@ def test_bug_report_questions_use_available_width_and_wrap_with_wide_metrics(
             assert question.height() >= 2 * question.fontMetrics().height()
 
     _run_dialog(window, monkeypatch, "show_bug_report_dialog", exercise)
+
+
+@pytest.mark.parametrize("language", ["es", "fr", "it", "pt-BR", "bg"])
+def test_bug_report_optional_context_wraps_with_long_translated_caption(
+    window, monkeypatch, dialog_font, language,
+):
+    window.currentLanguage = language
+    dialog_font(14)
+    translate = window._lt
+    caption_text = translate("Floppy context (optional)")
+    # Some native font fallbacks ignore QFont.setStretch(). Make the actual
+    # caption wider than the viewport instead of assuming proportional metrics.
+    while window.fontMetrics().horizontalAdvance(caption_text) < 850:
+        caption_text += " " + translate("Floppy context (optional)")
+    monkeypatch.setattr(
+        window, "_lt",
+        lambda text, **values: caption_text if text == "Floppy context (optional)"
+        else translate(text, **values),
+    )
+
+    def exercise(dialog):
+        group = dialog.findChild(QGroupBox)
+        # A native QGroupBox title cannot wrap and imposes that width on its
+        # scroll area, even when every question in the group already wraps.
+        for size in ((700, 480), (950, 650), (700, 480)):
+            _resize(dialog, size)
+        caption = next(
+            check for check in group.findChildren(QCheckBox)
+            if check.text() == caption_text
+        )
+        assert caption.caption.height() >= 2 * caption.fontMetrics().height()
+        fields = group.findChildren(QComboBox) + group.findChildren(QLineEdit)
+        assert fields
+        for checked in (True, False, True):
+            caption.setChecked(checked)
+            assert all(field.isEnabled() == checked for field in fields)
+        _assert_accessible(dialog)
+
+    _run_dialog(window, monkeypatch, "show_bug_report_dialog", exercise)
+
+
+@pytest.mark.parametrize("include_context", [False, True])
+def test_bug_report_optional_context_toggle_controls_submitted_answers(
+    window, monkeypatch, include_context,
+):
+    sent = []
+    monkeypatch.setattr(window, "_submit_bug_report", sent.append)
+
+    def exercise(dialog):
+        group = dialog.findChild(QGroupBox)
+        checkbox = next(
+            check for check in group.findChildren(QCheckBox)
+            if check.text() == window._lt("Floppy context (optional)")
+        )
+        assert not checkbox.isChecked()
+        checkbox.setChecked(True)
+        model = group.findChild(QLineEdit)
+        model.setText("DGC1 ENST")
+        checkbox.setChecked(include_context)
+        _resize(dialog, (700, 480))
+        buttons = dialog.findChild(QDialogButtonBox)
+        next(
+            button for button in buttons.buttons()
+            if buttons.buttonRole(button) == QDialogButtonBox.AcceptRole
+        ).click()
+
+    _run_dialog(
+        window, monkeypatch, "show_bug_report_dialog", exercise,
+        summary="Report with optional floppy answers", include_logs=False,
+    )
+    assert len(sent) == 1
+    if include_context:
+        assert sent[0]["context"]["floppy_user_context"]["instrument_model"] == "DGC1 ENST"
+    else:
+        assert "floppy_user_context" not in sent[0]["context"]
 
 
 @pytest.mark.parametrize("method", ["show_bug_report_dialog", "show_feedback_dialog"])

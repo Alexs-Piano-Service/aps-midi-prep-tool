@@ -176,6 +176,44 @@ def test_translated_shortcuts_stay_accessible_at_large_font_and_narrow_width(
     assert len(_run_dialog(window, monkeypatch, exercise)) == 1
 
 
+def test_shortcut_columns_reserve_command_space_for_wide_native_editors(
+    window, monkeypatch, dialog_font,
+):
+    # Windows' offscreen font metrics can make the category and editor much
+    # wider than on Linux, even at the same point size. Supply a large native
+    # editor hint so every platform exercises the narrow-column fallback.
+    class WideEditor(QKeySequenceEdit):
+        def sizeHint(self):
+            hint = super().sizeHint()
+            hint.setWidth(450)
+            return hint
+
+    monkeypatch.setattr(main_window, "QKeySequenceEdit", WideEditor)
+    window.currentLanguage = "es"
+    dialog_font(14)
+
+    def exercise(dialog, _call):
+        table = dialog.findChild(QTableWidget, "keyboardShortcutsTable")
+        # The expanded window must accommodate the platform's full category
+        # hint as well as the editor and the command column.
+        wide_width = max(
+            950,
+            table.sizeHintForColumn(0) + table.columnWidth(2)
+            + max(100, table.horizontalHeader().minimumSectionSize())
+            + dialog.width() - table.viewport().width(),
+        )
+        for size in ((700, 480), (wide_width, 650), (700, 480)):
+            dialog.resize(*size)
+            QTest.qWait(130)
+            assert dialog.size().toTuple() == size
+            table, _box = _assert_controls_accessible(dialog, "es")
+            assert table.columnWidth(2) >= 450
+            if size[0] == wide_width:
+                assert table.columnWidth(0) >= table.sizeHintForColumn(0)
+
+    assert len(_run_dialog(window, monkeypatch, exercise)) == 1
+
+
 def test_shortcut_dialog_saves_accepted_edits_and_clears_selected_command(window, monkeypatch):
     def exercise(dialog, _call):
         table = dialog.findChild(QTableWidget, "keyboardShortcutsTable")

@@ -128,6 +128,11 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Bug reports wrap the optional floppy-context heading at large font sizes.
+  Bug-report and feedback form labels wrap within their shared column.
+  Keyboard Shortcuts preserves room for command names when native fonts make
+  translated categories or shortcut editors wider. Dialog regression tests use
+  native button minimum sizes across platforms.
 - Long translated buttons in Keyboard Shortcuts, Review Changes, and Overlapping
   Piano Notes stack when needed so narrow windows keep their chosen width.
   Bug-report questions wrap across the available width, and message boxes finish
