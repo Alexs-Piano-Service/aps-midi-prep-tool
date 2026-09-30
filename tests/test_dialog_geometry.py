@@ -164,6 +164,34 @@ def test_unsized_dialog_fits_once_and_then_preserves_user_geometry(window, direc
     _run_dialog(window, dialog, inspect, direct=direct)
 
 
+def test_initial_show_size_is_centered_synchronously_and_only_once(window):
+    class ShowSizedDialog(_Dialog):
+        def showEvent(self, event):
+            super().showEvent(event)
+            if not getattr(self, "shown_once", False):
+                # QMessageBox finalizes its size in showEvent; the difference
+                # from its hidden size depends on the platform and font.
+                self.resize(self.width() - 34, self.height() + 18)
+                self.shown_once = True
+
+    dialog = ShowSizedDialog(window)
+    dialog.resize(420, 250)
+    window._center_child_dialog(dialog)
+    dialog.show()
+    _assert_centered(dialog, window)
+    assert dialog.adjustments == 0
+
+    dialog.resize(540, 380)
+    dialog.move(18, 27)
+    geometry = dialog.geometry()
+    dialog.hide()
+    dialog.show()
+    QApplication.postEvent(dialog, QEvent(QEvent.LayoutRequest))
+    QTest.qWait(150)
+    assert dialog.geometry() == geometry
+    assert dialog.adjustments == 0
+
+
 def test_message_details_resize_without_moving_the_users_window_or_refitting(window):
     dialog = _MessageBox(window)
     dialog.setText("Some files could not be prepared.")

@@ -131,6 +131,7 @@ from .midi_type0_converter import (
 from .midi_channel_merger import merge_midi_channels_to_channel0_path
 from .eseq_channel_merger import merge_eseq_channels_to_channel0_path
 from .piano_overlap import ChannelMergeCancelled, OVERLAP_MODES
+from .responsive_button_box import ResponsiveDialogButtonBox
 from .xf_stripper import XF_CLEANUP_BROAD, XF_CLEANUP_TARGETED, strip_xf_from_midi_path
 from .conversion_review import build_staged_conversion_details, inspect_music_bytes, localize_music_error, localize_music_format
 from .write_safety_messages import localize_write_message
@@ -11300,18 +11301,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         layout.addWidget(table, stretch=1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons = ResponsiveDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         buttons.setObjectName("keyboardShortcutsButtons")
-        # Keep editing actions separate from confirmation, leaving room for
-        # translated captions when the window is narrow.
-        actions = QHBoxLayout()
-        restore_button = QPushButton(self._lt("Restore Defaults"), dialog)
-        clear_button = QPushButton(self._lt("Clear Selected"), dialog)
+        restore_button = buttons.addButton(self._lt("Restore Defaults"), QDialogButtonBox.ActionRole)
+        clear_button = buttons.addButton(self._lt("Clear Selected"), QDialogButtonBox.ActionRole)
         for button in (restore_button, clear_button):
             button.setAutoDefault(False)
-            actions.addWidget(button)
-        actions.addStretch()
-        layout.addLayout(actions)
         buttons.rejected.connect(dialog.reject)
 
         def restore_defaults():
@@ -13160,9 +13155,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _center_child_dialog(self, dialog):
         if dialog is None or dialog.isVisible():
             return
-        # Position each window before opening it. Once shown, even progress
-        # and message windows belong to the user: content and resize events
-        # must not fit or recenter them through queued callbacks.
+        # Fit before opening; the helper finishes centering synchronously after
+        # Qt finalizes the initial size and frame. Later content and resize
+        # events must not fit or recenter a window through queued callbacks.
         center_dialog_on_parent(
             dialog, self,
             adjust_size=isinstance(dialog, (QMessageBox, QProgressDialog))
@@ -18047,7 +18042,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             content_layout.addWidget(settings_note)
         content_layout.addStretch()
         accept_button = QDialogButtonBox.Save if editing_settings else QDialogButtonBox.Ok
-        buttons = self._make_dialog_button_box(accept_button | QDialogButtonBox.Cancel, dialog)
+        buttons = ResponsiveDialogButtonBox(accept_button | QDialogButtonBox.Cancel, dialog, spacing=8)
+        buttons.setContentsMargins(0, 8, 6, 4)
+        self._translate_dialog_button_box(buttons)
         if not editing_settings:
             buttons.button(QDialogButtonBox.Ok).setText(self._lt("Merge Channels"))
         buttons.accepted.connect(dialog.accept)
@@ -30714,9 +30711,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         instrument_model_edit.setPlaceholderText("Optional instrument or model")
         instrument_model_edit.setMaxLength(200)
 
-        floppy_form = QFormLayout()
-        floppy_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
-        floppy_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        # Give wrapping questions the full available width rather than using
+        # QFormLayout's separate label-column size hints for stacked rows.
+        floppy_form = QVBoxLayout()
         for text, field in (
             ("Disk kind:", disk_kind_combo),
             ("Works in original instrument:", original_instrument_combo),
@@ -30726,7 +30723,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         ):
             label = QLabel(self._lt(text))
             label.setWordWrap(True)
-            floppy_form.addRow(label, field)
+            label.setBuddy(field)
+            floppy_form.addWidget(label)
+            floppy_form.addWidget(field)
         floppy_context_layout.addLayout(floppy_form)
         content_layout.addWidget(floppy_context_group)
 

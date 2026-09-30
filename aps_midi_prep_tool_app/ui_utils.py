@@ -3,7 +3,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication, QFrame, QScrollArea, QVBoxLayout, QWidget
 from PySide6.QtGui import QPalette, QPixmap
-from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtCore import QByteArray, QEvent, QObject, Qt
 
 from .logo_assets import embedded_logo_dt, embedded_logo_lt
 
@@ -29,6 +29,23 @@ def pixmap_from_base64(data):
     pixmap = QPixmap()
     pixmap.loadFromData(ba)
     return pixmap
+
+
+class _CenterDialogOnShow(QObject):
+    def __init__(self, dialog, parent_widget):
+        super().__init__(dialog)
+        self.parent_widget = parent_widget
+
+    def eventFilter(self, dialog, event):
+        if event.type() == QEvent.ShowToParent:
+            # This synchronous event follows showEvent and native window
+            # creation, so QMessageBox's final size and frame are available.
+            # Detach before moving; later resizing and showing belong to the user.
+            dialog.removeEventFilter(self)
+            dialog._aps_center_on_show = None
+            center_dialog_on_parent(dialog, self.parent_widget, adjust_size=False)
+            self.deleteLater()
+        return False
 
 
 def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
@@ -58,6 +75,15 @@ def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
         dialog_geometry.setSize(dialog.sizeHint())
     dialog_geometry.moveCenter(target_geometry.center())
     dialog.move(dialog_geometry.topLeft())
+
+    if not dialog.isVisible():
+        on_show = getattr(dialog, "_aps_center_on_show", None)
+        if on_show is None:
+            on_show = _CenterDialogOnShow(dialog, parent_widget)
+            dialog._aps_center_on_show = on_show
+            dialog.installEventFilter(on_show)
+        else:
+            on_show.parent_widget = parent_widget
 
 
 def resize_dialog_to_screen(dialog, *, width, height):

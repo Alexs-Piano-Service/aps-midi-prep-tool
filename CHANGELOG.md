@@ -128,6 +128,10 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Long translated buttons in Keyboard Shortcuts, Review Changes, and Overlapping
+  Piano Notes stack when needed so narrow windows keep their chosen width.
+  Bug-report questions wrap across the available width, and message boxes finish
+  centering after Qt determines their initial size, preserving later user moves.
 - Long translated overlap choices fit narrow windows with larger fonts, and
   preparation details finish rewrapping table rows after column widths change.
 - Resizable forms open at compact default sizes. **Preparing for...** fits its

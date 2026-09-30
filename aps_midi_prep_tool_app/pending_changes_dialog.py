@@ -6,12 +6,13 @@ from PySide6.QtCore import QItemSelectionModel, QSignalBlocker, Qt
 from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QHeaderView, QLabel,
-    QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout,
+    QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout,
 )
 
 from .icon_utils import apply_window_icon
 from .localized_dialogs import QMessageBox
 from .message_catalog import translate_text
+from .responsive_button_box import ResponsiveDialogButtonBox
 from .ui_utils import resize_dialog_to_screen
 
 
@@ -63,16 +64,13 @@ class PendingChangesDialog(QDialog):
         self.details.setAccessibleName(self.t("Details"))
         self.splitter.addWidget(self.details)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        self.buttons = ResponsiveDialogButtonBox(QDialogButtonBox.Close)
         self.buttons.button(QDialogButtonBox.Close).setText(self.t("Close"))
         self.buttons.button(QDialogButtonBox.Close).setDefault(True)
         self.discard_button = self.buttons.addButton(self.p("discard_selected"), QDialogButtonBox.ActionRole)
         self.undo_button = self.buttons.addButton(self.p("undo_last"), QDialogButtonBox.ActionRole)
         self.discard_button.setAutoDefault(False)
         self.undo_button.setAutoDefault(False)
-        # Allow a narrow window; long translated captions use a vertical footer
-        # instead of imposing the combined width of all three buttons.
-        self.buttons.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         layout.addWidget(self.buttons)
         self.table.itemSelectionChanged.connect(self.update_details)
         self.discard_button.clicked.connect(self.discard_selected)
@@ -83,24 +81,8 @@ class PendingChangesDialog(QDialog):
         # Tables and details scroll at larger fonts; only the footer needs to
         # reflow when the requested initial width is limited by the screen.
         resize_dialog_to_screen(self, width=900, height=600)
-        self._fit_buttons(self.width())
         height = self.height()
         self.splitter.setSizes([round(height * 0.55), round(height * 0.45)])
-
-    def _fit_buttons(self, width):
-        margins = self.layout().contentsMargins()
-        buttons = self.buttons.buttons()
-        self.buttons.setMinimumWidth(max(button.sizeHint().width() for button in buttons))
-        spacing = max(0, self.buttons.layout().spacing())
-        row_width = sum(button.sizeHint().width() for button in buttons) + spacing * (len(buttons) - 1)
-        available = width - margins.left() - margins.right()
-        orientation = Qt.Horizontal if row_width <= available else Qt.Vertical
-        if self.buttons.orientation() != orientation:
-            self.buttons.setOrientation(orientation)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._fit_buttons(event.size().width())
 
     def t(self, source):
         return translate_text(source, self.language_code)

@@ -7,7 +7,7 @@ from PySide6.QtCore import QEvent, QPoint, QRect, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialogButtonBox, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QDialogButtonBox, QGroupBox, QLabel, QLineEdit,
     QPlainTextEdit, QScrollArea,
 )
 
@@ -170,6 +170,36 @@ def test_bug_report_long_questions_remain_fully_visible_with_wide_font(
     def exercise(dialog):
         for size in ((700, 480), (950, 650)):
             _resize(dialog, size)
+
+    _run_dialog(window, monkeypatch, "show_bug_report_dialog", exercise)
+
+
+def test_bug_report_questions_use_available_width_and_wrap_with_wide_metrics(
+    window, monkeypatch, dialog_font,
+):
+    window.currentLanguage = "fr"
+    dialog_font(14)
+
+    def exercise(dialog):
+        group = dialog.findChild(QGroupBox)
+        # Exercise a long question independently of the installed font or DPI.
+        question = next(
+            label for label in group.findChildren(QLabel)
+            if label.text() == window._lt("USB drive reads other disks:")
+        )
+        field = next(
+            combo for combo in group.findChildren(QComboBox)
+            if combo.findData("not_tried") >= 0
+        )
+        font = QFont(question.font())
+        font.setStretch(250)
+        question.setFont(font)
+        for size in ((700, 480), (950, 650), (700, 480)):
+            _resize(dialog, size)
+            assert question.width() == field.width()
+            assert question.geometry().bottom() < field.geometry().top()
+            assert question.fontMetrics().horizontalAdvance(question.text()) > question.width()
+            assert question.height() >= 2 * question.fontMetrics().height()
 
     _run_dialog(window, monkeypatch, "show_bug_report_dialog", exercise)
 
