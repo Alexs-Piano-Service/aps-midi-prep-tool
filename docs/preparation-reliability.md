@@ -12,8 +12,10 @@ For your piano's song format and delivery settings, start with
 
 ## Review or undo changes before saving
 
-1. Open **Edit → Review Changes...** to compare original and proposed filenames,
-   titles, formats, playback order, and conversion reports.
+1. Open **Edit → Review Changes...**. The list summarizes each song's changes.
+   Select a song to compare its original and proposed filename, title, and
+   format, with playback-order changes and conversion reports below. Resize the
+   window or drag the divider between the list and details for more room.
 2. If needed, select songs in that dialog to discard their edits. **Edit → Undo**
    (**Ctrl+Z**) reverses the latest staged action; **Edit → Undo All** discards
    every staged change since the current files were loaded or last saved.

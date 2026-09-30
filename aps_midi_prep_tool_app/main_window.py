@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QGridLayout,
+    QFormLayout,
     QHBoxLayout,
     QPushButton,
     QLabel,
@@ -142,6 +143,7 @@ from .ui_utils import (
     embedded_logo_lt,
     is_dark_theme,
     pixmap_from_base64,
+    scrollable_dialog_layout,
 )
 from .drop_table_widget import DropTableWidget, zip_import_operation
 from .disk_device_discovery import discover_floppy_devices
@@ -247,6 +249,7 @@ from .app_info import (
 )
 from .subprocess_utils import windows_subprocess_kwargs
 from .localized_dialogs import QMessageBox, _message_parent_language, install_qt_translations
+from .wrapped_checkbox import WrappedCheckBox
 from .message_catalog import (
     DEFAULT_LANGUAGE,
     guidance_for_error_detail,
@@ -9155,7 +9158,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         main_layout = QVBoxLayout(main_widget)
         self.mainLayout = main_layout
         main_layout.setSpacing(self._scaled_int(10, minimum=4))
-        main_layout.setContentsMargins(*self._scaled_margins((10, 10, 10, 10)))
+        main_layout.setContentsMargins(*self._scaled_margins((14, 14, 14, 14)))
         self.setCentralWidget(main_widget)
 
         # Top: source buttons
@@ -10147,7 +10150,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         main_layout = getattr(self, "mainLayout", None)
         if main_layout is not None:
             main_layout.setSpacing(self._scaled_int(10, minimum=4))
-            main_layout.setContentsMargins(*self._scaled_margins((10, 10, 10, 10)))
+            main_layout.setContentsMargins(*self._scaled_margins((14, 14, 14, 14)))
 
         preparation_layout = getattr(self, "preparationLayout", None)
         if preparation_layout is not None:
@@ -11094,7 +11097,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         dialog = QDialog(self)
         apply_window_icon(dialog)
         dialog.setWindowTitle(self._lt("Keyboard Shortcuts"))
-        dialog.resize(760, 520)
+        dialog.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        dialog.setSizeGripEnabled(True)
+        available = dialog.screen().availableGeometry()
+        dialog.resize(
+            min(self._scaled_int(900), available.width() - 40),
+            min(self._scaled_int(650), available.height() - 60),
+        )
 
         layout = QVBoxLayout(dialog)
         intro = QLabel(self._lt("Change the keyboard shortcuts used by the main window commands."), dialog)
@@ -11102,6 +11111,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         layout.addWidget(intro)
 
         table = QTableWidget(len(specs), 3, dialog)
+        table.setObjectName("keyboardShortcutsTable")
         table.setHorizontalHeaderLabels([
             self._lt("Category"),
             self._lt("Command"),
@@ -11118,13 +11128,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
 
-        sample_editor = QKeySequenceEdit(table)
-        shortcut_row_height = max(
-            34,
-            table.fontMetrics().height() + 16,
-            sample_editor.sizeHint().height() + 8,
-        )
-        sample_editor.deleteLater()
+        # Measure the real cell editors below. A temporary visible child used
+        # for measurement can linger over the header during the modal loop.
+        shortcut_row_height = max(34, table.fontMetrics().height() + 16)
         table.verticalHeader().setDefaultSectionSize(shortcut_row_height)
 
         editors = {}
@@ -11133,22 +11139,32 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             command_item = QTableWidgetItem(self._lt(spec["label"]).replace("&", ""))
             for item in (category_item, command_item):
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                item.setToolTip(item.text())
             table.setItem(row, 0, category_item)
             table.setItem(row, 1, command_item)
 
             editor = QKeySequenceEdit(self._shortcut_sequence_for_spec(spec), table)
+            editor.setAccessibleName(command_item.text())
             if hasattr(editor, "setClearButtonEnabled"):
                 editor.setClearButtonEnabled(True)
             table.setCellWidget(row, 2, editor)
             editors[spec["id"]] = editor
-            table.setRowHeight(row, shortcut_row_height)
+            table.setRowHeight(row, max(shortcut_row_height, editor.sizeHint().height() + 8))
 
         layout.addWidget(table, stretch=1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
-        restore_button = buttons.addButton(self._lt("Restore Defaults"), QDialogButtonBox.ResetRole)
-        clear_button = buttons.addButton(self._lt("Clear Selected"), QDialogButtonBox.ActionRole)
-        buttons.accepted.connect(dialog.accept)
+        buttons.setObjectName("keyboardShortcutsButtons")
+        # Keep editing actions separate from confirmation, leaving room for
+        # translated captions when the window is narrow.
+        actions = QHBoxLayout()
+        restore_button = QPushButton(self._lt("Restore Defaults"), dialog)
+        clear_button = QPushButton(self._lt("Clear Selected"), dialog)
+        for button in (restore_button, clear_button):
+            button.setAutoDefault(False)
+            actions.addWidget(button)
+        actions.addStretch()
+        layout.addLayout(actions)
         buttons.rejected.connect(dialog.reject)
 
         def restore_defaults():
@@ -11164,16 +11180,19 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         clear_button.clicked.connect(clear_selected)
         layout.addWidget(buttons)
 
-        while self._exec_child_dialog(dialog) == QDialog.Accepted:
-            shortcut_text_by_id = {
+        def shortcut_assignments():
+            return {
                 spec["id"]: editors[spec["id"]].keySequence().toString(QKeySequence.PortableText)
                 for spec in specs
             }
+
+        def accept_shortcuts():
+            shortcut_text_by_id = shortcut_assignments()
             conflict = self._shortcut_conflict(shortcut_text_by_id, specs)
             if conflict is not None:
                 sequence_text, first_spec, second_spec = conflict
                 QMessageBox.warning(
-                    self,
+                    dialog,
                     self._lt("Duplicate Shortcut"),
                     (
                         self._lt(
@@ -11184,10 +11203,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         )
                     ),
                 )
-                continue
-            self._save_keyboard_shortcuts(shortcut_text_by_id)
-            self.status_label.setText(self._lt("Keyboard shortcuts updated."))
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(accept_shortcuts)
+        if self._exec_child_dialog(dialog, resize_to_contents=False) != QDialog.Accepted:
             return
+        self._save_keyboard_shortcuts(shortcut_assignments())
+        self.status_label.setText(self._lt("Keyboard shortcuts updated."))
 
     def show_console_log_window(self):
         dialog = getattr(self, "consoleLogDialog", None)
@@ -11249,11 +11272,21 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         dialog = QDialog(self)
         apply_window_icon(dialog)
         dialog.setWindowTitle(self._t("bulk.title"))
+        dialog.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        dialog.setSizeGripEnabled(True)
         layout = QVBoxLayout(dialog)
+        scroll = QScrollArea(dialog)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
 
         intro = QLabel(self._t("bulk.description"))
         intro.setWordWrap(True)
-        layout.addWidget(intro)
+        content_layout.addWidget(intro)
 
         form_layout = QGridLayout()
         form_layout.setContentsMargins(0, 8, 0, 0)
@@ -11289,43 +11322,44 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
         form_layout.addWidget(naming_label, 2, 0)
         form_layout.addWidget(naming_combo, 2, 1, 1, 2)
-        layout.addLayout(form_layout)
+        content_layout.addLayout(form_layout)
+        content_layout.addStretch()
 
         convert_checkbox = QCheckBox(self._t("bulk.convert"))
         convert_checkbox.setToolTip(
             self._t("bulk.convert.tooltip")
         )
-        form_layout.addWidget(convert_checkbox, 4, 1, 1, 2)
+        form_layout.addWidget(convert_checkbox, 4, 0, 1, 3)
 
         long_name_checkbox = QCheckBox(self._t("bulk.long_filenames"))
         long_name_checkbox.setToolTip(self._t("bulk.long_filenames.tooltip"))
-        form_layout.addWidget(long_name_checkbox, 3, 1, 1, 2)
+        form_layout.addWidget(long_name_checkbox, 3, 0, 1, 3)
 
         trim_title_spaces_checkbox = QCheckBox(self._t("bulk.trim_titles"))
         trim_title_spaces_checkbox.setToolTip(self._t("bulk.trim_titles.tooltip"))
-        form_layout.addWidget(trim_title_spaces_checkbox, 5, 1, 1, 2)
+        form_layout.addWidget(trim_title_spaces_checkbox, 5, 0, 1, 3)
 
         include_sources_checkbox = QCheckBox(self._t("bulk.include_sources"))
         include_sources_checkbox.setToolTip(
             self._t("bulk.include_sources.tooltip")
         )
-        form_layout.addWidget(include_sources_checkbox, 6, 1, 1, 2)
+        form_layout.addWidget(include_sources_checkbox, 6, 0, 1, 3)
 
         retention_hint = QLabel(self._t("bulk.no_overwrite"))
         retention_hint.setWordWrap(True)
-        form_layout.addWidget(retention_hint, 7, 1, 1, 2)
+        form_layout.addWidget(retention_hint, 7, 0, 1, 3)
 
         save_progress_checkbox = QCheckBox(self._lt("Save progress for verified resume"))
         save_progress_checkbox.setToolTip(self._lt(
             "Progress records are removed after successful extraction. Failed or cancelled jobs keep their records for resuming."
         ))
         save_progress_checkbox.setChecked(True)
-        form_layout.addWidget(save_progress_checkbox, 8, 1, 1, 2)
+        form_layout.addWidget(save_progress_checkbox, 8, 0, 1, 3)
         resume_button = QPushButton(self._lt("Resume extraction job..."))
-        form_layout.addWidget(resume_button, 9, 1, 1, 2)
+        form_layout.addWidget(resume_button, 9, 0, 1, 3)
         resume_hint = QLabel("")
         resume_hint.setWordWrap(True)
-        form_layout.addWidget(resume_hint, 10, 1, 1, 2)
+        form_layout.addWidget(resume_hint, 10, 0, 1, 3)
         selected_job = {"path": ""}
 
         source_directory = self._bulk_extraction_default_source_directory()
@@ -11352,7 +11386,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         preparation_hint = QLabel()
         preparation_hint.setWordWrap(True)
         preparation_hint.setVisible(self._preparation_requires_dos83_filenames())
-        form_layout.addWidget(preparation_hint, 11, 1, 1, 2)
+        form_layout.addWidget(preparation_hint, 11, 0, 1, 3)
         if self._preparation_requires_dos83_filenames():
             long_name_checkbox.setChecked(False)
             long_name_checkbox.setEnabled(False)
@@ -11494,9 +11528,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         buttons.accepted.connect(accept_options)
         layout.addWidget(buttons)
-        dialog.resize(720, dialog.sizeHint().height())
+        available = dialog.screen().availableGeometry()
+        dialog.resize(
+            min(self._scaled_int(900), available.width() - 40),
+            min(self._scaled_int(700), available.height() - 60),
+        )
 
-        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+        if self._exec_child_dialog(dialog, resize_to_contents=False) != QDialog.Accepted:
+            dialog.deleteLater()
             return
 
         source_directory = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
@@ -11510,6 +11549,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             convert_eseq and trim_title_spaces_checkbox.isChecked()
         )
         use_album_names = naming_combo.currentData() == "album"
+        dialog.deleteLater()
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_SOURCE, source_directory)
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_OUTPUT, output_directory)
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_CONVERT_ESEQ, convert_eseq)
@@ -12927,14 +12967,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             markiv_backup_action.setToolTip(self._t("markiv.tooltip"))
 
     def eventFilter(self, obj, event):
-        if isinstance(obj, QDialog) and bool(obj.property("_aps_center_on_parent")):
-            if event.type() in {QEvent.Show, QEvent.ShowToParent}:
-                self._schedule_center_child_dialog(obj)
-            elif (
-                bool(obj.property("_aps_recenter_on_content_change"))
-                and event.type() in {QEvent.Resize, QEvent.LayoutRequest}
-            ):
-                self._schedule_center_child_dialog(obj, delays=(0, 25))
         if obj is self.table.viewport():
             if event.type() == QEvent.Resize:
                 self._resize_table_columns_to_fill()
@@ -12977,37 +13009,23 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         super().resizeEvent(event)
         self._resize_table_columns_to_fill()
 
-    def _center_child_dialog_now(self, dialog):
-        center_dialog_on_parent(dialog, self)
-
-    def _schedule_center_child_dialog(self, dialog, delays=(0,)):
-        def center_if_alive():
-            try:
-                if dialog is not None:
-                    self._center_child_dialog_now(dialog)
-            except RuntimeError:
-                pass
-
-        for delay in delays:
-            QTimer.singleShot(max(0, int(delay)), center_if_alive)
-
-    def _center_child_dialog(self, dialog, *, recenter_on_content_change=False):
-        if dialog is None:
+    def _center_child_dialog(self, dialog):
+        if dialog is None or dialog.isVisible():
             return
-        dialog.setProperty("_aps_center_on_parent", True)
-        if recenter_on_content_change:
-            dialog.setProperty("_aps_recenter_on_content_change", True)
-        if not bool(dialog.property("_aps_center_event_filter")):
-            dialog.installEventFilter(self)
-            dialog.setProperty("_aps_center_event_filter", True)
-        self._center_child_dialog_now(dialog)
-        self._schedule_center_child_dialog(dialog, delays=(0, 25, 100))
+        # Position each window before opening it. Once shown, even progress
+        # and message windows belong to the user: content and resize events
+        # must not fit or recenter them through queued callbacks.
+        center_dialog_on_parent(
+            dialog, self,
+            adjust_size=isinstance(dialog, (QMessageBox, QProgressDialog))
+            or not dialog.testAttribute(Qt.WA_Resized),
+        )
 
     def _exec_child_dialog(self, dialog, *, resize_to_contents=True):
         dialog.setWindowModality(Qt.WindowModal)
         self._translate_dialog_tree(dialog)
         if resize_to_contents:
-            self._center_child_dialog(dialog, recenter_on_content_change=True)
+            self._center_child_dialog(dialog)
         else:
             # Scrollable forms own their initial size. Center once and leave
             # later layout changes and user resizing to the window manager.
@@ -13088,8 +13106,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         dialog.setWindowTitle(self._progress_dialog_title(dialog))
         dialog.setWindowModality(Qt.WindowModal)
         dialog.setMinimumDuration(0)
-        dialog.setProperty("_aps_progress_center_updates_remaining", 4)
-        self._center_child_dialog(dialog, recenter_on_content_change=True)
+        self._center_child_dialog(dialog)
         return dialog
 
     def _stabilize_progress_dialog_width(self, dialog, width=640):
@@ -13128,7 +13145,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self._center_child_dialog(dialog)
         dialog.show()
         QApplication.processEvents()
-        self._center_child_dialog(dialog)
 
     def _clean_error_detail(self, detail):
         text = str(detail or "").strip()
@@ -13467,10 +13483,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 dialog.setValue(0)
         self._set_progress_dialog_message(dialog, message)
         QApplication.processEvents()
-        remaining_centers = int(dialog.property("_aps_progress_center_updates_remaining") or 0)
-        if remaining_centers > 0:
-            dialog.setProperty("_aps_progress_center_updates_remaining", remaining_centers - 1)
-            self._schedule_center_child_dialog(dialog, delays=(0, 25))
 
     def _set_disk_load_busy(self, busy):
         is_busy = bool(busy)
@@ -17814,8 +17826,18 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(self._lt("Overlapping Piano Notes"))
         apply_window_icon(dialog)
-        dialog.setMinimumWidth(520)
+        dialog.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        dialog.setSizeGripEnabled(True)
         layout = QVBoxLayout(dialog)
+        scroll = QScrollArea(dialog)
+        scroll.setObjectName("pianoOverlapScrollArea")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
         if editing_settings:
             intro = QLabel(self._lt(
                 "Choose how to handle overlapping notes when merging channels. "
@@ -17828,14 +17850,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             ))
         intro.setTextFormat(Qt.PlainText)
         intro.setWordWrap(True)
-        layout.addWidget(intro)
+        content_layout.addWidget(intro)
         behavior = QComboBox(dialog)
         behavior.setObjectName("pianoOverlapBehavior")
         behavior.addItem(self._lt("Smart repair"), "smart")
         behavior.addItem(self._lt("Keep attacks — trim overlaps"), "retrigger")
         behavior.addItem(self._lt("Merge only — keep overlaps"), "off")
         behavior.setCurrentIndex(max(0, behavior.findData(mode)))
-        layout.addWidget(behavior)
+        content_layout.addWidget(behavior)
         descriptions = {
             "smart": self._lt(
                 "Remove long notes covering two or more shorter strikes of the same key. "
@@ -17851,24 +17873,26 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             ),
         }
         description = QLabel(dialog)
+        description.setObjectName("pianoOverlapDescription")
         description.setWordWrap(True)
         behavior.currentIndexChanged.connect(
             lambda _index: description.setText(descriptions[behavior.currentData()])
         )
         description.setText(descriptions[behavior.currentData()])
-        layout.addWidget(description)
-        remember = QCheckBox(self._lt("Use this behavior for all future channel merges"), dialog)
+        content_layout.addWidget(description)
+        remember = WrappedCheckBox(self._lt("Use this behavior for all future channel merges"), dialog)
         remember.setObjectName("rememberPianoOverlapBehavior")
         remember.setChecked(editing_settings and mode in OVERLAP_MODES and self.settings.value(
             self.SETTING_SKIP_PIANO_OVERLAP_DIALOG, False, type=bool,
         ))
-        layout.addWidget(remember)
+        content_layout.addWidget(remember)
         if not editing_settings:
             settings_note = QLabel(self._lt(
                 "You can change this any time in Settings → Overlapping Piano Notes..."
             ))
             settings_note.setWordWrap(True)
-            layout.addWidget(settings_note)
+            content_layout.addWidget(settings_note)
+        content_layout.addStretch()
         accept_button = QDialogButtonBox.Save if editing_settings else QDialogButtonBox.Ok
         buttons = self._make_dialog_button_box(accept_button | QDialogButtonBox.Cancel, dialog)
         if not editing_settings:
@@ -17876,7 +17900,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+        available = dialog.screen().availableGeometry()
+        dialog.resize(
+            min(self._scaled_int(720), available.width() - 40),
+            min(self._scaled_int(460), available.height() - 60),
+        )
+        if self._exec_child_dialog(dialog, resize_to_contents=False) != QDialog.Accepted:
             return None
         mode = behavior.currentData()
         if editing_settings or remember.isChecked():
@@ -22363,6 +22392,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         layout.addWidget(buttons)
 
         def resize_dialog_to_content():
+            # Fit the initial form only; later option changes belong to the
+            # layout and must preserve the user's chosen window dimensions.
+            if dialog.isVisible():
+                return
             dialog.layout().activate()
             hint_size = dialog.sizeHint()
             dialog.resize(max(dialog.minimumWidth(), hint_size.width()), hint_size.height())
@@ -22375,7 +22408,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             ok_button = buttons.button(QDialogButtonBox.Ok)
             if ok_button is not None:
                 ok_button.setEnabled((gw_device_combo.currentData() is not None) if is_gw else (drive_combo.currentData() is not None))
-            QTimer.singleShot(0, resize_dialog_to_content)
+            resize_dialog_to_content()
 
         target_combo.currentIndexChanged.connect(refresh_target_state)
         self._add_floppy_drive_refresh(
@@ -22750,6 +22783,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         layout.addWidget(buttons)
 
         def resize_dialog_to_content():
+            # Fit the initial form only; later option changes belong to the
+            # layout and must preserve the user's chosen window dimensions.
+            if dialog.isVisible():
+                return
             dialog.layout().activate()
             hint_size = dialog.sizeHint()
             dialog.resize(max(dialog.minimumWidth(), hint_size.width()), hint_size.height())
@@ -22768,7 +22805,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             ok = buttons.button(QDialogButtonBox.Ok)
             if ok is not None:
                 ok.setEnabled((gw_device_combo.currentData() is not None) if is_gw else (drive_combo.currentData() is not None))
-            QTimer.singleShot(0, resize_dialog_to_content)
+            resize_dialog_to_content()
 
         drive_combo.currentIndexChanged.connect(refresh_drive_disk_size)
         source_combo.currentIndexChanged.connect(refresh_source_state)
@@ -23192,6 +23229,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             label.setMinimumWidth(form_label_width)
 
         def resize_dialog_to_content():
+            # Fit the initial form only; later option changes belong to the
+            # layout and must preserve the user's chosen window dimensions.
+            if dialog.isVisible():
+                return
             dialog.layout().activate()
             hint = dialog.sizeHint()
             dialog.resize(max(dialog.minimumWidth(), hint.width()), hint.height())
@@ -23223,7 +23264,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if ok_button is not None:
                 ok_button.setEnabled(ok_enabled)
                 ok_button.setText(self._lt("Recover" if is_recovery else "Read"))
-            QTimer.singleShot(0, resize_dialog_to_content)
+            resize_dialog_to_content()
 
         source_combo.currentIndexChanged.connect(refresh_dialog_state)
         recovery_checkbox.toggled.connect(refresh_dialog_state)
@@ -23805,6 +23846,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         layout.addWidget(buttons)
 
         def resize_dialog_to_content():
+            # Fit the initial form only; later option changes belong to the
+            # layout and must preserve the user's chosen window dimensions.
+            if dialog.isVisible():
+                return
             dialog.layout().activate()
             hint_size = dialog.sizeHint()
             dialog.resize(max(dialog.minimumWidth(), hint_size.width()), hint_size.height())
@@ -23817,7 +23862,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             ok_button = buttons.button(QDialogButtonBox.Ok)
             if ok_button is not None:
                 ok_button.setEnabled((gw_device_combo.currentData() is not None) if is_gw else (drive_combo.currentData() is not None))
-            QTimer.singleShot(0, resize_dialog_to_content)
+            resize_dialog_to_content()
 
         target_combo.currentIndexChanged.connect(refresh_target_state)
         self._add_floppy_drive_refresh(
@@ -30137,11 +30182,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         apply_window_icon(dialog)
         dialog.setWindowTitle("Disclaimer")
         dialog.setModal(True)
-        dialog.setMinimumWidth(520)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout, content_layout = scrollable_dialog_layout(
+            dialog, width=720, height=540, spacing=12,
+        )
 
         message_label = QLabel(dialog)
         message_label.setWordWrap(True)
@@ -30149,7 +30192,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         message_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
         message_label.setTextFormat(Qt.RichText)
         message_label.setText(self._t("dialog.disclaimer.html"))
-        layout.addWidget(message_label)
+        content_layout.addWidget(message_label)
+        content_layout.addStretch(1)
 
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok, dialog)
         buttons.accepted.connect(dialog.accept)
@@ -30161,11 +30205,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         apply_window_icon(dialog)
         dialog.setWindowTitle(self._t("dialog.about.title", app=APP_TITLE_WITH_VERSION))
         dialog.setModal(True)
-        dialog.setMinimumWidth(420)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout, content_layout = scrollable_dialog_layout(
+            dialog, width=600, height=540, spacing=12,
+        )
 
         logo_label = QLabel(dialog)
         logo_label.setAlignment(Qt.AlignCenter)
@@ -30174,18 +30216,20 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             logo_label.setPixmap(pixmap.scaled(220, 68, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             logo_label.setText("APS MIDI Prep Tool")
-        layout.addWidget(logo_label)
+        content_layout.addWidget(logo_label)
 
         title_label = QLabel(APP_TITLE_WITH_VERSION, dialog)
         title_label.setAlignment(Qt.AlignCenter)
+        title_label.setWordWrap(True)
         title_label.setFont(self._make_heading_font(13))
-        layout.addWidget(title_label)
+        content_layout.addWidget(title_label)
 
         website_label = QLabel(f'<a href="{APP_WEBSITE}">{APP_WEBSITE}</a>', dialog)
         website_label.setAlignment(Qt.AlignCenter)
+        website_label.setWordWrap(True)
         website_label.setOpenExternalLinks(True)
         website_label.setToolTip(self._lt("Project website."))
-        layout.addWidget(website_label)
+        content_layout.addWidget(website_label)
 
         info_label = QLabel(
             (
@@ -30201,7 +30245,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         info_label.setTextFormat(Qt.RichText)
         info_label.setAlignment(Qt.AlignCenter)
         info_label.setWordWrap(True)
-        layout.addWidget(info_label)
+        content_layout.addWidget(info_label)
+        content_layout.addStretch(1)
 
         buttons = self._make_dialog_button_box(QDialogButtonBox.Close, dialog)
         disclaimer_button = buttons.addButton(self._lt("Disclaimer"), QDialogButtonBox.ActionRole)
@@ -30393,21 +30438,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         apply_window_icon(dialog)
         dialog.setWindowTitle(self._lt("Report a Bug"))
         dialog.setModal(True)
-        dialog.setMinimumWidth(620)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(10)
-
-        scroll_area = QScrollArea(dialog)
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        form_body = QWidget(scroll_area)
-        content_layout = QVBoxLayout(form_body)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(10)
-        scroll_area.setWidget(form_body)
-        layout.addWidget(scroll_area, 1)
+        layout, content_layout = scrollable_dialog_layout(dialog, width=800, height=720)
 
         intro = QLabel(
             self._lt("Tell us what happened and what you expected instead.")
@@ -30497,36 +30528,25 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         instrument_model_edit.setPlaceholderText("Optional instrument or model")
         instrument_model_edit.setMaxLength(200)
 
-        floppy_form_grid = self._make_dialog_form_grid()
-        floppy_labels = [
-            self._add_dialog_form_row(floppy_form_grid, 0, "Disk kind:", disk_kind_combo),
-            self._add_dialog_form_row(
-                floppy_form_grid,
-                1,
-                "Works in original instrument:",
-                original_instrument_combo,
-            ),
-            self._add_dialog_form_row(
-                floppy_form_grid,
-                2,
-                "USB drive reads other disks:",
-                other_disks_combo,
-            ),
-            self._add_dialog_form_row(floppy_form_grid, 3, "Media marking:", media_marking_combo),
-            self._add_dialog_form_row(
-                floppy_form_grid,
-                4,
-                "Instrument/model:",
-                instrument_model_edit,
-            ),
-        ]
-        self._align_dialog_form_labels(floppy_labels)
-        floppy_context_layout.addLayout(floppy_form_grid)
+        floppy_form = QFormLayout()
+        floppy_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        floppy_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        for text, field in (
+            ("Disk kind:", disk_kind_combo),
+            ("Works in original instrument:", original_instrument_combo),
+            ("USB drive reads other disks:", other_disks_combo),
+            ("Media marking:", media_marking_combo),
+            ("Instrument/model:", instrument_model_edit),
+        ):
+            label = QLabel(self._lt(text))
+            label.setWordWrap(True)
+            floppy_form.addRow(label, field)
+        floppy_context_layout.addLayout(floppy_form)
         content_layout.addWidget(floppy_context_group)
 
         include_recovery_diagnostics_checkbox = None
         if recovery_diagnostics:
-            include_recovery_diagnostics_checkbox = QCheckBox(
+            include_recovery_diagnostics_checkbox = WrappedCheckBox(
                 "Include floppy recovery diagnostics",
                 dialog,
             )
@@ -30542,7 +30562,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             recovery_diagnostics_note.setStyleSheet("QLabel { color: palette(mid); }")
             content_layout.addWidget(recovery_diagnostics_note)
 
-        include_logs_checkbox = QCheckBox(self._lt("Include recent console logs"), dialog)
+        include_logs_checkbox = WrappedCheckBox(self._lt("Include recent console logs"), dialog)
         include_logs_checkbox.setChecked(bool(include_logs))
         content_layout.addWidget(include_logs_checkbox)
 
@@ -30601,24 +30621,20 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         apply_window_icon(dialog)
         dialog.setWindowTitle(self._lt("Send Feedback"))
         dialog.setModal(True)
-        dialog.setMinimumWidth(620)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(10)
+        layout, content_layout = scrollable_dialog_layout(dialog, width=760, height=600)
 
         intro = QLabel(
             self._lt("Tell us what would make APS MIDI Prep Tool better, or what is working well.")
         )
         intro.setWordWrap(True)
-        layout.addWidget(intro)
+        content_layout.addWidget(intro)
 
         privacy = QLabel(
             self._lt("Feedback includes app details. Logs are optional and may include recent console output and file paths.")
         )
         privacy.setWordWrap(True)
         privacy.setStyleSheet("QLabel { color: palette(mid); }")
-        layout.addWidget(privacy)
+        content_layout.addWidget(privacy)
 
         summary_edit = QLineEdit(dialog)
         summary_edit.setPlaceholderText(self._lt("Short summary"))
@@ -30641,16 +30657,17 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._add_dialog_form_row(form_grid, 2, "Contact:", contact_edit),
         ]
         self._align_dialog_form_labels(labels)
-        layout.addLayout(form_grid)
+        form_grid.setRowStretch(1, 1)
+        content_layout.addLayout(form_grid, 1)
 
-        include_logs_checkbox = QCheckBox(self._lt("Include recent console logs"), dialog)
+        include_logs_checkbox = WrappedCheckBox(self._lt("Include recent console logs"), dialog)
         include_logs_checkbox.setChecked(bool(include_logs))
-        layout.addWidget(include_logs_checkbox)
+        content_layout.addWidget(include_logs_checkbox)
 
         log_note = QLabel(self._lt("Adds recent console output if it helps explain your feedback."))
         log_note.setWordWrap(True)
         log_note.setStyleSheet("QLabel { color: palette(mid); }")
-        layout.addWidget(log_note)
+        content_layout.addWidget(log_note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel, parent=dialog)
         send_button = buttons.addButton(self._lt("Send Feedback"), QDialogButtonBox.AcceptRole)

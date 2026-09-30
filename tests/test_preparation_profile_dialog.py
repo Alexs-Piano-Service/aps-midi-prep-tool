@@ -5,13 +5,18 @@ from html import escape
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QRect, QSettings, Qt
+from PySide6.QtCore import QEvent, QRect, QSettings, Qt, QTimer
+from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QDialogButtonBox, QLabel, QStyle,
+    QStyledItemDelegate, QStyleOptionViewItem,
+)
 
 from aps_midi_prep_tool_app import preparation_profile_dialog as dialog_module
 from aps_midi_prep_tool_app import preparation_profiles as profiles_module
 from aps_midi_prep_tool_app.preparation_profile_dialog import PreparationProfileDialog
+from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
 from aps_midi_prep_tool_app.preparation_profiles import (
     COMPATIBILITY_SOURCE, SETTING_DISK_FORMAT, SETTING_IMAGE_FORMAT, SETTING_MEDIUM, SETTING_PROFILE,
 )
@@ -311,3 +316,101 @@ def test_summary_retains_separate_required_clavinova_container_conversion(applic
         assert dialog.changes_table.rowCount() == 6
     finally:
         dialog.close()
+
+
+@pytest.fixture
+def modal_parent(application, tmp_path, monkeypatch):
+    from aps_midi_prep_tool_app import main_window
+
+    settings = QSettings(str(tmp_path / "resize.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(main_window, "QSettings", lambda *_args: settings)
+    monkeypatch.setattr(main_window.MidiTitleWindow, "_log_event", lambda *_args, **_kwargs: None)
+    original_font = QFont(application.font())
+    parent = main_window.MidiTitleWindow()
+    parent.resize(680, 480)
+    parent.show()
+    application.processEvents()
+    yield parent
+    parent.hide()
+    parent.deleteLater()
+    application.setFont(original_font)
+    application.processEvents()
+
+
+def _assert_preparation_controls_fit(dialog):
+    scroll = dialog.scroll_area
+    assert dialog.rect().contains(scroll.geometry())
+    assert dialog.rect().contains(dialog.buttons.geometry())
+    assert scroll.geometry().bottom() < dialog.buttons.geometry().top()
+    assert scroll.horizontalScrollBar().maximum() == 0
+    for button in dialog.buttons.buttons():
+        assert button.isVisible()
+        assert dialog.buttons.rect().contains(button.geometry())
+        assert button.width() >= button.sizeHint().width()
+    content = scroll.widget()
+    for widget in (dialog.profile_combo, dialog.medium_combo, dialog.changes_table):
+        assert content.rect().contains(widget.geometry())
+    assert dialog.changes_table.horizontalScrollBar().maximum() == 0
+    for row in range(dialog.changes_table.rowCount()):
+        assert dialog.changes_table.rowHeight(row) >= dialog.changes_table.sizeHintForRow(row)
+    for label in (dialog.preparation_note_label, dialog.source_label):
+        if label.isHidden():
+            continue
+        scroll.ensureWidgetVisible(label)
+        QTest.qWait(10)
+        assert not label.visibleRegion().isEmpty()
+        assert label.height() >= label.heightForWidth(label.width())
+
+
+@pytest.mark.parametrize("font_size,language", [(9, "en")] + [(14, item.code) for item in SUPPORTED_LANGUAGES])
+def test_preparation_dialog_preserves_user_geometry_and_reflows_during_modal_resize(
+    application, modal_parent, font_size, language,
+):
+    parent = modal_parent
+    font = QFont(parent.font().family(), font_size)
+    application.setFont(font)
+    parent.setFont(font)
+    parent.currentLanguage = language
+    before = {key: parent.settings.value(key) for key in parent.settings.allKeys()}
+    dialog = PreparationProfileDialog(
+        parent.settings, "mark_ii", "nalbantov", parent,
+        song_counts={"midi": 3, "eseq": 2, "midi_non_type0": 3, "clavinova": 1},
+    )
+    failures = []
+
+    def exercise():
+        try:
+            available = dialog.screen().availableGeometry()
+            assert dialog.width() <= available.width()
+            assert dialog.height() <= available.height()
+            for size in ((1100, 760), (600, 360), (950, 640)):
+                dialog.resize(*size)
+                dialog.move(20, 30)
+                QTest.qWait(130)
+                assert dialog.size().toTuple() == size
+                assert dialog.pos().toTuple() == (20, 30)
+                geometry = dialog.geometry()
+                for profile_key in ("mark_ii", "enspire", "pianodisc_128plus", "custom"):
+                    combo = dialog.profile_combo
+                    combo.setCurrentIndex(combo.findData(profile_key))
+                    application.postEvent(dialog, QEvent(QEvent.Type.LayoutRequest))
+                    QTest.qWait(30)
+                    assert dialog.geometry() == geometry
+                    assert dialog.selection()[0].key == profile_key
+                    _assert_preparation_controls_fit(dialog)
+                    assert dialog.geometry() == geometry
+            dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel).click()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            if dialog.isVisible():
+                dialog.reject()
+
+    QTimer.singleShot(150, exercise)
+    assert parent._exec_child_dialog(dialog) == QDialog.DialogCode.Rejected
+    try:
+        if failures:
+            raise failures[0]
+        assert {key: parent.settings.value(key) for key in parent.settings.allKeys()} == before
+    finally:
+        dialog.deleteLater()

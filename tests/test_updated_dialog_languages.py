@@ -135,19 +135,30 @@ def test_pending_review_localizes_type_transition_details_and_close_button(appli
     host = _PendingReviewHost(language, str(tmp_path / "Original.mid"), report)
     inspected = []
 
-    def inspect_dialog(dialog):
+    def inspect_dialog(dialog, *, resize_to_contents=True):
+        assert resize_to_contents is False
         dialog.show()
         table = dialog.findChild(QTableWidget)
         table.selectRow(0)
         application.processEvents()
         assert table.rowCount() == 1
-        assert table.horizontalHeaderItem(2).text() == translate_text("Type", language)
-        assert table.item(0, 2).text() == " → ".join(
-            translate_text("Type {type}", language, type=kind) for kind in (2, 0)
-        )
-        assert table.item(0, 0).text() == "Original.mid\nOriginal title"
-        assert table.item(0, 1).text() == "Prepared.mid\nPrepared title"
-        assert dialog.findChild(QTextEdit).toPlainText().splitlines()[0] == _report_heading(language)
+        assert [table.horizontalHeaderItem(column).text() for column in range(3)] == [
+            tr("pending." + key, language)
+            for key in ("original_filename", "proposed_filename", "changes")
+        ]
+        assert table.item(0, 0).text() == "Original.mid"
+        assert table.item(0, 1).text() == "Prepared.mid"
+        assert table.item(0, 2).text() == "; ".join((
+            tr("pending.filename_changed", language),
+            tr("pending.title_changed", language),
+            _report_heading(language),
+        ))
+        details = dialog.findChild(QTextEdit).toPlainText()
+        assert _report_heading(language) in details
+        assert "Original title" in details and "Prepared title" in details
+        assert translate_text("Type", language) in details
+        for kind in (2, 0):
+            assert translate_text("Type {type}", language, type=kind) in details
         buttons = dialog.findChild(QDialogButtonBox)
         assert buttons.button(QDialogButtonBox.Close).text() == translate_text("Close", language)
         assert dialog.windowTitle() == tr("pending.review", language)

@@ -5,9 +5,9 @@ from html import escape
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHeaderView, QLabel, QStyledItemDelegate, QStyleOptionViewItem,
-    QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .icon_utils import apply_window_icon
@@ -50,11 +50,27 @@ class PreparationProfileDialog(QDialog):
         )
         self.song_counts = dict(song_counts or {})
         self.setWindowTitle(self.t("Preparing for..."))
-        self.resize(660, 360)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setSizeGripEnabled(True)
+        scale = max(1.0, self.fontMetrics().height() / 16)
+        available = self.screen().availableGeometry()
+        self.resize(min(round(850 * scale), available.width() - 40),
+                    min(round(600 * scale), available.height() - 60))
         layout = QVBoxLayout(self)
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setObjectName("preparationProfileScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.profile_combo = QComboBox()
         self.profile_combo.setObjectName("preparationProfileCombo")
+        self.profile_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.profile_combo.setMinimumContentsLength(16)
         self.profile_combo.view().setItemDelegate(_ProfilePopupDelegate(self.profile_combo.view()))
         for category, label in PIANO_PROFILE_CATEGORIES:
             profiles = [profile for profile in PIANO_PROFILES if profile.category == category]
@@ -75,22 +91,27 @@ class PreparationProfileDialog(QDialog):
         form.addRow(self.t("Piano / controller:"), self.profile_combo)
         self.medium_combo = QComboBox()
         self.medium_combo.setObjectName("preparationMediumCombo")
+        self.medium_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.medium_combo.setMinimumContentsLength(16)
         form.addRow(self.t("Drive / delivery:"), self.medium_combo)
-        layout.addLayout(form)
+        content_layout.addLayout(form)
         self.changes_table = QTableWidget(0, 3)
         self.changes_table.setObjectName("preparationChangesTable")
         self.changes_table.setHorizontalHeaderLabels([self.t(text) for text in ("Setting", "Current", "Proposed")])
         self.changes_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.changes_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.changes_table.horizontalHeader().sectionResized.connect(self.changes_table.resizeRowsToContents)
         self.changes_table.verticalHeader().hide()
-        layout.addWidget(self.changes_table, 1)
+        self.changes_table.setMinimumHeight(round(180 * scale))
+        content_layout.addWidget(self.changes_table, 1)
         self.manual_label = QLabel(self.t("Keep current settings"))
-        layout.addWidget(self.manual_label)
+        content_layout.addWidget(self.manual_label)
         self.preparation_note_label = QLabel()
         self.preparation_note_label.setObjectName("preparationNoteLabel")
         self.preparation_note_label.setWordWrap(True)
         self.preparation_note_label.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(self.preparation_note_label)
+        self.preparation_note_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        content_layout.addWidget(self.preparation_note_label)
         self.source_label = QLabel()
         self.source_label.setObjectName("preparationSourcesLabel")
         self.source_label.setWordWrap(True)
@@ -98,7 +119,10 @@ class PreparationProfileDialog(QDialog):
         source_font = self.source_label.font()
         source_font.setPointSizeF(max(8, source_font.pointSizeF() - 1))
         self.source_label.setFont(source_font)
-        layout.addWidget(self.source_label)
+        self.source_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        content_layout.addWidget(self.source_label)
+        self.scroll_area.setWidget(content)
+        layout.addWidget(self.scroll_area, 1)
         self.buttons = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Apply).setText(self.t("Apply and Prepare"))
         self.buttons.button(QDialogButtonBox.Cancel).setText(self.t("Cancel"))

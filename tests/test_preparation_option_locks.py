@@ -238,7 +238,7 @@ def test_new_bulk_job_explains_filename_lock_and_keeps_conversion_manual(window,
     window.settings.setValue(window.SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES, True)
     window.settings.setValue(window.SETTING_BULK_EXTRACTION_CONVERT_ESEQ, False)
 
-    def inspect(dialog):
+    def inspect(dialog, **_kwargs):
         names = _checkbox(dialog, window._t("bulk.long_filenames"))
         conversion = _checkbox(dialog, window._t("bulk.convert"))
         assert not names.isChecked()

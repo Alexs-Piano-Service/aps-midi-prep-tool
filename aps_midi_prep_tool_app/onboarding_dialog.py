@@ -246,8 +246,8 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             page_count_label.setText(onboarding_text(
                 "page_count", language_code, current=index + 1, total=len(pages)
             ))
-            dialog.adjustSize()
-            center_dialog_on_parent(dialog, parent)
+            # The layout may grow to accommodate a taller page, but switching
+            # workflows must preserve the user's window size and position.
 
         workflow_selector.currentIndexChanged.connect(set_page)
         back_button.clicked.connect(lambda: set_page(page_stack.currentIndex() - 1))

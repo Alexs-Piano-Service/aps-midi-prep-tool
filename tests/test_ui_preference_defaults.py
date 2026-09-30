@@ -49,7 +49,7 @@ def _assert_filename_dialog_defaults(window, monkeypatch, *, enabled, checked):
     monkeypatch.setattr(window, "_discover_floppy_devices", lambda: ([], []))
     seen = []
 
-    def inspect_dialog(dialog):
+    def inspect_dialog(dialog, **_kwargs):
         read_dialog = dialog.windowTitle() == "Read Floppy"
         controls = {checkbox.text(): checkbox for checkbox in dialog.findChildren(QCheckBox)}
         names = controls[window._lt("Name MIDI files by track number and song title") if read_dialog
@@ -272,7 +272,7 @@ def test_long_filename_controls_do_not_require_eseq_conversion(window, monkeypat
     monkeypatch.setattr(window, "_discover_floppy_devices", lambda: ([], []))
     seen = []
 
-    def inspect_dialog(dialog):
+    def inspect_dialog(dialog, **_kwargs):
         controls = {checkbox.text(): checkbox for checkbox in dialog.findChildren(QCheckBox)}
         names = controls[window._lt("Name MIDI files by track number and song title") if dialog_kind == "read"
                          else window._t("bulk.long_filenames")]

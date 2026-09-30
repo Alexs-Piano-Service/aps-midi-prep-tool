@@ -1,6 +1,6 @@
 """Application-language message boxes shared by primary and nested dialogs."""
 
-from PySide6.QtCore import QCoreApplication, QEvent, QLibraryInfo, QLocale, QTimer, QTranslator
+from PySide6.QtCore import QCoreApplication, QEvent, QLibraryInfo, QLocale, QTranslator
 from PySide6.QtWidgets import QDialogButtonBox, QMessageBox as QtQMessageBox
 
 from .icon_utils import apply_window_icon
@@ -181,7 +181,6 @@ class QMessageBox(QtQMessageBox):
             parent._center_child_dialog(box)
         else:
             center_dialog_on_parent(box, parent)
-            QTimer.singleShot(0, lambda: center_dialog_on_parent(box, parent))
         return box.exec()
 
     @staticmethod

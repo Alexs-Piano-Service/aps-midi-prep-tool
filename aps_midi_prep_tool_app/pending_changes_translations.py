@@ -19,6 +19,89 @@ PENDING_CHANGE_MESSAGES = {
     "pending." + key: {language: values[index] for language, values in _ROWS.items()}
     for index, key in enumerate(_KEYS)
 }
+_REVIEW_ROWS = {
+    "en": (
+        "Select a song to compare the original and proposed versions. Use Save or Save As in the main window to write the changes.",
+        "Original filename", "Proposed filename", "Filename changed", "Song title changed",
+        "Song added", "Song removed", "Select a song to see its changes.", "Undo Last Change",
+    ),
+    "es": (
+        "Seleccione una canción para comparar las versiones original y propuesta. Use Guardar o Guardar como en la ventana principal para guardar los cambios.",
+        "Nombre de archivo original", "Nombre de archivo propuesto", "Nombre de archivo cambiado", "Título de canción cambiado",
+        "Canción añadida", "Canción eliminada", "Seleccione una canción para ver sus cambios.", "Deshacer el último cambio",
+    ),
+    "fr": (
+        "Sélectionnez un morceau pour comparer les versions originale et proposée. Utilisez Enregistrer ou Enregistrer sous dans la fenêtre principale pour enregistrer les modifications.",
+        "Nom de fichier original", "Nom de fichier proposé", "Nom de fichier modifié", "Titre du morceau modifié",
+        "Morceau ajouté", "Morceau supprimé", "Sélectionnez un morceau pour voir ses modifications.", "Annuler la dernière modification",
+    ),
+    "de": (
+        "Wählen Sie ein Stück aus, um die ursprüngliche und die vorgeschlagene Version zu vergleichen. Verwenden Sie Speichern oder Speichern unter im Hauptfenster, um die Änderungen zu speichern.",
+        "Ursprünglicher Dateiname", "Vorgeschlagener Dateiname", "Dateiname geändert", "Titel des Stücks geändert",
+        "Stück hinzugefügt", "Stück entfernt", "Wählen Sie ein Stück aus, um seine Änderungen zu sehen.", "Letzte Änderung rückgängig machen",
+    ),
+    "it": (
+        "Seleziona un brano per confrontare la versione originale e quella proposta. Usa Salva o Salva con nome nella finestra principale per salvare le modifiche.",
+        "Nome file originale", "Nome file proposto", "Nome file modificato", "Titolo del brano modificato",
+        "Brano aggiunto", "Brano rimosso", "Seleziona un brano per vedere le modifiche.", "Annulla ultima modifica",
+    ),
+    "pt-BR": (
+        "Selecione uma música para comparar as versões original e proposta. Use Salvar ou Salvar como na janela principal para salvar as alterações.",
+        "Nome de arquivo original", "Nome de arquivo proposto", "Nome de arquivo alterado", "Título da música alterado",
+        "Música adicionada", "Música removida", "Selecione uma música para ver suas alterações.", "Desfazer última alteração",
+    ),
+    "bg": (
+        "Изберете песен, за да сравните оригиналната и предложената версия. Използвайте Запис или Запис като в главния прозорец, за да запазите промените.",
+        "Оригинално име на файла", "Предложено име на файла", "Променено име на файла", "Променено заглавие на песента",
+        "Добавена песен", "Премахната песен", "Изберете песен, за да видите промените по нея.", "Отмяна на последната промяна",
+    ),
+    "nl": (
+        "Selecteer een nummer om de oorspronkelijke en voorgestelde versie te vergelijken. Gebruik Opslaan of Opslaan als in het hoofdvenster om de wijzigingen op te slaan.",
+        "Oorspronkelijke bestandsnaam", "Voorgestelde bestandsnaam", "Bestandsnaam gewijzigd", "Titel van nummer gewijzigd",
+        "Nummer toegevoegd", "Nummer verwijderd", "Selecteer een nummer om de wijzigingen te bekijken.", "Laatste wijziging ongedaan maken",
+    ),
+    "pl": (
+        "Wybierz utwór, aby porównać wersję oryginalną i proponowaną. Użyj polecenia Zapisz lub Zapisz jako w oknie głównym, aby zapisać zmiany.",
+        "Oryginalna nazwa pliku", "Proponowana nazwa pliku", "Zmieniono nazwę pliku", "Zmieniono tytuł utworu",
+        "Dodano utwór", "Usunięto utwór", "Wybierz utwór, aby zobaczyć jego zmiany.", "Cofnij ostatnią zmianę",
+    ),
+    "ja": (
+        "曲を選択して、元の内容と変更後の内容を比較できます。変更を保存するには、メインウィンドウの「保存」または「名前を付けて保存」を使用してください。",
+        "元のファイル名", "変更後のファイル名", "ファイル名を変更", "曲名を変更",
+        "曲を追加", "曲を削除", "曲を選択すると変更内容が表示されます。", "最後の変更を元に戻す",
+    ),
+    "ko": (
+        "곡을 선택하여 원본과 변경 후 버전을 비교하세요. 변경 사항을 저장하려면 기본 창에서 저장 또는 다른 이름으로 저장을 사용하세요.",
+        "원본 파일 이름", "변경 후 파일 이름", "파일 이름 변경됨", "곡 제목 변경됨",
+        "곡 추가됨", "곡 제거됨", "곡을 선택하면 변경 사항이 표시됩니다.", "마지막 변경 실행 취소",
+    ),
+    "zh-Hans": (
+        "选择一首歌曲，比较原始版本和更改后的版本。使用主窗口中的“保存”或“另存为”来保存更改。",
+        "原始文件名", "更改后的文件名", "文件名已更改", "歌曲标题已更改",
+        "歌曲已添加", "歌曲已移除", "选择一首歌曲以查看其更改。", "撤销上次更改",
+    ),
+}
+for _index, _key in enumerate((
+    "review_help", "original_filename", "proposed_filename", "filename_changed", "title_changed",
+    "song_added", "song_removed", "select_song", "undo_last",
+)):
+    PENDING_CHANGE_MESSAGES["pending." + _key] = {
+        language: values[_index] for language, values in _REVIEW_ROWS.items()
+    }
+PENDING_CHANGE_MESSAGES["pending.discard_selected"] = {
+    "en": "Discard Selected Changes",
+    "es": "Descartar cambios seleccionados",
+    "fr": "Abandonner les modifications sélectionnées",
+    "de": "Ausgewählte Änderungen verwerfen",
+    "it": "Scarta modifiche selezionate",
+    "pt-BR": "Descartar alterações selecionadas",
+    "bg": "Отхвърляне на избраните промени",
+    "nl": "Geselecteerde wijzigingen verwerpen",
+    "pl": "Odrzuć wybrane zmiany",
+    "ja": "選択した変更を破棄",
+    "ko": "선택한 변경 사항 취소",
+    "zh-Hans": "放弃所选更改",
+}
 _UNDO_ROWS = {
     "en": ("Undo", "Undo All", "The last change was undone.", "Returned to the state before these changes."),
     "es": ("Deshacer", "Deshacer todo", "Se deshizo el último cambio.", "Se restauró el estado anterior a estos cambios."),

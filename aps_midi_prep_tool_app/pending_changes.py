@@ -8,13 +8,11 @@ import tempfile
 from functools import wraps
 
 from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QLabel,
-    QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout,
-)
+from PySide6.QtWidgets import QLabel, QTableWidgetItem
 
 from .localized_dialogs import QMessageBox
-from .message_catalog import tr, translate_text
+from .message_catalog import tr
+from .pending_changes_dialog import PendingChangesDialog
 from .preparation_profiles import PREPARATION_SETTING_KEYS
 from .conversion_review import ConversionReport, localize_music_error, localize_music_format
 from .drop_table_widget import zip_import_operation
@@ -505,67 +503,12 @@ class PendingChangesMixin:
             self._move_table_row(row, slot)
 
     def show_pending_changes(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle(self._pending_text("review"))
-        dialog.resize(880, 520)
-        layout = QVBoxLayout(dialog)
-        table = QTableWidget(0, 4, dialog)
-        table.setHorizontalHeaderLabels([self._pending_text("original"), self._pending_text("proposed"),
-                                         translate_text("Type", self._language_code()), self._pending_text("changes")])
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        layout.addWidget(table)
-        details = QTextEdit(dialog)
-        details.setReadOnly(True)
-        layout.addWidget(details)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close, dialog)
-        buttons.button(QDialogButtonBox.Close).setText(translate_text("Close", self._language_code()))
-        discard = buttons.addButton(self._pending_text("discard"), QDialogButtonBox.ActionRole)
-        undo = buttons.addButton(self._pending_text("undo"), QDialogButtonBox.ActionRole)
-        layout.addWidget(buttons)
-        review_rows = []
-
-        def refresh():
-            try:
-                review_rows[:] = self._pending_review_rows()
-            except Exception as exc:
-                details.setPlainText(str(exc))
-                return
-            table.setRowCount(len(review_rows))
-            for index, (path, original, proposed, kind, detail) in enumerate(review_rows):
-                preview = detail.splitlines()[0] if detail else ""
-                if len(preview) > 100:
-                    preview = preview[:97] + "…"
-                for column, value in enumerate((original, proposed, kind, preview)):
-                    table.setItem(index, column, QTableWidgetItem(value))
-            table.resizeColumnsToContents()
-            for column, maximum in enumerate((260, 260, 140, 240)):
-                table.setColumnWidth(column, min(table.columnWidth(column), maximum))
-            table.horizontalHeader().setStretchLastSection(True)
-            table.resizeRowsToContents()
-            undo.setEnabled(bool(self._staged_undo))
-            discard.setEnabled(False)
-
-        def selection_changed():
-            selected = sorted({index.row() for index in table.selectedIndexes()})
-            discard.setEnabled(bool(selected))
-            details.setPlainText("\n\n".join(review_rows[row][4] for row in selected))
-
-        def discard_selected():
-            selected = sorted({index.row() for index in table.selectedIndexes()})
-            try:
-                self.discard_staged_song_changes([review_rows[row][0] for row in selected])
-            except Exception as exc:
-                QMessageBox.warning(dialog, self._pending_text("review"), str(exc))
-            refresh()
-
-        table.itemSelectionChanged.connect(selection_changed)
-        discard.clicked.connect(discard_selected)
-        undo.clicked.connect(lambda: (self.undo_last_staged_batch(), refresh()))
-        buttons.rejected.connect(dialog.reject)
-        refresh()
-        self._exec_child_dialog(dialog)
+        self._commit_staged_metadata_edit()
+        dialog = PendingChangesDialog(self)
+        try:
+            self._exec_child_dialog(dialog, resize_to_contents=False)
+        finally:
+            dialog.deleteLater()
 
     @staged_batch
     def discard_staged_song_changes(self, paths):

@@ -1,9 +1,9 @@
 import os
 import sys
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFrame, QScrollArea, QVBoxLayout, QWidget
 from PySide6.QtGui import QPalette, QPixmap
-from PySide6.QtCore import QByteArray
+from PySide6.QtCore import QByteArray, Qt
 
 from .logo_assets import embedded_logo_dt, embedded_logo_lt
 
@@ -58,6 +58,39 @@ def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
         dialog_geometry.setSize(dialog.sizeHint())
     dialog_geometry.moveCenter(target_geometry.center())
     dialog.move(dialog_geometry.topLeft())
+
+
+def scrollable_dialog_layout(dialog, *, width, height, spacing=10):
+    """Give a form a scrollable body and room for an always-visible footer.
+
+    Size once, using the current font and available screen. Later resizing is
+    owned by Qt's layouts and the user, without queued fits to the size hint.
+    """
+    dialog.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+    dialog.setSizeGripEnabled(True)
+    scale = max(1.0, dialog.fontMetrics().height() / 16.0)
+    width, height = round(width * scale), round(height * scale)
+    screen = dialog.screen() or QApplication.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        width = min(width, max(1, available.width() - 40))
+        height = min(height, max(1, available.height() - 60))
+    dialog.resize(width, height)
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(18, 18, 18, 18)
+    layout.setSpacing(spacing)
+    scroll_area = QScrollArea(dialog)
+    scroll_area.setObjectName("dialogScrollArea")
+    scroll_area.setWidgetResizable(True)
+    scroll_area.setFrameShape(QFrame.NoFrame)
+    body = QWidget(scroll_area)
+    content = QVBoxLayout(body)
+    content.setContentsMargins(0, 0, 0, 0)
+    content.setSpacing(spacing)
+    scroll_area.setWidget(body)
+    layout.addWidget(scroll_area, 1)
+    return layout, content
 
 
 def resource_path(relative_path):

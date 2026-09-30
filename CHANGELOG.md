@@ -9,6 +9,9 @@ with release sections grouped by version and date.
 
 ### Added
 
+- Developer playback tests render converted E-SEQ files with FluidSynth and
+  check audible notes, pitches, rests, tempo changes, and volume-mute behavior.
+  Linux CI requires these checks; they add no end-user application behavior.
 - **Update and restart** downloads and verifies a published release, then
   updates the running standalone Windows EXE or Linux AppImage in place,
   including copies on USB drives. It resolves pending edits, defers during disk
@@ -44,6 +47,10 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- **Review Changes** opens larger, with a resizable split between the song list
+  and a full original/proposed comparison. Summaries identify filename and title
+  edits, and the first song's details appear immediately. Resizing no longer
+  triggers automatic shrinking and recentering.
 - Conversion dialogs, progress messages, and change reviews consistently use
   **E-SEQ**. E-SEQ-to-MIDI conversion automatically removes Yamaha startup
   volume mutes, including for ENSPIRE preparation, extraction, and MIDI copies.
@@ -94,6 +101,21 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Resizable forms keep the user's chosen size and position instead of repeatedly
+  fitting and recentering during resize. Bulk Extraction has a scrollable form
+  with Extract and Cancel always visible, including on smaller screens.
+- **Overlapping Piano Notes** keeps its controls together when enlarged and
+  scrolls on smaller windows. Changing overlap behavior preserves the window's
+  size and position, with Save / Merge Channels and Cancel kept visible.
+- **Keyboard Shortcuts** keeps its table and buttons usable while resizing.
+  A temporary shortcut editor no longer appears over the table header, and
+  duplicate-shortcut warnings keep the editor open at the chosen size and position.
+- **About**, **Disclaimer**, **Report a Bug**, **Send Feedback**, and
+  **Preparing for...** fit the screen and scroll when needed, with action buttons
+  kept visible. Preparation table rows rewrap as columns resize, and translated
+  bug-report questions remain readable in narrow windows. Floppy options and
+  Welcome page changes preserve the chosen window size; progress updates and
+  message details no longer automatically recenter an open window.
 - Image saves stage and sync completed output beside the destination before
   replacing it. Cross-filesystem copy failures leave existing images intact.
 - E-SEQ conversion and channel merging respect valid declared stream lengths,

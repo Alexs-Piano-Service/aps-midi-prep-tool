@@ -3,8 +3,12 @@
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel
+from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtGui import QFont
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel, QScrollArea,
+)
 
 from aps_midi_prep_tool_app.eseq_converter import convert_midi_bytes_to_eseq_bytes
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translate_text
@@ -24,7 +28,7 @@ def _source(tmp_path, overlapping=True, native=False, name="SONG"):
 def _dialog_choice(monkeypatch, window, mode="retrigger", remember=False, accepted=True):
     seen = []
 
-    def choose(dialog):
+    def choose(dialog, **_kwargs):
         assert dialog.windowTitle() == window._lt("Overlapping Piano Notes")
         combo = dialog.findChild(QComboBox, "pianoOverlapBehavior")
         checkbox = dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior")
@@ -152,7 +156,7 @@ def test_settings_changes_saved_behavior_and_can_restore_prompting(window, monke
     before = window._staged_signature()
     seen = []
 
-    def edit(dialog):
+    def edit(dialog, **_kwargs):
         seen.append(dialog)
         combo = dialog.findChild(QComboBox, "pianoOverlapBehavior")
         checkbox = dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior")
@@ -187,7 +191,7 @@ def test_settings_defaults_require_opt_in(window, monkeypatch, mode, automatic):
         window.settings.setValue(window.SETTING_PIANO_OVERLAP_MODE, mode)
         window.settings.setValue(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, automatic)
 
-    def save_defaults(dialog):
+    def save_defaults(dialog, **_kwargs):
         assert dialog.findChild(QComboBox, "pianoOverlapBehavior").currentData() == "smart"
         assert not dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior").isChecked()
         return QDialog.Accepted
@@ -205,7 +209,7 @@ def test_cancelling_settings_preserves_preferences(window, monkeypatch, automati
     window.settings.setValue(window.SETTING_PIANO_OVERLAP_MODE, "off")
     window.settings.setValue(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, automatic)
 
-    def cancel(dialog):
+    def cancel(dialog, **_kwargs):
         combo = dialog.findChild(QComboBox, "pianoOverlapBehavior")
         combo.setCurrentIndex(combo.findData("retrigger"))
         dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior").setChecked(not automatic)
@@ -252,7 +256,7 @@ def test_overlap_dialog_is_localized(window, monkeypatch, language, editing_sett
     )
     seen = []
 
-    def inspect(dialog):
+    def inspect(dialog, **_kwargs):
         seen.append(dialog)
         expected = lambda source: translate_text(source, language)
         assert dialog.windowTitle() == expected("Overlapping Piano Notes")
@@ -276,3 +280,169 @@ def test_overlap_dialog_is_localized(window, monkeypatch, language, editing_sett
     else:
         assert window._piano_overlap_behavior("SONG.MID", 2) is None
     assert len(seen) == 1
+
+
+@pytest.fixture
+def dialog_font(window):
+    application = QApplication.instance()
+    original = QFont(application.font())
+
+    def set_size(size):
+        font = QFont(window.font().family(), size)
+        application.setFont(font)
+        window.setFont(font)
+
+    yield set_size
+    application.setFont(original)
+
+
+def _run_visible_overlap_dialog(window, monkeypatch, editing_settings, exercise):
+    execute = window._exec_child_dialog
+    failures = []
+
+    def inspect(dialog, **kwargs):
+        assert kwargs.get("resize_to_contents") is False
+
+        def inspect_visible():
+            try:
+                exercise(dialog)
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                if dialog.isVisible():
+                    dialog.reject()
+
+        QTimer.singleShot(150, inspect_visible)
+        return execute(dialog, **kwargs)
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect)
+    filename = None if editing_settings else "A piano performance with repeated notes.MID"
+    assert window._piano_overlap_options_dialog(filename=filename, count=25) is None
+    if failures:
+        raise failures[0]
+
+
+def _assert_overlap_buttons_accessible(dialog, editing_settings):
+    boxes = dialog.findChildren(QDialogButtonBox)
+    assert len(boxes) == 1
+    buttons = boxes[0]
+    scroll = dialog.findChild(QScrollArea)
+    assert scroll is not None
+    assert dialog.rect().contains(scroll.geometry())
+    assert dialog.rect().contains(buttons.geometry())
+    assert scroll.geometry().bottom() < buttons.geometry().top()
+    accept = buttons.button(QDialogButtonBox.Save if editing_settings else QDialogButtonBox.Ok)
+    cancel = buttons.button(QDialogButtonBox.Cancel)
+    assert not accept.geometry().intersects(cancel.geometry())
+    for button in (accept, cancel):
+        assert button.isVisible()
+        assert buttons.rect().contains(button.geometry())
+        assert button.width() >= button.sizeHint().width()
+
+
+def _assert_overlap_description_accessible(dialog):
+    scroll = dialog.findChild(QScrollArea)
+    description = dialog.findChild(QLabel, "pianoOverlapDescription")
+    assert description is not None
+    scroll.ensureWidgetVisible(description)
+    QTest.qWait(30)
+    assert not description.visibleRegion().isEmpty()
+    assert description.height() >= description.heightForWidth(description.width())
+    assert scroll.horizontalScrollBar().maximum() == 0
+
+
+@pytest.mark.parametrize("editing_settings", [False, True], ids=["song", "settings"])
+@pytest.mark.parametrize("font_size", [9, 14])
+def test_live_overlap_dialog_keeps_user_geometry_and_cancelled_preferences(
+    window, monkeypatch, dialog_font, editing_settings, font_size,
+):
+    dialog_font(font_size)
+    window.settings.setValue(window.SETTING_PIANO_OVERLAP_MODE, "off")
+    window.settings.setValue(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, True)
+
+    def exercise(dialog):
+        assert dialog.font().pointSize() == font_size
+        available = dialog.screen().availableGeometry()
+        assert dialog.width() <= available.width()
+        assert dialog.height() <= available.height()
+        behavior = dialog.findChild(QComboBox, "pianoOverlapBehavior")
+        remember = dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior")
+        for size in ((1100, 800), (700, 360), (960, 680)):
+            dialog.resize(*size)
+            dialog.move(20, 30)
+            QTest.qWait(130)
+            assert dialog.size().toTuple() == size
+            assert dialog.pos().toTuple() == (20, 30)
+            geometry = dialog.geometry()
+            descriptions = set()
+            for mode in ("off", "smart", "retrigger"):
+                behavior.setCurrentIndex(behavior.findData(mode))
+                remember.setChecked(not remember.isChecked())
+                QTest.qWait(130)
+                assert dialog.geometry() == geometry
+                assert behavior.currentData() == mode
+                _assert_overlap_buttons_accessible(dialog, editing_settings)
+                _assert_overlap_description_accessible(dialog)
+                descriptions.add(dialog.findChild(QLabel, "pianoOverlapDescription").text())
+                assert dialog.geometry() == geometry
+            assert len(descriptions) == 3
+        scroll = dialog.findChild(QScrollArea)
+        scroll.ensureWidgetVisible(remember)
+        QTest.qWait(30)
+        was_checked = remember.isChecked()
+        caption = remember.findChild(QLabel)
+        assert caption is not None
+        assert caption.text() == remember.text()
+        caption_position = caption.mapTo(dialog, caption.rect().center())
+        QTest.mouseClick(dialog.windowHandle(), Qt.LeftButton, pos=caption_position)
+        assert remember.isChecked() is not was_checked
+        remember.setFocus()
+        QTest.keyClick(remember, Qt.Key_Space)
+        assert remember.isChecked() is was_checked
+        assert dialog.geometry() == geometry
+        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Cancel).click()
+
+    _run_visible_overlap_dialog(window, monkeypatch, editing_settings, exercise)
+    assert window.settings.value(window.SETTING_PIANO_OVERLAP_MODE) == "off"
+    assert window.settings.value(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, type=bool)
+
+
+@pytest.mark.parametrize("language", [language.code for language in SUPPORTED_LANGUAGES])
+@pytest.mark.parametrize("editing_settings", [False, True], ids=["song", "settings"])
+def test_overlap_translations_remain_accessible_at_large_font_and_small_window(
+    window, monkeypatch, dialog_font, language, editing_settings,
+):
+    window.currentLanguage = language
+    dialog_font(14)
+
+    def exercise(dialog):
+        assert dialog.windowTitle() == translate_text("Overlapping Piano Notes", language)
+        _assert_overlap_buttons_accessible(dialog, editing_settings)
+        dialog.resize(600, 360)
+        dialog.move(20, 30)
+        QTest.qWait(130)
+        assert dialog.size().toTuple() == (600, 360)
+        geometry = dialog.geometry()
+        behavior = dialog.findChild(QComboBox, "pianoOverlapBehavior")
+        for index in range(3):
+            behavior.setCurrentIndex(index)
+            QTest.qWait(130)
+            assert dialog.geometry() == geometry
+            _assert_overlap_buttons_accessible(dialog, editing_settings)
+            _assert_overlap_description_accessible(dialog)
+        scroll = dialog.findChild(QScrollArea)
+        remember = dialog.findChild(QCheckBox, "rememberPianoOverlapBehavior")
+        scroll.ensureWidgetVisible(remember)
+        QTest.qWait(30)
+        assert not remember.visibleRegion().isEmpty()
+        caption = remember.findChild(QLabel)
+        assert caption is not None
+        assert caption.text() == translate_text("Use this behavior for all future channel merges", language)
+        assert caption.height() >= caption.heightForWidth(caption.width())
+        assert remember.rect().contains(caption.geometry())
+        assert scroll.horizontalScrollBar().maximum() == 0
+        assert dialog.geometry() == geometry
+
+    _run_visible_overlap_dialog(window, monkeypatch, editing_settings, exercise)
+    assert not window.settings.contains(window.SETTING_PIANO_OVERLAP_MODE)
+    assert not window.settings.value(window.SETTING_SKIP_PIANO_OVERLAP_DIALOG, False, type=bool)

@@ -43,6 +43,33 @@ translation-catalog consistency. When changing floppy, image, E-SEQ, or MIDI
 conversion behavior, test with copies of representative files and note what
 workflow you verified.
 
+### E-SEQ conversion playback checks
+
+Run the developer-only audio tests to verify that converted MIDI makes sound:
+
+```bash
+python -m pytest -q tests/audio --audio-require-tools
+```
+
+These tests convert handcrafted Disklavier FIL, Q11, and Clavinova MDA files
+through the normal file converter, then render the resulting MIDI with real
+FluidSynth. They measure sound levels and expected pitches during several notes,
+quiet rests, tempo changes, and startup/intentional volume mutes. A deliberately
+silent conversion must fail the same musical-output check. Fixtures are original
+test phrases; no customer music or copyrighted song library is included.
+
+Install FluidSynth and a General MIDI piano SoundFont (on Debian/Ubuntu,
+`sudo apt-get install fluidsynth timgm6mb-soundfont`). To use other installations,
+set `APS_TEST_FLUIDSYNTH` to the executable and `APS_TEST_SOUNDFONT` to the
+SoundFont file. Rendering runs offline without speakers or a MIDI device, and
+temporary MIDI/WAV files stay in pytest's temporary directory. No playback test
+is added to the end-user application.
+
+The ordinary suite skips these checks if tools are unavailable; the command
+above fails in that case. Linux CI installs the tools and requires the checks
+using `APS_REQUIRE_AUDIO_TESTS=1`. Passing verifies these known musical phrases;
+it does not certify every external E-SEQ file or a physical piano's response.
+
 ## CI and release tags
 
 Both local Windows builds and the signed workflow invoke
