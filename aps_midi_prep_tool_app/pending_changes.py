@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 from functools import wraps
 
 from PySide6.QtCore import QEvent, QObject, Qt
@@ -17,19 +18,21 @@ from .preparation_profiles import PREPARATION_SETTING_KEYS
 from .conversion_review import ConversionReport, localize_music_error, localize_music_format
 from .drop_table_widget import zip_import_operation
 from .eseq_pianodir import PianodirMetadata
+from .preparation_layer import PREPARATION_ID_ROLE, PreparationLayer
 
 
 _STATE_FIELDS = (
     "pendingEdits", "pendingRegularConversions", "pendingRegularRenames",
     "pendingRegularOrderKeyEdits", "listedFileInfo", "regularEseqMode",
     "regularEseqVariant", "regularHasPianodir", "regularPianodirPopulated",
-    "regularPianodirSourcePath", "loadedRegularEseqPaths",
+    "regularPianodirSourcePath", "loadedRegularEseqPaths", "loadedRegularPianodirMetadata",
+    "regularTitlesLikelyCentered",
     "pendingImageRenames", "pendingImageTitleEdits", "pendingImageDeletes",
     "pendingImageAdditions", "pendingImageReplacements", "pendingImageExportFilenames",
     "pendingSmartPianoSoftTitleEdits", "pendingSmartPianoSoftCatalogReplacement",
     "imageFileInfo", "imageEseqMode", "imageEseqVariant", "imageHasPianodir",
     "imagePianodirPopulated", "pendingGeneratePianodir", "pendingDeletePianodir",
-    "pendingExportPianodirMetadata",
+    "pendingExportPianodirMetadata", "loadedImagePianodirMetadata", "imageTitlesLikelyCentered",
 )
 
 
@@ -55,6 +58,50 @@ def staged_batch(method):
     return wrapped
 
 
+def manual_midi_batch(method):
+    """Run a row utility before automatic preparation, with one Undo action."""
+    @staged_batch
+    @wraps(method)
+    def wrapped(self, rows, *args, **kwargs):
+        run = getattr(self, "_run_manual_midi_edit", None)
+        if run is None:
+            return method(self, rows, *args, **kwargs)
+        return run(rows, lambda selected: method(self, selected, *args, **kwargs))
+    return wrapped
+
+
+def manual_midi_inspection_action(method):
+    """Adapt an inspection action's source identity to the same edit boundary."""
+    @staged_batch
+    @wraps(method)
+    def wrapped(self, item, action):
+        source = str(item.get("source_path") or "")
+        row = next((row for row in range(self.table.rowCount())
+                    if self.table.item(row, 1) is not None
+                    and self.table.item(row, 1).text() == source), None)
+        run = getattr(self, "_run_manual_midi_edit", None)
+        if row is None or run is None:
+            return method(self, item, action)
+
+        def apply(selected):
+            updated = dict(item)
+            if selected:
+                updated["source_path"] = selected[0][1]
+            return method(self, updated, action)
+
+        identity = self.table.item(row, 1).data(PREPARATION_ID_ROLE)
+        result = run([(row, source)], apply)
+        if identity and isinstance(result, dict) and "item" in result:
+            current_path = next((self.table.item(index, 1).text()
+                                 for index in range(self.table.rowCount())
+                                 if self.table.item(index, 1) is not None
+                                 and self.table.item(index, 1).data(PREPARATION_ID_ROLE) == identity), source)
+            result["item"] = next((candidate for candidate in self._inspection_items()
+                                   if candidate.get("source_path") == current_path), result["item"])
+        return result
+    return wrapped
+
+
 class _MetadataUndoFilter(QObject):
     def __init__(self, window):
         super().__init__(window)
@@ -72,6 +119,12 @@ class PendingChangesMixin:
         for name in _STATE_FIELDS:
             yield getattr(self, name, None)
         snapshots = list(getattr(self, "_staged_undo_stack", ()))
+        layers = list(getattr(self, "_preparation_layers", ()))
+        current_layer = getattr(self, "_preparation_layer", None)
+        if current_layer is not None:
+            layers.append(current_layer)
+        for layer in layers:
+            snapshots.extend((layer.before, layer.after))
         metadata_edit = getattr(self, "_staged_metadata_edit", None)
         if metadata_edit:
             snapshots.append(metadata_edit[1])
@@ -91,6 +144,8 @@ class PendingChangesMixin:
         self._undo_all_requires_source_reset = False
         self._staged_metadata_edit = None
         self._restored_staging_assets = []
+        self._preparation_layer = None
+        self._preparation_layers = []
         self._pending_review_initialized = True
         self.saveDestinationLabel = QLabel()
         self.saveDestinationLabel.setWordWrap(True)
@@ -177,7 +232,13 @@ class PendingChangesMixin:
                     for key in PREPARATION_SETTING_KEYS}
         return state, rows, self.imagePianodirTitleEdit.text(), self.imagePianodirCatalogEdit.text(), settings
 
-    def _capture_staged_state(self):
+    def _capture_staged_state(self, *, include_preparation_layer=True):
+        # Paths of newly added image songs change during format conversion and
+        # renaming. Item data survives both operations and snapshot restoration.
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            if item is not None and not item.data(PREPARATION_ID_ROLE):
+                item.setData(PREPARATION_ID_ROLE, uuid.uuid4().hex)
         signature = self._staged_signature()
         assets = tempfile.TemporaryDirectory(prefix="aps_undo_")
         copies = {}
@@ -207,7 +268,111 @@ class PendingChangesMixin:
                      for row in range(self.table.rowCount())],
             "album": self.imagePianodirTitleEdit.text(),
             "catalog": self.imagePianodirCatalogEdit.text(),
+            "preparation_layer": getattr(self, "_preparation_layer", None) if include_preparation_layer else None,
         }
+
+    def _remove_preparation_layer(self):
+        layer = getattr(self, "_preparation_layer", None)
+        if layer is None:
+            return
+        self._commit_staged_metadata_edit()
+        current = self._capture_staged_state(include_preparation_layer=False)
+        try:
+            rebased = layer.rebase(
+                current, raw_title_role=self.TITLE_RAW_ROLE,
+                edited_title_role=self.TITLE_EDITED_ROLE, image_mode=self.is_image_mode(),
+            )
+        except Exception:
+            current["assets"].cleanup()
+            raise
+        self._restore_staged_snapshot(rebased)
+
+    def _begin_preparation_layer(self):
+        if not getattr(self, "_pending_review_initialized", False):
+            return None
+        self._remove_preparation_layer()
+        return self._capture_staged_state(include_preparation_layer=False)
+
+    def _finish_preparation_layer(self, before):
+        if before is None:
+            return
+        after = self._capture_staged_state(include_preparation_layer=False)
+        layer = PreparationLayer(before, after)
+        self._preparation_layer = layer
+        # Undo may still reference an older immutable layer. Their asset owners
+        # are retained until session history is cleared, just like restored Undo.
+        self._preparation_layers.append(layer)
+
+    def _commit_preparation_paths(self, paths):
+        layer = getattr(self, "_preparation_layer", None)
+        if layer is None:
+            return
+        rows = [[self.table.item(row, column) for column in range(self.table.columnCount())]
+                for row in range(self.table.rowCount())]
+        self._preparation_layer = layer.without_paths(set(paths), rows)
+
+    def _run_manual_midi_edit(self, rows, operation):
+        """Apply MIDI edits to retained MIDI sources, then prepare their output.
+
+        A MIDI-only utility still needs the prepared MIDI representation of a
+        native E-SEQ source. Those selected rows keep that representation, and
+        its explicitly edited bytes become their manual layer. Native MIDI
+        songs retain their original track structure and metadata until the
+        utility itself deliberately changes them.
+        """
+        layer = getattr(self, "_preparation_layer", None)
+        if (layer is None or getattr(self, "_preparing_destination", False)
+                or not self._preparation_profile().song_format):
+            return operation(rows)
+        # A dialog can retain row numbers while the table is reordered. Resolve
+        # its source paths first so an edit never follows a new row occupant.
+        current_rows = {self.table.item(row, 1).text(): row for row in range(self.table.rowCount())
+                        if self.table.item(row, 1) is not None}
+        rows = [(current_rows[path], path) for _row, path in rows if path in current_rows]
+        selected = {self.table.item(row, 1).data(PREPARATION_ID_ROLE)
+                    for row, _path in rows if self.table.item(row, 1) is not None}
+        info_field = "imageFileInfo" if self.is_image_mode() else "listedFileInfo"
+        native_midi = {
+            row[1].data(PREPARATION_ID_ROLE)
+            for row in layer.before["rows"] if row[1] is not None
+            and layer.before["state"].get(info_field, {}).get(row[1].text(), {}).get("title_mode") == "midi"
+        } & selected
+        if not native_midi:
+            return operation(rows)
+
+        sorting_enabled = self.table.isSortingEnabled()
+        header = self.table.horizontalHeader()
+        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
+        prepared = self._capture_staged_state()
+        excluded_paths = {row[1].text() for row in prepared["rows"] if row[1] is not None
+                          and row[1].data(PREPARATION_ID_ROLE) not in native_midi}
+        partial = layer.without_paths(excluded_paths, prepared["rows"])
+        rebased = partial.rebase(
+            prepared, raw_title_role=self.TITLE_RAW_ROLE,
+            edited_title_role=self.TITLE_EDITED_ROLE, image_mode=self.is_image_mode(),
+        )
+        self._destination_preparation_queued = False
+        self._restore_staged_snapshot(rebased)
+        self._preparation_layer = layer
+        remapped = [(row, self.table.item(row, 1).text()) for row in range(self.table.rowCount())
+                    if self.table.item(row, 1) is not None
+                    and self.table.item(row, 1).data(PREPARATION_ID_ROLE) in selected]
+        before_edit = self._staged_signature()
+        try:
+            return operation(remapped)
+        finally:
+            status = self.status_label.text()
+            if before_edit == self._staged_signature():
+                # A canceled/no-op utility must not manufacture a manual edit
+                # from the temporary removal of preparation. Its original
+                # staged files still exist, so preserve their exact identities.
+                unchanged = dict(prepared, copies={})
+                self._restore_staged_snapshot(unchanged)
+                header.setSortIndicator(sort_column, sort_order)
+                self.table.setSortingEnabled(sorting_enabled)
+            else:
+                self._prepare_for_destination()
+            self.status_label.setText(status)
 
     @zip_import_operation
     def _invalidate_staged_undo(self):
@@ -225,6 +390,11 @@ class PendingChangesMixin:
     def _clear_staging_history(self):
         self._invalidate_staged_undo()
         self._undo_all_requires_source_reset = False
+        self._preparation_layer = None
+        for layer in getattr(self, "_preparation_layers", []):
+            layer.before["assets"].cleanup()
+            layer.after["assets"].cleanup()
+        self._preparation_layers = []
         for assets in getattr(self, "_restored_staging_assets", []):
             assets.cleanup()
         self._restored_staging_assets = []
@@ -294,6 +464,7 @@ class PendingChangesMixin:
             self._staging_depth = 0
 
     def _restore_staged_snapshot(self, snapshot):
+        previous_depth = getattr(self, "_staging_depth", 0)
         state = copy.deepcopy(snapshot["state"])
         copies = snapshot["copies"]
         for field in ("pendingImageAdditions", "pendingImageReplacements"):
@@ -305,6 +476,7 @@ class PendingChangesMixin:
         state["pendingSmartPianoSoftCatalogReplacement"] = copies.get(catalog_path, catalog_path)
         for key, value in state.items():
             setattr(self, key, value)
+        self._preparation_layer = snapshot.get("preparation_layer")
         for key, (existed, value) in snapshot.get("settings", {}).items():
             if existed:
                 self.settings.setValue(key, value)
@@ -324,7 +496,7 @@ class PendingChangesMixin:
             self._restored_staging_assets.append(snapshot["assets"])
             self._refresh_after_pending_restore()
         finally:
-            self._staging_depth = 0
+            self._staging_depth = previous_depth
         self._refresh_pending_changes_ui()
 
     def _refresh_after_pending_restore(self):
@@ -366,6 +538,9 @@ class PendingChangesMixin:
         return paths
 
     def _refresh_pending_changes_ui(self, *_signal_args):
+        refresh_overlap = getattr(self, "_refresh_overlap_repair_state", None)
+        if refresh_overlap is not None:
+            refresh_overlap()
         if not getattr(self, "_pending_review_initialized", False):
             return
         count = len(self._pending_song_paths())
@@ -376,7 +551,9 @@ class PendingChangesMixin:
         busy = (bool(getattr(self, "_staging_depth", 0)) or
                 (getattr(self, "choose_button", None) is not None and not self.choose_button.isEnabled()))
         for name, available in (("editUndoAction", can_undo),
-                                ("editUndoAllAction", self._can_undo_all_staged_changes())):
+                                ("editUndoAllAction", self._can_undo_all_staged_changes()),
+                                ("editResetPreparationAction", bool(getattr(self, "_preparation_layer", None)
+                                    or self._preparation_profile().song_format))):
             action = getattr(self, name, None)
             if action is not None:
                 action.setEnabled(available and not busy)
@@ -512,6 +689,7 @@ class PendingChangesMixin:
 
     @staged_batch
     def discard_staged_song_changes(self, paths):
+        paths = tuple(paths)
         self.table.setSortingEnabled(False)
         for path in paths:
             row = next((r for r in range(self.table.rowCount())
@@ -523,7 +701,16 @@ class PendingChangesMixin:
                     if row >= 0:
                         self.table.removeRow(row)
                 else:
+                    identity = (self.table.item(row, 1).data(PREPARATION_ID_ROLE)
+                                if row >= 0 else None)
                     material = self.image_session.extract_file(path)
+                    # Probing consults the staged filename when deciding which
+                    # container to inspect. Remove its automatic suffix before
+                    # reading the immutable image entry again.
+                    for field in ("pendingImageRenames", "pendingImageTitleEdits",
+                                  "pendingImageReplacements", "pendingImageExportFilenames"):
+                        getattr(self, field).pop(path, None)
+                    self.imageFileInfo.pop(path, None)
                     self._probe_image_file(path, os.path.getsize(material), material)
                     self.pendingImageDeletes.discard(path)
                     if path in self.pendingSmartPianoSoftTitleEdits:
@@ -545,6 +732,8 @@ class PendingChangesMixin:
                     self.add_image_table_row(path, os.path.basename(path), info.get("size", 0),
                                              title=info.get("title", ""), midi_type=info.get("midi_type", ""),
                                              order_key=info.get("order_key", b""))
+                    if identity:
+                        self.table.item(self.table.rowCount() - 1, 1).setData(PREPARATION_ID_ROLE, identity)
                     if row >= 0 and row != self.table.rowCount() - 1:
                         self._move_table_row(self.table.rowCount() - 1, row)
                 for field in ("pendingImageRenames", "pendingImageTitleEdits", "pendingImageReplacements", "pendingImageExportFilenames"):
@@ -562,4 +751,7 @@ class PendingChangesMixin:
                     self._update_midi_type_indicator(row, midi_type)
                     self._update_compat_indicator(row, title)
         self._restore_selected_song_positions(paths)
+        # Explicit discard establishes the actual source as this song's new
+        # baseline; earlier manual edits must not revive on the next switch.
+        self._commit_preparation_paths(paths)
         self._refresh_after_pending_restore()

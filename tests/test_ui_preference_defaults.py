@@ -116,6 +116,9 @@ def test_view_checks_mean_visible_and_preserve_preference_keys(
 def test_profile_defaults_match_controller_and_medium(profile):
     for medium_key in profile.media:
         changes = proposed_settings(profile, get_preparation_medium(profile, medium_key))
+        if profile.key == "custom":
+            assert changes == {}
+            continue
         assert changes["format_disklavier_screen"] is (
             profile.key in {"mark_i", "mark_ii", "mark_ii_xg", "mark_iii"}
         )
@@ -131,8 +134,15 @@ def test_restored_profile_supplies_missing_title_and_filename_defaults(window, m
     try:
         profile = get_preparation_profile(key)
         changes = proposed_settings(profile, get_preparation_medium(profile, ""))
-        assert restored.format_disklavier_checkbox.isChecked() is changes["format_disklavier_screen"]
-        assert restored._long_midi_filenames_enabled() is changes["long_midi_filenames"]
+        if key == "custom":
+            # With no saved preferences, manual mode uses the application's
+            # initial defaults; selecting Custom itself proposes no changes.
+            assert changes == {}
+            assert not restored.format_disklavier_checkbox.isChecked()
+            assert restored._long_midi_filenames_enabled()
+        else:
+            assert restored.format_disklavier_checkbox.isChecked() is changes["format_disklavier_screen"]
+            assert restored._long_midi_filenames_enabled() is changes["long_midi_filenames"]
     finally:
         restored.close()
 
@@ -217,11 +227,25 @@ def test_profile_switch_and_undo_restore_screen_controls_and_manual_overrides(wi
     assert window.viewFormatDisklavierScreenAction.isChecked()
     assert not window._long_midi_filenames_enabled()
     _apply(window, "custom")
-    assert not window.format_disklavier_checkbox.isChecked()
-    assert window._long_midi_filenames_enabled()
-    window.undo_last_staged_batch()
+    assert window._preparation_profile().key == "custom"
     assert window.format_disklavier_checkbox.isChecked()
     assert window.viewFormatDisklavierScreenAction.isChecked()
+    assert not window._long_midi_filenames_enabled()
+    assert window.settingsUseDos83FilenamesAction.isEnabled()
+    assert window.settingsUseDos83FilenamesAction.isChecked()
+    window.format_disklavier_checkbox.setChecked(False)
+    window.toggle_dos83_filenames(False)
+    window._set_long_midi_filenames_enabled(True)
+    assert not window.format_disklavier_checkbox.isChecked()
+    assert not window.viewFormatDisklavierScreenAction.isChecked()
+    assert not window.settingsUseDos83FilenamesAction.isChecked()
+    assert window._long_midi_filenames_enabled()
+    window.undo_last_staged_batch()
+    assert window._preparation_profile().key == "mark_ii"
+    assert window.format_disklavier_checkbox.isChecked()
+    assert window.viewFormatDisklavierScreenAction.isChecked()
+    assert not window.settingsUseDos83FilenamesAction.isEnabled()
+    assert window.settingsUseDos83FilenamesAction.isChecked()
     assert not window._long_midi_filenames_enabled()
     window.format_disklavier_checkbox.setChecked(False)
     assert not window.settings.value("format_disklavier_screen", type=bool)

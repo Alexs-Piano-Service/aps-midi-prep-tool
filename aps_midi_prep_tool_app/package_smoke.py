@@ -1,7 +1,7 @@
 """Exercise the installed application's UI, image tools and MP3 encoder.
 
 This command uses only bundled application code and standard-library fixtures.
-The Windows runner supplies a fresh working directory, restricted PATH and a
+The package runner supplies a fresh working directory, restricted PATH and a
 process-tree deadline. A source-mode run is useful for development but is
 explicitly distinguished from frozen-package acceptance in the report.
 """
@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -19,10 +20,11 @@ import traceback
 import wave
 
 from .app_info import APP_VERSION
+from .build_info import build_identity
 
 SMOKE_ARGUMENT = "--aps-package-smoke"
 REPORT_FILENAME = "package-smoke.json"
-CASE_NAMES = ("ui", "img", "hfe", "mp3")
+CASE_NAMES = ("ui", "img", "image_source_changes", "hfe", "mp3")
 
 
 def _sha256(path):
@@ -137,6 +139,84 @@ def _check_img(directory, state):
     return {"files_verified": len(expected), "sha256": _sha256(img)}
 
 
+def _check_image_source_changes(directory, state):
+    from .floppy_image import FloppyImageError, _copy_host_file_into_image, _require_command
+
+    if "img" not in state:
+        raise RuntimeError("IMG creation must pass before the external-change check can run.")
+    # Modify a disposable copy directly through mcopy while the editor keeps
+    # its original working image. This reproduces an edit outside the app.
+    source = directory / "Externally changed é.img"
+    recovered = directory / "Recovered pending edits é.img"
+    shutil.copyfile(state["img"], source)
+    external_file = directory / "OUTSIDE.MID"
+    external_payload = _midi_bytes(84)
+    external_file.write_bytes(external_payload)
+    expected = state["expected"]
+    updated_expected = {**expected, "OUTSIDE.MID": external_payload}
+    renames = {"SONG1.MID": "STAGED.MID"}
+    staged_expected = {renames.get(name, name): payload for name, payload in expected.items()}
+    rejected = []
+    with _opened_image(source) as stale:
+        working_before = Path(stale.working_img_path).read_bytes()
+        source_before = source.read_bytes()
+        _copy_host_file_into_image(str(source), str(external_file), "OUTSIDE.MID")
+        newer_source = source.read_bytes()
+        if newer_source == source_before:
+            raise RuntimeError("The external IMG edit did not change the source.")
+        with _opened_image(source) as current:
+            _assert_payloads(current, updated_expected)
+
+        writes = (
+            ("commit_to_source", lambda: stale.commit_to_source(renames=renames)),
+            ("export_to_source", lambda: stale.export_to(str(source), "img", renames=renames)),
+            ("export_to_images_source", lambda: stale.export_to_images(
+                str(source), "img", stale.disk_format, renames=renames,
+            )),
+        )
+        for operation, write in writes:
+            try:
+                write()
+            except FloppyImageError as exc:
+                if "Source image changed" not in str(exc):
+                    raise RuntimeError(f"{operation} failed without the source-change safeguard: {exc}") from exc
+            else:
+                raise RuntimeError(f"Stale image save was accepted by {operation} after an external file was added.")
+            if source.read_bytes() != newer_source:
+                raise RuntimeError(f"{operation} changed the externally updated source IMG.")
+            if Path(stale.working_img_path).read_bytes() != working_before:
+                raise RuntimeError(f"{operation} discarded the original working image.")
+            rejected.append(operation)
+
+        with _opened_image(source) as current:
+            _assert_payloads(current, updated_expected)
+        stale.export_to(str(recovered), "img", renames=renames)
+        with _opened_image(recovered) as saved_edits:
+            _assert_payloads(saved_edits, staged_expected)
+        if source.read_bytes() != newer_source:
+            raise RuntimeError("Recovering pending edits changed the externally updated source IMG.")
+
+    # Reloading adopts the outside changes. A second save also checks that the
+    # source fingerprint is refreshed after this session's own successful save.
+    with _opened_image(source) as refreshed:
+        refreshed.commit_to_source(renames=renames)
+        _assert_payloads(refreshed, {**staged_expected, "OUTSIDE.MID": external_payload})
+        refreshed.commit_to_source(renames={"STAGED.MID": "SONG1.MID"})
+    with _opened_image(source) as saved:
+        _assert_payloads(saved, updated_expected)
+    return {
+        "mcopy": _require_command("mcopy"),
+        "stale_writes_rejected": rejected,
+        "external_source_bytes_preserved": True,
+        "external_file_preserved": True,
+        "pending_edits_recovered_to_new_image": True,
+        "reload_and_repeat_save_succeeded": True,
+        "external_edit_sha256": hashlib.sha256(newer_source).hexdigest(),
+        "recovered_image": str(recovered), "recovered_image_sha256": _sha256(recovered),
+        "reloaded_source_sha256": _sha256(source),
+    }
+
+
 def _check_hfe(directory, state):
     if "img" not in state:
         raise RuntimeError("IMG creation must pass before the HFE round trip can run.")
@@ -192,6 +272,7 @@ def run_package_smoke(output_directory):
     directory.mkdir(parents=True, exist_ok=False)
     report = {
         "schema_version": 1, "app_version": APP_VERSION,
+        "build_identity": build_identity(),
         "frozen": bool(getattr(sys, "frozen", False)), "executable": sys.executable,
         "executable_sha256": _sha256(sys.executable), "platform": sys.platform,
         "started_utc": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -200,7 +281,9 @@ def run_package_smoke(output_directory):
     _write_report(directory, report)
     _isolate_user_state(directory)
     state = {}
-    for name, check in zip(CASE_NAMES, (_check_ui, _check_img, _check_hfe, _check_mp3)):
+    for name, check in zip(CASE_NAMES, (
+        _check_ui, _check_img, _check_image_source_changes, _check_hfe, _check_mp3,
+    )):
         report["cases"][name] = {"status": "running"}
         _write_report(directory, report)
         started = time.monotonic()

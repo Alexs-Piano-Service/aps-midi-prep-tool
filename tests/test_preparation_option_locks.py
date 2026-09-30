@@ -78,6 +78,7 @@ def test_preparation_locks_filename_setting_and_direct_changes(window, profile_k
 
     _apply(window, "custom")
     assert action.isEnabled()
+    assert action.isChecked()
     assert action.text().replace("&", "") == "Use DOS 8.3 Filenames"
     window.toggle_dos83_filenames(False)
     window._set_long_midi_filenames_enabled(True)
@@ -104,12 +105,15 @@ def test_filename_editor_explains_profile_lock_and_custom_unlocks(window, monkey
     def inspect_custom(dialog):
         checkbox = _checkbox(dialog, "Use 8.3 filenames")
         assert checkbox.isEnabled()
-        assert not checkbox.isChecked()
+        assert checkbox.isChecked()
         assert "Preparing for" not in checkbox.toolTip()
-        return QDialog.Rejected
+        checkbox.setChecked(False)
+        return QDialog.Accepted
 
     monkeypatch.setattr(window, "_exec_child_dialog", inspect_custom)
-    assert window._prompt_for_image_filename("Song Title.mid") == ("", False)
+    assert window._prompt_for_image_filename("Song Title.mid") == ("Song Title.mid", True)
+    assert not window._dos83_filenames_enabled()
+    assert not window.settingsUseDos83FilenamesAction.isChecked()
 
 
 def test_descriptive_rename_cannot_override_prepared_regular_filenames(window, monkeypatch, tmp_path):

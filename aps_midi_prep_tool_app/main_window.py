@@ -143,6 +143,7 @@ from .ui_utils import (
     embedded_logo_lt,
     is_dark_theme,
     pixmap_from_base64,
+    resize_dialog_to_screen,
     scrollable_dialog_layout,
 )
 from .drop_table_widget import DropTableWidget, zip_import_operation
@@ -160,7 +161,7 @@ from .disk_session_worker import (
 from .icon_utils import apply_window_icon
 from .markiv_backup_dialog import MarkIVBackupDialog
 from .onboarding_dialog import onboarding_text, show_first_time_dialog
-from .pending_changes import PendingChangesMixin, staged_batch
+from .pending_changes import PendingChangesMixin, manual_midi_batch, manual_midi_inspection_action, staged_batch
 from .self_update_ui import SelfUpdateMixin
 from .helpers.atomic_file import atomic_write_bytes
 from .preview_audio_cache import PreviewAudioCache, file_identity, preview_cache_key
@@ -9117,7 +9118,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.settings.setValue(self.SETTING_EMULATOR_IMAGE_STARTING_NUMBER, 0)
         for key in (self.SETTING_USE_DOS83_FILENAMES, self.SETTING_FORMAT_DISKLAVIER_SCREEN):
             if not self.settings.contains(key):
-                self.settings.setValue(key, proposed_settings(profile, medium)[key])
+                self.settings.setValue(key, proposed_settings(profile, medium).get(key, False))
         self._reset_user_hide_choices_if_needed()
         self._migrate_filename_defaults_if_needed()
         self._reset_gw_sector_report_hide_choices_if_needed()
@@ -9207,7 +9208,17 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.preparationCustomButton.setObjectName("preparationCustomButton")
         self.preparationCustomButton.clicked.connect(self.disengage_preparation_profile)
         preparation_layout.addWidget(self.preparationCustomButton)
-        main_layout.addWidget(self.preparationBar)
+        self.overlapRepairStateLabel = QLabel()
+        self.overlapRepairStateLabel.setObjectName("overlapRepairStateLabel")
+        self.overlapRepairStateLabel.setTextFormat(Qt.PlainText)
+        self.overlapRepairStateLabel.hide()
+        self.preparationRow = QWidget()
+        self.preparationRowLayout = QHBoxLayout(self.preparationRow)
+        self.preparationRowLayout.setContentsMargins(0, 0, 0, 0)
+        self.preparationRowLayout.setSpacing(self._scaled_int(8, minimum=3))
+        self.preparationRowLayout.addWidget(self.preparationBar, 1)
+        self.preparationRowLayout.addWidget(self.overlapRepairStateLabel)
+        main_layout.addWidget(self.preparationRow)
         self.preparationBar.setVisible(
             self.settings.value(self.SETTING_SHOW_PREPARATION_ROW, True, type=bool)
         )
@@ -9668,6 +9679,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.editReviewChangesAction = QAction(self._lt("Review Changes..."), self)
         self.editReviewChangesAction.triggered.connect(self.show_pending_changes)
         self.editMenu.addAction(self.editReviewChangesAction)
+        self.editResetPreparationAction = QAction(self._lt("Reset preparation"), self)
+        self.editResetPreparationAction.triggered.connect(self.reset_preparation)
+        self.editMenu.addAction(self.editResetPreparationAction)
 
         self.diskMenu = self.menuBar().addMenu(self._lt("&Disk"))
         self.diskMenu.addAction(self.fileReadFloppyAction)
@@ -10158,6 +10172,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         for layout_name, spacing, minimum in (
             ("sourceLayout", 10, 4),
+            ("preparationRowLayout", 8, 3),
             ("preparationLayout", 8, 3),
             ("fileListLayout", 6, 2),
             ("usageBarsLayout", 3, 1),
@@ -10451,7 +10466,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return proposed_settings(
             MidiTitleWindow._preparation_profile(self),
             MidiTitleWindow._preparation_medium(self),
-        )["use_dos83_filenames"]
+        ).get("use_dos83_filenames", False)
 
     def _preparation_forced_option_reason(self, option_label, value_label):
         profile = MidiTitleWindow._preparation_profile(self)
@@ -10520,7 +10535,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     "midi" if profile.song_format == "eseq" else "eseq"))
             else:
                 label.setText(self._lt("Custom"))
-                label.setToolTip("")
+                label.setToolTip(self._lt("Stop automatic preparation and keep current work and settings."))
         bar = getattr(self, "preparationBar", None)
         if bar is not None:
             bar.setProperty("preparationActive", active)
@@ -10533,20 +10548,96 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         custom_button = getattr(self, "preparationCustomButton", None)
         if custom_button is not None:
             custom_button.setText(self._lt("Custom"))
-            custom_button.setToolTip(self._lt("Switch to Custom"))
+            custom_button.setToolTip(self._lt("Stop automatic preparation and keep current work and settings."))
             custom_button.setVisible(active)
+        reset_action = getattr(self, "editResetPreparationAction", None)
+        if reset_action is not None:
+            reset_action.setText(self._lt("Reset preparation"))
+            reset_action.setToolTip(self._lt("Remove automatic preparation changes and keep manual edits and settings."))
+            reset_action.setStatusTip(reset_action.toolTip())
         for name in ("preparationButton", "preparationAction"):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.setText(self._lt("Preparing for..."))
+        MidiTitleWindow._refresh_preparation_state(self)
+
+    def _refresh_preparation_state(self):
+        MidiTitleWindow._refresh_overlap_repair_state(self)
+
+    def _refresh_overlap_repair_state(self):
+        label = getattr(self, "overlapRepairStateLabel", None)
+        if label is None:
+            return
+        repairs = []
+        for row in range(self.table.rowCount()) if hasattr(self, "table") else ():
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            path = path_item.text()
+            if self.is_image_mode():
+                if (path in self.pendingImageDeletes or
+                        (path not in self.pendingImageReplacements and path not in self.pendingImageAdditions)):
+                    continue
+                info = self.imageFileInfo.get(path, {})
+            else:
+                info = self.pendingRegularConversions.get(path, {})
+            mode = info.get("overlap_repair_mode")
+            if mode in ("smart", "retrigger"):
+                filename = self.table.item(row, 3)
+                repairs.append((filename.text() if filename is not None else os.path.basename(path), mode))
+        captions = {
+            "smart": self._lt("Overlap repair: Smart"),
+            "retrigger": self._lt("Overlap repair: Keep attacks"),
+        }
+        label.setText(" · ".join(captions[mode] for mode in captions
+                                 if any(applied == mode for _filename, applied in repairs)))
+        label.setToolTip("\n".join(f"{filename}: {captions[mode]}" for filename, mode in repairs))
+        label.setAccessibleDescription(label.toolTip())
+        label.setVisible(bool(repairs))
+        self.preparationRow.setVisible(bool(repairs) or not self.preparationBar.isHidden())
+
+    def _prepared_delivery_kind(self):
+        medium = self._preparation_medium()
+        if medium.key == "original":
+            return "floppy"
+        if medium.key in FLOPPY_MEDIA:
+            return "images"
+        return "files"
+
+    def save_prepared_delivery(self):
+        if self._disk_worker_busy() or not self.choose_button.isEnabled():
+            return
+        if not self._ensure_preparation_ready():
+            return
+        if not any(self._preparation_song_rows()):
+            return
+        delivery = self._prepared_delivery_kind()
+        if delivery == "floppy":
+            return self._save_image_and_apply_to_floppy()
+        if delivery == "images":
+            if not self._preparation_profile().song_format:
+                return self.save_as_image()
+            from .prepared_delivery import create_prepared_disk_images
+            return create_prepared_disk_images(self)
+        return self.save_as_changes()
 
     def disengage_preparation_profile(self):
         if self._disk_worker_busy() or not self.choose_button.isEnabled():
             return
         profile = get_preparation_profile("custom")
-        self._apply_preparation_profile(
-            profile, get_preparation_medium(profile, "custom"), preserve_preferences=True,
-        )
+        self._apply_preparation_profile(profile, get_preparation_medium(profile, "custom"))
+
+    @staged_batch
+    def reset_preparation(self):
+        if self._disk_worker_busy() or not self.choose_button.isEnabled():
+            return
+        self._destination_preparation_queued = False
+        self._remove_preparation_layer()
+        profile = get_preparation_profile("custom")
+        self._apply_preparation_profile(profile, get_preparation_medium(profile, "custom"))
+        self.status_label.setText(self._lt(
+            "Automatic preparation has been reset. Manual edits and settings have been kept."
+        ))
 
     def choose_preparation_profile(self):
         if self._disk_worker_busy():
@@ -10554,9 +10645,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
         profile = self._preparation_profile()
         medium = self._preparation_medium()
+        song_counts = self._preparation_song_counts()
+        if not getattr(self, "_destination_preparation_queued", False):
+            song_counts.update(
+                attention=len(self._preparation_incompatible_files()),
+                attention_profile=profile.key, attention_medium=medium.key,
+            )
         dialog = PreparationProfileDialog(
             self.settings, profile.key, medium.key, self,
-            song_counts=self._preparation_song_counts(),
+            song_counts=song_counts,
         )
         if self._exec_child_dialog(dialog) != QDialog.Accepted:
             return
@@ -10573,6 +10670,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if self._validate_image_filename(filename, enforce_dos83=True):
                 key = "dos83_" + kind
                 counts[key] = counts.get(key, 0) + 1
+        counts["total"] = counts["midi"] + counts["eseq"]
         return counts
 
     def _preparation_song_rows(self):
@@ -10585,6 +10683,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if path_item is None:
                 continue
             path = path_item.text()
+            if image_mode and path in self.pendingImageDeletes:
+                continue
             info = self._image_info_for_path(path) if image_mode else self.listedFileInfo.get(path, {})
             kind = info.get("title_mode")
             if kind not in {"midi", "eseq"}:
@@ -10630,7 +10730,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         target_filename = os.path.basename(target_path)
                     else:
                         target_filename = self._converted_regular_filename_for_kind(
-                            path, "eseq", used_filenames=self._regular_used_output_filenames_for_directory(os.path.dirname(path), exclude_row=row),
+                            filename, "eseq", used_filenames=self._regular_used_output_filenames_for_directory(os.path.dirname(path), exclude_row=row),
                         )
                     intermediate = os.path.join(scratch_dir, f"{uuid.uuid4().hex}.mid")
                     output = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
@@ -10746,7 +10846,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if not target or getattr(self, "_preparing_destination", False):
             return
         self._preparing_destination = True
+        MidiTitleWindow._refresh_preparation_state(self)
+        before = None
         try:
+            begin_layer = getattr(self, "_begin_preparation_layer", None)
+            if callable(begin_layer):
+                before = begin_layer()
             self._eseq_conversion_cc7_policy = DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
             if profile.trim_title_spaces:
                 # Clean titles before conversion embeds them and builds filenames.
@@ -10783,12 +10888,19 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     self.regularPianodirSourcePath = ""
                 self._refresh_regular_pianodir_row()
         finally:
-            self._preparing_destination = False
+            try:
+                finish_layer = getattr(self, "_finish_preparation_layer", None)
+                if callable(finish_layer):
+                    finish_layer(before)
+            finally:
+                self._preparing_destination = False
+                MidiTitleWindow._refresh_preparation_state(self)
 
     def _schedule_destination_preparation(self):
         if not self._preparation_profile().song_format or getattr(self, "_destination_preparation_queued", False):
             return
         self._destination_preparation_queued = True
+        MidiTitleWindow._refresh_preparation_state(self)
 
         def prepare_when_ready():
             if not self._destination_preparation_queued:
@@ -10809,24 +10921,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if getattr(self, "_destination_preparation_queued", False):
             self._destination_preparation_queued = False
             self._prepare_for_destination()
-        required_type0 = profile.song_format == "midi" and profile.midi_types == (0,)
-        required_format = (self._lt("MIDI Type 0") if required_type0 else
-                           "MIDI" if profile.song_format == "midi" else "Disklavier E-SEQ")
-        image_mode = self.is_image_mode()
-        incompatible = []
-        for _row, path, kind, filename in self._preparation_song_rows():
-            if image_mode and path in self.pendingImageDeletes:
-                continue
-            wrong_format = kind != profile.song_format
-            if not wrong_format and (required_type0 or profile.song_format == "eseq"):
-                material = (self._pending_or_extracted_image_path(path) if image_mode
-                            else self._regular_source_material_path(path))
-                if required_type0:
-                    wrong_format = extract_midi_type_label_from_midi(material) != "Type 0"
-                else:
-                    wrong_format = filename.lower().endswith(".mda") or is_clavinova_mda_file(material)
-            if wrong_format:
-                incompatible.append(f"{filename}: " + self._lt("Required format: {format}", format=required_format))
+        incompatible = MidiTitleWindow._preparation_incompatible_files(self, verify_files=True)
         if incompatible:
             self._show_error_list(
                 self._lt("Preparation incomplete"),
@@ -10839,13 +10934,73 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return False
         return True
 
+    def _preparation_incompatible_files(self, *, verify_files=False):
+        """Readiness issues shared by delivery validation and passive UI state."""
+        profile = MidiTitleWindow._preparation_profile(self)
+        if not profile.song_format:
+            return []
+        required_type0 = profile.song_format == "midi" and profile.midi_types == (0,)
+        required_format = (self._lt("MIDI Type 0") if required_type0 else
+                           "MIDI" if profile.song_format == "midi" else "Disklavier E-SEQ")
+        image_mode = self.is_image_mode()
+        require_dos83 = proposed_settings(profile, MidiTitleWindow._preparation_medium(self)).get("use_dos83_filenames")
+        incompatible = []
+        for row, path, kind, filename in self._preparation_song_rows():
+            if image_mode and path in self.pendingImageDeletes:
+                continue
+            wrong_format = kind != profile.song_format
+            if not wrong_format and (profile.midi_types or profile.song_format == "eseq"):
+                if not verify_files:
+                    # Passive status uses the type detected on import or
+                    # conversion; saving still verifies the prepared bytes.
+                    midi_type = self._row_midi_type_label(row, path)
+                    if profile.song_format == "midi":
+                        wrong_format = midi_type not in {f"Type {kind}" for kind in profile.midi_types}
+                    else:
+                        wrong_format = filename.lower().endswith(".mda") or midi_type == "MDA"
+                else:
+                    material = (self._pending_or_extracted_image_path(path) if image_mode
+                                else self._regular_source_material_path(path))
+                    if profile.song_format == "midi":
+                        wrong_format = extract_midi_type_label_from_midi(material) not in {
+                            f"Type {kind}" for kind in profile.midi_types
+                        }
+                    else:
+                        wrong_format = filename.lower().endswith(".mda") or is_clavinova_mda_file(material)
+            if wrong_format:
+                incompatible.append(f"{filename}: " + self._lt("Required format: {format}", format=required_format))
+            elif require_dos83:
+                filename_issue = self._validate_image_filename(filename, enforce_dos83=True)
+                if filename_issue:
+                    incompatible.append(f"{filename}: {filename_issue}")
+        return incompatible
+
     @staged_batch
-    def _apply_preparation_profile(self, profile, medium, *, preserve_preferences=False):
+    def _apply_preparation_profile(self, profile, medium):
+        if profile.key == "custom":
+            # Manual mode freezes the current work. Keep its preparation
+            # provenance so Reset or a later destination can still replace it.
+            self._destination_preparation_queued = False
+            self.settings.setValue(SETTING_PROFILE, profile.key)
+            self.settings.setValue(SETTING_MEDIUM, "custom")
+            self._refresh_preparation_ui()
+            refresh_actions = getattr(self, "_update_menu_actions", None)
+            if callable(refresh_actions):
+                refresh_actions()
+            t = getattr(self, "_lt", lambda text, **fields: text.format(**fields))
+            self.status_label.setText(t(
+                "Automatic preparation is off. Current work and settings have been kept."
+            ))
+            return
         previous = (MidiTitleWindow._preparation_profile(self).key, MidiTitleWindow._preparation_medium(self).key)
+        remove_layer = getattr(self, "_remove_preparation_layer", None)
+        if callable(remove_layer):
+            remove_layer()
+        self._destination_preparation_queued = False
         if previous != (profile.key, medium.key):
             # Legacy global choices belong to the previous destination only.
             self.settings.setValue(MidiTitleWindow.SETTING_SAVE_AS_IMAGE_FORMAT, "")
-        changes = {} if preserve_preferences else proposed_settings(profile, medium)
+        changes = proposed_settings(profile, medium)
         for key, value in changes.items():
             self.settings.setValue(key, value)
         self.settings.setValue(SETTING_PROFILE, profile.key)
@@ -10858,7 +11013,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             toggle_screen(changes["format_disklavier_screen"])
         self._refresh_preparation_ui()
         prepare = getattr(self, "_prepare_for_destination", None)
-        if callable(prepare) and not preserve_preferences:
+        if callable(prepare):
             prepare()
         refresh_actions = getattr(self, "_update_menu_actions", None)
         if callable(refresh_actions):
@@ -10872,11 +11027,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             elif profile.midi_types == (0,):
                 remaining += counts.get("midi_non_type0", 0)
         t = getattr(self, "_lt", lambda text, **fields: text.format(**fields))
-        if preserve_preferences:
-            self.status_label.setText(t(
-                "Automatic preparation is off. Current preferences and staged changes have been kept."
-            ))
-            return
         self.status_label.setText(t(
             "Preparing for {profile}. {remaining} file(s) still need conversion. Review staged changes before saving.",
             profile=t(profile.label), remaining=remaining,
@@ -10963,6 +11113,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             {"id": "edit.undo", "category": "Edit", "label": "Undo", "action": "editUndoAction", "default": "Ctrl+Z"},
             {"id": "edit.undo_all", "category": "Edit", "label": "Undo All", "action": "editUndoAllAction", "default": ""},
             {"id": "edit.review", "category": "Edit", "label": "Review Changes...", "action": "editReviewChangesAction", "default": ""},
+            {"id": "edit.reset_preparation", "category": "Edit", "label": "Reset preparation", "action": "editResetPreparationAction", "default": ""},
             {"id": "file.new_image", "category": "File", "label": "New Image...", "action": "fileNewImageAction", "default": "Ctrl+N"},
             {"id": "file.open_folder", "category": "File", "label": "Open MIDI Folder...", "action": "fileOpenFolderAction", "default": "Ctrl+O"},
             {"id": "file.open_image", "category": "File", "label": "Open Image...", "action": "fileOpenImageAction", "default": "Ctrl+Shift+O"},
@@ -11099,11 +11250,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         dialog.setWindowTitle(self._lt("Keyboard Shortcuts"))
         dialog.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         dialog.setSizeGripEnabled(True)
-        available = dialog.screen().availableGeometry()
-        dialog.resize(
-            min(self._scaled_int(900), available.width() - 40),
-            min(self._scaled_int(650), available.height() - 60),
-        )
+        resize_dialog_to_screen(dialog, width=800, height=560)
 
         layout = QVBoxLayout(dialog)
         intro = QLabel(self._lt("Change the keyboard shortcuts used by the main window commands."), dialog)
@@ -11528,11 +11675,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         buttons.accepted.connect(accept_options)
         layout.addWidget(buttons)
-        available = dialog.screen().availableGeometry()
-        dialog.resize(
-            min(self._scaled_int(900), available.width() - 40),
-            min(self._scaled_int(700), available.height() - 60),
-        )
+        resize_dialog_to_screen(dialog, width=760, height=560)
 
         if self._exec_child_dialog(dialog, resize_to_contents=False) != QDialog.Accepted:
             dialog.deleteLater()
@@ -12425,6 +12568,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         shuffle,
         include_song_lists,
         disk_layout="fill",
+        catalog_number="",
+        preserve_catalog_midi=False,
     ):
         if self._disk_worker_busy():
             QMessageBox.information(self, self._lt("Busy"), self._t("emulator.busy"))
@@ -12455,6 +12600,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             starting_number=starting_number,
             safety_margin_bytes=safety_margin_bytes,
             album_title=album_title,
+            catalog_number=catalog_number,
+            preserve_catalog_midi=preserve_catalog_midi,
             output_content=output_content,
             require_midi_type0=(
                 output_content == "midi" and self._preparation_profile().midi_types == (0,)
@@ -12885,6 +13032,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             ("editUndoAction", "Undo", "U"),
             ("editUndoAllAction", "Undo All", "A"),
             ("editReviewChangesAction", "Review Changes...", "R"),
+            ("editResetPreparationAction", "Reset preparation", "P"),
             ("fileNewImageAction", "New Image...", "N"),
             ("fileOpenFolderAction", "Open MIDI Folder...", "F"),
             ("fileOpenImageAction", "Open Image...", "O"),
@@ -17357,6 +17505,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         visible = bool(state)
         self.settings.setValue(self.SETTING_SHOW_PREPARATION_ROW, visible)
         self.preparationBar.setVisible(visible)
+        self._refresh_preparation_state()
         action = getattr(self, "viewShowPreparationRowAction", None)
         if action is not None and action.isChecked() != visible:
             action.setChecked(visible)
@@ -17900,11 +18049,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        available = dialog.screen().availableGeometry()
-        dialog.resize(
-            min(self._scaled_int(720), available.width() - 40),
-            min(self._scaled_int(460), available.height() - 60),
-        )
+        resize_dialog_to_screen(dialog, width=640, height=380)
         if self._exec_child_dialog(dialog, resize_to_contents=False) != QDialog.Accepted:
             return None
         mode = behavior.currentData()
@@ -17914,12 +18059,19 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.settings.sync()
         return mode
 
-    def _merge_piano_channels_to_path(self, source, destination, filename):
+    def _choose_piano_overlap_for_conversion(self, filename, count, report):
+        mode = self._piano_overlap_behavior(filename, count)
+        if count and mode in ("smart", "retrigger"):
+            report["overlap_repair_mode"] = mode
+        return mode
+
+    def _merge_piano_channels_to_path(self, source, destination, filename, *, overlap_report=None):
+        report = overlap_report if overlap_report is not None else {}
         converter = (merge_eseq_channels_to_channel0_path if is_eseq_file(source)
                      else merge_midi_channels_to_channel0_path)
         try:
             return converter(source, destination, overlap_handler=lambda count:
-                             self._piano_overlap_behavior(filename, count))
+                             self._choose_piano_overlap_for_conversion(filename, count, report))
         except ChannelMergeCancelled:
             return None
 
@@ -18430,6 +18582,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _update_menu_actions(self):
         self._refresh_pending_changes_ui()
+        MidiTitleWindow._refresh_preparation_state(self)
         refresh_conversions = getattr(self, "_refresh_preparation_conversion_actions", None)
         if callable(refresh_conversions):
             refresh_conversions()
@@ -19733,7 +19886,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 )
         return items
 
-    @staged_batch
+    @manual_midi_inspection_action
     def _stage_inspected_midi_action(self, item, action):
         """Apply one explicit inspection edit to the current staged source."""
         if not self.choose_button.isEnabled():
@@ -19766,11 +19919,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     raise ValueError(self._lt("These actions require a MIDI file."))
 
         output_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{os.path.basename(target_filename)}")
+        overlap_report = {}
         if action == "type0":
             changed = convert_midi_file_to_type0_path(source_material, output_path)
         else:
             changed = self._merge_piano_channels_to_path(
                 source_material, output_path, os.path.basename(target_filename),
+                overlap_report=overlap_report,
             )
         if changed is None:
             message = self._lt("Channel merge canceled.")
@@ -19791,6 +19946,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         row, source_path, target_filename, output_path,
                         title=title, midi_type=midi_type, is_midi=is_midi,
                         title_mode=title_mode, size=size, order_key=order_key,
+                        **overlap_report,
                     )
                     source_path = self.table.item(row, 1).text()
                 else:
@@ -19798,6 +19954,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         row, source_path, target_filename, output_path,
                         "midi_type0" if action == "type0" else "eseq" if source_is_eseq else "midi",
                         overwrite_original=True,
+                        **overlap_report,
                     )
             finally:
                 self.table.setSortingEnabled(sorting)
@@ -20422,7 +20579,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if reason:
             raise EseqConversionError(reason)
         target_filename = self._converted_regular_filename_for_kind(
-            full_path,
+            self._regular_row_output_filename(row),
             target_kind,
             used_filenames=self._regular_used_output_filenames_for_directory(
                 os.path.dirname(full_path),
@@ -20567,7 +20724,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             order_key=order_key,
         )
 
-        if not target_kind:
+        # Destination conversion belongs to the replaceable preparation layer.
+        # Keep the imported bytes intact until the batch is prepared below.
+        if not target_kind or profile_target:
             return {"status": "added", "path": full_path, "message": "Added."}
 
         row = self._find_regular_row_for_path(full_path)
@@ -21687,7 +21846,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return self.imageFileInfo.get(image_path, {})
 
     def _set_image_file_info(self, image_path, *, is_midi=False, title="", midi_type="", size=0, title_mode="", order_key=b""):
-        baseline = self.imageFileInfo.get(image_path, {}).get("change_report_baseline")
+        previous_info = self.imageFileInfo.get(image_path, {})
+        baseline = previous_info.get("change_report_baseline")
         self.imageFileInfo[image_path] = {
             "is_midi": bool(is_midi),
             "title": title or "",
@@ -21698,6 +21858,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         }
         if baseline is not None and image_path in getattr(self, "pendingImageAdditions", {}):
             self.imageFileInfo[image_path]["change_report_baseline"] = baseline
+        # Probing a further edit refreshes file facts without undoing a staged
+        # repair. Replacement with a different song clears this provenance.
+        mode = previous_info.get("overlap_repair_mode")
+        if mode in ("smart", "retrigger") and (
+            image_path in getattr(self, "pendingImageAdditions", {})
+            or image_path in getattr(self, "pendingImageReplacements", {})
+        ):
+            self.imageFileInfo[image_path]["overlap_repair_mode"] = mode
 
     def _pending_or_extracted_image_path(self, image_path):
         if image_path in self.pendingImageAdditions:
@@ -26282,12 +26450,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             target_filename = self._regular_row_output_filename(row)
             output_temp_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
             source_material_path = self._regular_source_material_path(full_path)
+            overlap_report = {}
             try:
                 changed = convert_midi_file_to_type0_path(
                     source_material_path,
                     output_temp_path,
                     remap_all_instruments_to_channel0=remap_all_instruments,
-                    overlap_handler=lambda count: self._piano_overlap_behavior(target_filename, count),
+                    overlap_handler=lambda count: self._choose_piano_overlap_for_conversion(
+                        target_filename, count, overlap_report),
                 )
                 if not changed:
                     unchanged_count += 1
@@ -26299,6 +26469,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     output_temp_path,
                     "midi_type0",
                     overwrite_original=True,
+                    **overlap_report,
                 )
                 converted_count += 1
             except ChannelMergeCancelled:
@@ -26356,7 +26527,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _regular_pedal_source_material_path(self, full_path, scratch_dir):
         return self._regular_midi_utility_source_material_path(full_path, scratch_dir)
 
-    @staged_batch
+    @manual_midi_batch
     def _merge_channels_in_regular_rows(self, rows):
         progress_dialog = QProgressDialog(
             "Merging MIDI channels...",
@@ -26396,10 +26567,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     scratch_dir,
                 )
                 source_is_eseq = is_eseq_file(source_material_path)
+                overlap_report = {}
                 changed = self._merge_piano_channels_to_path(
                     source_material_path,
                     output_temp_path,
                     os.path.basename(target_filename),
+                    overlap_report=overlap_report,
                 )
                 if changed is None:
                     canceled = True
@@ -26414,6 +26587,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     output_temp_path,
                     "eseq" if source_is_eseq else "midi",
                     overwrite_original=True,
+                    **overlap_report,
                 )
                 changed_count += 1
             except Exception as exc:
@@ -26445,7 +26619,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 guidance="The original files were not changed; remove or replace the listed files and try again",
             )
 
-    @staged_batch
+    @manual_midi_batch
     def _apply_pedal_compatibility_to_regular_rows(self, rows, options):
         softening_requested = bool(options.get("soften_sustain_pedal"))
         progressDialog = QProgressDialog(
@@ -26557,7 +26731,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _image_pedal_source_material_path(self, source_path):
         return self._image_midi_utility_source_material_path(source_path)
 
-    @staged_batch
+    @manual_midi_batch
     def _merge_channels_in_image_rows(self, rows):
         if self.image_session is None:
             QMessageBox.information(
@@ -26591,10 +26765,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     self.image_session.patched_dir,
                     f"{uuid.uuid4().hex}_{os.path.basename(current_path)}",
                 )
+                overlap_report = {}
                 changed = self._merge_piano_channels_to_path(
                     source_host_path,
                     output_host_path,
                     os.path.basename(current_path),
+                    overlap_report=overlap_report,
                 )
                 if changed is None:
                     canceled = True
@@ -26620,6 +26796,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     title_mode=title_mode,
                     size=size,
                     order_key=order_key,
+                    **overlap_report,
                 )
                 changed_count += 1
             except Exception as exc:
@@ -26661,7 +26838,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",
             )
 
-    @staged_batch
+    @manual_midi_batch
     def _apply_pedal_compatibility_to_image_rows(self, rows, options):
         if self.image_session is None:
             QMessageBox.information(
@@ -26765,7 +26942,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",
             )
 
-    @staged_batch
+    @manual_midi_batch
     def _strip_xf_from_regular_rows(self, rows):
         progress_dialog = QProgressDialog(
             "Stripping Yamaha XF data...",
@@ -26849,7 +27026,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 guidance="The original files were not changed; remove or replace the listed files and try again",
             )
 
-    @staged_batch
+    @manual_midi_batch
     def _strip_xf_from_image_rows(self, rows):
         if self.image_session is None:
             QMessageBox.information(
@@ -27015,6 +27192,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         title_mode,
         size,
         order_key,
+        overlap_repair_mode=None,
     ):
         path_item = self.table.item(row, 1)
         filename_item = self.table.item(row, 3)
@@ -27031,6 +27209,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         report_details = MidiTitleWindow._image_conversion_review_details(
             self, source_path, replacement_host_path,
         )
+        overlap_repair_mode = overlap_repair_mode or self.imageFileInfo.get(source_path, {}).get(
+            "overlap_repair_mode")
 
         info_key = source_path
         if source_path in self.pendingImageAdditions:
@@ -27066,6 +27246,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             order_key=order_key,
         )
         self.imageFileInfo[info_key].update(report_details)
+        if overlap_repair_mode in ("smart", "retrigger"):
+            self.imageFileInfo[info_key]["overlap_repair_mode"] = overlap_repair_mode
         self.imageFileInfo[info_key]["title_edited"] = title_edited
         self._reapply_image_centered_title_assumption()
         kind_item = self.table.item(row, 6)
@@ -27478,6 +27660,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         target_kind,
         *,
         overwrite_original=False,
+        overlap_repair_mode=None,
     ):
         title, midi_type, title_mode, is_midi, order_key = self._probe_regular_file(temp_path)
         if is_clavinova_mda_file(temp_path):
@@ -27495,6 +27678,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if error:
                 raise EseqConversionError(error)
         report_details = build_staged_conversion_details(source_path, temp_path)
+        overlap_repair_mode = overlap_repair_mode or self.pendingRegularConversions.get(source_path, {}).get(
+            "overlap_repair_mode")
         self.pendingRegularConversions[source_path] = {
             "temp_path": temp_path,
             "target_kind": target_kind,
@@ -27503,6 +27688,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             "title_edited": title_edited,
             **report_details,
         }
+        if overlap_repair_mode in ("smart", "retrigger"):
+            self.pendingRegularConversions[source_path]["overlap_repair_mode"] = overlap_repair_mode
+        # The converted output name incorporates the deliberate rename, with
+        # the destination's suffix. Keep one authoritative pending name.
+        self.pendingRegularRenames.pop(source_path, None)
         self.pendingEdits.pop(source_path, None)
         self._set_listed_file_info(
             source_path,
@@ -27639,7 +27829,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 title_trim_errors.extend(trim_errors)
 
             current_title = self._row_raw_title(row)
-            if target_kind == "midi" and use_long_filenames:
+            if target_kind == "midi" and use_long_filenames and full_path not in self.pendingRegularRenames:
                 target_filename = self._long_midi_filename_for_row(
                     row,
                     index + 1,
@@ -27647,7 +27837,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 )
             else:
                 target_filename = self._converted_regular_filename_for_kind(
-                    full_path,
+                    self._regular_row_output_filename(row),
                     target_kind,
                     used_filenames=self._regular_used_output_filenames_for_directory(
                         os.path.dirname(full_path),
@@ -28822,11 +29012,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _image_drop_conversion_kind(self, host_path):
         profile_target = MidiTitleWindow._preparation_profile(self).song_format
-        if profile_target == "eseq" and is_midi_file(host_path):
-            return "eseq"
-        if profile_target == "midi" and is_eseq_file(host_path) and has_eseq_title_metadata(host_path):
-            return "midi"
         if profile_target:
+            # Preserve the import before automatic destination preparation.
             return ""
         if self.imageEseqMode and is_midi_file(host_path):
             return "eseq"
@@ -28839,6 +29026,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return ""
 
     def _build_image_addition_filename(self, host_path, used_paths, conversion_kind=""):
+        if MidiTitleWindow._preparation_profile(self).song_format and not conversion_kind:
+            return self._build_image_filename(os.path.basename(host_path), used_paths, enforce_dos83=False)
         if conversion_kind == "eseq":
             stem = os.path.splitext(os.path.basename(host_path))[0] or "FILE"
             return self._build_image_filename(
@@ -28942,6 +29131,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 size,
                 staged_host_path,
             )
+            self.imageFileInfo[source_path].pop("overlap_repair_mode", None)
             self.imageFileInfo[source_path].update(MidiTitleWindow._image_conversion_review_details(
                 self, source_path, staged_host_path, added_source_path=host_path,
             ))
@@ -29991,15 +30181,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 delete_pianodir=delete_pianodir,
                 progress_callback=progress_callback,
             )
-            self.pendingImageRenames.clear()
-            self.pendingImageTitleEdits.clear()
-            self.pendingImageDeletes.clear()
-            self.pendingImageAdditions.clear()
-            self.pendingImageReplacements.clear()
-            self.pendingSmartPianoSoftTitleEdits.clear()
-            self.pendingSmartPianoSoftCatalogReplacement = ""
-            self.pendingGeneratePianodir = False
-            self.pendingDeletePianodir = False
+            self._clear_pending_image_changes_after_commit()
             progress_callback(5, 5, "Reloading floppy view...")
             self._reload_image_table_after_commit()
             progressDialog.close()
@@ -31154,6 +31336,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 eseq_directory_order=self._image_eseq_directory_order(),
                 delete_pianodir=delete_pianodir,
                 progress_callback=progress_callback,
+                **({"allow_split": False} if for_floppy else {}),
             )
             export_sector_reports = getattr(self.image_session, "latest_gw_sector_reports", ())
             if self.image_session.source_kind == "floppy_gw":
@@ -31554,6 +31737,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 disk_format,
                 progress_callback=progress_callback,
                 sector_report_callback=sector_reports.append,
+                **({"allow_split": False} if for_floppy else {}),
             )
 
             if len(output_paths) == 1:
@@ -31699,6 +31883,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
         if errors:
             return errors, 0, backup_count
+        self._commit_preparation_paths(set(old_to_new.values()))
         self.pendingRegularRenames.clear()
         self._refresh_regular_mode_action_state()
         return [], len(old_to_new), backup_count
@@ -31824,6 +32009,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     if error_msg:
                         errors.append(error_msg)
                     else:
+                        self._commit_preparation_paths({full_path})
                         self._invalidate_staged_undo()
                         saved_paths.add(full_path)
                         self.pendingEdits.pop(full_path, None)

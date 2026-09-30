@@ -494,7 +494,13 @@ def _replace_locked_and_restart(job, *, restart=None, startup_timeout=STARTUP_TI
     if backup.exists():
         if not backup.is_file():
             raise UpdateError("The executable recovery path is occupied by a folder.")
-        _replace_with_retry(backup, backup.with_name(backup.name + "." + secrets.token_hex(6)))
+        # Keep the older recovery copy until startup succeeds. The helper then
+        # removes its own staging directory, leaving just the newest .previous
+        # beside the application. Failed updates retain this copy for recovery.
+        older_backup = directory / "older.previous"
+        if older_backup.exists() or older_backup.is_symlink():
+            raise UpdateError("The update staging recovery path is already occupied.")
+        _replace_with_retry(backup, older_backup)
     _replace_with_retry(backup_staging, backup)
     _sync_directory(target.parent)
     _replace_with_retry(payload, target)

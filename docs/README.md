@@ -66,6 +66,7 @@ analysis files that are not distributed with the repository.
 
 - [Run from source](../README.md#run-from-source) and [contribute changes](../CONTRIBUTING.md)
 - [Release packages and acceptance evidence](release-process.md)
+- [Optional GitHub bug-report forwarding](bug-report-github.md)
 - [Windows release acceptance tests](windows-test-plan.md)
 - [SoundFont catalog and packaging reference](../aps_midi_prep_tool_app/soundfonts/README.md)
 - [Report a security issue](../SECURITY.md)

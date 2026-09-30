@@ -191,15 +191,19 @@ def _asset_for_release(version, target, cancel_callback):
     if (not isinstance(release, dict) or release.get("tag_name") != f"v{version}"
             or release.get("draft") is not False or release.get("prerelease") is not False):
         raise UpdateError("The requested version is not a published stable release.")
-    name = ("APSMIDIPrepTool.exe" if target.kind == "windows-onefile" else
-            f"APSMidiPrepTool-{version}-{target.architecture}.AppImage")
+    # Published standalone EXEs use both names; setup EXEs are never suitable
+    # for replacing the running portable application.
+    names = (("APSMIDIPrepTool.exe", "APS.MIDI.Prep.Tool.exe")
+             if target.kind == "windows-onefile" else
+             (f"APSMidiPrepTool-{version}-{target.architecture}.AppImage",))
     assets = release.get("assets")
     if not isinstance(assets, list):
         raise UpdateError("The release has no verified application download.")
-    matches = [asset for asset in assets if isinstance(asset, dict) and asset.get("name") == name]
+    matches = [asset for asset in assets if isinstance(asset, dict) and asset.get("name") in names]
     if len(matches) != 1:
         raise UpdateError("This release has no unique application download for your platform.")
     asset = matches[0]
+    name = asset["name"]
     size = asset.get("size")
     digest = asset.get("digest")
     expected_url = f"https://github.com/{REPOSITORY}/releases/download/v{version}/{name}"

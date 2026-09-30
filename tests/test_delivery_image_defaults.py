@@ -112,6 +112,8 @@ def test_unsure_keeps_manual_conversion_and_reviews_delivery_and_filename_defaul
                 for row in range(dialog.changes_table.rowCount())]
         assert rows == [
             ["Image type", "HFE", "HFE"],
+            ["Image prefix", "DSKA", "DSKA"],
+            ["Starting disk number", "0", "0"],
             ["Filenames", "Descriptive filenames", "Descriptive filenames"],
             ["Format for Disklavier screen", "Off", "Off"],
         ]

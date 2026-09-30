@@ -114,8 +114,13 @@ def test_chili_retains_both_midi_types_and_uses_hd_dos_media():
     assert proposed_settings(profile, medium)[SETTING_DISK_FORMAT] == "ibm.1440"
 
 
-@pytest.mark.parametrize("key", ("custom", "unsure", "unrecognized-old-profile"))
-def test_custom_and_unknown_profiles_reset_filename_and_title_defaults_only(key):
+def test_custom_preserves_all_preferences():
+    profile = get_preparation_profile("custom")
+    assert proposed_settings(profile, get_preparation_medium(profile, "")) == {}
+
+
+@pytest.mark.parametrize("key", ("unsure", "unrecognized-old-profile"))
+def test_unknown_profiles_reset_filename_and_title_defaults_only(key):
     profile = get_preparation_profile(key)
     assert proposed_settings(profile, get_preparation_medium(profile, "")) == {
         "use_dos83_filenames": False, "long_midi_filenames": True,
@@ -255,7 +260,7 @@ def test_dialog_shows_proposals_without_mutating_settings(application):
             for row in range(dialog.changes_table.rowCount())
         ]
         assert "HFE" in proposed_values
-        assert dialog.changes_table.rowCount() == 5
+        assert dialog.changes_table.rowCount() == 7
         assert settings.values == original
         dialog.buttons.button(QDialogButtonBox.Apply).click()
         assert dialog.result() == QDialog.Accepted
@@ -276,7 +281,9 @@ def test_dialog_restricts_media_when_switching_to_modern_usb_controller(applicat
         assert dialog.changes_table.item(3, 0).text() == "Trim Title Spaces"
         assert dialog.changes_table.item(3, 2).text() == "On"
         dialog.profile_combo.setCurrentIndex(dialog.profile_combo.findData("custom"))
-        assert dialog.changes_table.rowCount() == 2
+        assert dialog.changes_table.rowCount() == 0
+        assert dialog.changes_table.isHidden()
+        assert dialog.manual_label.text() == "Stop automatic preparation and keep current work and settings."
     finally:
         dialog.close()
 
@@ -311,10 +318,9 @@ def test_apply_sets_export_defaults_and_keeps_staged_work():
     manual_settings = dict(settings.values)
     custom = get_preparation_profile("custom")
     MidiTitleWindow._apply_preparation_profile(window, custom, get_preparation_medium(custom, ""))
-    reset_defaults = proposed_settings(custom, get_preparation_medium(custom, ""))
     for key, value in manual_settings.items():
         if key not in {SETTING_PROFILE, SETTING_MEDIUM}:
-            assert settings.values[key] == reset_defaults.get(key, value)
+            assert settings.values[key] == value
     assert MidiTitleWindow._preparation_export_defaults(window) == {}
 
 

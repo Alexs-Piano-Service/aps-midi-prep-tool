@@ -26,6 +26,10 @@ The 0.8.8 package list requires the signed standalone `APSMIDIPrepTool.exe`,
 Windows installer, portable ZIP, Linux AppImage, and Windows test kit. Their
 exact filenames are in the metadata. The standalone EXE is the Windows
 self-update payload and must be present even when the installer and ZIP exist.
+Keep that exact standalone filename for v0.8.7 clients: their installed updater
+does not recognize `APS.MIDI.Prep.Tool.exe`. The new updater accepting both names
+does not change the old executable's selection logic. Upload only one accepted
+standalone name, since multiple candidates are rejected as ambiguous.
 The signed Windows workflow produces a standalone EXE and test kit. It does
 not produce the other required packages. Build and upload them before release,
 or explicitly change the declared package set in the validated release commit.
@@ -38,7 +42,30 @@ on clean Windows 10 and Windows 11 machines, and the AppImage on clean Linux.
 Include the standalone EXE in Windows 10 and Windows 11 acceptance records.
 Follow the complete Windows test plan, including MP3 rendering, and retain its
 results and environment records. For Linux, verify launch, IMG creation and
-reopening, an HFE round trip, and MP3 rendering without development tools.
+reopening, an HFE round trip, MP3 rendering, and refusal to overwrite an image
+changed outside the app, without development tools.
+
+The Linux build script runs `--aps-package-smoke` from the completed AppImage
+before writing its checksum. Its `image_source_changes` case adds a file to an
+already-open disposable IMG, checks that saving refuses without changing the
+newer image, then checks recovery to a new file and saving after reload. This
+guards against distributing an older binary even when source tests pass.
+Results and a SHA-256 of the complete AppImage are retained under
+`build/appimage/acceptance-VERSION-*/`. A failure stops the build before it
+creates a release checksum. These local checks do not establish clean-machine
+acceptance or change an unreleased version's publication status.
+
+For an offline rebuild with the existing, populated build environment:
+
+```bash
+PIP_NO_INDEX=1 GREASEWEAZLE_REQUIREMENT=greaseweazle==1.23 ./scripts/build_appimage.sh
+```
+
+This requires all build dependencies and appimagetool to be installed already.
+Keep source and artifact verification separate: the local 0.8.7 AppImage was
+built before the source-change safeguard landed. Until an installed package
+passes that case, reopen images after external edits or repairs, or recover
+pending edits with **Save As Image** to a new filename.
 
 The signed EXE also runs an automated smoke check after packaging. Run that
 check locally on Windows with:
@@ -140,3 +167,19 @@ insufficient space or write permission, unsaved edits, active disk work, and
 replacement/restart failure with recovery. Include native Windows 10/11 and
 Linux results in the retained acceptance evidence. Existing copies built
 before updater support require one manual replacement to gain this feature.
+
+For the v0.8.7 transition, start with the actual released signed executable,
+not a rebuilt copy of its source. Test both its original local filename and a
+renamed copy in a USB folder containing spaces. Record the old and new hashes,
+downloaded asset name, restart path, and displayed application version. Source
+tests and a new executable's own updater cannot establish old-client acceptance.
+
+Run several successive successful updates and verify that each leaves exactly
+one current `.previous` recovery copy and no completed `.aps-update-*` directory.
+Backups left by older updater versions may remain; record them before testing.
+Cancel a download and exercise read-only, full, and disconnected disposable
+destinations. The working executable and adjacent customer files must remain
+intact, or recovery must be clearly reported and retained when the drive is
+unavailable. Failed/unfinished update directories must not be removed by the
+successful-update retention policy. Never simulate drive failures on customer
+media. These native checks remain unperformed until their evidence is recorded.

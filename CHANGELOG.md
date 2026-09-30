@@ -9,6 +9,10 @@ with release sections grouped by version and date.
 
 ### Added
 
+- Supplied website report receiver can create GitHub issue references alongside
+  private bug report emails. It shares only a report ID and app version and
+  requires server configuration. Failed emails can be retried; concurrent
+  duplicate submissions are locked, and GitHub outages preserve email success.
 - Developer playback tests render converted E-SEQ files with FluidSynth and
   check audible notes, pitches, rests, tempo changes, and volume-mute behavior.
   Linux CI requires these checks; they add no end-user application behavior.
@@ -47,7 +51,30 @@ with release sections grouped by version and date.
 
 ### Changed
 
-- **Review Changes** opens larger, with a resizable split between the song list
+- Successful self-updates retain one previous executable. Older recovery copies
+  remain available until startup succeeds; failed updates retain their recovery
+  directory. Existing backups from earlier versions are left untouched.
+- Explicit piano merges show **Overlap repair: Smart** or **Overlap repair:
+  Keep attacks** while the repair is staged, including remembered choices.
+  Destination preparation leaves overlaps intact. Regression checks cover
+  sustained notes beneath repeated strikes and E-SEQ startup-mute cleanup
+  through interactive conversion, automatic preparation, disk import/export,
+  and bulk extraction.
+
+- Changing destinations replaces automatic preparation while preserving manual
+  titles, filenames, ordering, and edits. Retained source bytes avoid MIDI/E-SEQ
+  round trips. Undo restores the previous
+  destination and its preparation, including across later imports.
+- Both **Custom** entry points stop automatic preparation and keep all current
+  staged work and preferences. **Edit → Reset preparation** separately removes
+  automatic preparation changes, preserves manual edits and preferences, and
+  supports Undo. Choosing a later destination still replaces the old preparation.
+- **Preparing for...** starts with a concise delivery outcome and keeps the saved
+  settings comparison and compatibility references under **Details**.
+- Removed the extra song-readiness indicator beside the destination controls.
+  Preparation requirements still apply when saving or exporting, and song counts
+  and exceptions remain in the preparation dialog.
+- **Review Changes** has a resizable split between the song list
   and a full original/proposed comparison. Summaries identify filename and title
   edits, and the first song's details appear immediately. Resizing no longer
   triggers automatic shrinking and recentering.
@@ -101,6 +128,25 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Resizable forms open at compact default sizes. **Preparing for...** fits its
+  collapsed summary and expands for **Details** until the window is manually
+  resized; shared form windows no longer multiply their initial size by the font height.
+  Bulk Extraction, Overlapping Piano Notes, Keyboard Shortcuts, and Review
+  Changes use smaller starting sizes while preserving scrolling and resizing.
+- **Save**, **Save As**, and **Save As Image** use their original heading fonts.
+  The extra preparation status and save-button row has been removed.
+- The Windows updater recognizes the published standalone filename
+  `APS.MIDI.Prep.Tool.exe` as well as `APSMIDIPrepTool.exe`. Ambiguous downloads
+  and installers remain rejected, and the existing release, checksum, and
+  publisher-signature checks still apply. The filename failure and correction
+  are verified in source tests; native Windows update acceptance remains pending.
+- Linux packaging now verifies external-image-change protection in the completed
+  AppImage before generating its release checksum. Earlier Linux packages can
+  overwrite external changes to an open image; reopen after outside edits or
+  repairs, or save pending edits to a new filename until using a verified build.
+- **Save As Image** also refuses to overwrite a changed open source, including
+  aliases, resized images, and split-output filenames. Saves recheck the source
+  immediately before replacement after syncing the staged output.
 - Resizable forms keep the user's chosen size and position instead of repeatedly
   fitting and recentering during resize. Bulk Extraction has a scrollable form
   with Extract and Cancel always visible, including on smaller screens.

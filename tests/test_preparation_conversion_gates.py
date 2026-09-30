@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -49,7 +50,7 @@ def _midi():
     ("mark_i", "eseq"), ("mark_ii", "eseq"), ("mark_iii", "midi"), ("enspire", "midi"),
 ))
 @pytest.mark.parametrize("image_mode", (False, True))
-def test_destination_blocks_reverse_conversion_and_custom_restores_it(
+def test_destination_blocks_reverse_conversion_until_custom_keeps_current_work(
     window, monkeypatch, tmp_path, profile_key, target, image_mode,
 ):
     source = tmp_path / ("SONG.MID" if target == "eseq" else "SONG.FIL")
@@ -93,8 +94,20 @@ def test_destination_blocks_reverse_conversion_and_custom_restores_it(
             window._stage_regular_row_conversion(0, str(source), opposite)
     assert source.read_bytes() == payload
 
+    row, source_path, kind, _filename = next(window._preparation_song_rows())
+    material = (window._pending_or_extracted_image_path(source_path) if image_mode
+                else window._regular_source_material_path(source_path))
+    prepared_payload = Path(material).read_bytes()
+
     _apply(window, "custom")
     assert window._preparation_conversion_restriction(opposite) == ""
+    row, source_path, kind, _filename = next(window._preparation_song_rows())
+    assert kind == target
+    material = (window._pending_or_extracted_image_path(source_path) if image_mode
+                else window._regular_source_material_path(source_path))
+    assert Path(material).read_bytes() == prepared_payload
+    # Custom keeps preparation and releases the destination format gate, so
+    # converting the staged song back to the other format becomes available.
     assert button.isEnabled()
     assert action.isEnabled()
     assert "disabled" not in button.toolTip()

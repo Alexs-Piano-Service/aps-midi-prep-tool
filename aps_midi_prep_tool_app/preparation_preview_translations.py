@@ -12,6 +12,32 @@ def _add(source, translations):
 
 
 _add("Preparing for...", "Preparar para...|Préparer pour...|Vorbereiten für...|Preparazione per...|Preparar para...|Подготовка за...|Voorbereiden voor...|Przygotowanie dla...|使用先に合わせて準備...|대상에 맞게 준비...|准备目标...")
+_add("Preparing for:", "Preparar para:|Préparer pour :|Vorbereiten für:|Preparazione per:|Preparar para:|Подготовка за:|Voorbereiden voor:|Przygotowanie dla:|準備の対象:|준비 대상:|准备目标：")
+_add("Delivery:", "Destino:|Support de sortie :|Ausgabe:|Destinazione:|Destino:|Носител:|Uitvoer:|Nośnik docelowy:|出力先:|출력 대상:|交付方式：")
+_add("Saved settings", "Ajustes guardados|Réglages enregistrés|Gespeicherte Einstellungen|Impostazioni salvate|Configurações salvas|Запазени настройки|Opgeslagen instellingen|Zapisane ustawienia|保存済みの設定|저장된 설정|已保存的设置")
+_add("On apply", "Al aplicar|Après application|Nach dem Anwenden|Dopo l’applicazione|Ao aplicar|При прилагане|Na toepassen|Po zastosowaniu|適用後|적용 후|应用后")
+_add("Image prefix", "Prefijo de imagen|Préfixe d’image|Image-Präfix|Prefisso immagine|Prefixo da imagem|Префикс на образа|Imagevoorvoegsel|Prefiks obrazu|イメージ名の接頭辞|이미지 접두사|映像前缀")
+_add("Starting disk number", "Número de disco inicial|Numéro du premier disque|Erste Datenträgernummer|Numero disco iniziale|Número inicial do disco|Начален номер на диска|Beginnummer schijf|Początkowy numer dysku|開始ディスク番号|시작 디스크 번호|起始磁盘编号")
+_add("1 song", "1 canción|1 morceau|1 Stück|1 brano|1 música|1 песен|1 nummer|1 utwór|1曲|1곡|1 首歌曲")
+_add("{count} songs", "{count} canciones|{count} morceaux|{count} Stücke|{count} brani|{count} músicas|{count} песни|{count} nummers|Utwory: {count}|{count}曲|{count}곡|{count} 首歌曲")
+_add("No songs loaded", "No hay canciones cargadas|Aucun morceau chargé|Keine Stücke geladen|Nessun brano caricato|Nenhuma música carregada|Няма заредени песни|Geen nummers geladen|Nie wczytano utworów|曲が読み込まれていません|불러온 곡 없음|未加载歌曲")
+_add("Preparing…", "Preparando…|Préparation…|Vorbereitung…|Preparazione…|Preparando…|Подготовка…|Voorbereiden…|Przygotowywanie…|準備中…|준비 중…|正在准备…")
+_add("1 song ready", "1 canción lista|1 morceau prêt|1 Stück bereit|1 brano pronto|1 música pronta|1 песен е готова|1 nummer gereed|1 utwór gotowy|1曲の準備完了|1곡 준비 완료|1 首歌曲已就绪")
+_add("{count} songs ready", "{count} canciones listas|{count} morceaux prêts|{count} Stücke bereit|{count} brani pronti|{count} músicas prontas|{count} песни са готови|{count} nummers gereed|Gotowe utwory: {count}|{count}曲の準備完了|{count}곡 준비 완료|{count} 首歌曲已就绪")
+_add("1 song needs attention", "1 canción requiere atención|1 morceau nécessite une vérification|1 Stück muss geprüft werden|1 brano da controllare|1 música precisa de atenção|1 песен се нуждае от проверка|1 nummer vereist aandacht|1 utwór wymaga sprawdzenia|1曲の確認が必要です|1곡 확인 필요|1 首歌曲需要检查")
+_add("{count} songs need attention", "{count} canciones requieren atención|{count} morceaux nécessitent une vérification|{count} Stücke müssen geprüft werden|{count} brani da controllare|{count} músicas precisam de atenção|{count} песни се нуждаят от проверка|{count} nummers vereisen aandacht|Utwory wymagające sprawdzenia: {count}|{count}曲の確認が必要です|{count}곡 확인 필요|{count} 首歌曲需要检查")
+_add("1 song loaded", "1 canción cargada|1 morceau chargé|1 Stück geladen|1 brano caricato|1 música carregada|1 заредена песен|1 nummer geladen|1 utwór wczytany|1曲を読み込み済み|1곡 불러옴|已加载 1 首歌曲")
+_add("{count} songs loaded", "{count} canciones cargadas|{count} morceaux chargés|{count} Stücke geladen|{count} brani caricati|{count} músicas carregadas|{count} заредени песни|{count} nummers geladen|Wczytane utwory: {count}|{count}曲を読み込み済み|{count}곡 불러옴|已加载 {count} 首歌曲")
+_add("Floppy disks", "Disquetes|Disquettes|Disketten|Dischetti|Disquetes|Дискети|Diskettes|Dyskietki|フロッピーディスク|플로피 디스크|软盘")
+_add("Disk images", "Imágenes de disco|Images disque|Datenträgerabbilder|Immagini disco|Imagens de disco|Дискови образи|Schijfimages|Obrazy dysków|ディスクイメージ|디스크 이미지|磁盘映像")
+_add("MIDI files", "Archivos MIDI|Fichiers MIDI|MIDI-Dateien|File MIDI|Arquivos MIDI|MIDI файлове|MIDI-bestanden|Pliki MIDI|MIDIファイル|MIDI 파일|MIDI 文件")
+_add("Prepared files", "Archivos preparados|Fichiers préparés|Vorbereitete Dateien|File preparati|Arquivos preparados|Подготвени файлове|Voorbereide bestanden|Przygotowane pliki|準備済みファイル|준비된 파일|准备好的文件")
+_add("{size} floppy disks", "Disquetes de {size}|Disquettes de {size}|{size}-Disketten|Dischetti da {size}|Disquetes de {size}|Дискети {size}|Diskettes van {size}|Dyskietki {size}|{size}のフロッピーディスク|{size} 플로피 디스크|{size} 软盘")
+_add("{size} disk images", "Imágenes de disco de {size}|Images disque de {size}|{size}-Datenträgerabbilder|Immagini disco da {size}|Imagens de disco de {size}|Дискови образи {size}|Schijfimages van {size}|Obrazy dysków {size}|{size}のディスクイメージ|{size} 디스크 이미지|{size} 磁盘映像")
+_add("Originals unchanged", "Originales sin cambios|Originaux inchangés|Originale unverändert|Originali invariati|Originais inalterados|Оригиналите са непроменени|Originelen ongewijzigd|Oryginały bez zmian|元のファイルは変更されません|원본 변경 없음|原文件保持不变")
+_add("Save prepared files…", "Guardar archivos preparados…|Enregistrer les fichiers préparés…|Vorbereitete Dateien speichern…|Salva file preparati…|Salvar arquivos preparados…|Запис на подготвените файлове…|Voorbereide bestanden opslaan…|Zapisz przygotowane pliki…|準備したファイルを保存…|준비된 파일 저장…|保存准备好的文件…")
+_add("Create disk images…", "Crear imágenes de disco…|Créer des images disque…|Datenträgerabbilder erstellen…|Crea immagini disco…|Criar imagens de disco…|Създаване на дискови образи…|Schijfimages maken…|Utwórz obrazy dysków…|ディスクイメージを作成…|디스크 이미지 만들기…|创建磁盘映像…")
+_add("Write prepared floppy…", "Escribir disquete preparado…|Écrire la disquette préparée…|Vorbereitete Diskette schreiben…|Scrivi dischetto preparato…|Gravar disquete preparado…|Запис на подготвената дискета…|Voorbereide diskette schrijven…|Zapisz przygotowaną dyskietkę…|準備したフロッピーディスクに書き込み…|준비된 플로피 기록…|写入准备好的软盘…")
 _add("Song format", "Formato de canciones|Format des morceaux|Songformat|Formato brani|Formato das músicas|Формат на песните|Songformaat|Format utworów|曲の形式|곡 형식|歌曲格式")
 _add("Filenames", "Nombres de archivo|Noms de fichiers|Dateinamen|Nomi dei file|Nomes dos arquivos|Имена на файловете|Bestandsnamen|Nazwy plików|ファイル名|파일 이름|文件名")
 _add("Descriptive filenames", "Nombres descriptivos|Noms descriptifs|Beschreibende Dateinamen|Nomi descrittivi|Nomes descritivos|Описателни имена|Beschrijvende namen|Nazwy opisowe|曲名を使ったファイル名|설명형 파일 이름|描述性文件名")
@@ -33,18 +59,102 @@ _add("Show Save Destination", "Mostrar destino de guardado|Afficher la destinati
 _add("Show Preparation Row", "Mostrar fila de preparación|Afficher la ligne de préparation|Vorbereitungszeile anzeigen|Mostra riga di preparazione|Mostrar linha de preparação|Показване на реда за подготовка|Voorbereidingsrij tonen|Pokaż wiersz przygotowania|準備の行を表示|준비 행 표시|显示准备栏")
 _add("Switch to Custom", "Cambiar a Personalizado|Passer à Personnalisé|Zu Benutzerdefiniert wechseln|Passa a Personalizzato|Mudar para Personalizado|Преминаване към По избор|Overschakelen naar Aangepast|Przełącz na Własne|カスタムに切り替え|사용자 지정으로 전환|切换为自定义")
 _add(
-    "Automatic preparation is off. Current preferences and staged changes have been kept.",
-    "La preparación automática está desactivada. Se han conservado las preferencias actuales y los cambios pendientes.|"
-    "La préparation automatique est désactivée. Les préférences actuelles et les modifications en attente ont été conservées.|"
-    "Die automatische Vorbereitung ist deaktiviert. Die aktuellen Einstellungen und vorgemerkten Änderungen wurden beibehalten.|"
-    "La preparazione automatica è disattivata. Le preferenze attuali e le modifiche in attesa sono state mantenute.|"
-    "A preparação automática está desativada. As preferências atuais e as alterações pendentes foram mantidas.|"
-    "Автоматичната подготовка е изключена. Текущите настройки и чакащите промени са запазени.|"
-    "Automatische voorbereiding is uitgeschakeld. De huidige voorkeuren en klaargezette wijzigingen zijn behouden.|"
-    "Automatyczne przygotowanie jest wyłączone. Zachowano bieżące preferencje i oczekujące zmiany.|"
-    "自動準備は無効です。現在の設定と保留中の変更は保持されています。|"
-    "자동 준비가 꺼져 있습니다. 현재 환경 설정과 저장 대기 중인 변경 사항은 유지되었습니다.|"
-    "自动准备已关闭。已保留当前偏好设置和待保存的更改。",
+    "Stop automatic preparation and keep current work and settings.",
+    "Detener la preparación automática y conservar el trabajo y los ajustes actuales.|"
+    "Arrêter la préparation automatique et conserver le travail et les réglages actuels.|"
+    "Automatische Vorbereitung beenden und aktuellen Arbeitsstand und Einstellungen beibehalten.|"
+    "Interrompi la preparazione automatica e mantieni il lavoro e le impostazioni attuali.|"
+    "Interromper a preparação automática e manter o trabalho e as configurações atuais.|"
+    "Спиране на автоматичната подготовка и запазване на текущата работа и настройки.|"
+    "Stop automatische voorbereiding en behoud het huidige werk en de instellingen.|"
+    "Zatrzymaj automatyczne przygotowanie i zachowaj bieżącą pracę oraz ustawienia.|"
+    "自動準備を停止し、現在の作業内容と設定を保持します。|"
+    "자동 준비를 중지하고 현재 작업과 설정을 유지합니다.|"
+    "停止自动准备并保留当前工作和设置。",
+)
+_add(
+    "Automatic preparation is off. Current work and settings have been kept.",
+    "La preparación automática está desactivada. Se han conservado el trabajo y los ajustes actuales.|"
+    "La préparation automatique est désactivée. Le travail et les réglages actuels ont été conservés.|"
+    "Die automatische Vorbereitung ist deaktiviert. Der aktuelle Arbeitsstand und die Einstellungen wurden beibehalten.|"
+    "La preparazione automatica è disattivata. Il lavoro e le impostazioni attuali sono stati mantenuti.|"
+    "A preparação automática está desativada. O trabalho e as configurações atuais foram mantidos.|"
+    "Автоматичната подготовка е изключена. Текущата работа и настройки са запазени.|"
+    "Automatische voorbereiding is uitgeschakeld. Het huidige werk en de instellingen zijn behouden.|"
+    "Automatyczne przygotowanie jest wyłączone. Zachowano bieżącą pracę i ustawienia.|"
+    "自動準備は無効です。現在の作業内容と設定は保持されています。|"
+    "자동 준비가 꺼져 있습니다. 현재 작업과 설정은 유지되었습니다.|"
+    "自动准备已关闭。已保留当前工作和设置。",
+)
+_add(
+    "Current work and settings kept",
+    "Trabajo y ajustes actuales conservados|"
+    "Travail et réglages actuels conservés|"
+    "Aktueller Arbeitsstand und Einstellungen beibehalten|"
+    "Lavoro e impostazioni attuali mantenuti|"
+    "Trabalho e configurações atuais mantidos|"
+    "Текущата работа и настройки са запазени|"
+    "Huidig werk en instellingen behouden|"
+    "Bieżąca praca i ustawienia zachowane|"
+    "現在の作業内容と設定を保持|"
+    "현재 작업과 설정 유지|"
+    "保留当前工作和设置",
+)
+_add(
+    "Reset preparation",
+    "Restablecer preparación|"
+    "Réinitialiser la préparation|"
+    "Vorbereitung zurücksetzen|"
+    "Reimposta preparazione|"
+    "Redefinir preparação|"
+    "Нулиране на подготовката|"
+    "Voorbereiding terugzetten|"
+    "Resetuj przygotowanie|"
+    "準備をリセット|"
+    "준비 초기화|"
+    "重置准备",
+)
+_add(
+    "Remove automatic preparation changes and keep manual edits and settings.",
+    "Eliminar los cambios de preparación automática y conservar las ediciones manuales y los ajustes.|"
+    "Supprimer les changements de préparation automatique et conserver les modifications manuelles et les réglages.|"
+    "Änderungen der automatischen Vorbereitung entfernen und manuelle Änderungen und Einstellungen beibehalten.|"
+    "Rimuovi le modifiche della preparazione automatica e mantieni le modifiche manuali e le impostazioni.|"
+    "Remover as alterações da preparação automática e manter as edições manuais e as configurações.|"
+    "Премахване на промените от автоматичната подготовка и запазване на ръчните промени и настройки.|"
+    "Verwijder wijzigingen van automatische voorbereiding en behoud handmatige bewerkingen en instellingen.|"
+    "Usuń zmiany automatycznego przygotowania i zachowaj ręczne zmiany oraz ustawienia.|"
+    "自動準備による変更を取り消し、手動での編集と設定を保持します。|"
+    "자동 준비로 인한 변경을 제거하고 수동 편집과 설정을 유지합니다.|"
+    "移除自动准备所做的更改，并保留手动编辑和设置。",
+)
+_add(
+    "Automatic preparation has been reset. Manual edits and settings have been kept.",
+    "Se ha restablecido la preparación automática. Se han conservado las ediciones manuales y los ajustes.|"
+    "La préparation automatique a été réinitialisée. Les modifications manuelles et les réglages ont été conservés.|"
+    "Die automatische Vorbereitung wurde zurückgesetzt. Manuelle Änderungen und Einstellungen wurden beibehalten.|"
+    "La preparazione automatica è stata reimpostata. Le modifiche manuali e le impostazioni sono state mantenute.|"
+    "A preparação automática foi redefinida. As edições manuais e as configurações foram mantidas.|"
+    "Автоматичната подготовка е нулирана. Ръчните промени и настройки са запазени.|"
+    "Automatische voorbereiding is teruggezet. Handmatige bewerkingen en instellingen zijn behouden.|"
+    "Automatyczne przygotowanie zostało zresetowane. Zachowano ręczne zmiany i ustawienia.|"
+    "自動準備をリセットしました。手動での編集と設定は保持されています。|"
+    "자동 준비가 초기화되었습니다. 수동 편집과 설정은 유지되었습니다.|"
+    "自动准备已重置。已保留手动编辑和设置。",
+)
+_add(
+    "Automatic preparation is off. Your manual edits and current preferences have been kept.",
+    "La preparación automática está desactivada. Se han conservado tus ediciones manuales y las preferencias actuales.|"
+    "La préparation automatique est désactivée. Vos modifications manuelles et les préférences actuelles ont été conservées.|"
+    "Die automatische Vorbereitung ist deaktiviert. Ihre manuellen Änderungen und aktuellen Einstellungen wurden beibehalten.|"
+    "La preparazione automatica è disattivata. Le modifiche manuali e le preferenze attuali sono state mantenute.|"
+    "A preparação automática está desativada. Suas edições manuais e as preferências atuais foram mantidas.|"
+    "Автоматичната подготовка е изключена. Ръчните ви промени и текущите настройки са запазени.|"
+    "Automatische voorbereiding is uitgeschakeld. Je handmatige bewerkingen en huidige voorkeuren zijn behouden.|"
+    "Automatyczne przygotowanie jest wyłączone. Zachowano ręczne zmiany i bieżące preferencje.|"
+    "自動準備は無効です。手動での編集と現在の設定は保持されています。|"
+    "자동 준비가 꺼져 있습니다. 수동 편집과 현재 환경 설정은 유지되었습니다.|"
+    "自动准备已关闭。已保留手动编辑和当前偏好设置。",
 )
 _add(
     "Preparing for {profile} sets {option} to {value}. Change the target system or choose Custom to change this option.",
@@ -203,6 +313,8 @@ _add("USB / folder export", "Exportar a USB / carpeta|Export vers USB / dossier|
 _add("Review emulator disk set", "Revisar conjunto de discos del emulador|Vérifier le jeu de disques de l’émulateur|Emulator-Diskettensatz prüfen|Esamina il set di dischi dell’emulatore|Revisar conjunto de discos do emulador|Преглед на комплекта дискове за емулатор|Emulatordiskset controleren|Przejrzyj zestaw dysków emulatora|エミュレーターディスクセットを確認|에뮬레이터 디스크 세트 검토|查看模拟器磁盘集")
 _add("{disks} disk(s), {songs} song(s). Output: {path}", "{disks} disco(s), {songs} canción(es). Destino: {path}|{disks} disque(s), {songs} morceau(x). Sortie : {path}|{disks} Diskette(n), {songs} Stück(e). Ausgabe: {path}|{disks} dischi, {songs} brani. Destinazione: {path}|{disks} disco(s), {songs} música(s). Saída: {path}|{disks} диска, {songs} песни. Изход: {path}|{disks} diskette(s), {songs} nummer(s). Uitvoer: {path}|{disks} dysków, {songs} utworów. Wyjście: {path}|ディスク{disks}枚、{songs}曲。出力先: {path}|디스크 {disks}개, {songs}곡. 출력: {path}|{disks} 张磁盘，{songs} 首歌曲。输出：{path}")
 _add("Review the packed output below. Exclude albums, edit titles, or change album order, then choose Update Preview before building.", "Revise los discos propuestos. Excluya álbumes, edite títulos o cambie el orden y elija Actualizar vista previa antes de crearlos.|Vérifiez les disques proposés. Excluez des albums, modifiez les titres ou leur ordre, puis actualisez l’aperçu avant la création.|Prüfen Sie die gepackte Ausgabe. Schließen Sie Alben aus, ändern Sie Titel oder die Albumreihenfolge und aktualisieren Sie vor dem Erstellen die Vorschau.|Esamina i dischi proposti. Escludi album, modifica titoli o ordine e aggiorna l’anteprima prima di creare il set.|Revise os discos propostos. Exclua álbuns, edite títulos ou altere a ordem e atualize a prévia antes de criar.|Прегледайте подготвените дискове. Изключете албуми, редактирайте заглавия или реда им и обновете прегледа преди създаване.|Controleer de ingepakte uitvoer. Sluit albums uit, wijzig titels of de albumvolgorde en werk de voorvertoning bij voordat u bouwt.|Przejrzyj przygotowane dyski. Wyklucz albumy, zmień tytuły lub kolejność, a przed utworzeniem zaktualizuj podgląd.|下のディスク構成を確認してください。アルバムの除外、タイトルや順序の編集後は、作成前にプレビューを更新してください。|아래 디스크 구성을 검토하세요. 앨범을 제외하거나 제목 또는 순서를 변경한 뒤 생성 전에 미리보기를 업데이트하세요.|查看下方磁盘内容。可排除专辑、编辑标题或调整专辑顺序，然后在生成前更新预览。")
+_add("Overlap repair: Smart", "Reparación de solapamientos: inteligente|Correction des chevauchements : intelligente|Überlappungsreparatur: intelligent|Correzione sovrapposizioni: intelligente|Reparo de sobreposições: inteligente|Поправка на застъпвания: интелигентна|Overlapherstel: slim|Naprawa nakładania: inteligentna|音の重なり修復：スマート|음 겹침 복구: 스마트|重叠修复：智能")
+_add("Overlap repair: Keep attacks", "Reparación de solapamientos: conservar ataques|Correction des chevauchements : conserver les attaques|Überlappungsreparatur: Anschläge erhalten|Correzione sovrapposizioni: mantieni attacchi|Reparo de sobreposições: manter ataques|Поправка на застъпвания: запазване на атаките|Overlapherstel: aanslagen behouden|Naprawa nakładania: zachowaj ataki|音の重なり修復：打鍵を保持|음 겹침 복구: 어택 유지|重叠修复：保留起音")
 _add("Include", "Incluir|Inclure|Einbeziehen|Includi|Incluir|Включване|Opnemen|Uwzględnij|含める|포함|包含")
 _add("Songs", "Canciones|Morceaux|Stücke|Brani|Músicas|Песни|Nummers|Utwory|曲|곡|歌曲")
 _add("Source folder", "Carpeta de origen|Dossier source|Quellordner|Cartella di origine|Pasta de origem|Изходна папка|Bronmap|Folder źródłowy|元のフォルダー|원본 폴더|源文件夹")

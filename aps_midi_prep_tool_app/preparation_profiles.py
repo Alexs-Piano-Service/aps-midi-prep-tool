@@ -61,7 +61,7 @@ PIANO_PROFILES = (
         "unsure", "I'm not sure", category="general",
         media=("custom", "original", "flashfloppy_img", "flashfloppy_hfe", "emulator_custom", "usb"),
     ),
-    PianoProfile("custom", "Custom", caution="Keep manual conversion settings; use descriptive filenames and standard title editing.", category="general"),
+    PianoProfile("custom", "Custom", caution="Stop automatic preparation and keep current work and settings.", category="general"),
     PianoProfile(
         "mark_i", "Mark I — MX100A/B, DKW10, DKC5R", "eseq", ("eseq",), (),
         "ibm.720", FLOPPY_MEDIA, "original", "documented",
@@ -213,6 +213,8 @@ def get_preparation_medium(profile, key):
 
 def proposed_settings(profile, medium):
     """Return only defaults the user can review before applying this profile."""
+    if profile.key == "custom":
+        return {}
     medium = get_preparation_medium(profile, medium.key)
     floppy = medium.key in FLOPPY_MEDIA
     use_dos83 = floppy and profile.song_format is not None

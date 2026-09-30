@@ -260,7 +260,9 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         disk_format,
         output_ext,
         output_content="eseq",
+        catalog_number="",
         require_midi_type0=False,
+        preserve_catalog_midi=False,
         include_subfolders=True,
         disk_layout="fill",
         shuffle=False,
@@ -275,10 +277,12 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         self.starting_number = int(starting_number)
         self.safety_margin_bytes = int(safety_margin_bytes)
         self.album_title = album_title
+        self.catalog_number = catalog_number
         self.disk_format = disk_format
         self.output_ext = output_ext
         self.output_content = output_content
         self.require_midi_type0 = bool(require_midi_type0)
+        self.preserve_catalog_midi = bool(preserve_catalog_midi)
         self.include_subfolders = bool(include_subfolders)
         self.disk_layout = disk_layout
         self.shuffle = bool(shuffle)
@@ -331,10 +335,12 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
                 starting_number=self.starting_number,
                 safety_margin_bytes=self.safety_margin_bytes,
                 album_title=self.album_title,
+                catalog_number=self.catalog_number,
                 disk_format=self.disk_format,
                 output_ext=self.output_ext,
                 output_content=self.output_content,
                 require_midi_type0=self.require_midi_type0,
+                preserve_catalog_midi=self.preserve_catalog_midi,
                 include_subfolders=self.include_subfolders,
                 disk_layout=self.disk_layout,
                 shuffle=self.shuffle,

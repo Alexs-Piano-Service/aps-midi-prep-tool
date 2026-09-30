@@ -65,6 +65,14 @@ different MIDI ports, and notes that only touch do not prompt. Repairs preserve
 each note's MIDI destination, including generated releases. The same choice
 applies when combining instruments as piano during Type 0 conversion.
 
+Smart repair can also remove a legitimate sustained note beneath repeated
+strikes, including its leading and trailing portions. Destination preparation
+does not run overlap repair, even with a remembered Smart preference.
+When an explicit merge stages a repair, **Overlap repair: Smart** or
+**Overlap repair: Keep attacks** stays visible beside the preparation state;
+hover over it to see affected filenames. The indicator clears when the staged
+repair is undone, discarded, or committed with **Save**.
+
 Check **Use this behavior for all future channel merges** to remember the choice
 across files and app restarts. Without that check, each affected song asks again.
 Open **Settings → Overlapping Piano Notes...** any time to change the behavior,

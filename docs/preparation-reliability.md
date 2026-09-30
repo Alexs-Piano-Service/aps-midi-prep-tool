@@ -100,12 +100,19 @@ playback. This includes **ENSPIRE and other MIDI preparation profiles**, floppy
 extraction, emulator MIDI output, and MIDI copies made during Mark IV backup.
 There is no checkbox to enable this cleanup.
 
-Cleanup removes `CC7=0` commands at or before each part's first note, including
-setup after a long opening pause. Later volume changes remain intact. It does
-not replace the commands with volume 100 or alter note strength, timing, or
+Cleanup removes `CC7=0` commands at or before each part's first sounding note,
+including setup after a long opening pause. Channels are evaluated independently; channels
+without sounding notes keep their commands. Later volume changes, including
+intentional mutes and restored volume, remain intact. Native MIDI preparation
+does not apply this E-SEQ cleanup. The cleanup does not replace the commands
+with volume 100 or alter note strength, timing, or
 pedals. The conversion report shows the before/after volume-command counts.
 Original E-SEQ files remain unchanged until you explicitly save over them;
 export copies to keep the originals.
+
+Clavinova MDA preparation for Disklavier E-SEQ preserves volume commands through
+its intermediate conversion. A subsequent MIDI export performs the same startup
+cleanup as converting the MDA directly to MIDI.
 
 Preparation profiles do not run instrument merging or the separate Pedal
 Compatibility and metadata-cleanup utilities. Fresh MIDI-to-Disklavier E-SEQ
@@ -138,12 +145,22 @@ Same-key overlaps prompt for smart repair, trimming, or the existing merge
 behavior. Smart repair follows the piano merger's containment rule: remove a
 long note only when it contains at least two surviving notes at distinct starts,
 each no more than half its duration. It can remove the long note's leading and
-trailing portions. Repair pairs notes before channel routing, combines unisons,
-and releases trimmed notes at the next attack's exact tick (zero release gap).
+trailing portions, including a legitimate sustained note beneath repeated
+attacks. Destination preparation never applies overlap repair, even when Smart
+is remembered for explicit channel merges. Repair pairs notes before channel
+routing, combines unisons, and releases trimmed notes at the next attack's exact
+tick (zero release gap).
 Native E-SEQ delay commands remain intact. Independent Type 2 sequences never
 count as overlaps with one another. A checked future-merges preference persists
 across restarts; **Settings → Show Dismissed Messages Again** makes affected songs
 ask again.
+
+An applied repair displays **Overlap repair: Smart** or **Overlap repair: Keep
+attacks** beside the preparation state, with affected filenames in its tooltip.
+This remains visible when the optional status and preparation controls are
+hidden. It describes staged repairs, not the remembered preference, and clears
+when those repairs are undone, discarded, or committed with **Save**. Unaffected songs and
+**Merge only** do not add a repair indicator.
 
 ### Emulator disk-set reports
 

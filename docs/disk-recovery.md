@@ -19,8 +19,17 @@
 APS opens common IMG/BIN raw images and HFE images. The song list shows titles,
 playback order, album information, and remaining disk space.
 
+**Image changes outside APS:** the Linux 0.8.7 AppImage predates the source-change
+safeguard. Saving an image that another tool changed while it was open can
+silently replace those newer contents, including added files or repairs. Until
+you have a rebuilt package verified against this case, reopen the image after
+outside changes. To keep pending edits, use **Save As Image** with a new filename
+first; do not select the original image as the destination. That copy contains
+the session's edits and does not merge newer external changes.
+
 Ordinary **Save** preserves unrelated files in an E-SEQ image, including notes,
-MIDI files, and management catalogs, unless you explicitly delete them.
+MIDI files, and management catalogs present when opened, unless you explicitly
+delete them.
 **Save As** and **Save As Image** still prepare a clean E-SEQ delivery set.
 
 [![A Yamaha E-SEQ floppy image with editable song titles](images/aps-midi-prep-tool-yamaha-eseq-floppy-image-editor.png)](images/aps-midi-prep-tool-yamaha-eseq-floppy-image-editor.png)

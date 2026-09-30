@@ -43,6 +43,13 @@ translation-catalog consistency. When changing floppy, image, E-SEQ, or MIDI
 conversion behavior, test with copies of representative files and note what
 workflow you verified.
 
+Qt tests share the application and widget cleanup in `tests/conftest.py`.
+Closing a widget hides it, and calling `processEvents()` alone does not finish
+queued `deleteLater()` calls outside Qt's main event loop. The shared teardown
+deletes each test's remaining windows and flushes deferred deletions before the
+next test, while preserving widgets owned by longer-lived fixtures. Keep worker
+shutdown and other resource cleanup in the fixtures that create them.
+
 ### E-SEQ conversion playback checks
 
 Run the developer-only audio tests to verify that converted MIDI makes sound:

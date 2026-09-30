@@ -89,10 +89,10 @@ try {
         throw 'The smoke report application version does not match the expected release.'
     }
     if ($report.status -ne 'passed') { throw 'The package smoke report does not show a complete pass.' }
-    foreach ($name in @('ui', 'img', 'hfe', 'mp3')) {
+    foreach ($name in @('ui', 'img', 'image_source_changes', 'hfe', 'mp3')) {
         if ($report.cases.$name.status -ne 'passed') { throw "Package smoke case did not pass: $name" }
     }
-    Write-Host "Final Windows EXE passed UI, IMG, HFE and MP3 checks: $reportPath"
+    Write-Host "Final Windows EXE passed UI, IMG, source-change protection, HFE and MP3 checks: $reportPath"
 } finally {
     if ($started -and !$process.HasExited) {
         Stop-PackageProcessTree $process.Id

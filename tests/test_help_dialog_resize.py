@@ -16,10 +16,12 @@ from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
 from test_window_menu_behavior import window
 
 
-HELP_DIALOGS = (
-    "show_about_dialog", "show_disclaimer_dialog",
-    "show_bug_report_dialog", "show_feedback_dialog",
-)
+HELP_DIALOGS = {
+    "show_about_dialog": (600, 540),
+    "show_disclaimer_dialog": (720, 540),
+    "show_bug_report_dialog": (800, 720),
+    "show_feedback_dialog": (760, 600),
+}
 
 
 @pytest.fixture
@@ -119,8 +121,10 @@ def test_help_dialogs_keep_user_geometry_and_accessible_controls(
 
     def exercise(dialog):
         available = dialog.screen().availableGeometry()
-        assert dialog.width() <= available.width()
-        assert dialog.height() <= available.height()
+        default_width, default_height = HELP_DIALOGS[method]
+        assert dialog.width() <= min(default_width, available.width() - 40)
+        assert dialog.height() <= min(default_height, available.height() - 60)
+        _assert_accessible(dialog)
         for size in ((1150, 800), (700, 480), (950, 650)):
             _resize(dialog, size)
         normal_geometry = dialog.geometry()

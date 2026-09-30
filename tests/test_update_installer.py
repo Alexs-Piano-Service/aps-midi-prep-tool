@@ -67,7 +67,8 @@ def test_installs_same_unicode_filename_and_preserves_music_config_and_old_versi
     updater._replace_and_restart(job, restart=_acknowledging_restart)
     assert target.read_bytes() == b"new executable"
     assert backup.read_bytes() == b"old executable"
-    assert list(target.parent.glob(target.name + ".previous.*"))[0].read_bytes() == b"older executable"
+    assert (Path(job["directory"]) / "older.previous").read_bytes() == b"older executable"
+    assert not list(target.parent.glob(target.name + ".previous.*"))
     assert (target.parent / "customer music.mid").read_bytes() == b"music remains"
     assert (target.parent / "aps-midi-prep-tool.json").read_bytes() == b"configuration remains"
     if os.name != "nt":
@@ -184,6 +185,62 @@ def test_authorized_helper_installs_once_and_cleans_staging(update_job):
     ) == 0
     assert Path(job["target"]).read_bytes() == b"new executable"
     assert not directory.exists()
+
+
+def test_successive_successful_updates_keep_only_the_latest_recovery_copy(update_job):
+    job = update_job
+    target = Path(job["target"])
+    previous = target.read_bytes()
+    parent = SimpleNamespace(exited=lambda: True, close=lambda: None)
+    for generation in range(4):
+        directory = Path(job["directory"])
+        directory.mkdir(exist_ok=True)
+        new_bytes = f"executable version {generation}".encode()
+        Path(job["payload"]).write_bytes(new_bytes)
+        job["original_sha256"] = updater._hash_file(target)
+        job["sha256"] = updater._hash_file(Path(job["payload"]))
+        updater._write_json(directory / "job.json", job)
+        updater._write_marker(directory / "commit", job["token"])
+
+        def restart(active_job, *, acknowledge):
+            assert acknowledge
+            assert target.read_bytes() == new_bytes
+            assert Path(str(target) + ".previous").read_bytes() == previous
+            if generation:
+                assert (directory / "older.previous").is_file()
+            return _acknowledging_restart(active_job, acknowledge=acknowledge)
+
+        assert updater._run_helper(
+            directory / "job.json", parent_factory=lambda *args: parent,
+            replace_and_restart=lambda active_job: updater._replace_and_restart(active_job, restart=restart),
+        ) == 0
+        assert target.read_bytes() == new_bytes
+        assert Path(str(target) + ".previous").read_bytes() == previous
+        assert not list(target.parent.glob(target.name + ".previous.*"))
+        assert not list(target.parent.glob(".aps-update-*"))
+        previous = new_bytes
+    assert (target.parent / "customer music.mid").read_bytes() == b"music remains"
+    assert (target.parent / "aps-midi-prep-tool.json").read_bytes() == b"configuration remains"
+
+
+@pytest.mark.parametrize("child_running", [False, True])
+def test_failed_update_retains_older_backup_in_its_recovery_directory(update_job, child_running):
+    job = update_job
+    directory = Path(job["directory"])
+    Path(job["target"] + ".previous").write_bytes(b"older executable")
+    updater._write_marker(directory / "commit", job["token"])
+    parent = SimpleNamespace(exited=lambda: True, close=lambda: None)
+    assert updater._run_helper(
+        directory / "job.json", parent_factory=lambda *args: parent,
+        replace_and_restart=lambda active_job: updater._replace_and_restart(
+            active_job, restart=lambda *_args, **_kwargs: SimpleNamespace(
+                poll=lambda: None if child_running else 1), startup_timeout=0.001),
+    ) == 1
+    assert Path(job["target"]).read_bytes() == (b"new executable" if child_running else b"old executable")
+    if child_running:
+        assert Path(job["target"] + ".previous").read_bytes() == b"old executable"
+    assert (directory / "older.previous").read_bytes() == b"older executable"
+    assert (directory / "failure.json").is_file()
 
 
 @pytest.mark.parametrize("phase", ["verification", "replacement", "startup"])

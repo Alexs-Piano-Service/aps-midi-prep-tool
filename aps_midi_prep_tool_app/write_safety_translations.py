@@ -8,6 +8,19 @@ def _add(source, *values):
     WRITE_SAFETY_TRANSLATIONS[source] = dict(zip(_LANGUAGES, values, strict=True))
 
 
+_add("The prepared songs do not fit on one floppy disk. Remove songs from the list and try again.",
+     "Las canciones preparadas no caben en un solo disquete. Quite canciones de la lista e inténtelo de nuevo.",
+     "Les morceaux préparés ne tiennent pas sur une seule disquette. Retirez des morceaux de la liste et réessayez.",
+     "Die vorbereiteten Stücke passen nicht auf eine Diskette. Entfernen Sie Stücke aus der Liste und versuchen Sie es erneut.",
+     "I brani preparati non entrano in un solo dischetto. Rimuovi alcuni brani dall’elenco e riprova.",
+     "As músicas preparadas não cabem em um único disquete. Remova músicas da lista e tente novamente.",
+     "Подготвените песни не се побират на една дискета. Премахнете песни от списъка и опитайте отново.",
+     "De voorbereide nummers passen niet op één diskette. Verwijder nummers uit de lijst en probeer het opnieuw.",
+     "Przygotowane utwory nie mieszczą się na jednej dyskietce. Usuń część utworów z listy i spróbuj ponownie.",
+     "準備した曲は1枚のフロッピーディスクに収まりません。一覧から曲を減らして、もう一度お試しください。",
+     "준비된 곡이 플로피 디스크 한 장에 들어가지 않습니다. 목록에서 일부 곡을 제거한 후 다시 시도하세요.",
+     "准备好的歌曲无法装入一张软盘。请从列表中移除一些歌曲后重试。")
+
 _add("Save Image and Apply to Floppy...",
      "Guardar imagen y aplicarla al disquete...",
      "Enregistrer l’image et l’appliquer à la disquette...",

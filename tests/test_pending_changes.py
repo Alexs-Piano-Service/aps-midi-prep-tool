@@ -20,6 +20,7 @@ def midi_bytes(title):
 @pytest.fixture
 def window(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("APS_MIDI_RENAME_RECOVERY_DIR", str(tmp_path / "rename-recovery"))
     settings = QSettings(str(tmp_path / "test.ini"), QSettings.IniFormat)
     monkeypatch.setattr(main_window, "QSettings", lambda *args: settings)
     monkeypatch.setattr(main_window.QMessageBox, "information", lambda *args, **kwargs: None)
@@ -452,6 +453,7 @@ def test_rename_only_save_clears_history_and_keeps_saved_names_when_undo_all_is_
     w, paths = window
     original = paths[0].read_bytes()
     monkeypatch.setattr(w, "_prompt_for_image_filename", lambda *args, **kwargs: ("RENAMED.MID", True))
+    monkeypatch.setattr(w, "_show_error_list", lambda *args, **kwargs: pytest.fail(str(args)))
     w.edit_regular_filename(0)
 
     w.save_pending_changes()

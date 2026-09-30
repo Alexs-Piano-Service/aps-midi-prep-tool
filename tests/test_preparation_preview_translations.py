@@ -60,8 +60,15 @@ def test_profile_dialog_uses_selected_language_for_controls_and_compact_summary(
     dialog = PreparationProfileDialog(settings, "mark_i", "original", parent, song_counts={"midi": 2, "dos83_midi": 1})
     try:
         assert dialog.windowTitle() == translate_text("Preparing for...", language)
-        assert dialog.buttons.button(QDialogButtonBox.Apply).text() == translate_text("Apply and Prepare", language)
+        assert dialog.buttons.button(QDialogButtonBox.Apply).text() == translate_text("Apply", language)
         assert dialog.medium_combo.currentText() == translate_text("Original floppy drive", language)
+        assert dialog.outcome_label.text() == " · ".join((
+            translate_text("{count} songs", language, count=2),
+            translate_text("{size} floppy disks", language, size="720 KB"),
+            translate_text("Originals unchanged", language),
+        ))
+        assert dialog.details_button.text() == translate_text("Details", language)
+        assert dialog.details_widget.isHidden()
         labels = [dialog.changes_table.item(row, 0).text() for row in range(dialog.changes_table.rowCount())]
         assert translate_text("Filenames", language) in labels
         assert translate_text("Song format", language) in labels
@@ -112,8 +119,8 @@ def test_manufacturer_dialog_localizes_subgroup_guidance_delivery_and_source(tmp
         if profile.midi_types == (0,):
             assert (type_label, translate_text("Current default", language), translate_text("MIDI Type 0", language)) in rows
             assert (
-                translate_text("Convert songs", language), "2",
-                translate_text("{source} → {target} (staged)", language, source="MIDI", target="SMF0"),
+                translate_text("Convert songs", language), "—",
+                "2 · " + translate_text("{source} → {target} (staged)", language, source="MIDI", target="SMF0"),
             ) in rows
         else:
             assert not any(row[0] == type_label for row in rows)
@@ -135,12 +142,19 @@ def test_rendered_preparation_dialog_covers_every_profile_and_delivery_option(tm
         dialog.show()
         app.processEvents()
         visible_labels = {label.text() for label in dialog.findChildren(QLabel) if label.isVisible()}
-        for source in ("Piano / controller:", "Drive / delivery:"):
+        for source in ("Preparing for:", "Delivery:"):
             assert translate_text(source, language) in visible_labels
-        assert dialog.buttons.button(QDialogButtonBox.Apply).text() == translate_text("Apply and Prepare", language)
+        assert translate_text("No songs loaded", language) in dialog.outcome_label.text()
+        assert translate_text("Originals unchanged", language) in dialog.outcome_label.text()
+        assert dialog.buttons.button(QDialogButtonBox.Apply).text() == translate_text("Apply", language)
         assert dialog.buttons.button(QDialogButtonBox.Cancel).text() == translate_text("Cancel", language)
+        assert not dialog.changes_table.isVisible()
+        assert not dialog.source_label.isVisible()
+        dialog.details_button.click()
+        app.processEvents()
+        assert dialog.changes_table.isVisible()
         assert [dialog.changes_table.horizontalHeaderItem(index).text() for index in range(3)] == [
-            translate_text(source, language) for source in ("Setting", "Current", "Proposed")
+            translate_text(source, language) for source in ("Setting", "Saved settings", "On apply")
         ]
         for profile in PIANO_PROFILES:
             dialog.profile_combo.setCurrentIndex(dialog.profile_combo.findData(profile.key))
@@ -156,7 +170,14 @@ def test_rendered_preparation_dialog_covers_every_profile_and_delivery_option(tm
                 assert selected_profile.key == profile.key
                 assert selected_medium.key == medium_key
                 assert dialog.medium_combo.currentText() == translate_text(selected_medium.label, language)
-                if profile.source_url:
+                if profile.key == "custom":
+                    assert dialog.source_label.isHidden()
+                    assert dialog.changes_table.isHidden()
+                    assert dialog.changes_table.rowCount() == 0
+                    assert dialog.manual_label.isVisible()
+                    assert dialog.manual_label.text() == translate_text(profile.caution, language)
+                    assert translate_text("Current work and settings kept", language) in dialog.outcome_label.text()
+                elif profile.source_url:
                     assert escape(translate_text(profile.source_label, language), quote=True) in dialog.source_label.text()
                 if selected_medium.source_url:
                     assert escape(translate_text("Emulator documentation", language), quote=True) in dialog.source_label.text()
@@ -185,7 +206,7 @@ def test_preparation_dialog_uses_saved_language_without_a_main_window(tmp_path, 
         app.processEvents()
         assert dialog.language_code == language
         assert dialog.windowTitle() == translate_text("Preparing for...", language)
-        assert dialog.buttons.button(QDialogButtonBox.Apply).text() == translate_text("Apply and Prepare", language)
+        assert dialog.buttons.button(QDialogButtonBox.Apply).text() == translate_text("Apply", language)
         profile, _medium = dialog.selection()
         assert dialog.preparation_note_label.text() == translate_text(profile.preparation_note, language)
     finally:

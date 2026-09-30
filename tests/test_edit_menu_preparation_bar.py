@@ -94,7 +94,7 @@ def test_preparation_stays_one_row_and_custom_disengages_with_one_click(window, 
     assert "\n" not in w.preparationLabel.text()
     assert w.preparationBar.height() <= w.preparationButton.height() + 10
     assert not w.preparationCustomButton.isHidden()
-    pending_path = w.pendingRegularConversions[str(song)]["temp_path"]
+    assert w.pendingRegularConversions[str(song)]["temp_path"]
     QTest.mouseClick(w.preparationCustomButton, Qt.LeftButton)
     assert w._preparation_profile().key == "custom"
     assert w.preparationBar.property("preparationActive") is False
@@ -102,7 +102,9 @@ def test_preparation_stays_one_row_and_custom_disengages_with_one_click(window, 
     assert w.preparationCustomButton.isHidden()
     assert w.preparationLabel.text() == "Custom"
     assert w.convertEseqToMidiButton.isEnabled()
-    assert w.pendingRegularConversions[str(song)]["temp_path"] == pending_path
+    assert not w.convertMidiToEseqButton.isEnabled()
+    assert w.pendingRegularConversions
+    assert w._regular_source_material_path(str(song)) != str(song)
 
 
 def test_busy_operation_disables_undo_and_custom(window):
@@ -111,9 +113,16 @@ def test_busy_operation_disables_undo_and_custom(window):
     w._set_disk_load_busy(True)
     assert not w.editUndoAction.isEnabled()
     assert not w.editUndoAllAction.isEnabled()
+    assert not w.editResetPreparationAction.isEnabled()
     assert not w.preparationCustomButton.isEnabled()
+    before = w._staged_signature()
+    history_count = len(w._staged_undo_stack)
+    w.reset_preparation()
+    assert w._staged_signature() == before
+    assert len(w._staged_undo_stack) == history_count
     w._set_disk_load_busy(False)
     assert w.editUndoAction.isEnabled()
+    assert w.editResetPreparationAction.isEnabled()
     assert w.preparationCustomButton.isEnabled()
 
 
@@ -131,7 +140,7 @@ def test_preparation_bar_refreshes_profile_delivery_controls_and_tooltips_in_eve
         assert w.preparationButton.text() == translate_text("Preparing for...", language.code)
         assert w.preparationAction.text().replace("&", "") == translate_text("Preparing for...", language.code)
         assert w.preparationCustomButton.text() == translate_text("Custom", language.code)
-        assert w.preparationCustomButton.toolTip() == translate_text("Switch to Custom", language.code)
+        assert w.preparationCustomButton.toolTip() == translate_text("Stop automatic preparation and keep current work and settings.", language.code)
         assert w.preparationLabel.text() == " · ".join((
             translate_text(profile.label, language.code), translate_text(medium.label, language.code), "MIDI",
         ))
@@ -174,17 +183,16 @@ def test_startup_preserves_saved_emulator_number_in_builder(
         app.processEvents()
 
 
-def test_custom_button_preserves_preferences_and_staged_changes(window, tmp_path):
+def test_custom_button_preserves_preferences_and_all_staged_changes(window, tmp_path):
     w, app, song = window
     profile = get_preparation_profile("mark_ii")
     w._apply_preparation_profile(profile, get_preparation_medium(profile, "nalbantov"))
     w.settings.setValue("emulator_image_starting_number", 200)
     preferences = {key: w.settings.value(key) for key in w.settings.allKeys()
                    if key not in {"preparation_profile", "preparation_medium"}}
-    staged = {path: dict(value) for path, value in w.pendingRegularConversions.items()}
-    edits = dict(w.pendingEdits)
-    renames = dict(w.pendingRegularRenames)
-    pianodir = w.pendingGeneratePianodir
+    assert w.pendingRegularConversions
+    conversions = {path: dict(change) for path, change in w.pendingRegularConversions.items()}
+    generated_catalog = w.pendingGeneratePianodir
     w.show()
     app.processEvents()
 
@@ -192,15 +200,15 @@ def test_custom_button_preserves_preferences_and_staged_changes(window, tmp_path
 
     assert w._preparation_profile().key == "custom"
     assert {key: w.settings.value(key) for key in preferences} == preferences
-    assert w.pendingRegularConversions == staged
-    assert w.pendingEdits == edits
-    assert w.pendingRegularRenames == renames
-    assert w.pendingGeneratePianodir == pianodir
+    assert w.pendingRegularConversions == conversions
+    assert not w.pendingEdits
+    assert not w.pendingRegularRenames
+    assert w.pendingGeneratePianodir == generated_catalog
     assert w.format_disklavier_checkbox.isChecked()
     assert w._dos83_filenames_enabled()
     assert not w._long_midi_filenames_enabled()
     assert w.settingsUseDos83FilenamesAction.isEnabled()
-    assert "preferences and staged changes have been kept" in w.status_label.text()
+    assert "Automatic preparation is off" in w.status_label.text()
 
     # A later import keeps its original format once automatic preparation is off.
     added = tmp_path / "LATER.MID"

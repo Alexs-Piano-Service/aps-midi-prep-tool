@@ -63,8 +63,11 @@ To restore the previous version manually:
    restore `My Piano Tool.exe.previous` as `My Piano Tool.exe`, then launch it.
 
 Your startup JSON and music folders require no restoration because the updater
-does not replace them. Existing `.previous` backups are retained under unique
-suffixes rather than silently overwritten.
+does not replace them. Each successful update keeps one `.previous` backup.
+An older backup stays in the update's staging directory as `older.previous`
+until the new application confirms startup; successful completion removes that
+directory. Failed updates retain it for recovery. Suffixed backups left by older
+versions are left alone and can be removed manually after checking them.
 
 Failure details remain in `failure.json` inside the `.aps-update-*` staging
 directory beside the executable. Include those details when asking for help.
@@ -73,13 +76,20 @@ application.
 
 ## How supported copies are recognized
 
-Windows updater releases contain `APSMIDIPrepTool.exe`; Linux releases contain
-`APSMidiPrepTool-VERSION-ARCH.AppImage`. Current packages declare their format
+The Windows updater accepts the standalone names `APSMIDIPrepTool.exe` and
+`APS.MIDI.Prep.Tool.exe` (published in v0.8.7). It requires exactly one matching
+asset; installer EXEs are not eligible for in-place replacement. Linux releases
+contain `APSMidiPrepTool-VERSION-ARCH.AppImage`. Current packages declare their format
 and architecture in the build identity. Builds that include the updater but
 lack these markers can still qualify when their running bundle is recognized
 as a supported standalone Windows EXE or Linux AppImage. Renaming an executable
 is supported; renaming an installer or an arbitrary program does not make it
 eligible.
+
+Release maintainers must publish the next standalone Windows executable as
+`APSMIDIPrepTool.exe`: the released v0.8.7 updater requires that exact asset
+name. Adding another accepted name to new code cannot change an already
+installed updater. The release manifest and signed build use the required name.
 
 APS also keeps a small `<filename>.update-lock` file to prevent two running
 copies from updating the same application at once. It continues to work when

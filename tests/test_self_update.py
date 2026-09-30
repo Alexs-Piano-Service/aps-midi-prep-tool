@@ -167,6 +167,67 @@ def test_duplicate_matching_asset_is_rejected(preparation):
     assert_untouched(preparation)
 
 
+@pytest.mark.parametrize("asset_name", ["APSMIDIPrepTool.exe", "APS.MIDI.Prep.Tool.exe"])
+def test_windows_standalone_is_selected_alongside_installer_and_appimage(preparation, asset_name):
+    target = replace(preparation["target"], kind="windows-onefile")
+    appimage = preparation["release"]["assets"][0].copy()
+    standalone = preparation["release"]["assets"][0]
+    url = f"https://github.com/{updater.REPOSITORY}/releases/download/v{VERSION}/{asset_name}"
+    standalone.update(name=asset_name, browser_download_url=url)
+    installer_name = f"APS-MIDI-Prep-Tool-Setup-{VERSION}.exe"
+    installer = dict(standalone, name=installer_name, browser_download_url=(
+        f"https://github.com/{updater.REPOSITORY}/releases/download/v{VERSION}/{installer_name}"
+    ))
+    # v0.8.7 was published with the dotted standalone name, a setup EXE,
+    # and an AppImage. The updater must select only the standalone EXE.
+    preparation["release"]["assets"] = [installer, standalone, appimage]
+
+    assert updater._asset_for_release(VERSION, target, None) == (
+        url, standalone["size"], standalone["digest"][7:],
+    )
+    assert preparation["calls"] == [f"{updater.API_ROOT}/releases/tags/v{VERSION}"]
+    assert_untouched(preparation)
+
+
+@pytest.mark.parametrize("names", [
+    ["APSMIDIPrepTool.exe", "APS.MIDI.Prep.Tool.exe"],
+    ["APS.MIDI.Prep.Tool.exe", "APS.MIDI.Prep.Tool.exe"],
+    [f"APS-MIDI-Prep-Tool-Setup-{VERSION}.exe"],
+    ["APS MIDI Prep Tool.exe"],
+    ["APSMIDIPrepTool-windows.zip"],
+])
+def test_windows_ambiguous_or_unrecognized_downloads_are_rejected(preparation, names):
+    target = replace(preparation["target"], kind="windows-onefile")
+    asset = preparation["release"]["assets"][0]
+    preparation["release"]["assets"] = [dict(asset, name=name, browser_download_url=(
+        f"https://github.com/{updater.REPOSITORY}/releases/download/v{VERSION}/{name}"
+    )) for name in names]
+
+    with pytest.raises(updater.UpdateError, match="unique"):
+        updater._asset_for_release(VERSION, target, None)
+    assert_untouched(preparation)
+
+
+@pytest.mark.parametrize("change", [
+    {"digest": None},
+    {"digest": "sha256:1234"},
+    {"browser_download_url": "https://github.com/untrusted/aps/releases/download/v9.8.7/APS.MIDI.Prep.Tool.exe"},
+    {"browser_download_url": f"https://github.com/{updater.REPOSITORY}/releases/download/v{VERSION}/APSMIDIPrepTool.exe"},
+    {"browser_download_url": f"https://github.com/{updater.REPOSITORY}/releases/download/v9.8.6/APS.MIDI.Prep.Tool.exe"},
+])
+def test_published_windows_name_still_requires_verified_digest_and_exact_release_url(preparation, change):
+    target = replace(preparation["target"], kind="windows-onefile")
+    asset = preparation["release"]["assets"][0]
+    asset.update(name="APS.MIDI.Prep.Tool.exe", browser_download_url=(
+        f"https://github.com/{updater.REPOSITORY}/releases/download/v{VERSION}/APS.MIDI.Prep.Tool.exe"
+    ))
+    asset.update(change)
+
+    with pytest.raises(updater.UpdateError, match="checksum|official release"):
+        updater._asset_for_release(VERSION, target, None)
+    assert_untouched(preparation)
+
+
 @pytest.mark.parametrize("metadata", [b"not json", b"[]", b"null", b"\xff", b"x" * (updater.MAX_METADATA_BYTES + 1)],
                          ids=["invalid-json", "array", "null", "invalid-encoding", "too-large"])
 def test_invalid_or_oversized_metadata_fails_without_touching_application(preparation, metadata):
@@ -543,15 +604,16 @@ def test_windows_signature_check_has_a_deadline(signature_process, monkeypatch):
     assert signature_process["killed"]
 
 
-def test_windows_preparation_runs_signature_check_and_cleans_stage_on_rejection(preparation, monkeypatch):
+@pytest.mark.parametrize("asset_name", ["APSMIDIPrepTool.exe", "APS.MIDI.Prep.Tool.exe"])
+def test_windows_preparation_runs_signature_check_and_cleans_stage_on_rejection(preparation, monkeypatch, asset_name):
     old = windows_bytes(suffix=b"old release")
     payload = windows_bytes()
     path = preparation["target"].path
     path.write_bytes(old)
     preparation.update(original=old, payload=payload, target=updater.UpdateTarget(path, "windows-onefile", "x86_64"))
     preparation["release"]["assets"][0].update(
-        name="APSMIDIPrepTool.exe", size=len(payload), digest="sha256:" + hashlib.sha256(payload).hexdigest(),
-        browser_download_url=f"https://github.com/{updater.REPOSITORY}/releases/download/v{VERSION}/APSMIDIPrepTool.exe",
+        name=asset_name, size=len(payload), digest="sha256:" + hashlib.sha256(payload).hexdigest(),
+        browser_download_url=f"https://github.com/{updater.REPOSITORY}/releases/download/v{VERSION}/{asset_name}",
     )
 
     def reject(installed, downloaded, _cancel):

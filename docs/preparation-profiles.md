@@ -9,15 +9,28 @@ until you save or export them.
 ## Start here
 
 1. Choose **Preparing for...** above the song list, or **Settings → Preparing for...**.
-2. Select your **Piano / controller** and **Drive / delivery**. Controllers are
+2. Select your controller under **Preparing for** and your **Delivery** method. Controllers are
    grouped under **General**, **Disklavier**, **PianoDisc**, and **QRS**; typing a
    model name selects it. If you do not know your model, choose **I'm not sure**
    and check the [controller defaults](#controller-defaults) before converting songs.
-3. Compare the **Current** and **Proposed** settings, then choose **Apply and Prepare**.
+3. Check the outcome summary: the song count, delivery type, and confirmation that
+   originals remain unchanged. Open **Details** to compare **Saved settings**
+   with **On apply**, review conversion counts, or follow compatibility references.
+   Choose **Apply** to stage preparation.
 4. Open **Edit → Review Changes...** to inspect proposed filenames, titles,
    formats, and conversion reports. Use **Edit → Undo** (**Ctrl+Z**) to restore
    the previous profile and staged state if needed.
-5. Save or export for your [delivery method](#choose-a-delivery-method).
+5. Choose the save or export command for your [delivery method](#choose-a-delivery-method).
+
+The summary counts the loaded songs and describes the selected output. **Details**
+labels the preference comparison **Saved settings / On apply**; saved preferences
+do not describe the formats of the loaded songs. Image numbering, preparation
+notes, and compatibility references are also inside **Details**.
+
+The main window keeps the destination controls compact. The preparation dialog
+shows the song count and any songs that need attention. Saving and export check
+the selected destination requirements and list affected files if preparation
+is incomplete.
 
 Applying a profile prepares loaded songs and changes the editing mode; future
 imports follow the same destination. For Mark II, the list switches to E-SEQ
@@ -33,12 +46,46 @@ for the differences between Save, Save As, and Save As Image.
 
 ## Change or turn off automatic preparation
 
-The destination row highlights active preparation. Click **Custom** in that row
-to turn off automatic preparation and allow conversion to either format. Changes
-already staged stay available for review, and current filename, title-formatting,
-and export preferences stay unchanged. Applying **Custom** or **I'm not sure**
-from the preparation dialog instead shows proposed defaults for review, including
-long MIDI filenames and disabled Disklavier screen formatting.
+Preparation keeps three layers: the loaded songs, your manual edits, and the
+automatic changes required by the current destination. Choosing a different
+destination replaces the automatic layer. It preserves title edits, filenames,
+song order, additions, removals, and deliberate conversions.
+
+While a destination is active, MIDI tools work on the retained MIDI source
+before automatic preparation is applied again. For example, a pedal edit preserves the original track layout
+even when the destination requires Type 0. A MIDI-only edit to an original E-SEQ
+song retains the MIDI conversion needed for that explicit edit.
+
+For example, choosing PianoDisc 128Plus and then Standard MIDI export restores
+the original Type 1 organization, unless you explicitly converted it yourself.
+Choosing an E-SEQ destination and then a MIDI destination prepares from the
+retained source, without a conversion round trip. Choosing B directly produces
+the same result as choosing A and then B when you make no edits between them.
+
+The destination row highlights active preparation. **Custom** means manual mode:
+stop automatic preparation and keep the current work and settings. Clicking
+**Custom** in that row or applying **Custom** in the preparation dialog does
+exactly the same thing. Prepared conversions, titles, filenames, ordering, and
+all other staged work stay as they are. Filename, title-formatting, and export
+preferences also stay unchanged, and you can edit the previously locked options
+or convert songs to either format.
+In Custom, tools edit the current staged songs; those deliberate edits remain
+part of your work when preparation is reset.
+
+To remove automatic preparation changes, use **Edit → Reset preparation**.
+This turns off automatic preparation and preserves deliberate manual edits and
+current preferences. It works after entering **Custom**, too. **Edit → Undo**
+restores the previous preparation and mode. Neither action changes the originals.
+
+Choosing another destination later still replaces the previous automatic
+preparation, including when you used **Custom** in between. **I'm not sure**
+remains a separate dialog choice with proposed defaults for review.
+
+Saving changes to the loaded files commits those songs as the new source.
+If only some files save successfully, unsaved songs keep their reversible
+preparation. When Save As opens the saved files or image, that result becomes
+the new source; the previous originals remain unchanged. ZIP export keeps the
+current loaded songs and preparation.
 
 Options controlled by the destination are disabled and show their effective
 values. Each affected dialog has one preparation note, and disabled controls
@@ -51,7 +98,9 @@ Image type, capacity, and screen formatting remain editable defaults.
 The preparation row is visible by default. Use **View → Show Preparation Controls**
 to hide or show it. Hiding it keeps the selected preparation active;
 **Settings → Preparing for...** remains available.
-The preparation dialog links to the selected controller's evidence: the **APS
+The preparation state remains visible even when these controls, the general
+status area, or the quick controls are hidden.
+The preparation dialog's **Details** section links to the selected controller's evidence: the **APS
 Disklavier Compatibility Table** for Disklavier and General choices, or the
 **PianoDisc user manual** or **QRS user manual** for those manufacturers.
 
@@ -64,7 +113,8 @@ USB and app folder preparation keep descriptive filenames.
 destination does not require them.
 Long MIDI filenames use the track number and song title and do not require converting
 E-SEQ songs to MIDI. Disklavier screen formatting defaults on for Mark I,
-Mark II (including XG), and Mark III profiles, and off for all other profiles.
+Mark II (including XG), and Mark III profiles, and off for other destinations.
+**Custom** keeps the current screen-formatting setting.
 Change it under **Settings → Format for Disklavier screen**.
 With screen formatting enabled, opening the title editor starts with the first
 32 characters so an overlong title can be corrected. Cancelling leaves the title
@@ -82,6 +132,9 @@ only when saved.
 
 ## Choose a delivery method
 
+Applying a profile only stages changes. Choose a save or export command below
+when you are ready to deliver the prepared songs.
+
 | What you want to create | Where to go |
 | --- | --- |
 | A folder of songs for USB or an app | **File → Save As...** |
@@ -97,7 +150,17 @@ format was used previously. You can change the format in the export dialog.
 An **Unsure** controller can still select a generic delivery format without
 assuming a song format or disk capacity. Normal **Save** retains the original
 image format; capture and recovery options retain their own settings.
-USB and PianoDisc app preparation use **Save As** to
+The **Save Image and Apply to Floppy…** recovery action, offered after certain
+floppy save or write failures, requires the prepared songs to fit on one floppy.
+If they do not fit, the app stops before saving an image or selecting a drive.
+Remove songs and try again, or use **File → Save As Image...** to create a split
+set of disk images. For a numbered emulator disk set, use
+**Utilities → Build Emulator Disk Set...**.
+When the single prepared IMG is saved, the app offers drive selection, an
+explicit overwrite confirmation, and a write with readback verification.
+Cancelling or failing the image save does not write a floppy.
+
+USB and PianoDisc app preparation use **File → Save As...** to
 export a folder. For QRS USB profiles, copy the MIDI files to a USB drive and
 select it on the controller. For Prodigy, import the exported MIDI files into
 the PianoDisc iQ Player app and use its supported connection to the piano.

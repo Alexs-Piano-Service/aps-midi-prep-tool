@@ -527,6 +527,7 @@ def _prepare_song_files(
     *,
     output_content,
     require_midi_type0=False,
+    preserve_catalog_midi=False,
     title_overrides=None,
     title_sources=None,
     folder_metadata=None,
@@ -657,6 +658,12 @@ def _prepare_song_files(
                     **converter_options,
                 )
                 converted_count += 1
+            elif preserve_catalog_midi and source_path in catalog_songs:
+                # Prepared delivery already applied deliberate embedded-title
+                # edits. Catalog-backed titles belong in PSONG.MNG and must
+                # not rewrite an otherwise unchanged MIDI event stream.
+                shutil.copy2(source_path, local_path)
+                preserved_midi = True
             elif title_override is not None:
                 try:
                     write_midi_title_to_path(source_path, title_override, local_path)
@@ -1248,6 +1255,7 @@ def build_emulator_disk_images(
     output_ext="hfe",
     output_content="eseq",
     require_midi_type0=False,
+    preserve_catalog_midi=False,
     include_subfolders=True,
     disk_layout="fill",
     shuffle=False,
@@ -1272,6 +1280,8 @@ def build_emulator_disk_images(
     image's songs, while E-SEQ images use PIANODIR.FIL.
     ``require_midi_type0`` converts MIDI output before preview and packing,
     preserving musical channels and instruments.
+    ``preserve_catalog_midi`` keeps catalog-backed MIDI bytes unchanged while
+    retaining reviewed titles in PSONG.MNG; prepared delivery uses this mode.
     """
     source_directory = os.path.abspath(os.fspath(source_directory))
     output_directory = os.path.abspath(os.fspath(output_directory))
@@ -1401,6 +1411,7 @@ def build_emulator_disk_images(
                 preparation_directory,
                 output_content=output_content,
                 require_midi_type0=require_midi_type0,
+                preserve_catalog_midi=preserve_catalog_midi,
                 title_overrides={**title_overrides, **reviewed_song_titles},
                 title_sources={**title_sources, **{path: "Preview edit" for path in reviewed_song_titles}},
                 folder_metadata=active_metadata,

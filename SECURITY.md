@@ -47,12 +47,20 @@ with the existing endpoint; it does not authenticate legitimate installations.
 Replacing it with another distributed constant would not create a credential.
 The legacy environment-variable names remain supported for compatibility.
 
-The PHP receiving endpoints are not in this repository and have not been audited
-here. The server operator must check whether they trust this token for access or
-abuse prevention. Any such trust must be removed server-side, with request-size
-and rate limits, input validation, and independent authorization for privileged
-actions. Client signatures alone cannot provide those protections. Do not use
-the bundled token to protect any other service; retire that trust if it exists.
+The supplied [bug-report receiver](server/bug-report.php) is included with its
+HMAC signing value read from `APS_BUG_REPORT_SECRET`; the live deployment and
+feedback endpoint have not been audited here. The receiver retains request-size
+and rate limits, validation, and the legacy signature checks. Missing signing
+configuration fails explicitly. Client signatures alone do not authorize
+privileged actions or replace server abuse controls. Do not use the bundled
+token to protect any other service; retire that trust if it exists.
+
+Optional [GitHub forwarding](docs/bug-report-github.md) runs after successful
+email acceptance. It publishes only a report ID and app version while full
+reports remain in private email. It is disabled by default and uses a separate
+server-held GitHub token. GitHub failures do not change successful email
+responses. Concurrent report retries share a lock; only accepted emails receive
+a sent marker, and uncertain delivery state requires server-side reconciliation.
 
 ## Legal And Safety Notes
 

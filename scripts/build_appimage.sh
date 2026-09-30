@@ -377,9 +377,54 @@ rm -f "$APPIMAGE_PATH" "$CHECKSUM_PATH"
 ARCH="$APPIMAGE_ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "${APPIMAGETOOL_ARGS[@]}" "$APPDIR" "$APPIMAGE_PATH"
 
 chmod +x "$APPIMAGE_PATH"
+
+# Check the actual frozen artifact before writing its release checksum. A
+# source-tree test pass cannot prove that an AppImage contains the same fixes.
+SMOKE_ROOT="$(mktemp -d "$APPIMAGE_BUILD_DIR/acceptance-$APP_VERSION-XXXXXX")"
+SMOKE_RESULTS="$SMOKE_ROOT/results"
+if ! (
+    cd "$SMOKE_ROOT"
+    env -u APS_MIDI_PREP_LAME APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen \
+        timeout --kill-after=10s 180s "$APPIMAGE_PATH" --aps-package-smoke "$SMOKE_RESULTS"
+) >"$SMOKE_ROOT/run.log" 2>&1; then
+    echo "AppImage acceptance failed. See $SMOKE_ROOT/run.log and $SMOKE_RESULTS/package-smoke.json" >&2
+    exit 1
+fi
+python3 - "$APPIMAGE_PATH" "$SMOKE_RESULTS/package-smoke.json" "$SMOKE_ROOT/appimage-acceptance.json" "$APP_VERSION" "$BUILD_DIR/build-info.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+artifact, report_path, evidence_path = map(Path, sys.argv[1:4])
+report = json.loads(report_path.read_text(encoding="utf-8"))
+identity = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
+required = {"ui", "img", "image_source_changes", "hfe", "mp3"}
+if (report.get("status") != "passed" or report.get("frozen") is not True
+        or report.get("schema_version") != 1 or report.get("platform") != "linux"
+        or report.get("app_version") != sys.argv[4]
+        or report.get("build_identity") != identity
+        or not required.issubset(report.get("cases", {}))
+        or any(report["cases"][name].get("status") != "passed" for name in required)):
+    raise SystemExit(f"AppImage acceptance report is incomplete or failed: {report_path}")
+binary_directory = Path(report["executable"]).parent
+for case, tool in (("image_source_changes", "mcopy"), ("hfe", "greaseweazle"), ("mp3", "lame")):
+    if Path(report["cases"][case].get(tool, "")).parent != binary_directory:
+        raise SystemExit(f"AppImage acceptance used an unbundled {tool}: {report_path}")
+digest = hashlib.sha256()
+with artifact.open("rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+evidence_path.write_text(json.dumps({
+    "asset": artifact.name, "sha256": digest.hexdigest(), "app_version": report["app_version"],
+    "build_identity": report.get("build_identity"), "clean_machine": False,
+    "report": str(report_path), "checks": report["cases"],
+}, indent=2) + "\n", encoding="utf-8")
+PY
 (
     cd "$OUT_DIR"
     sha256sum "$(basename "$APPIMAGE_PATH")" > "$(basename "$CHECKSUM_PATH")"
 )
 echo "Built $APPIMAGE_PATH"
 echo "Wrote $CHECKSUM_PATH"
+echo "Verified packaged image-change protection: $SMOKE_ROOT/appimage-acceptance.json"

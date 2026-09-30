@@ -5,13 +5,15 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEvent, QSettings, QTimer
+from PySide6.QtCore import QEvent, QRect, QSettings, QTimer
+from PySide6.QtGui import QFont, QScreen
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication, QDialog, QLabel, QProgressDialog, QPushButton, QTextEdit, QVBoxLayout,
 )
 
 from aps_midi_prep_tool_app import main_window
+from aps_midi_prep_tool_app.ui_utils import scrollable_dialog_layout
 
 
 class _CountAdjustments:
@@ -86,6 +88,40 @@ def _assert_centered(dialog, parent):
     distance = dialog.frameGeometry().center() - parent.frameGeometry().center()
     assert abs(distance.x()) <= 2
     assert abs(distance.y()) <= 2
+
+
+@pytest.mark.parametrize("font_size", [9, 14, 18])
+@pytest.mark.parametrize("screen_size,expected", [
+    ((2560, 1440), (640, 380)),
+    ((600, 400), (560, 340)),
+])
+def test_scrollable_dialog_defaults_fit_screen_without_font_scaling(
+    window, monkeypatch, font_size, screen_size, expected,
+):
+    monkeypatch.setattr(
+        QScreen, "availableGeometry", lambda _self: QRect(0, 0, *screen_size),
+    )
+    dialog = _Dialog(window)
+    dialog.setFont(QFont(dialog.font().family(), font_size))
+    layout, content = scrollable_dialog_layout(dialog, width=640, height=380)
+    description = QLabel("Choose the files to prepare. " * 30)
+    description.setWordWrap(True)
+    content.addWidget(description)
+    close = QPushButton("Close")
+    layout.addWidget(close)
+
+    def inspect():
+        assert dialog.size().toTuple() == expected
+        assert dialog.font().pointSize() == font_size
+        assert dialog.rect().contains(close.geometry())
+        assert dialog.adjustments == 0
+        dialog.resize(740, 500)
+        geometry = dialog.geometry()
+        QApplication.postEvent(dialog, QEvent(QEvent.LayoutRequest))
+        QTest.qWait(50)
+        assert dialog.geometry() == geometry
+
+    _run_dialog(window, dialog, inspect)
 
 
 @pytest.mark.parametrize("direct", [False, True], ids=["exec", "modeless-helper"])

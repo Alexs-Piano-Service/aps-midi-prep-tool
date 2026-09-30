@@ -5,8 +5,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QSettings, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QEvent, QPoint, QRect, QSettings, QTimer
+from PySide6.QtGui import QFont, QScreen
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QPushButton,
@@ -19,6 +19,7 @@ from aps_midi_prep_tool_app.emulator_image_builder import EmulatorBuildPreview
 from aps_midi_prep_tool_app.emulator_preview_dialog import EmulatorPreviewDialog
 from aps_midi_prep_tool_app.floppy_image import FloppyDriveInfo, GreaseweazleDeviceInfo
 from aps_midi_prep_tool_app.markiv_backup_dialog import MarkIVBackupDialog
+from aps_midi_prep_tool_app.pending_changes_dialog import PendingChangesDialog
 from aps_midi_prep_tool_app.self_update_ui import SelfUpdateDialog
 
 
@@ -81,6 +82,57 @@ def _run_live(window, dialog, inspect=None):
     QTimer.singleShot(150, check)
     result = window._exec_child_dialog(dialog)
     assert result == QDialog.Rejected
+    if errors:
+        raise errors[0]
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("bulk", (760, 560)),
+    ("overlap-song", (640, 380)),
+    ("overlap-settings", (640, 380)),
+    ("shortcuts", (800, 560)),
+    ("pending-changes", (900, 600)),
+])
+def test_scrollable_tools_open_compactly_on_large_desktops(window, monkeypatch, kind, expected):
+    # A small offscreen display masks accidental font scaling by clipping every
+    # oversized default to the same screen bounds.
+    monkeypatch.setattr(QScreen, "availableGeometry", lambda _self: QRect(0, 0, 2560, 1440))
+    execute = window._exec_child_dialog
+    errors = []
+    seen = []
+
+    def inspect(dialog, **options):
+        seen.append(dialog)
+
+        def check():
+            try:
+                assert dialog.size().toTuple() == expected
+                for buttons in dialog.findChildren(QDialogButtonBox):
+                    for button in buttons.buttons():
+                        assert button.isVisible()
+                        bounds = button.rect().translated(button.mapTo(dialog, QPoint()))
+                        assert dialog.rect().contains(bounds), button.text()
+                _exercise_resize(dialog)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                dialog.reject()
+
+        QTimer.singleShot(150, check)
+        return execute(dialog, **options)
+
+    monkeypatch.setattr(window, "_exec_child_dialog", inspect)
+    if kind == "bulk":
+        window.show_bulk_extraction_utility()
+    elif kind.startswith("overlap"):
+        window._piano_overlap_options_dialog(
+            filename="SONG.MID" if kind == "overlap-song" else None, count=2,
+        )
+    elif kind == "shortcuts":
+        window.show_keyboard_shortcuts_dialog()
+    else:
+        window._exec_child_dialog(PendingChangesDialog(window), resize_to_contents=False)
+    assert len(seen) == 1
     if errors:
         raise errors[0]
 

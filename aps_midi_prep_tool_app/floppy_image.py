@@ -2029,7 +2029,7 @@ def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_fo
             raise FloppyImageError(f"Files were written, but readback verification failed: {exc}") from exc
 
 
-def _finish_temp_output(temp_path, output_path):
+def _finish_temp_output(temp_path, output_path, *, before_replace=None):
     temp_mode = stat.S_IMODE(os.stat(temp_path).st_mode)
     readonly_windows_stage = os.name == "nt" and not temp_mode & stat.S_IWUSR
     # Windows needs a writable descriptor to sync. copy2 may have inherited
@@ -2042,6 +2042,8 @@ def _finish_temp_output(temp_path, output_path):
     finally:
         if readonly_windows_stage:
             os.chmod(temp_path, temp_mode)
+    if before_replace is not None:
+        before_replace(output_path)
     try:
         os.replace(temp_path, output_path)
     except OSError as exc:
@@ -2057,6 +2059,8 @@ def _finish_temp_output(temp_path, output_path):
             with os.fdopen(fd, "wb") as handle:
                 shutil.copy2(temp_path, local_temp)
                 os.fsync(handle.fileno())
+            if before_replace is not None:
+                before_replace(output_path)
             os.replace(local_temp, output_path)
         finally:
             try:
@@ -2320,11 +2324,15 @@ def create_floppy_images_from_files(
     volume_label="NO NAME",
     progress_callback=None,
     sector_report_callback=None,
+    allow_split=True,
+    validate_output_path=None,
 ):
     if not file_specs:
         raise FloppyImageError("There are no files to save into an image. Add MIDI or E-SEQ files first.")
 
     output_path = os.path.abspath(output_path)
+    if validate_output_path is not None:
+        validate_output_path(output_path)
     output_dir = os.path.dirname(output_path)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -2377,6 +2385,12 @@ def create_floppy_images_from_files(
                     "Remove the file, choose a larger disk format, or split the set across multiple images."
                 )
 
+            if not allow_split:
+                raise FloppyImageError(
+                    "The prepared songs do not fit on one floppy disk. "
+                    "Remove songs from the list and try again."
+                )
+
             raw_images.append(current_img)
             current_img = start_new_image(len(raw_images) + 1)
             current_count = 0
@@ -2399,13 +2413,16 @@ def create_floppy_images_from_files(
         total_images = len(raw_images)
         digits = max(2, len(str(total_images)))
         written_paths = []
+        output_paths = [
+            output_path if total_images == 1 else
+            f"{base_path}_{index:0{digits}d}.{output_ext.lower().lstrip('.')}"
+            for index in range(1, total_images + 1)
+        ]
+        if validate_output_path is not None:
+            for final_path in output_paths:
+                validate_output_path(final_path)
 
-        for index, raw_img in enumerate(raw_images, start=1):
-            if total_images == 1:
-                final_path = output_path
-            else:
-                final_path = f"{base_path}_{index:0{digits}d}.{output_ext.lower().lstrip('.')}"
-
+        for index, (raw_img, final_path) in enumerate(zip(raw_images, output_paths), start=1):
             _notify_progress(
                 progress_callback,
                 index,
@@ -2417,8 +2434,10 @@ def create_floppy_images_from_files(
                 final_path, suffix=f".{output_ext.lower().lstrip('.')}",
             )
             try:
+                if validate_output_path is not None:
+                    validate_output_path(final_path)
                 report = _write_image_direct(raw_img, temp_output, output_ext, disk_format)
-                _finish_temp_output(temp_output, final_path)
+                _finish_temp_output(temp_output, final_path, before_replace=validate_output_path)
                 if report is not None and sector_report_callback is not None:
                     sector_report_callback(report)
             finally:
@@ -11186,6 +11205,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
 
     def write_image(self, source_img, output_path, output_ext, progress_callback=None, cancel_callback=None):
         output_path = os.path.abspath(output_path)
+        validate_output_path = lambda path: FloppyImageSession._assert_export_destination_unchanged(self, path)
+        validate_output_path(output_path)
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
         temp_output = _capture_temp_output_path(
@@ -11198,7 +11219,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 _notify_progress(progress_callback, 4, 5, f"Converting floppy image to {output_ext.upper()}...")
             report = self._write_image_direct(source_img, temp_output, output_ext, cancel_callback=cancel_callback)
             _raise_if_cancelled(cancel_callback)
-            _finish_temp_output(temp_output, output_path)
+            _finish_temp_output(temp_output, output_path, before_replace=validate_output_path)
             self.latest_gw_sector_reports = _gw_sector_reports(report)
         finally:
             if os.path.exists(temp_output):
@@ -11422,9 +11443,11 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         delete_pianodir=False,
         progress_callback=None,
         cancel_callback=None,
+        allow_split=True,
     ):
         if not isinstance(disk_format, DiskFormat):
             raise FloppyImageError("Invalid disk format for image export.")
+        FloppyImageSession._assert_export_destination_unchanged(self, output_path)
 
         modified_img = self.create_modified_image(
             renames=renames,
@@ -11489,6 +11512,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 disk_format,
                 progress_callback=progress_callback,
                 sector_report_callback=reports.append,
+                allow_split=allow_split,
+                validate_output_path=lambda path: FloppyImageSession._assert_export_destination_unchanged(self, path),
             )
             self.latest_gw_sector_reports = _gw_sector_reports(*reports)
             return output_paths
@@ -11496,6 +11521,21 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             shutil.rmtree(extract_dir, ignore_errors=True)
             if os.path.exists(modified_img):
                 os.remove(modified_img)
+
+    def _assert_export_destination_unchanged(self, output_path):
+        if getattr(self, "source_kind", None) != "image":
+            return
+        same_source = (
+            os.path.normcase(os.path.realpath(output_path))
+            == os.path.normcase(os.path.realpath(self.source_path))
+        )
+        if not same_source:
+            try:
+                same_source = os.path.samefile(output_path, self.source_path)
+            except OSError:
+                pass
+        if same_source:
+            FloppyImageSession._assert_source_unchanged(self)
 
     def _assert_source_unchanged(self):
         expected = getattr(self, "_source_fingerprint", None)
@@ -11508,7 +11548,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             pass
         raise FloppyImageError(
             "Source image changed since it was opened. Reload it or use Save As Image "
-            "to preserve pending edits. No file was overwritten."
+            "to preserve pending edits. The source image was not overwritten."
         )
 
     def commit_to_source(
@@ -11590,7 +11630,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 _raise_if_cancelled(cancel_callback)
                 saved_fingerprint = _image_source_fingerprint(temp_output)
                 FloppyImageSession._assert_source_unchanged(self)
-                _finish_temp_output(temp_output, self.source_path)
+                _finish_temp_output(
+                    temp_output, self.source_path,
+                    before_replace=lambda _path: FloppyImageSession._assert_source_unchanged(self),
+                )
                 self._source_fingerprint = saved_fingerprint
             if self.source_kind.startswith("floppy"):
                 self.last_write_verification = {"confidence": "written", "hardware_tested": False}

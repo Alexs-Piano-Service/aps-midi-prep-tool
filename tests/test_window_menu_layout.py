@@ -80,7 +80,7 @@ def test_menu_commands_remain_available_once_after_reorganization(window):
 
 @pytest.mark.parametrize("menu_name,action_names", (
     ("editMenu", (
-        "editUndoAction", "editUndoAllAction", "editReviewChangesAction",
+        "editUndoAction", "editUndoAllAction", "editReviewChangesAction", "editResetPreparationAction",
         "utilitiesRenameAction", "utilitiesLongFilenamesAction", "utilitiesTrimTitleSpacesAction",
         "utilitiesPedalCompatibilityAction", "utilitiesMergeChannelsAction", "utilitiesStripXfAction",
         "utilitiesSmfAction", "utilitiesEseqToMidiAction", "utilitiesMidiToEseqAction",
@@ -136,9 +136,9 @@ def test_shortcut_settings_use_the_current_menu_category(window):
 
 
 # These IDs are persistent preference keys. Moving an action must retain both
-# its existing bindings and its factory default; only Quit is newly assigned.
+# its existing bindings and its factory default. Reset preparation is unbound.
 SHORTCUT_DEFAULTS = {
-    "edit.undo": "Ctrl+Z", "edit.undo_all": "", "edit.review": "",
+    "edit.undo": "Ctrl+Z", "edit.undo_all": "", "edit.review": "", "edit.reset_preparation": "",
     "file.new_image": "Ctrl+N", "file.open_folder": "Ctrl+O",
     "file.open_image": "Ctrl+Shift+O", "file.read_floppy": "Ctrl+R",
     "file.image_floppy": "Ctrl+I", "file.save": "Ctrl+S",

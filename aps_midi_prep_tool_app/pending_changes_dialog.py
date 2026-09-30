@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from .icon_utils import apply_window_icon
 from .localized_dialogs import QMessageBox
 from .message_catalog import translate_text
+from .ui_utils import resize_dialog_to_screen
 
 
 class PendingChangesDialog(QDialog):
@@ -79,14 +80,11 @@ class PendingChangesDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         self.refresh()
 
-        # Respect both larger interface fonts and the available desktop. The
-        # caller must not subsequently adjustSize() this scrollable dialog.
-        screen = self.screen().availableGeometry()
-        scale = max(1.0, self.fontMetrics().height() / 17)
-        width = min(round(1200 * scale), max(320, screen.width() - 40))
-        height = min(round(800 * scale), max(300, screen.height() - 60))
-        self._fit_buttons(width)
-        self.resize(width, height)
+        # Tables and details scroll at larger fonts; only the footer needs to
+        # reflow when the requested initial width is limited by the screen.
+        resize_dialog_to_screen(self, width=900, height=600)
+        self._fit_buttons(self.width())
+        height = self.height()
         self.splitter.setSizes([round(height * 0.55), round(height * 0.45)])
 
     def _fit_buttons(self, width):
