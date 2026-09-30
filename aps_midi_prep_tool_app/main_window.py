@@ -18002,6 +18002,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         content_layout.addWidget(intro)
         behavior = QComboBox(dialog)
         behavior.setObjectName("pianoOverlapBehavior")
+        # Long translations must not set the scroll area's minimum width.
+        behavior.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         behavior.addItem(self._lt("Smart repair"), "smart")
         behavior.addItem(self._lt("Keep attacks — trim overlaps"), "retrigger")
         behavior.addItem(self._lt("Merge only — keep overlaps"), "off")

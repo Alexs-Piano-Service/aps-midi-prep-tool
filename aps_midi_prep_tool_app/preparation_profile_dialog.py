@@ -121,7 +121,11 @@ class PreparationProfileDialog(QDialog):
         self.changes_table.setHorizontalHeaderLabels([self.t(text) for text in ("Setting", "Saved settings", "On apply")])
         self.changes_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.changes_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.changes_table.horizontalHeader().sectionResized.connect(self.changes_table.resizeRowsToContents)
+        # Stretch updates the column widths together. Reflow wrapped rows after
+        # the header finishes, when its section sizes and viewport agree.
+        self.changes_table.horizontalHeader().sectionResized.connect(
+            self.changes_table.resizeRowsToContents, Qt.ConnectionType.QueuedConnection,
+        )
         self.changes_table.verticalHeader().hide()
         self.changes_table.setMinimumHeight(round(180 * scale))
         details_layout.addWidget(self.changes_table, 1)

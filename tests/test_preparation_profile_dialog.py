@@ -555,6 +555,34 @@ def _assert_preparation_controls_fit(dialog):
         assert label.height() >= label.heightForWidth(label.width())
 
 
+def test_preparation_details_reflow_saved_values_after_columns_shrink(application, tmp_path):
+    settings = QSettings(str(tmp_path / "profile.ini"), QSettings.IniFormat)
+    settings.setValue(
+        "emulator_image_prefix",
+        "A long saved disk image prefix with enough words to wrap over several lines in a narrow window",
+    )
+    dialog = PreparationProfileDialog(settings, "mark_ii", "nalbantov")
+    try:
+        dialog.resize(1000, 700)
+        dialog.show()
+        dialog.details_button.setChecked(True)
+        QTest.qWait(30)
+        table = dialog.changes_table
+        prefix_row = next(row for row in range(table.rowCount()) if table.item(row, 0).text() == "Image prefix")
+        wide_height = table.rowHeight(prefix_row)
+        for width in (600, 1000, 600):
+            dialog.resize(width, 700)
+            QTest.qWait(30)
+            assert dialog.size().toTuple() == (width, 700)
+            assert table.rowHeight(prefix_row) >= table.sizeHintForRow(prefix_row)
+            if width == 600:
+                assert table.rowHeight(prefix_row) > wide_height
+            else:
+                assert table.rowHeight(prefix_row) == wide_height
+    finally:
+        dialog.close()
+
+
 @pytest.mark.parametrize("font_size,language", [(9, "en")] + [(14, item.code) for item in SUPPORTED_LANGUAGES])
 def test_preparation_dialog_preserves_user_geometry_and_reflows_during_modal_resize(
     application, modal_parent, font_size, language,

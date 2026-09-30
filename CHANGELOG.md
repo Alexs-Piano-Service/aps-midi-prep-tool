@@ -128,6 +128,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Long translated overlap choices fit narrow windows with larger fonts, and
+  preparation details finish rewrapping table rows after column widths change.
 - Resizable forms open at compact default sizes. **Preparing for...** fits its
   collapsed summary and expands for **Details** until the window is manually
   resized; shared form windows no longer multiply their initial size by the font height.

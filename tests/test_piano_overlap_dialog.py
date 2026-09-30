@@ -287,8 +287,9 @@ def dialog_font(window):
     application = QApplication.instance()
     original = QFont(application.font())
 
-    def set_size(size):
+    def set_size(size, stretch=100):
         font = QFont(window.font().family(), size)
+        font.setStretch(stretch)
         application.setFont(font)
         window.setFont(font)
 
@@ -409,11 +410,12 @@ def test_live_overlap_dialog_keeps_user_geometry_and_cancelled_preferences(
 
 @pytest.mark.parametrize("language", [language.code for language in SUPPORTED_LANGUAGES])
 @pytest.mark.parametrize("editing_settings", [False, True], ids=["song", "settings"])
+@pytest.mark.parametrize("font_stretch", [100, 125], ids=["normal", "wide"])
 def test_overlap_translations_remain_accessible_at_large_font_and_small_window(
-    window, monkeypatch, dialog_font, language, editing_settings,
+    window, monkeypatch, dialog_font, language, editing_settings, font_stretch,
 ):
     window.currentLanguage = language
-    dialog_font(14)
+    dialog_font(14, stretch=font_stretch)
 
     def exercise(dialog):
         assert dialog.windowTitle() == translate_text("Overlapping Piano Notes", language)
