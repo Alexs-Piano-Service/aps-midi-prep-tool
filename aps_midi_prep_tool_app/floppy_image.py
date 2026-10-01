@@ -63,12 +63,32 @@ class AmbiguousDosFilenameError(FloppyImageError):
     """A filename cannot safely identify a single FAT directory entry."""
 
 
-class _Fat12DirectoryCorruptionError(FloppyImageError):
-    """Directory corruption must not be bypassed by another image reader."""
+class _Fat12CorruptionError(FloppyImageError):
+    """Known FAT corruption must not be bypassed by another image reader."""
+
+
+class _Fat12DirectoryCorruptionError(_Fat12CorruptionError):
+    """A directory chain is corrupt or overlaps another directory."""
+
+
+class _Fat12ClusterBoundsError(_Fat12CorruptionError):
+    """A cluster lies outside the data area, including on contiguous MDR disks."""
+
+
+class _Fat12RecoveryAmbiguityError(_Fat12CorruptionError):
+    """Viable FAT copies recover different contents for the same file."""
 
 
 class FloppyOperationCancelled(FloppyImageError):
     """Raised when the user cancels a long floppy operation."""
+
+
+class FloppyCaptureReadError(FloppyImageError):
+    """An exact capture failed; logical recovery requires a separate choice."""
+
+    def __init__(self, message, *, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
 
 
 class GreaseweazleConversionError(FloppyImageError):
@@ -3769,9 +3789,19 @@ def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=
             while remaining > 0:
                 _raise_if_cancelled(cancel_callback)
                 current_size = min(chunk_size, remaining)
-                chunk = _read_device_exact(
-                    volume, cursor, current_size, "floppy image", cancel_callback=cancel_callback,
-                )
+                try:
+                    chunk = _read_device_exact(
+                        volume, cursor, current_size, "floppy image", cancel_callback=cancel_callback,
+                    )
+                except FloppyOperationCancelled:
+                    raise
+                except FloppyImageError as exc:
+                    exc.read_diagnostics = {
+                        "failed_read_offset_bytes": cursor,
+                        "failed_read_length_bytes": current_size,
+                        "failed_sector_exact": False,
+                    }
+                    raise
                 if not chunk:
                     raise FloppyImageError(
                         "Could not read floppy device: the drive stopped returning data before the full disk was read. "
@@ -3810,34 +3840,45 @@ def _read_block_device(device_path, output_path, size_bytes, progress_callback=N
     copied = 0
     chunk_size = 64 * 1024
     try:
-        with open(device_path, "rb", buffering=0) as source, open(output_path, "wb") as output:
-            while True:
-                _raise_if_cancelled(cancel_callback)
-                if total_size:
-                    remaining = total_size - copied
-                    if remaining <= 0:
-                        break
-                    chunk = source.read(min(chunk_size, remaining))
-                else:
-                    chunk = source.read(chunk_size)
-                if not chunk:
-                    break
-                output.write(chunk)
-                copied += len(chunk)
-                if progress_callback is not None and total_size > 0:
-                    progress = min(70, int((copied / total_size) * 70))
-                    progress_callback(
-                        progress,
-                        100,
-                        f"Reading floppy image: {display_bytes(copied)} of {display_bytes(total_size)}...",
-                    )
-        if total_size and copied < total_size:
-            raise FloppyImageError(
-                "Could not read floppy device: the drive stopped returning data before the full disk was read. "
-                "Check that a disk is inserted and that the selected format matches the disk."
-            )
+        source = open(device_path, "rb", buffering=0)
     except OSError as exc:
-        raise FloppyImageError(f"Could not read floppy device {device_path}: {exc}") from exc
+        raise FloppyImageError(f"Could not open floppy device {device_path}: {exc}") from exc
+    with source, open(output_path, "wb") as output:
+        while True:
+            _raise_if_cancelled(cancel_callback)
+            if total_size:
+                remaining = total_size - copied
+                if remaining <= 0:
+                    break
+                current_size = min(chunk_size, remaining)
+            else:
+                current_size = chunk_size
+            try:
+                chunk = source.read(current_size)
+            except OSError as exc:
+                error = FloppyImageError(f"Could not read floppy device {device_path}: {exc}")
+                error.read_diagnostics = {
+                    "failed_read_offset_bytes": copied, "failed_read_length_bytes": current_size,
+                    "failed_sector_exact": False,
+                }
+                raise error from exc
+            if not chunk:
+                break
+            # Destination failures must not invite another physical-media read.
+            output.write(chunk)
+            copied += len(chunk)
+            if progress_callback is not None and total_size > 0:
+                progress = min(70, int((copied / total_size) * 70))
+                progress_callback(
+                    progress,
+                    100,
+                    f"Reading floppy image: {display_bytes(copied)} of {display_bytes(total_size)}...",
+                )
+    if total_size and copied < total_size:
+        raise FloppyImageError(
+            "Could not read floppy device: the drive stopped returning data before the full disk was read. "
+            "Check that a disk is inserted and that the selected format matches the disk."
+        )
 
 
 def _capture_temp_output_path(output_path, *, suffix=None):
@@ -3900,13 +3941,22 @@ def capture_floppy_drive_image(
             100,
             f"Imaging floppy: 0 B of {display_bytes(read_size)}...",
         )
-        _read_block_device(
-            drive_info.path,
-            raw_temp_path,
-            read_size,
-            progress_callback=progress_callback,
-            cancel_callback=cancel_callback,
-        )
+        try:
+            _read_block_device(
+                drive_info.path,
+                raw_temp_path,
+                read_size,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+        except FloppyOperationCancelled:
+            raise
+        except FloppyImageError as exc:
+            raise FloppyCaptureReadError(str(exc), diagnostics={
+                "source": drive_info.path, "source_label": drive_info.display_name,
+                "requested_bytes": read_size, "exact_capture_completed": False,
+                **dict(getattr(exc, "read_diagnostics", {}) or {}),
+            }) from exc
         _raise_if_cancelled(cancel_callback)
 
         if raw_output:
@@ -3955,6 +4005,122 @@ def capture_floppy_drive_image(
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+def _guard_logical_capture_destination(drive_info, output_path):
+    """Reject the source volume before creating output, reports or scratch files."""
+    if os.name == "nt":
+        source_root = _windows_filesystem_root(drive_info.path)
+        if source_root is None:
+            raise FloppyImageError("Could not verify the source floppy volume. Choose a drive-letter source.")
+        source_drive = ntpath.splitdrive(source_root)[0].casefold()
+        destinations = (os.fspath(output_path), os.path.realpath(output_path))
+        if any(ntpath.splitdrive(path.removeprefix("\\\\?\\"))[0].casefold() == source_drive for path in destinations):
+            raise FloppyImageError("Save the logical image on a different device from the source floppy.")
+        return
+    source = os.stat(drive_info.path)
+    if not stat.S_ISBLK(source.st_mode):
+        return
+    parent = os.path.realpath(os.path.dirname(os.path.abspath(output_path)))
+    while not os.path.exists(parent):
+        previous, parent = parent, os.path.dirname(parent)
+        if parent == previous:
+            raise FloppyImageError("Could not verify the output filesystem.")
+    output_device = os.stat(parent).st_dev
+    source_sys = os.path.realpath(f"/sys/dev/block/{os.major(source.st_rdev)}:{os.minor(source.st_rdev)}")
+    output_sys = os.path.realpath(f"/sys/dev/block/{os.major(output_device)}:{os.minor(output_device)}")
+    if output_device == source.st_rdev or output_sys.startswith(source_sys + os.sep):
+        raise FloppyImageError("Save the logical image on a different device from the source floppy.")
+
+
+def capture_logical_floppy_image(
+    drive_info, output_path, *, disk_format=None, exact_failure=None,
+    progress_callback=None, cancel_callback=None,
+):
+    """Explicitly reconstruct a readable IMG; never represent it as raw acquisition."""
+    from .helpers.atomic_file import publish_new_file
+
+    if not isinstance(drive_info, FloppyDriveInfo):
+        raise FloppyImageError("Invalid floppy drive selection.")
+    if image_extension(output_path) != "img":
+        raise FloppyImageError("Logical recovery must be saved as an IMG file.")
+    _guard_logical_capture_destination(drive_info, output_path)
+    output_path = os.path.abspath(output_path)
+    stage = _capture_temp_output_path(output_path, suffix=".img")
+    report_path = f"{output_path}.recovery-{uuid.uuid4().hex[:8]}.json"
+    report_stage = ""
+    report_published = False
+    image_published = False
+    session = None
+    diagnostics = {
+        "schema_version": 1, "capture_kind": "logical_recovery",
+        "source": drive_info.path, "source_label": drive_info.display_name,
+        "exact_raw_copy": False, "archival_capture": False,
+        "source_modified": False, "files_independently_verified": False,
+        "exact_capture_failure": dict(exact_failure or {}),
+    }
+    try:
+        try:
+            repair = _read_floppy_device_fast_image(
+                drive_info.path, stage,
+                disk_format.size_bytes if isinstance(disk_format, DiskFormat) else drive_info.size_bytes,
+                progress_callback=progress_callback, cancel_callback=cancel_callback,
+                diagnostics=diagnostics,
+            )
+            listing = read_image_listing(stage)
+            diagnostics.update(repair_note=repair.note,
+                               boot_sector_reconstructed=repair.boot_sector_repaired)
+        except (FloppyOperationCancelled, _FloppyReadStalled):
+            raise
+        except FloppyImageError as exc:
+            diagnostics["fast_read_failure"] = str(exc)
+            source = FloppyRecoverySource(drive_info, disk_format) if isinstance(disk_format, DiskFormat) else drive_info
+            session = FloppyImageSession._recover_usb_floppy(
+                source, progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                temporary_parent=os.path.dirname(output_path),
+            )
+            shutil.copyfile(session.working_img_path, stage)
+            listing = read_image_listing(stage)
+            diagnostics.update(
+                read_method="bounded_full_disk_recovery",
+                recovery_diagnostics=session.recovery_diagnostics,
+                repair_note=session.repair_note,
+                boot_sector_reconstructed=session.source_boot_sector_repaired,
+            )
+        _raise_if_cancelled(cancel_callback)
+        diagnostics.update(
+            output_path=output_path, files_listed=sum(not entry.is_directory for entry in listing.entries),
+            image_bytes=os.path.getsize(stage), image_sha256=floppy_save_recovery.digest(stage),
+            file_data_status=("read_without_sector_errors"
+                              if diagnostics.get("read_method") == "allocated_files"
+                              and diagnostics.get("allocated_file_data_complete")
+                              and diagnostics.get("file_map_complete") else "incomplete_or_uncertain"),
+            limitation="Logical reconstruction: free/unreadable sectors may be omitted or zero-filled; metadata may be repaired. This is not a bit-exact or archival capture.",
+        )
+        report_stage = _capture_temp_output_path(report_path, suffix=".json")
+        with open(report_stage, "w", encoding="utf-8") as handle:
+            json.dump(diagnostics, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _notify_progress(progress_callback, 98, 100, "Saving logical recovery image and diagnostics...")
+        publish_new_file(report_stage, report_path, check_cancel=lambda: _raise_if_cancelled(cancel_callback))
+        report_published = True
+        _raise_if_cancelled(cancel_callback)
+        _finish_capture_output(stage, output_path)
+        image_published = True
+        return {"output_path": output_path, "diagnostics_path": report_path,
+                "capture_kind": "logical_recovery", "diagnostics": diagnostics}
+    finally:
+        if session is not None:
+            session.cleanup()
+        for path in (stage, report_stage, report_path if report_published and not image_published else ""):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 
 def capture_greaseweazle_floppy_image(
@@ -4846,7 +5012,7 @@ def _recovery_affected_files(image_path, diagnostics):
                     if cluster in seen_directories:
                         continue
                     seen_directories.add(cluster)
-                    clusters = _fat12_cluster_chain_from_start(fat, cluster)
+                    clusters = _fat12_cluster_chain_from_start(fat, cluster, geometry)
                     if any(unread_in_range(_cluster_offset(geometry, item), geometry.cluster_size) for item in clusters):
                         affected.append({"path": path, "status": "directory unreadable; contained songs unknown"})
                     else:
@@ -4872,14 +5038,14 @@ def _recovery_affected_files(image_path, diagnostics):
         return [], f"Song damage could not be mapped: {exc}"
 
 
-def retain_floppy_recovery_capture(source_path, diagnostics):
+def retain_floppy_recovery_capture(source_path, diagnostics, *, temporary_parent=None):
     """Retain useful acquisition data independently of an editable session."""
     details = dict(diagnostics or {})
     if not os.path.isfile(source_path):
         return details
     capture_path = details.get("partial_capture_path", "")
     if not os.path.isfile(capture_path):
-        retained_dir = tempfile.mkdtemp(prefix="aps_partial_floppy_")
+        retained_dir = tempfile.mkdtemp(prefix="aps_partial_floppy_", dir=temporary_parent)
         capture_path = os.path.join(retained_dir, "partial.img")
         shutil.copy2(source_path, capture_path)
     details["partial_capture_path"] = capture_path
@@ -5582,7 +5748,7 @@ def _is_block_device_path(path):
         return False
 
 
-def _read_fat12_block_device_listing(device_path):
+def _read_fat12_block_device_listing(device_path, *, diagnostics=None):
     fd = os.open(device_path, os.O_RDONLY)
     try:
         boot_sector = _read_device_exact(fd, 0, _YAMAHA_BYTES_PER_SECTOR, "floppy boot sector")
@@ -5592,7 +5758,7 @@ def _read_fat12_block_device_listing(device_path):
                 "Could not parse a FAT12 boot sector on this floppy. "
                 "The disk may not be an IBM/Yamaha floppy, or it may need recovery."
             )
-        fat = _read_device_exact(fd, geometry.fat_offset, geometry.fat_size, "floppy FAT")
+        fat_area, fat_bad_ranges = _read_fat_area_best_effort(fd, geometry, boot_sector[21])
         root_dir = _read_device_exact(fd, geometry.root_offset, geometry.root_size, "floppy root directory")
     finally:
         os.close(fd)
@@ -5601,9 +5767,14 @@ def _read_fat12_block_device_listing(device_path):
         entry["attr"] & 0x10 and not _is_windows_volume_metadata_path(entry["name"])
         for entry in _iter_fat_directory_entries(root_dir)
     ):
-        return _read_fat12_image_listing(device_path)
+        return _read_fat12_image_listing(device_path, diagnostics=diagnostics)
 
-    data = boot_sector.ljust(geometry.data_offset, b"\x00")
+    data = bytearray(boot_sector.ljust(geometry.data_offset, b"\x00"))
+    data[geometry.fat_offset:geometry.fat_offset + geometry.fat_area_size] = fat_area
+    data[geometry.root_offset:geometry.root_offset + geometry.root_size] = root_dir
+    fat, _note = _select_fat12_copy(
+        data, geometry, root_dir, diagnostics=diagnostics, unreadable_ranges=fat_bad_ranges,
+    )
     entries = _collect_fat12_listing_entries(data, geometry, fat, root_dir)
     free_clusters = sum(
         1
@@ -5622,10 +5793,10 @@ def read_image_listing(img_path, *, diagnostics=None):
     if os.name == "nt" and _windows_filesystem_root(img_path):
         return _read_windows_filesystem_drive_listing(img_path, diagnostics=diagnostics)
     if _is_block_device_path(img_path):
-        return _read_fat12_block_device_listing(img_path)
+        return _read_fat12_block_device_listing(img_path, diagnostics=diagnostics)
     try:
-        return _read_fat12_image_listing(img_path)
-    except _Fat12DirectoryCorruptionError:
+        return _read_fat12_image_listing(img_path, diagnostics=diagnostics)
+    except _Fat12CorruptionError:
         raise
     except FloppyImageError as fat_exc:
         if not shutil.which("7z"):
@@ -6174,7 +6345,6 @@ def _read_device_best_effort(device, offset, size, label, *, sector_size=_YAMAHA
 
 def _read_fat_area_best_effort(device, geometry, media_descriptor, cancel_callback=None):
     fat_copies = []
-    bad_by_copy = []
     bad_ranges = []
     for fat_index in range(geometry.num_fats):
         copy_offset = geometry.fat_offset + fat_index * geometry.fat_size
@@ -6188,38 +6358,11 @@ def _read_fat_area_best_effort(device, geometry, media_descriptor, cancel_callba
         )
         fat_copies.append(fat_copy)
         bad_ranges.extend(copy_bad_ranges)
-        bad_by_copy.append(
-            {
-                max(0, int((bad_offset - copy_offset) // geometry.bytes_per_sector))
-                for bad_offset, _bad_size in copy_bad_ranges
-            }
-        )
-
-    valid_copies = [
-        index
-        for index, fat_copy in enumerate(fat_copies)
-        if _fat_signature_at(fat_copy, 0, media_descriptor)
-    ]
-    if not valid_copies:
+    if not any(_fat_signature_at(fat, 0, media_descriptor) for fat in fat_copies):
         raise FloppyImageError("Could not read a valid FAT from the floppy.")
-
-    merged = bytearray(geometry.fat_size)
-    sector_count = int(math.ceil(geometry.fat_size / geometry.bytes_per_sector))
-    for sector_index in range(sector_count):
-        sector_start = sector_index * geometry.bytes_per_sector
-        sector_end = min(geometry.fat_size, sector_start + geometry.bytes_per_sector)
-        chosen = None
-        for copy_index in valid_copies:
-            if sector_index not in bad_by_copy[copy_index]:
-                chosen = fat_copies[copy_index][sector_start:sector_end]
-                break
-        if chosen is None:
-            chosen = fat_copies[valid_copies[0]][sector_start:sector_end]
-        merged[sector_start:sector_end] = chosen
-
-    if not _fat_signature_at(merged, 0, media_descriptor):
-        raise FloppyImageError("Could not reconstruct a valid FAT from the floppy.")
-    return bytes(merged) * geometry.num_fats, bad_ranges
+    # Preserve each copy until the root directory supplies enough evidence to
+    # validate complete chains. Sector-by-sector merging can invent a third FAT.
+    return b"".join(fat_copies), bad_ranges
 
 
 def _decode_dos_directory_name(raw_name):
@@ -6272,47 +6415,43 @@ def _iter_root_file_entries(root_dir):
 
 def _fat12_next_cluster(fat, cluster):
     index = cluster + (cluster // 2)
-    if index + 1 >= len(fat):
-        return 0xFFF
+    if index < 0 or index + 1 >= len(fat):
+        raise _Fat12ClusterBoundsError(
+            "A cluster points outside the FAT12 allocation table; the image is corrupt. "
+            "Use Recover Damaged Image."
+        )
     if cluster & 1:
         return ((fat[index] >> 4) | (fat[index + 1] << 4)) & 0xFFF
     return (fat[index] | ((fat[index + 1] & 0x0F) << 8)) & 0xFFF
 
 
 def _fat12_cluster_chain(fat, first_cluster, size, geometry):
-    if size <= 0 or first_cluster < 2:
+    if size <= 0 and first_cluster == 0:
         return []
-
     needed_clusters = int(math.ceil(size / geometry.cluster_size))
-    max_clusters = max(needed_clusters + 4, 4)
-    clusters = []
-    seen = set()
-    cluster = first_cluster
-
-    while 2 <= cluster < 0xFF0 and cluster not in seen:
-        clusters.append(cluster)
-        seen.add(cluster)
-        if len(clusters) >= max_clusters:
-            break
-        next_cluster = _fat12_next_cluster(fat, cluster)
-        if next_cluster >= 0xFF8:
-            break
-        if next_cluster == 0xFF7:
-            raise FloppyImageError("FAT12 cluster chain contains a bad cluster marker; the disk or image may be damaged.")
-        if next_cluster < 2:
-            break
-        cluster = next_cluster
-
+    clusters = _fat12_cluster_chain_from_start(fat, first_cluster, geometry)
     if len(clusters) < needed_clusters:
-        raise FloppyImageError("FAT12 cluster chain ended before the file data was complete; the disk or image may be damaged.")
+        raise _Fat12CorruptionError(
+            "FAT12 cluster chain ended before the file data was complete; the image is corrupt. "
+            "Use Recover Damaged Image."
+        )
     return clusters[:needed_clusters]
 
 
-def _fat12_cluster_chain_from_start(fat, first_cluster):
+def _validate_fat12_data_cluster(geometry, cluster):
+    if not 2 <= cluster < min(_fat12_data_cluster_count(geometry) + 2, 0xFF0):
+        raise _Fat12ClusterBoundsError(
+            "A cluster points outside the floppy data area; the FAT12 image is corrupt. "
+            "Use Recover Damaged Image."
+        )
+
+
+def _fat12_cluster_chain_from_start(fat, first_cluster, geometry):
     clusters = []
     seen = set()
     cluster = first_cluster
-    while 2 <= cluster < 0xFF0:
+    while True:
+        _validate_fat12_data_cluster(geometry, cluster)
         if cluster in seen:
             raise _Fat12DirectoryCorruptionError(
                 "The FAT12 cluster chain contains a cycle; the disk or image is corrupt. "
@@ -6323,10 +6462,11 @@ def _fat12_cluster_chain_from_start(fat, first_cluster):
         next_cluster = _fat12_next_cluster(fat, cluster)
         if next_cluster >= 0xFF8:
             break
-        if next_cluster == 0xFF7:
-            raise FloppyImageError("FAT12 cluster chain contains a bad cluster marker; the disk or image may be damaged.")
-        if next_cluster < 2:
-            break
+        if next_cluster == 0xFF7 or next_cluster < 2 or 0xFF0 <= next_cluster < 0xFF8:
+            raise _Fat12CorruptionError(
+                "FAT12 cluster chain contains a free, reserved or bad cluster marker; the image is corrupt. "
+                "Use Recover Damaged Image."
+            )
         cluster = next_cluster
     return clusters
 
@@ -6338,10 +6478,13 @@ def _cluster_offset(geometry, cluster):
 def _read_cluster_chain_from_image(data, geometry, clusters, size):
     output = bytearray()
     for cluster in clusters:
+        _validate_fat12_data_cluster(geometry, cluster)
         offset = _cluster_offset(geometry, cluster)
         end = offset + geometry.cluster_size
-        if offset < geometry.data_offset or end > len(data):
-            raise FloppyImageError("A file points outside the floppy data area; the FAT directory appears corrupt.")
+        if offset < geometry.data_offset or end > min(len(data), geometry.total_size):
+            raise _Fat12ClusterBoundsError(
+                "A file points outside the floppy data area; the FAT directory is corrupt. Use Recover Damaged Image."
+            )
         output.extend(data[offset:end])
         if len(output) >= size:
             break
@@ -6426,9 +6569,7 @@ def _iter_fat_directory_entries(directory_bytes):
 
 
 def _read_directory_chain_from_image(data, geometry, fat, first_cluster, *, directory_clusters=None):
-    if first_cluster < 2:
-        return b""
-    clusters = _fat12_cluster_chain_from_start(fat, first_cluster)
+    clusters = _fat12_cluster_chain_from_start(fat, first_cluster, geometry)
     if not clusters:
         return b""
     if directory_clusters is not None:
@@ -6524,10 +6665,13 @@ def _clear_fat12_hidden_system_flags(data):
 def _fat12_contiguous_file_bytes(data, geometry, first_cluster, size):
     if size <= 0:
         return b""
+    _validate_fat12_data_cluster(geometry, first_cluster)
     offset = _cluster_offset(geometry, first_cluster)
     end = offset + size
-    if offset < geometry.data_offset or end > len(data):
-        raise FloppyImageError("A file points outside the floppy data area; the FAT directory appears corrupt.")
+    if offset < geometry.data_offset or end > min(len(data), geometry.total_size):
+        raise _Fat12ClusterBoundsError(
+            "A file points outside the floppy data area; the FAT directory is corrupt. Use Recover Damaged Image."
+        )
     return data[offset:end]
 
 
@@ -6561,6 +6705,8 @@ def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_
         try:
             cluster_chain = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
             packed_size = len(cluster_chain) * geometry.cluster_size
+        except _Fat12ClusterBoundsError:
+            raise
         except FloppyImageError:
             if not allow_contiguous_fallback:
                 raise
@@ -6579,7 +6725,92 @@ def _collect_fat12_listing_entries(data, geometry, fat, directory_bytes, parent_
     return entries
 
 
-def _read_fat12_image_context(img_path):
+def _fat12_copy_records(data, geometry):
+    """Keep mirror identities intact; never combine contradictory FAT sectors."""
+    boot_geometry = _geometry_from_boot_sector(data[:512])
+    media_descriptor = data[21] if boot_geometry == geometry and len(data) > 21 and data[21] >= 0xF0 else None
+    for index in range(geometry.num_fats):
+        offset = geometry.fat_offset + index * geometry.fat_size
+        fat = bytes(data[offset:offset + geometry.fat_size])
+        signature_valid = (
+            len(fat) == geometry.fat_size and fat[0] >= 0xF0
+            and _fat_signature_at(fat, 0, media_descriptor if media_descriptor is not None else fat[0])
+        )
+        yield index, fat, signature_valid
+
+
+def _fat12_allocation_signature(fat, geometry):
+    # Ignore bytes outside the actual data-cluster map and equivalent EOC
+    # markers. Unreferenced allocations still matter for safe future writes.
+    return tuple(
+        0xFFF if value >= 0xFF8 else value
+        for value in (_fat12_next_cluster(fat, cluster)
+                      for cluster in range(2, _fat12_data_cluster_count(geometry) + 2))
+    )
+
+
+def _select_fat12_copy(data, geometry, root_dir, *, diagnostics=None, unreadable_ranges=()):
+    """Select only a complete, structurally sound and unambiguous allocation map."""
+    records = list(_fat12_copy_records(data, geometry))
+    valid = []
+    errors = []
+    checked = {}
+    allow_contiguous = electone_mdr_to_midi.root_directory_has_mdr_entries(root_dir)
+    for index, fat, signature_valid in records:
+        offset = geometry.fat_offset + index * geometry.fat_size
+        if any(start < offset + geometry.fat_size and start + size > offset
+               for start, size in unreadable_ranges):
+            errors.append(f"FAT {index + 1}: contains unreadable sectors")
+            continue
+        if not signature_valid:
+            errors.append(f"FAT {index + 1}: invalid allocation-table signature")
+            continue
+        if fat not in checked:
+            try:
+                _collect_fat12_listing_entries(
+                    data, geometry, fat, root_dir, allow_contiguous_fallback=allow_contiguous,
+                )
+                checked[fat] = None
+            except FloppyImageError as exc:
+                checked[fat] = exc
+        error = checked[fat]
+        if error is not None:
+            errors.append(f"FAT {index + 1}: {error}")
+        else:
+            valid.append((index, fat))
+    details = {
+        "fat_copies_checked": len(records),
+        "fat_copies_structurally_valid": [index + 1 for index, _fat in valid],
+        "fat_copy_errors": errors,
+    }
+    if isinstance(diagnostics, dict):
+        diagnostics.update(details)
+    if not valid:
+        raise _Fat12CorruptionError(
+            "No FAT12 copy has a valid allocation table and complete file/directory chains; "
+            "the image is corrupt. Use Recover Damaged Image. " + " ".join(errors)
+        )
+    selected_index, selected_fat = valid[0]
+    signature = _fat12_allocation_signature(selected_fat, geometry)
+    if any(_fat12_allocation_signature(fat, geometry) != signature for _index, fat in valid[1:]):
+        if isinstance(diagnostics, dict):
+            diagnostics["fat_copies_conflict"] = True
+        raise _Fat12CorruptionError(
+            "The FAT12 copies contain conflicting allocation chains and more than one copy appears valid. "
+            "APS cannot safely choose file contents or free space. Use Recover Damaged Image."
+        )
+    note = ""
+    if len(valid) != len(records):
+        note = (
+            f"Selected FAT {selected_index + 1}; the other allocation-table copy is damaged. "
+            "The original image was not changed."
+        )
+    if isinstance(diagnostics, dict):
+        diagnostics.update(fat_selected_copy=selected_index + 1, fat_copies_conflict=False, fat_selection_note=note)
+    return selected_fat, note
+
+
+def _read_fat12_image_context(img_path, *, diagnostics=None):
     with open(img_path, "rb") as handle:
         data = handle.read()
 
@@ -6599,19 +6830,16 @@ def _read_fat12_image_context(img_path):
             "The image appears truncated or the selected disk format is wrong."
         )
 
-    fat = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size]
-    if len(fat) != geometry.fat_size:
-        raise FloppyImageError("Could not read the FAT12 allocation table from this image; the image may be corrupt.")
-
     root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
     if len(root_dir) != geometry.root_size:
         raise FloppyImageError("Could not read the FAT12 root directory from this image; the image may be corrupt.")
 
+    fat, _note = _select_fat12_copy(data, geometry, root_dir, diagnostics=diagnostics)
     return data, geometry, fat, root_dir
 
 
-def _read_fat12_image_listing(img_path):
-    data, geometry, fat, root_dir = _read_fat12_image_context(img_path)
+def _read_fat12_image_listing(img_path, *, diagnostics=None):
+    data, geometry, fat, root_dir = _read_fat12_image_context(img_path, diagnostics=diagnostics)
     allow_contiguous_fallback = electone_mdr_to_midi.root_directory_has_mdr_entries(root_dir)
     entries = _collect_fat12_listing_entries(
         data,
@@ -6685,7 +6913,7 @@ def _fat12_directory_slots(img_path, directory_path):
             raise FloppyImageError(f"Could not find {directory_path} in the working image.")
         if not entry["attr"] & 0x10:
             raise FloppyImageError(f"Invalid image directory in {directory_path}.")
-        clusters = _fat12_cluster_chain_from_start(fat, entry["cluster"])
+        clusters = _fat12_cluster_chain_from_start(fat, entry["cluster"], geometry)
         directory = _read_directory_chain_from_image(data, geometry, fat, entry["cluster"])
         offsets = [_cluster_offset(geometry, cluster) + pos
                    for cluster in clusters for pos in range(0, geometry.cluster_size, 32)]
@@ -6864,6 +7092,8 @@ def _read_fat12_file_bytes(img_path, image_path):
     try:
         clusters = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
         return _read_cluster_chain_from_image(data, geometry, clusters, entry["size"])
+    except _Fat12ClusterBoundsError:
+        raise
     except FloppyImageError:
         if not electone_mdr_to_midi.root_directory_has_mdr_entries(root_dir):
             raise
@@ -6996,7 +7226,7 @@ def _reconstruct_yamaha_root_dir_from_pianodir(data):
                 continue
             if data[offset + 0x27:offset + 0x77] != record:
                 continue
-            chain = _fat12_cluster_chain_from_start(fat, cluster)
+            chain = _fat12_cluster_chain_from_start(fat, cluster, geometry)
             allocated = len(chain) * geometry.cluster_size
             payload = _read_cluster_chain_from_image(data, geometry, chain, allocated)
             matched_cluster = cluster
@@ -7019,7 +7249,7 @@ def _reconstruct_yamaha_root_dir_from_pianodir(data):
     return bytes(root_dir)
 
 
-def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None):
+def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None, *, diagnostics=None):
     try:
         device = _open_block_device_for_read(device_path)
     except FloppyImageError as exc:
@@ -7034,7 +7264,10 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                 0,
                 _YAMAHA_BYTES_PER_SECTOR,
                 cancel_callback=cancel_callback,
-            ) or b"\x00" * _YAMAHA_BYTES_PER_SECTOR
+            )
+            boot_unreadable = sector0 is None
+            sector0 = sector0 or b"\x00" * _YAMAHA_BYTES_PER_SECTOR
+            fat_bad_ranges, root_bad_ranges = [], []
             geometry = _geometry_from_boot_sector(sector0)
             repair_result = YamahaRepairResult("Fast floppy read: valid FAT12 boot sector present.", False)
             boot = sector0
@@ -7082,10 +7315,9 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         raise
                     except FloppyImageError:
                         continue
-                    if not _fat_signature_at(candidate_fat, 0, media_descriptor) or not _fat_signature_at(
-                        candidate_fat,
-                        candidate_geometry.fat_size,
-                        media_descriptor,
+                    if not any(
+                        _fat_signature_at(candidate_fat, index * candidate_geometry.fat_size, media_descriptor)
+                        for index in range(candidate_geometry.num_fats)
                     ):
                         continue
                     if not _root_dir_looks_plausible(candidate_root, 0, candidate_geometry.root_dir_sectors):
@@ -7094,6 +7326,8 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                     geometry = candidate_geometry
                     fat_area = candidate_fat
                     root_dir = candidate_root
+                    fat_bad_ranges = candidate_fat_bad_ranges
+                    root_bad_ranges = candidate_root_bad_ranges
                     matched_layout = layout
                     fallback_allowed = False
                     break
@@ -7176,8 +7410,18 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             image[geometry.fat_offset:geometry.fat_offset + len(fat_area)] = fat_area
             image[geometry.root_offset:geometry.root_offset + len(root_dir)] = root_dir
 
-            fat = fat_area[:geometry.fat_size]
             file_entries = list(_iter_root_file_entries(root_dir))
+            fat, fat_note = _select_fat12_copy(
+                image, geometry, root_dir, diagnostics=diagnostics, unreadable_ranges=fat_bad_ranges,
+            )
+            if fat_note:
+                for index in range(geometry.num_fats):
+                    offset = geometry.fat_offset + index * geometry.fat_size
+                    image[offset:offset + geometry.fat_size] = fat
+                repair_result = YamahaRepairResult(
+                    repair_result.note + " " + fat_note + " FAT mirrors normalized in the working copy.",
+                    True, boot_sector_repaired=repair_result.boot_sector_repaired,
+                )
             file_chains = []
             _notify_progress(progress_callback, 20, 100, f"Planning fast read for {len(file_entries)} file(s)...")
             for entry in file_entries:
@@ -7257,6 +7501,38 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                     boot_sector_repaired=repair_result.boot_sector_repaired,
                 )
 
+            if diagnostics is not None:
+                requested_ranges = [
+                    (0, len(boot)), (geometry.fat_offset, len(fat_area)),
+                    (geometry.root_offset, len(root_dir)),
+                    *[(geometry.data_offset + (start - 2) * geometry.cluster_size,
+                       (end - start + 1) * geometry.cluster_size) for start, end in cluster_runs],
+                ]
+                omitted = []
+                cursor = 0
+                for offset, length in sorted(requested_ranges):
+                    if offset > cursor:
+                        omitted.append({"offset_bytes": cursor, "length_bytes": offset - cursor})
+                    cursor = max(cursor, offset + length)
+                if cursor < total_size:
+                    omitted.append({"offset_bytes": cursor, "length_bytes": total_size - cursor})
+                unreadable = [
+                    {"area": area, "offset_bytes": offset, "length_bytes": length}
+                    for area, ranges in (
+                        ("boot", [(0, geometry.bytes_per_sector)] if boot_unreadable else []),
+                        ("fat", fat_bad_ranges), ("root", root_bad_ranges), ("file_data", bad_file_ranges),
+                    ) for offset, length in ranges
+                ]
+                diagnostics.update(
+                    read_method="allocated_files", unreadable_ranges=unreadable,
+                    omitted_ranges=omitted, omitted_sectors_zero_filled=bool(omitted),
+                    allocated_file_data_complete=not bool(bad_file_ranges),
+                    file_map_complete=not bool(fat_bad_ranges or root_bad_ranges),
+                    file_data_zero_filled=bool(bad_file_ranges),
+                    boot_sector_reconstructed=repair_result.boot_sector_repaired,
+                    filesystem_repair_note=repair_result.note,
+                )
+
             with open(output_path, "wb") as handle:
                 handle.write(image)
             _raise_if_cancelled(cancel_callback)
@@ -7279,9 +7555,27 @@ def prepare_yamaha_image(input_path, output_path):
 
 
 def prepare_yamaha_bytes(data, output_path):
-    def write_output(payload):
+    def finish(payload, result):
+        # This is a disposable working copy. The separate boot-sector repair
+        # utility deliberately preserves source FAT bytes instead.
+        geometry = _geometry_from_boot_sector(payload[:512])
+        if geometry is not None and len(payload) >= geometry.total_size:
+            root_dir = payload[geometry.root_offset:geometry.root_offset + geometry.root_size]
+            fat, note = _select_fat12_copy(payload, geometry, root_dir)
+            if note:
+                normalized = bytearray(payload)
+                for index in range(geometry.num_fats):
+                    offset = geometry.fat_offset + index * geometry.fat_size
+                    normalized[offset:offset + geometry.fat_size] = fat
+                payload = bytes(normalized)
+                result = YamahaRepairResult(
+                    result.note + " " + note + " FAT mirrors normalized in the working copy.",
+                    True,
+                    boot_sector_repaired=result.boot_sector_repaired,
+                )
         with open(output_path, "wb") as handle:
             handle.write(payload)
+        return result
 
     detection = _detect_yamaha_layout(data)
     if detection is None:
@@ -7299,12 +7593,10 @@ def prepare_yamaha_bytes(data, output_path):
                 "notes": "sector 0 and root directory were damaged; rebuilt root directory from PIANODIR.FIL and FAT chains",
             }
     if detection is None:
-        write_output(data)
-        return YamahaRepairResult("No Yamaha copy-protection repair needed.", False)
+        return finish(data, YamahaRepairResult("No Yamaha copy-protection repair needed.", False))
 
     if detection["mode"] == "already_valid":
-        write_output(data)
-        return YamahaRepairResult("Yamaha repair check: valid 720 KB FAT12 boot sector already present.", False)
+        return finish(data, YamahaRepairResult("Yamaha repair check: valid 720 KB FAT12 boot sector already present.", False))
 
     layout = detection.get("layout")
     root_dir_sectors = int(detection.get("root_dir_sectors", _YAMAHA_ROOT_DIR_SECTORS))
@@ -7351,13 +7643,11 @@ def prepare_yamaha_bytes(data, output_path):
         repaired_data[root_offset:root_offset + len(root_dir)] = root_dir
         repaired = bytes(repaired_data)
 
-    write_output(repaired)
-
-    return YamahaRepairResult(
+    return finish(repaired, YamahaRepairResult(
         "Yamaha-compatible boot-sector repair applied: " + detection["notes"] + ".",
         True,
         boot_sector_repaired=True,
-    )
+    ))
 
 
 def _disk_format_for_image(img_path):
@@ -7725,7 +8015,10 @@ def _recover_files_from_fat_context(data, geometry):
     if len(data) < geometry.fat_offset + geometry.fat_size:
         return files
 
-    fat = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size]
+    # A damaged file need not invalidate every other file in that FAT. Explicit
+    # recovery tries each signature-valid copy, keeping each complete chain
+    # intact, before resorting to a contiguous salvage read.
+    fats = list(dict.fromkeys(fat for _index, fat, valid in _fat12_copy_records(data, geometry) if valid))
     root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
     for entry in _iter_fat_directory_entries(root_dir):
         if _is_windows_volume_metadata_path(entry["name"]):
@@ -7738,30 +8031,35 @@ def _recover_files_from_fat_context(data, geometry):
         size = int(entry["size"] or 0)
         if size <= 0:
             continue
-        try:
-            clusters = _fat12_cluster_chain(fat, entry["cluster"], size, geometry)
-            payload = _read_cluster_chain_from_image(data, geometry, clusters, size)
-        except FloppyImageError:
-            start_offset = _cluster_offset(geometry, entry["cluster"])
-            if start_offset < geometry.data_offset or start_offset >= len(data):
+        payloads = []
+        for fat in fats:
+            try:
+                clusters = _fat12_cluster_chain(fat, entry["cluster"], size, geometry)
+                payload = _read_cluster_chain_from_image(data, geometry, clusters, size)
+            except FloppyImageError:
                 continue
-            payload = data[start_offset:min(len(data), start_offset + size)]
-
-        if is_pianodir_path(name) and _is_probably_pianodir_bytes(payload):
-            files.append(
-                RecoveredFile(
-                    PIANODIR_FILENAME,
-                    _padded_pianodir_bytes(payload),
-                    "PIANODIR",
-                    _cluster_offset(geometry, entry["cluster"]),
-                    "fat",
-                )
+            if payload not in payloads:
+                payloads.append(payload)
+        if len(payloads) > 1:
+            raise _Fat12RecoveryAmbiguityError(
+                f"Conflicting FAT12 copies recover different contents for {name}. "
+                "Recovery stopped without choosing a FAT copy or discarding an alternative. "
+                "Keep the original image for manual recovery."
             )
+        if not payloads:
+            try:
+                payloads.append(_fat12_contiguous_file_bytes(data, geometry, entry["cluster"], size))
+            except FloppyImageError:
+                continue
+        payload = payloads[0]
+        source_offset = _cluster_offset(geometry, entry["cluster"])
+        if is_pianodir_path(name) and _is_probably_pianodir_bytes(payload):
+            files.append(RecoveredFile(PIANODIR_FILENAME, _padded_pianodir_bytes(payload), "PIANODIR", source_offset, "fat"))
         elif _is_probably_eseq_bytes(payload):
-            files.append(RecoveredFile(name, payload, "E-SEQ", _cluster_offset(geometry, entry["cluster"]), "fat"))
+            files.append(RecoveredFile(name, payload, "E-SEQ", source_offset, "fat"))
         elif payload[:4] == b"MThd":
             midi_payload = _extract_midi_blob_for_recovery(payload, 0) or payload
-            files.append(RecoveredFile(name, midi_payload, "MIDI", _cluster_offset(geometry, entry["cluster"]), "fat"))
+            files.append(RecoveredFile(name, midi_payload, "MIDI", source_offset, "fat"))
     return files
 
 
@@ -8373,7 +8671,7 @@ def _write_recovered_files_to_image(
             _notify_progress(progress_callback, 98, 100, "Verifying recovered image...")
             read_image_listing(recovered_img)
             return recovered_img, disk_format
-        except FloppyOperationCancelled:
+        except (FloppyOperationCancelled, _Fat12RecoveryAmbiguityError):
             raise
         except Exception as exc:
             last_error = exc
@@ -8410,6 +8708,10 @@ def _recover_files_from_raw_image_bytes(data, disk_format_hint=None, diagnostics
             recovered.extend(geometry_files)
             if scan is not None:
                 scan["recovered_files"] = len(geometry_files)
+        except _Fat12RecoveryAmbiguityError as exc:
+            if isinstance(diagnostics, dict):
+                diagnostics["fat_recovery_ambiguity"] = str(exc)
+            raise
         except FloppyOperationCancelled:
             raise
         except Exception as exc:
@@ -9991,7 +10293,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
                     )
-                except FloppyOperationCancelled:
+                except (FloppyOperationCancelled, _Fat12RecoveryAmbiguityError):
                     raise
                 except Exception as exc:
                     last_error = exc
@@ -10007,7 +10309,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             raise
 
     @classmethod
-    def _recover_usb_floppy(cls, drive_info, progress_callback=None, cancel_callback=None):
+    def _recover_usb_floppy(cls, drive_info, progress_callback=None, cancel_callback=None, *, temporary_parent=None):
         disk_format_hint = None
         if isinstance(drive_info, FloppyRecoverySource):
             disk_format_hint = drive_info.disk_format
@@ -10015,7 +10317,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         if not isinstance(drive_info, FloppyDriveInfo):
             raise FloppyImageError("Invalid floppy drive selection.")
 
-        temp_dir = tempfile.mkdtemp(prefix="aps_recover_floppy_")
+        temp_dir = tempfile.mkdtemp(prefix="aps_recover_floppy_", dir=temporary_parent)
         try:
             source_copy = os.path.join(temp_dir, "source_recovery.img")
             read_size = (
@@ -10046,7 +10348,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 cancel_callback=cancel_callback,
                 diagnostics=diagnostics,
             )
-            diagnostics = retain_floppy_recovery_capture(source_copy, diagnostics)
+            diagnostics = retain_floppy_recovery_capture(source_copy, diagnostics, temporary_parent=temporary_parent)
             read_note = _usb_recovery_read_note(diagnostics)
             format_note = ""
             if isinstance(disk_format_hint, DiskFormat):
@@ -10071,7 +10373,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             _finalize_recovery_diagnostics(details)
             retained_in_original_dir = False
             try:
-                details = retain_floppy_recovery_capture(source_copy, details)
+                details = retain_floppy_recovery_capture(source_copy, details, temporary_parent=temporary_parent)
             except OSError as retain_error:
                 # Keep the original acquisition if copying the retained bundle
                 # fails, so a disk-space error cannot erase recovered bytes.
@@ -10212,7 +10514,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
                     )
-                except FloppyOperationCancelled:
+                except (FloppyOperationCancelled, _Fat12RecoveryAmbiguityError):
                     raise
                 except Exception as exc:
                     last_error = exc
@@ -10745,7 +11047,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             # only the requested file from block devices instead.
             if not _is_block_device_path(source_img):
                 data = _read_fat12_file_bytes(source_img, image_path)
-        except AmbiguousDosFilenameError:
+        except (AmbiguousDosFilenameError, _Fat12CorruptionError):
             raise
         except FloppyImageError:
             pass

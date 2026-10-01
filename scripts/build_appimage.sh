@@ -70,6 +70,7 @@ BUNDLE_MTOOLS="${BUNDLE_MTOOLS:-1}"
 BUNDLE_7ZIP="${BUNDLE_7ZIP:-1}"
 BUNDLE_GREASEWEAZLE="${BUNDLE_GREASEWEAZLE:-1}"
 BUNDLE_LAME="${BUNDLE_LAME:-1}"
+BUNDLE_CDDA="${BUNDLE_CDDA:-0}"
 BUNDLE_FLUIDSYNTH="${BUNDLE_FLUIDSYNTH:-0}"
 GREASEWEAZLE_REQUIREMENT="${GREASEWEAZLE_REQUIREMENT:-git+https://github.com/keirf/greaseweazle.git@v1.23}"
 MTOOLS_COMMANDS=(mformat mcopy mdel mren mdir)
@@ -204,6 +205,24 @@ copy_lame_bundle() {
     copy_shared_libraries "$lame_path"
 }
 
+copy_cdparanoia_bundle() {
+    local reader_path license_dir
+    reader_path="$(command -v cdparanoia || true)"
+    if [[ -z "$reader_path" ]]; then
+        echo "cdparanoia is required for Smart PianoSoft audio-CD reading." >&2
+        echo "Install cdparanoia, or keep BUNDLE_CDDA=0 for the release without the experimental utility." >&2
+        exit 1
+    fi
+    install -Dm755 "$reader_path" "$APPDIR/usr/bin/cdparanoia"
+    copy_shared_libraries "$reader_path"
+    for license_dir in /usr/share/doc/cdparanoia /usr/share/doc/libcdparanoia0; do
+        if [[ -f "$license_dir/copyright" ]]; then
+            install -Dm644 "$license_dir/copyright" \
+                "$APPDIR/usr/share/licenses/$(basename "$license_dir")/copyright"
+        fi
+    done
+}
+
 copy_7zip_bundle() {
     local sevenzip_path sevenzip_binary sevenzip_dir
     sevenzip_path="$(command -v 7z || true)"
@@ -288,6 +307,10 @@ fi
 
 if is_enabled "$BUNDLE_LAME"; then
     copy_lame_bundle
+fi
+
+if is_enabled "$BUNDLE_CDDA"; then
+    copy_cdparanoia_bundle
 fi
 
 if is_enabled "$BUNDLE_FLUIDSYNTH"; then

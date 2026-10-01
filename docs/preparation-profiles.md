@@ -179,7 +179,9 @@ separate choices.
 
 ENSPIRE and other MIDI profiles automatically remove Yamaha startup volume
 mutes when converting E-SEQ songs. See [startup-mute cleanup](preparation-reliability.md#automatic-yamaha-startup-mute-cleanup)
-for the exact rule; later volume changes stay intact.
+for the exact rule; later volume changes stay intact. For a manual conversion
+that must retain muted opening notes, select **Preserve original volume
+controls** in the E-SEQ-to-MIDI confirmation.
 
 ## Controller defaults
 

@@ -8854,6 +8854,9 @@ class BulkExtractionProgressDialog(QDialog):
 
 
 class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
+    # Deferred from 0.8.8. Keep the implementation available for development,
+    # but do not expose it through menus or persisted keyboard shortcuts.
+    ENABLE_SMART_PIANOSOFT_UTILITY = False
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
     TITLE_RAW_ROLE = Qt.UserRole + 1
@@ -8883,6 +8886,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     FILENAME_DEFAULTS_VERSION = 1
     SETTING_ESEQ_TO_MIDI_LONG_FILENAMES = "eseq_to_midi_long_filenames"
     SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES = "eseq_to_midi_trim_title_spaces"
+    SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME = "eseq_to_midi_preserve_volume_controls"
     DEFAULT_LONG_MIDI_FILENAMES = True
     SETTING_ALLOW_FLOPPY_SAVE = "allow_floppy_save"
     SETTING_CONFIRM_IMAGE_SAVE = "confirm_image_save"
@@ -9807,6 +9811,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.utilitiesMarkIVBackupAction.setToolTip(self._t("markiv.tooltip"))
         self.utilitiesMarkIVBackupAction.triggered.connect(self.show_markiv_backup_utility)
         self.utilitiesMenu.addAction(self.utilitiesMarkIVBackupAction)
+
+        if self.ENABLE_SMART_PIANOSOFT_UTILITY:
+            self.utilitiesSmartPianoSoftAction = QAction(self._t("sps.action"), self)
+            self.utilitiesSmartPianoSoftAction.triggered.connect(self.show_smart_pianosoft_utility)
+            self.utilitiesMenu.addAction(self.utilitiesSmartPianoSoftAction)
 
         self.utilitiesEmulatorImagesAction = QAction(self._t("emulator.action"), self)
         self.utilitiesEmulatorImagesAction.setToolTip(
@@ -11110,7 +11119,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.table.setHorizontalHeaderLabels([self._lt(label) for label in labels])
 
     def _keyboard_shortcut_specs(self):
-        return (
+        specs = (
             {"id": "edit.undo", "category": "Edit", "label": "Undo", "action": "editUndoAction", "default": "Ctrl+Z"},
             {"id": "edit.undo_all", "category": "Edit", "label": "Undo All", "action": "editUndoAllAction", "default": ""},
             {"id": "edit.review", "category": "Edit", "label": "Review Changes...", "action": "editReviewChangesAction", "default": ""},
@@ -11148,6 +11157,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             {"id": "utilities.render_audio", "category": "Utilities", "label": "Render Audio...", "action": "utilitiesRenderAudioAction", "default": "F5"},
             {"id": "utilities.bulk_extraction", "category": "Utilities", "label": "Bulk Extraction...", "action": "utilitiesBulkExtractionAction", "default": ""},
             {"id": "utilities.markiv_backup", "category": "Utilities", "label": "Back Up Mark IV Music...", "action": "utilitiesMarkIVBackupAction", "default": ""},
+            {"id": "utilities.smart_pianosoft", "category": "Utilities", "label": self._t("sps.action"), "action": "utilitiesSmartPianoSoftAction", "default": ""},
             {"id": "utilities.emulator_images", "category": "Utilities", "label": "Build Emulator Disk Set...", "action": "utilitiesEmulatorImagesAction", "default": ""},
             {"id": "utilities.repair_boot_sector", "category": "Disk", "label": "Repair Yamaha Boot Sector...", "action": "utilitiesRepairBootSectorAction", "default": ""},
             {"id": "utilities.rename", "category": "Edit", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
@@ -11168,6 +11178,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             {"id": "help.report_bug", "category": "Help", "label": "Report a Bug...", "action": "helpReportBugAction", "default": "F10"},
             {"id": "help.about", "category": "Help", "label": "About APS MIDI Prep Tool", "action": "helpAboutAction", "default": "Ctrl+F1"},
         )
+        if not self.ENABLE_SMART_PIANOSOFT_UTILITY:
+            return tuple(spec for spec in specs if spec["id"] != "utilities.smart_pianosoft")
+        return specs
 
     def _shortcut_settings_key(self, shortcut_id):
         return f"{self.SETTING_KEYBOARD_SHORTCUT_PREFIX}/{shortcut_id}"
@@ -11400,6 +11413,192 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if context_path and os.path.isdir(context_path):
             return os.path.abspath(context_path)
         return self._last_save_as_location()
+
+    def _smart_pianosoft_loaded_source(self):
+        """Freeze the current list without reopening its image or floppy source.
+
+        Image-session extraction reads the existing local working image. The
+        worker receives only immutable bytes, never table widgets or staging
+        paths whose lifetime belongs to the main window.
+        """
+        import stat
+
+        from .smart_pianosoft import parse_smart_pianosoft_song_catalog
+        from .smart_pianosoft_media import MAX_SOURCE_BYTES
+        from .smart_pianosoft_workflow import ListedAlbumTrack, LoadedAlbumSource
+
+        rows = []
+        for row in self._regular_file_rows():
+            source_path = self.table.item(row, 1).text()
+            if self.is_image_mode() and source_path in self.pendingImageDeletes:
+                continue
+            rows.append((row, source_path))
+        if not rows:
+            return None
+
+        original_source = Path(self.regularModeContextPath or os.getcwd())
+        label = original_source.name
+        song_catalog = disk_catalog = b""
+        source_device = None
+        byte_count = 0
+
+        def file_identity(path):
+            path = Path(path)
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"The listed source is not a regular file: {path.name}")
+            info = path.stat()
+            if info.st_size > MAX_SOURCE_BYTES - byte_count:
+                raise ValueError("The current list exceeds the Smart PianoSoft source size limit.")
+            return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+        def read_payload(path):
+            nonlocal byte_count
+            before = file_identity(path)
+            with open(path, "rb") as handle:
+                payload = handle.read(MAX_SOURCE_BYTES - byte_count + 1)
+            if before != file_identity(path):
+                raise ValueError(f"The listed source changed while being copied: {Path(path).name}")
+            if len(payload) > MAX_SOURCE_BYTES - byte_count:
+                raise ValueError("The current list exceeds the Smart PianoSoft source size limit.")
+            byte_count += len(payload)
+            return payload
+
+        try:
+            image_mode = self.is_image_mode()
+            if image_mode:
+                session = self.image_session
+                original_source = Path(session.source_path).absolute()
+                label = str(session.source_name or original_source.name)
+                metadata_paths = {}
+                for _row, source_path in rows:
+                    key = os.path.basename(source_path).casefold()
+                    if key not in {"psong.mng", "pdisk.mng"}:
+                        continue
+                    if key in metadata_paths:
+                        raise ValueError(f"The current list contains more than one {key.upper()} catalog.")
+                    metadata_paths[key] = source_path
+
+                def metadata_path(key):
+                    source_path = metadata_paths.get(key)
+                    if source_path is None:
+                        return ""
+                    if key == "psong.mng" and self.pendingSmartPianoSoftCatalogReplacement:
+                        return self.pendingSmartPianoSoftCatalogReplacement
+                    return self._pending_or_extracted_image_path(source_path)
+            else:
+                directories = {Path(path).absolute().parent for _row, path in rows}
+                if len(directories) != 1:
+                    raise ValueError("The current list must contain songs from one Smart PianoSoft album folder.")
+                original_source = next(iter(directories))
+                label = original_source.name
+                metadata_paths = {}
+                for path in original_source.iterdir():
+                    key = path.name.casefold()
+                    if key not in {"psong.mng", "pdisk.mng"}:
+                        continue
+                    if key in metadata_paths:
+                        raise ValueError(f"The album folder contains more than one {key.upper()} catalog.")
+                    metadata_paths[key] = path
+
+                def metadata_path(key):
+                    return metadata_paths.get(key, "")
+
+            try:
+                source_info = os.stat(original_source)
+                if stat.S_ISBLK(source_info.st_mode):
+                    source_device = source_info.st_rdev
+            except OSError:
+                pass
+
+            catalog_path = metadata_path("psong.mng")
+            if not catalog_path:
+                raise ValueError("The current list is not a Smart PianoSoft album: PSONG.MNG is missing.")
+            song_catalog = read_payload(catalog_path)
+            disk_path = metadata_path("pdisk.mng")
+            if disk_path:
+                disk_catalog = read_payload(disk_path)
+            songs = parse_smart_pianosoft_song_catalog(song_catalog)
+            catalog = {song.filename.casefold(): song for song in songs}
+            if len(catalog) != len(songs):
+                raise ValueError("The Smart PianoSoft catalog contains duplicate MIDI filenames.")
+
+            tracks = []
+            with tempfile.TemporaryDirectory(prefix="aps-smart-pianosoft-list-") as scratch:
+                for row, source_path in rows:
+                    filename = os.path.basename(source_path)
+                    if filename.casefold() in {"psong.mng", "pdisk.mng"}:
+                        continue
+                    title_mode = (self._image_path_title_mode(source_path) if image_mode
+                                  else self._listed_file_title_mode(source_path))
+                    if (title_mode not in {"midi", "eseq"}
+                            and Path(filename).suffix.casefold() not in {".mid", ".midi"}
+                            and filename.casefold() not in catalog):
+                        continue
+                    song = catalog.get(filename.casefold())
+                    if song is None and not image_mode:
+                        matches = [song for song in songs if re.fullmatch(
+                            rf"{song.track_number:02d}\s+-\s+.+\.mid(?:i)?", filename, re.I,
+                        )]
+                        if len(matches) == 1:
+                            song = matches[0]
+                    if song is None:
+                        raise ValueError(f"The listed song is not in this Smart PianoSoft catalog: {filename}")
+                    host_path = (self._pending_or_extracted_image_path(source_path) if image_mode
+                                 else self._regular_source_material_path(source_path))
+                    before = file_identity(host_path)
+                    copied_path = os.path.join(scratch, f"{len(tracks):03d}.mid")
+                    title = self._row_raw_title(row)
+                    if image_mode:
+                        self._write_image_row_to_destination(source_path, copied_path)
+                        display_filename = os.path.basename(self._image_folder_export_path(
+                            source_path, self._final_image_path(source_path),
+                        ))
+                    else:
+                        error = self._write_listed_file_to_path(source_path, title, copied_path)
+                        if error:
+                            raise ValueError(error)
+                        display_filename = self._regular_row_output_filename(row)
+                        if source_path not in self.pendingEdits:
+                            title = song.title or title
+                    if before != file_identity(host_path):
+                        raise ValueError(f"The listed source changed while being copied: {filename}")
+                    tracks.append(ListedAlbumTrack(
+                        catalog_filename=song.filename, filename=display_filename,
+                        title=title, midi_bytes=read_payload(copied_path),
+                    ))
+            if not tracks:
+                raise ValueError("The current list contains no Smart PianoSoft MIDI songs.")
+            return LoadedAlbumSource(
+                label, original_source, song_catalog, disk_catalog, tuple(tracks),
+                source_device=source_device,
+            )
+        except Exception as exc:
+            return LoadedAlbumSource(
+                label, original_source, song_catalog, disk_catalog, (), error=str(exc),
+                source_device=source_device,
+            )
+
+    def show_smart_pianosoft_utility(self):
+        if not self.ENABLE_SMART_PIANOSOFT_UTILITY:
+            return
+        if self._disk_worker_busy() or not self.choose_button.isEnabled():
+            return
+        existing = getattr(self, "smartPianoSoftDialog", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
+        from .smart_pianosoft_dialog import SmartPianoSoftDialog
+
+        dialog = SmartPianoSoftDialog(
+            self.settings, self, loaded_source=self._smart_pianosoft_loaded_source(),
+        )
+        self.smartPianoSoftDialog = dialog
+        try:
+            self._exec_child_dialog(dialog, resize_to_contents=False)
+        finally:
+            self.smartPianoSoftDialog = None
+            dialog.deleteLater()
 
     def show_markiv_backup_utility(self):
         if self._disk_worker_busy() or not self.choose_button.isEnabled():
@@ -13122,6 +13321,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if markiv_backup_action is not None:
             markiv_backup_action.setText(self._with_mnemonic(self._t("markiv.action"), "M"))
             markiv_backup_action.setToolTip(self._t("markiv.tooltip"))
+        smart_pianosoft_action = getattr(self, "utilitiesSmartPianoSoftAction", None)
+        if smart_pianosoft_action is not None:
+            smart_pianosoft_action.setText(self._t("sps.action"))
 
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
@@ -16523,6 +16725,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             # users who hid the older dialog can make the new choice.
             self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES, False)
             self.settings.setValue(self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT, False)
+        if not self.settings.contains(MidiTitleWindow.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME):
+            # Offer the new preservation choice once to users who hid the
+            # older conversion dialog; subsequent choices remain remembered.
+            self.settings.setValue(MidiTitleWindow.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, False)
+            self.settings.setValue(self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT, False)
         dos83_setting_key = getattr(self, "SETTING_USE_DOS83_FILENAMES", "")
         if dos83_setting_key and self.settings.value(
             dos83_setting_key,
@@ -16916,8 +17123,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.settings.sync()
         return confirmed
 
+    def _manual_eseq_to_midi_cc7_policy(self):
+        preserve = self.settings.value(
+            MidiTitleWindow.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, False, type=bool,
+        )
+        return CC7_POLICY_PRESERVE if preserve else DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
+
     def _confirm_eseq_to_midi_conversion(self, *, title, message):
-        self._eseq_conversion_cc7_policy = DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
+        self._eseq_conversion_cc7_policy = MidiTitleWindow._manual_eseq_to_midi_cc7_policy(self)
         use_long_filenames = self._long_midi_filenames_enabled()
         trim_title_spaces = self.settings.value(
             self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES,
@@ -16947,10 +17160,17 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         layout.addWidget(summary)
 
         volume_note = QLabel(self._lt(
-            "Yamaha startup volume mutes are removed automatically for MIDI playback."
+            "By default, Yamaha startup volume mutes are removed for MIDI playback (recommended)."
         ))
         volume_note.setWordWrap(True)
         layout.addWidget(volume_note)
+        preserve_volume_checkbox = WrappedCheckBox(self._lt("Preserve original volume controls"), dialog)
+        preserve_volume_checkbox.setObjectName("preserveOriginalVolumeControls")
+        preserve_volume_checkbox.setChecked(self._eseq_conversion_cc7_policy == CC7_POLICY_PRESERVE)
+        preserve_volume_checkbox.setToolTip(self._lt(
+            "Keep every original volume change, including zero-volume commands and notes played while muted."
+        ))
+        layout.addWidget(preserve_volume_checkbox)
 
         long_name_checkbox = QCheckBox(
             self._lt("Name MIDI files by track number and song title")
@@ -17007,6 +17227,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         use_long_filenames = long_name_checkbox.isChecked()
         trim_title_spaces = trim_title_spaces_checkbox.isChecked()
+        preserve_volume = preserve_volume_checkbox.isChecked()
+        self._eseq_conversion_cc7_policy = (
+            CC7_POLICY_PRESERVE if preserve_volume else DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
+        )
+        self.settings.setValue(MidiTitleWindow.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, preserve_volume)
         if not force_short_names:
             self._set_long_midi_filenames_enabled(use_long_filenames)
         if not force_title_trim:
@@ -20616,6 +20841,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 output_temp_path,
                 filename=os.path.basename(full_path),
                 title_override=title_override,
+                cc7_policy=MidiTitleWindow._manual_eseq_to_midi_cc7_policy(self),
             )
         else:
             source_material_path = self._type0_midi_source_for_eseq_conversion(
@@ -25022,6 +25248,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         *,
         disk_format=None,
         source_name="the selected floppy",
+        exact_failure=None,
     ):
         if self._disk_worker_busy():
             QMessageBox.information(self, "Busy", "Please wait for disk processing to finish.")
@@ -25029,7 +25256,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         self._reset_gw_sector_report_dedupe()
         is_image_conversion = source_kind == "image_convert"
-        progress_title = "Convert Image" if is_image_conversion else "Image Floppy"
+        is_logical_recovery = source_kind == "floppy_usb_recovery"
+        progress_title = "Logical Floppy Recovery" if is_logical_recovery else "Convert Image" if is_image_conversion else "Image Floppy"
         progress_label = "Converting image..." if is_image_conversion else "Imaging floppy..."
         operation_label = "image conversion" if is_image_conversion else "floppy imaging"
         progress_dialog = QProgressDialog(progress_label, "Cancel", 0, 100, self)
@@ -25043,6 +25271,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             source,
             output_path,
             disk_format=disk_format,
+            exact_failure=exact_failure,
             parent=self,
         )
         worker.progressChanged.connect(
@@ -25058,6 +25287,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
         worker.captureFinished.connect(self._on_floppy_image_capture_success)
         worker.captureFailed.connect(self._on_floppy_image_capture_failure)
+        worker.captureRecoveryAvailable.connect(self._on_floppy_image_capture_recovery_available)
         worker.operationCancelled.connect(self._on_floppy_image_capture_cancelled)
         worker.finished.connect(self._on_floppy_image_capture_finished)
 
@@ -25067,6 +25297,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             "source_name": source_name,
             "output_path": output_path,
             "source_kind": source_kind,
+            "source": source,
+            "disk_format": disk_format,
             "output_ext": image_extension(output_path),
         }
         self._set_disk_load_busy(True)
@@ -25093,6 +25325,22 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             or image_extension(output_path)
         )
         output_ext = str(output_ext or "").lower().lstrip(".")
+        if payload.get("capture_kind") == "logical_recovery":
+            diagnostics = payload.get("diagnostics") or {}
+            report_path = payload.get("diagnostics_path", "")
+            self._log_warning_event("Image", "Logical recovery saved", source=source_name,
+                                    output=output_path, diagnostics=diagnostics, report=report_path)
+            self.status_label.setText(self._lt("Logical recovery image saved. Review the recovery diagnostics."))
+            QMessageBox.warning(
+                self, self._lt("Logical Recovery Saved"),
+                self._lt("Saved {filename}.\n\nThis is a reconstructed logical image, not a bit-exact or archival capture. "
+                         "Metadata may be repaired and unreadable or unused sectors may be zero-filled. "
+                         "Files may be incomplete. The source floppy was not modified.",
+                         filename=os.path.basename(output_path))
+                + "\n\n" + str(diagnostics.get("repair_note", ""))
+                + "\n\n" + self._lt("Recovery diagnostics: {path}", path=report_path),
+            )
+            return
         is_image_conversion = source_kind == "image_convert"
         is_direct_drive_conversion = (
             source_kind == "floppy_usb"
@@ -25164,6 +25412,50 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         self.reviewPrompt.record_successful_read(source_kind)
 
+    def _on_floppy_image_capture_recovery_available(self, payload):
+        if self.diskImageCaptureProgressDialog is not None:
+            self.diskImageCaptureProgressDialog.close()
+            self.diskImageCaptureProgressDialog = None
+        self.diskImageCaptureContext["recovery_offer"] = dict(payload or {})
+        self._log_error_event("Image", "Exact capture failed",
+                              source=self.diskImageCaptureContext.get("source_name", ""),
+                              message=(payload or {}).get("message", ""))
+
+    def _offer_logical_floppy_capture(self, context):
+        failure = context["recovery_offer"]
+        prompt = QMessageBox(self)
+        apply_window_icon(prompt)
+        prompt.setIcon(QMessageBox.Warning)
+        prompt.setWindowTitle(self._lt("Exact Floppy Capture Failed"))
+        prompt.setText(self._lt("The drive could not read every sector. Try a logical recovery image?"))
+        prompt.setInformativeText(self._lt(
+            "Logical recovery reads available files and may repair Yamaha metadata. Unused sectors are omitted, "
+            "and unreadable bytes may be zero-filled. Files may be incomplete. The result is not a bit-exact "
+            "or archival capture. The source floppy will not be modified."
+        ))
+        prompt.setDetailedText(str(failure.get("message", "")))
+        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        prompt.setDefaultButton(QMessageBox.No)
+        prompt.button(QMessageBox.Yes).setText(self._lt("Create Logical Recovery"))
+        prompt.button(QMessageBox.No).setText(self._lt("Cancel"))
+        if self._exec_child_dialog(prompt) != QMessageBox.Yes:
+            self.status_label.setText(self._lt("Exact capture failed. No recovery image was saved."))
+            return
+        default_path = os.path.splitext(context["output_path"])[0] + "-logical-recovery.img"
+        output_path, _selected = QFileDialog.getSaveFileName(
+            self, self._lt("Save Logical Recovery Image"), default_path,
+            self._lt("Logical recovery image (*.img)"),
+        )
+        if not output_path:
+            return
+        if not os.path.splitext(output_path)[1]:
+            output_path += ".img"
+        self._start_floppy_image_capture_worker(
+            "floppy_usb_recovery", context["source"], output_path,
+            disk_format=context.get("disk_format"), source_name=context.get("source_name", ""),
+            exact_failure={"message": failure.get("message", ""), **failure.get("diagnostics", {})},
+        )
+
     def _on_floppy_image_capture_failure(self, message):
         if self.diskImageCaptureProgressDialog is not None:
             self.diskImageCaptureProgressDialog.close()
@@ -25204,11 +25496,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @zip_import_operation
     def _on_floppy_image_capture_finished(self):
+        context = self.diskImageCaptureContext
         self._set_disk_load_busy(False)
         self.diskImageCaptureContext = {}
         if self.diskImageCaptureWorker is not None:
             self.diskImageCaptureWorker.deleteLater()
             self.diskImageCaptureWorker = None
+        if context.get("recovery_offer"):
+            self._offer_logical_floppy_capture(context)
 
     def _load_image_rows(self, entries):
         self.imageFileInfo.clear()
@@ -27456,6 +27751,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     dest_path,
                     filename=os.path.basename(final_image_path),
                     title_override=title_override,
+                    cc7_policy=MidiTitleWindow._manual_eseq_to_midi_cc7_policy(self),
                 )
             else:
                 self._write_image_row_to_destination(source_path, dest_path)
@@ -27871,7 +28167,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         output_temp_path,
                         filename=os.path.basename(full_path),
                         title_override=title_override,
-                        cc7_policy=getattr(self, "_eseq_conversion_cc7_policy", DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
+                        cc7_policy=(getattr(self, "_eseq_conversion_cc7_policy", DEFAULT_ESEQ_TO_MIDI_CC7_POLICY)
+                                    if confirm else DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
                     )
                 else:
                     source_material_path = self._type0_midi_source_for_eseq_conversion(
@@ -28069,7 +28366,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         row,
                         target_kind,
                         export_filename=export_filename,
-                        cc7_policy=getattr(self, "_eseq_conversion_cc7_policy", DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
+                        cc7_policy=(getattr(self, "_eseq_conversion_cc7_policy", DEFAULT_ESEQ_TO_MIDI_CC7_POLICY)
+                                    if confirm else DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
                     )
                 )
             except Exception as exc:
@@ -29093,6 +29391,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 convert_eseq_file_to_midi_path(
                     host_path,
                     staged_path,
+                    cc7_policy=MidiTitleWindow._manual_eseq_to_midi_cc7_policy(self),
                 )
             else:
                 raise FloppyImageError(f"Unsupported automatic conversion kind: {conversion_kind}")

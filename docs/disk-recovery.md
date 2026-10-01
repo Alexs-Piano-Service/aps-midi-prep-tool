@@ -38,6 +38,21 @@ Recovery tools can retry difficult disks. Greaseweazle hardware also supports
 SCP archives, which capture the disk's magnetic signals for preservation.
 Recovery cannot guarantee that damaged recordings will play correctly.
 
+## When exact floppy imaging fails
+
+An unreadable or protected sector can prevent **Create Image from Floppy...**
+from copying every sector even when **Read Floppy...** can read the songs.
+The failure dialog offers **Create Logical Recovery**. Cancel leaves the failed
+capture unpublished; choosing recovery opens **Save Logical Recovery Image**
+with a separate `-logical-recovery.img` filename.
+
+The logical image uses readable filesystem information and song clusters,
+reconstructs supported Yamaha metadata where possible, and records omitted,
+unreadable, or zero-filled ranges. Keep its adjacent `.recovery-….json` report.
+The result is a reconstructed working image. Exact sector preservation and
+archival capture are not claimed. Check the report and recovered songs before
+relying on the copy; the physical source is only read.
+
 ## Repair a Yamaha image or make its files visible
 
 A boot sector is the part of a disk image that describes its layout. Use
@@ -77,6 +92,16 @@ Choose **Disk → Recover Damaged Image...** to recover song data into a new
 editable image copy. Review the recovered songs, then use **Save As** for a
 folder or **Save As Image** for an image copy. The source image is unchanged.
 Recovery cannot guarantee that damaged recordings will play correctly.
+
+Normal FAT12 image loading checks its redundant allocation tables. A sole
+usable copy can supply the working image when another copy is damaged. If
+viable copies disagree on allocation, APS stops with recovery guidance instead
+of selecting one arbitrarily. File and directory clusters must fit within the
+image's data area during the initial scan.
+
+Recovery tries each usable allocation table before carving contiguous song
+data. If competing chains produce different plausible versions of the same
+song, it reports the ambiguity. Source images remain unchanged.
 
 **Disk → Recover Damaged Image...** also clears hidden/system attributes in the
 recovered image. Both repair tools make files visible automatically, including

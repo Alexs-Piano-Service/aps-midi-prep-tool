@@ -2,6 +2,7 @@
 
 import io
 import os
+from pathlib import Path
 import mido
 import pytest
 
@@ -9,9 +10,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog
 
 from aps_midi_prep_tool_app import main_window
+from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translate_text
 from aps_midi_prep_tool_app.bulk_extraction import bulk_extract_images
 from aps_midi_prep_tool_app.eseq_converter import (
     CC7_POLICY_PRESERVE,
@@ -299,3 +301,135 @@ def test_clavinova_container_preparation_keeps_volume_until_midi_export(
     assert source.read_bytes() == original
     if image_path is not None:
         assert image_path.read_bytes() == image_bytes
+
+
+def _intentional_muted_eseq(container):
+    song = mido.MidiFile(type=0, ticks_per_beat=384)
+    song.tracks.append(mido.MidiTrack([
+        mido.MetaMessage("set_tempo", tempo=512820),
+        mido.Message("control_change", channel=0, control=7, value=0),
+        mido.Message("note_on", channel=0, note=60, velocity=70),
+        mido.Message("note_off", channel=0, note=60, time=96),
+        mido.Message("note_on", channel=0, note=62, velocity=75, time=96),
+        mido.Message("note_off", channel=0, note=62, time=96),
+        mido.Message("control_change", channel=0, control=7, value=95, time=96),
+        mido.Message("note_on", channel=0, note=64, velocity=80),
+        mido.Message("note_off", channel=0, note=64, time=96),
+    ]))
+    stream = io.BytesIO()
+    song.save(file=stream)
+    return convert_midi_bytes_to_eseq_bytes(
+        stream.getvalue(), container_variant=container, cc7_policy=CC7_POLICY_PRESERVE,
+        timing_policy="preserve", pedal_policy="preserve",
+    )
+
+
+@pytest.mark.parametrize("route", ["interactive-files", "hidden-files", "interactive-image",
+                                   "hidden-image", "folder-staging", "image-staging", "image-export"])
+@pytest.mark.parametrize("container,extension", [(ESEQ_CONTAINER_DISKLAVIER, "FIL"),
+                                                 (ESEQ_CONTAINER_CLAVINOVA_MDA, "MDA")])
+def test_manual_preservation_keeps_muted_notes_and_later_volume_restore(
+    window, monkeypatch, tmp_path, route, container, extension,
+):
+    original = _intentional_muted_eseq(container)
+    source = tmp_path / f"MUTED.{extension}"
+    source.write_bytes(original)
+    expected = _channel_events(convert_eseq_bytes_to_midi_bytes(original, cc7_policy=CC7_POLICY_PRESERVE))
+    image_path = None
+    if "image" in route:
+        image_path = _make_image(source, tmp_path / "images")
+        image_before = image_path.read_bytes()
+        session = FloppyImageSession.load(image_path)
+        window._on_disk_load_success(session, session.list_entries())
+        window._on_disk_load_finished()
+    else:
+        window._load_regular_files([str(source)], "Intentional muted passage")
+
+    interactive = route.startswith("interactive")
+    window.settings.setValue(window.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, not interactive)
+    window.settings.setValue(window.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT, route.startswith("hidden"))
+    def choose_preservation(dialog):
+        checkbox = dialog.findChild(QCheckBox, "preserveOriginalVolumeControls")
+        assert checkbox is not None
+        assert not checkbox.isChecked()
+        checkbox.setChecked(True)
+        return QDialog.Accepted
+    if interactive:
+        monkeypatch.setattr(window, "_exec_child_dialog", choose_preservation)
+    elif route.startswith("hidden"):
+        monkeypatch.setattr(window, "_exec_child_dialog", lambda *_a: pytest.fail("Remembered dialog should stay hidden"))
+
+    output = tmp_path / "output"
+    if route == "folder-staging":
+        window._stage_regular_row_conversion(window._find_regular_row_for_path(str(source)), str(source), "midi")
+    elif route == "image-staging":
+        staged = window._stage_image_addition_host_file(str(source), "ADDED.MID", "midi")
+        actual = _channel_events(Path(staged).read_bytes())
+    elif route == "image-export":
+        specs, omitted = window._build_switched_midi_mode_files(window._image_eseq_conversion_rows(), str(output))
+        assert len(specs) == 1 and omitted == 0
+        actual = _channel_events(Path(specs[0][0]).read_bytes())
+    else:
+        window.convert_all_eseq_to_midi()
+        assert window.settings.value(window.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, type=bool)
+        if interactive:
+            # A later delivery profile must keep this deliberate manual
+            # conversion, rather than clean startup mutes from it again.
+            _apply(window, "enspire")
+    if route not in {"image-staging", "image-export"}:
+        QTest.qWait(20)
+        monkeypatch.setattr(main_window.QFileDialog, "getExistingDirectory", lambda *_a, **_k: str(output))
+        window.save_as_changes()
+        outputs = list(output.rglob("*.mid"))
+        assert len(outputs) == 1
+        actual = _channel_events(outputs[0].read_bytes())
+    assert not window.mute_workflow_errors
+    assert actual == expected
+    volume = 100
+    notes = []
+    for tick, message in actual:
+        if message.type == "control_change" and message.control == 7:
+            volume = message.value
+        elif message.type == "note_on" and message.velocity:
+            notes.append((message.note, volume))
+    assert notes == [(60, 0), (62, 0), (64, 95)]
+    assert source.read_bytes() == original
+    if image_path is not None:
+        assert image_path.read_bytes() == image_before
+
+
+def test_remembered_manual_preservation_does_not_change_automatic_destination_cleanup(window, tmp_path):
+    source = tmp_path / "MUTED.FIL"
+    original = _intentional_muted_eseq(ESEQ_CONTAINER_DISKLAVIER)
+    source.write_bytes(original)
+    window.settings.setValue(window.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, True)
+    window._load_regular_files([str(source)], "Intentional muted passage")
+    _apply(window, "enspire")
+    converted = window._regular_source_material_path(str(source))
+    events = _channel_events(Path(converted).read_bytes())
+    assert not any(message.type == "control_change" and message.control == 7 and message.value == 0
+                   for _tick, message in events)
+    assert window.settings.value(window.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, type=bool)
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("language", [entry.code for entry in SUPPORTED_LANGUAGES])
+def test_manual_volume_choice_is_localized_and_cancellation_keeps_previous_choice(window, monkeypatch, language):
+    window.currentLanguage = language
+    window.settings.setValue(window.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, True)
+    window.settings.setValue(window.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT, False)
+    def cancel_changed_choice(dialog):
+        checkbox = dialog.findChild(QCheckBox, "preserveOriginalVolumeControls")
+        assert checkbox.isChecked()
+        assert checkbox.text() == translate_text("Preserve original volume controls", language)
+        assert checkbox.toolTip() == translate_text(
+            "Keep every original volume change, including zero-volume commands and notes played while muted.", language,
+        )
+        if language != "en":
+            assert checkbox.text() != "Preserve original volume controls"
+        checkbox.setChecked(False)
+        return QDialog.Rejected
+    monkeypatch.setattr(window, "_exec_child_dialog", cancel_changed_choice)
+    result = window._confirm_eseq_to_midi_conversion(title="Convert", message="Convert songs")
+    assert not result[0]
+    assert window.settings.value(window.SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME, type=bool)

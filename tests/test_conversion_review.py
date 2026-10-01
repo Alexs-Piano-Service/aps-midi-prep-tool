@@ -386,8 +386,10 @@ def test_startup_cleanup_is_automatic_even_when_conversion_prompt_is_hidden(tmp_
 
         def _exec_child_dialog(self, dialog):
             self.shown = True
-            assert any("mutes are removed automatically" in label.text() for label in dialog.findChildren(QLabel))
-            assert not any("volume" in box.text().lower() for box in dialog.findChildren(QCheckBox))
+            assert any("recommended" in label.text() for label in dialog.findChildren(QLabel))
+            preservation = dialog.findChild(QCheckBox, "preserveOriginalVolumeControls")
+            assert preservation is not None
+            assert not preservation.isChecked()
             return QDialog.Accepted
 
     window = Window()

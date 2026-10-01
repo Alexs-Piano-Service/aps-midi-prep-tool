@@ -207,7 +207,7 @@ folder:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install PySide6 certifi
+pip install PySide6 certifi mido numpy
 python3 aps_midi_prep_tool.py
 ```
 

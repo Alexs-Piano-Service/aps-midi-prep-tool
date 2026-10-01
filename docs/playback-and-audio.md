@@ -33,6 +33,94 @@ LAME. The dialog explains missing requirements. Basic piano preview does not
 require FluidSynth, but it is not the SoundFont renderer used by this utility.
 See [optional tools](../README.md#compatibility-and-optional-tools).
 
+## Smart PianoSoft development (deferred)
+
+**The Smart PianoSoft synchronization utility is deferred and is not available
+from the menus or shortcuts in version 0.8.8.** Its implementation, tests, and
+research remain in the repository for future development. The workflow below
+describes that retained implementation, not a supported 0.8.8 command.
+
+The development dialog pairs Yamaha Smart PianoSoft floppies supplied for use
+with commercial audio CDs. It requires
+`PSONG.MNG`, its MIDI files, and the two Yamaha synchronization fingerprints
+inside each MIDI. An ordinary PianoSoft solo disk or a MIDI folder with a
+generated catalog does not qualify.
+
+When the retained dialog is invoked by a development harness:
+
+1. Load the Smart PianoSoft disk with **Read Floppy...** or **Open Image...**,
+   then open the utility. It automatically uses the loaded songs and their
+   catalog track order, song titles, and album title, without reading the
+   physical floppy again. Insert the matching audio CD. To use another source,
+   select **Choose source...** and choose a USB floppy, an IMG/HFE image, or an
+   extracted floppy folder. With no loaded Smart PianoSoft source, leaving the
+   source blank detects a USB floppy. Previously extracted
+   `01 - Song title.mid` filenames are supported when their original catalog is
+   retained.
+2. Select the CD drive and an output folder, then choose **Create album**.
+   The app snapshots the chosen source, securely reads the CD, verifies
+   the recording, and creates a new album directory. Loaded songs come from the
+   existing session; the physical floppy is not read again. The source media are
+   read-only.
+3. For an existing music file, choose **Scan floppy**, select its MIDI row, and
+   choose **Pair WAV...** (or double-click the row). Pair every song and select
+   **Use paired WAV files** to work without a CD. The implementation accepts
+   stereo, 16-bit, 44.1-kHz PCM WAV files; other audio formats need conversion first.
+
+When using the current song list, the utility includes its remaining songs and
+staged MIDI and title edits. Sorting the list or removing songs preserves each
+song's original CD track number. The pairing table displays the current
+filenames; the exported MIDI files retain the filenames from the Smart PianoSoft
+catalog so the catalog continues to identify them correctly.
+
+Physical CD and floppy reading is implemented for Linux. Secure CD reading
+uses `cdparanoia`, which is not bundled in the default 0.8.8 package. Development
+builds can include it with `BUNDLE_CDDA=1`; source tests of CD reading need the
+`cdparanoia` package. The retained Windows implementation can use saved floppy
+images/folders and paired WAV files. Pre-emphasized CDs are rejected because
+automatic de-emphasis has not yet been implemented.
+
+The result contains:
+
+- **MIDI:** the loaded song snapshot, with catalogs reflecting its selected songs
+  and titles. For a source chosen directly in the utility, MIDI bytes and MNG
+  catalogs are preserved unchanged. Original files and source media are never
+  modified.
+- **WAV:** unchanged CD PCM or paired WAV files.
+- **Disklavier:** encoded stereo PCM WAVs with music mixed to the left channel
+  and Yamaha piano-control data on the right.
+- **manifest.json:** completion status, pairings, source/output hashes,
+  synchronization offsets, speed ratios, and correlation scores.
+
+Catalog order is a candidate pairing, not proof of a match. Both beginning and
+ending fingerprints must match. They establish the start offset and playback
+speed correction; the source MIDI's complete tempo map is retained. Incorrect,
+silent, ambiguous, or unsupported references stop the operation. All pairings
+are verified before encoding begins. Cancellation or a read error leaves an
+explicitly incomplete report and any verified originals available for recovery;
+partially encoded WAVs are not published. Retained WAVs can be paired on a retry.
+
+The encoded files use Yamaha PianoSoft PlusAudio/Y-modulation, intended for
+CD-DA playback or a correctly configured analog MIDI/audio input. **Ordinary
+WAV import from USB or a hard disk has not been verified as a piano-control
+playback route.** The right channel contains control data, not listening audio.
+The output gives audio and MIDI a common lead-in for signal acquisition;
+the piano's PlusAudio playback path supplies its own mechanical delay handling.
+Physical piano playback, mechanical timing, and other Disklavier generations
+remain future acceptance work; the generated manifest records
+`hardware_verified: false`.
+
+The implementation was checked against the Mark IV sequencer's fingerprint
+filtering and its independent MIDI/audio decoder. Synthetic tests cover the
+control alphabet, MIDI messages, offset/drift recovery, and cancellation;
+privately held CD/MIDI material is used only for local validation and is not
+distributed. Yamaha describes fingerprint-based timing correction in
+[US7863513B2](https://patents.google.com/patent/US7863513B2/en), and Y-modulation
+in [US20030061931A1](https://patents.google.com/patent/US20030061931A1/en).
+The [Mark IV advanced manual](https://usa.yamaha.com/files/download/other_assets/3/321663/DKVMK4_B_e_X6398K0_02.pdf)
+describes analog MIDI input and MIDI input delay settings. No Yamaha software
+or commercial music is bundled with this feature.
+
 ## Inspect E-SEQ details
 
 For E-SEQ songs, **File details** includes the original header's startup tempo,

@@ -9,6 +9,7 @@ Start with the symptom you see:
 | Symptom | What to do |
 | --- | --- |
 | Reading or image creation stops progressing | [Check the current operation and try a local IMG](#if-reading-or-image-creation-stalls). |
+| Image Floppy fails after APS successfully reads the songs | [Choose a labeled logical recovery image](disk-recovery.md#when-exact-floppy-imaging-fails). |
 | Saving reports “The request is not supported” (error 50) | [Preserve the prepared songs and check the save result](#save-files-to-floppy-windows-error-50). |
 | APS reads the songs but Windows cannot open the disk | [Save an image, then apply it to a backed-up or spare floppy](#applying-an-image-when-windows-cannot-mount-the-disk). |
 | A file save fails or is cancelled | [Keep the recovery package](#recovering-a-failed-windows-file-save). |
@@ -35,6 +36,13 @@ also runs helper programs, so the percentage alone does not identify the cause.
 When closing during disk work, APS shows **Stopping Disk Work**. Wait for the
 operation to stop, then close APS again. [Timeouts and cancellation](#timeouts-and-cancellation)
 explains what APS waits for.
+
+An exact imaging failure such as **The disk media is not recognized** does not
+by itself establish that the disk is unformatted. An unreadable sector outside
+the allocated songs can cause a full-disk read to fail. The error dialog offers
+**Create Logical Recovery**, which saves a separately labeled IMG and a recovery
+report. Check that report for unreadable or omitted sectors and metadata
+reconstruction. This operation reads the original floppy without changing it.
 
 ## Save Files to Floppy: Windows error 50
 

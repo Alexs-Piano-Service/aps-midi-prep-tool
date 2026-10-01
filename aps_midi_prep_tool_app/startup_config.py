@@ -21,6 +21,7 @@ PATH_SETTINGS = frozenset({
     "bulk_extraction_source", "bulk_extraction_output", "bulk_extraction_last_job",
     "emulator_image_source", "emulator_image_output", "disk_recovery_image_path",
     "markiv_backup_source", "markiv_backup_output", "markiv_backup_last_folder",
+    "sps_source", "sps_output",
 })
 BOOLEAN_SETTINGS = frozenset({
     "show_compat_warning", "store_backups", "use_dos83_filenames", "hide_status",
@@ -32,6 +33,7 @@ BOOLEAN_SETTINGS = frozenset({
     "hide_save_as_image_complete_dialog", "skip_eseq_to_midi_conversion_prompt",
     "long_midi_filenames", "eseq_to_midi_long_filenames",
     "eseq_to_midi_trim_title_spaces", "allow_floppy_save", "confirm_image_save",
+    "eseq_to_midi_preserve_volume_controls",
     "auto_write_protect_on_load", "format_disklavier_screen",
     "eseq_export_album_subfolder", "image_export_album_subfolder",
     "read_floppy_gw_archival", "read_floppy_convert_to_midi",

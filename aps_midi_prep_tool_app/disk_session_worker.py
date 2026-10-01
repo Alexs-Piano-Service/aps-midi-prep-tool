@@ -7,9 +7,11 @@ from .emulator_image_builder import build_emulator_disk_images
 from .floppy_image import (
     BlankDiskImageError,
     FloppyImageSession,
+    FloppyCaptureReadError,
     FloppyOperationCancelled,
     GreaseweazleConversionError,
     capture_floppy_drive_image,
+    capture_logical_floppy_image,
     capture_greaseweazle_floppy_image,
     convert_greaseweazle_image_file,
 )
@@ -365,13 +367,15 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
 class DiskImageCaptureWorker(_CancellableDiskWorker):
     captureFinished = Signal(object)
     captureFailed = Signal(str)
+    captureRecoveryAvailable = Signal(object)
 
-    def __init__(self, source_kind, source, output_path, *, disk_format=None, parent=None):
+    def __init__(self, source_kind, source, output_path, *, disk_format=None, exact_failure=None, parent=None):
         super().__init__(parent)
         self.source_kind = source_kind
         self.source = source
         self.output_path = output_path
         self.disk_format = disk_format
+        self.exact_failure = exact_failure
 
     def run(self):
         try:
@@ -383,6 +387,13 @@ class DiskImageCaptureWorker(_CancellableDiskWorker):
                     progress_callback=self._emit_progress,
                     cancel_callback=self._cancel_requested,
                 )
+            elif self.source_kind == "floppy_usb_recovery":
+                recovery_result = capture_logical_floppy_image(
+                    self.source, self.output_path, disk_format=self.disk_format,
+                    exact_failure=self.exact_failure,
+                    progress_callback=self._emit_progress, cancel_callback=self._cancel_requested,
+                )
+                output_path = recovery_result["output_path"]
             elif self.source_kind == "floppy_gw":
                 capture_result = capture_greaseweazle_floppy_image(
                     self.source,
@@ -415,10 +426,16 @@ class DiskImageCaptureWorker(_CancellableDiskWorker):
                     "source": self.source,
                     "disk_format": self.disk_format,
                     "sector_map": sector_map,
+                    **locals().get("recovery_result", {}),
                 }
             )
         except FloppyOperationCancelled as exc:
             self._emit_cancelled(exc)
+        except FloppyCaptureReadError as exc:
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+            else:
+                self.captureRecoveryAvailable.emit({"message": str(exc), "diagnostics": exc.diagnostics})
         except Exception as exc:
             if self._should_treat_as_cancelled(exc):
                 self._emit_cancelled(exc)

@@ -98,10 +98,18 @@ When E-SEQ songs are converted to MIDI, APS automatically removes Yamaha
 startup channel-volume commands that would otherwise carry a mute into MIDI
 playback. This includes **ENSPIRE and other MIDI preparation profiles**, floppy
 extraction, emulator MIDI output, and MIDI copies made during Mark IV backup.
-There is no checkbox to enable this cleanup.
+Manual E-SEQ-to-MIDI conversion offers **Preserve original volume controls**.
+Leave it unchecked for the recommended startup-mute correction. Check it when
+the recording intentionally begins with muted notes or when preserving the
+original volume automation matters. The choice is remembered, including when
+the conversion confirmation is hidden. Automatic preparation and batch tools
+continue to use the recommended correction.
 
 Cleanup removes `CC7=0` commands at or before each part's first sounding note,
-including setup after a long opening pause. Channels are evaluated independently; channels
+including setup after a long opening pause. This is a heuristic: it cannot
+distinguish Yamaha initialization from an intentional mute over opening notes.
+The preservation option keeps those commands and the later volume raise.
+Channels are evaluated independently; channels
 without sounding notes keep their commands. Later volume changes, including
 intentional mutes and restored volume, remain intact. Native MIDI preparation
 does not apply this E-SEQ cleanup. The cleanup does not replace the commands

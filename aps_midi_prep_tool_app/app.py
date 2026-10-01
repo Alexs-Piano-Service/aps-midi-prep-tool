@@ -67,6 +67,12 @@ def main():
     if probe_exit_code is not None:
         sys.exit(probe_exit_code)
 
+    from .smart_pianosoft_media import run_media_helper_from_argv
+
+    media_exit_code = run_media_helper_from_argv(sys.argv)
+    if media_exit_code is not None:
+        sys.exit(media_exit_code)
+
     from .floppy_image import run_windows_raw_write_helper_from_argv
 
     helper_exit_code = run_windows_raw_write_helper_from_argv(sys.argv)

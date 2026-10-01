@@ -23,6 +23,8 @@ from .piano_overlap_translations import PIANO_OVERLAP_TRANSLATIONS
 from .boot_sector_translations import BOOT_SECTOR_TRANSLATIONS
 from .window_menu_translations import WINDOW_MENU_TRANSLATIONS
 from .update_translations import UPDATE_MESSAGES
+from .smart_pianosoft_translations import SMART_PIANOSOFT_MESSAGES
+from .logical_capture_translations import LOGICAL_CAPTURE_TRANSLATIONS
 
 from .bulgarian_translations import (
     BULGARIAN_MESSAGE_TRANSLATIONS,
@@ -3050,6 +3052,7 @@ MESSAGES.update(PENDING_CHANGE_MESSAGES)
 MESSAGES.update(REVIEW_PROMPT_MESSAGES)
 MESSAGES.update(MARKIV_BACKUP_MESSAGES)
 MESSAGES.update(UPDATE_MESSAGES)
+MESSAGES.update(SMART_PIANOSOFT_MESSAGES)
 MESSAGES["startup_config.error"] = {
     "en": "The startup configuration could not be loaded. APS will use its saved settings. Correct the file and restart APS to try again.",
     "es": "No se pudo cargar la configuración inicial. APS usará sus ajustes guardados. Corrija el archivo y reinicie APS para volver a intentarlo.",
@@ -3080,6 +3083,7 @@ COMMON_TEXT_TRANSLATIONS.update(WRITE_SAFETY_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(PIANO_OVERLAP_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(BOOT_SECTOR_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(WINDOW_MENU_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(LOGICAL_CAPTURE_TRANSLATIONS)
 
 
 def tr(message_id, language_code=None, **kwargs):

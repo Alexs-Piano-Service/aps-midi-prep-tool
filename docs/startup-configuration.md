@@ -189,6 +189,11 @@ Every entry in this table accepts an absolute or relative path string.
 | `emulator_image_output` | Build Emulator Disk Set output folder, such as `./Nalbantov`. |
 | `disk_recovery_image_path` | Initial image path in Recover Damaged Image. |
 
+The retained Smart PianoSoft development code also recognizes `sps_source`
+(floppy device, image, or extracted folder) and `sps_output` (output parent
+folder). These path settings do not enable the deferred utility in 0.8.8 and
+are not needed for normal deployments.
+
 ### Appearance, interface, and updates
 
 | Setting | Type / purpose |
@@ -230,6 +235,7 @@ All entries below are booleans except `eseq_to_midi_switch_mode` and `piano_over
 | `hide_recovery_complete_dialog` | Hide the recovery completion dialog. |
 | `hide_save_as_image_complete_dialog` | Hide the Save As Image completion dialog. |
 | `skip_eseq_to_midi_conversion_prompt` | Use remembered E-SEQ-to-MIDI choices without showing that options prompt. |
+| `eseq_to_midi_preserve_volume_controls` | Preserve all original volume commands during manual E-SEQ-to-MIDI conversion, including muted opening notes. Defaults to `false`; automatic preparation and batch conversion keep their default correction. |
 | `hide_gw_sector_report_read_v1` | Hide Greaseweazle read sector reports. |
 | `hide_gw_sector_report_write_v1` | Hide Greaseweazle write sector reports. |
 | `hide_gw_sector_report_convert_v1` | Hide Greaseweazle conversion sector reports. |

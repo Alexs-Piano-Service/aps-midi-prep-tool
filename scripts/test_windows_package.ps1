@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ExecutablePath,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [ValidateRange(10, 1800)][int]$TimeoutSeconds = 240,
-    [string]$ExpectedVersion = ''
+    [string]$ExpectedVersion = '',
+    [switch]$IncludeSmartPianoSoft
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +39,9 @@ $process = New-Object System.Diagnostics.Process
 $process.StartInfo.FileName = $exe
 # Windows filenames cannot contain a quote; the full output directory has no trailing slash.
 $process.StartInfo.Arguments = '--aps-package-smoke "' + $output.TrimEnd('\') + '"'
+if ($IncludeSmartPianoSoft) {
+    $process.StartInfo.Arguments += ' --include-smart-pianosoft'
+}
 $process.StartInfo.WorkingDirectory = $working
 $process.StartInfo.UseShellExecute = $false
 $process.StartInfo.RedirectStandardOutput = $true
@@ -89,10 +93,12 @@ try {
         throw 'The smoke report application version does not match the expected release.'
     }
     if ($report.status -ne 'passed') { throw 'The package smoke report does not show a complete pass.' }
-    foreach ($name in @('ui', 'img', 'image_source_changes', 'hfe', 'mp3')) {
+    $requiredCases = @('ui', 'img', 'image_source_changes', 'hfe', 'mp3')
+    if ($IncludeSmartPianoSoft) { $requiredCases += 'smart_pianosoft' }
+    foreach ($name in $requiredCases) {
         if ($report.cases.$name.status -ne 'passed') { throw "Package smoke case did not pass: $name" }
     }
-    Write-Host "Final Windows EXE passed UI, IMG, source-change protection, HFE and MP3 checks: $reportPath"
+    Write-Host "Final Windows EXE passed the requested package checks ($($requiredCases -join ', ')): $reportPath"
 } finally {
     if ($started -and !$process.HasExited) {
         Stop-PackageProcessTree $process.Id

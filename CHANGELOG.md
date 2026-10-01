@@ -81,8 +81,9 @@ with release sections grouped by version and date.
 - Conversion dialogs, progress messages, and change reviews consistently use
   **E-SEQ**. E-SEQ-to-MIDI conversion automatically removes Yamaha startup
   volume mutes, including for ENSPIRE preparation, extraction, and MIDI copies.
-  Later volume changes are preserved. The confusing optional volume-fix
-  checkbox is replaced by an explanation of automatic cleanup.
+  Later volume changes are preserved. Manual conversion offers a remembered
+  **Preserve original volume controls** option for intentional muted openings;
+  startup-mute correction remains the recommended default.
 - User documentation now starts with a short workflow and a task-based guide
   index. Separate guides cover installation, saving, recovery, and audio, with
   clearer setup steps and troubleshooting navigation.
@@ -128,6 +129,15 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Failed exact floppy imaging offers a separate, explicitly labeled logical
+  recovery image with diagnostics. Protected or unreadable sectors no longer
+  leave disks whose songs are readable without an imaging recovery path.
+  Reconstructed images are distinguished from exact sector captures.
+- Normal FAT12 image loading checks redundant allocation tables, uses the sole
+  usable copy when a mirror is damaged, and rejects conflicting viable copies
+  with recovery guidance. Recovery considers viable FAT copies before carving.
+- Initial FAT12 scans reject file and directory clusters outside the disk's
+  data area, including out-of-range links later in a chain.
 - Bug reports wrap the optional floppy-context heading at large font sizes.
   Bug-report and feedback form labels wrap within their shared column.
   Keyboard Shortcuts preserves room for command names when native fonts make

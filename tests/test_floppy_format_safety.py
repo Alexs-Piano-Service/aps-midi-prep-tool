@@ -279,8 +279,11 @@ def test_prepare_yamaha_bytes_leaves_valid_primary_boot_unchanged(tmp_path):
 
     result = prepare_yamaha_bytes(bytes(source), output_path)
 
-    assert not result.changed
-    assert output_path.read_bytes() == source
+    assert result.changed and not result.boot_sector_repaired
+    repaired = output_path.read_bytes()
+    assert repaired[:_FAT12_720_FAT2_OFFSET] == source[:_FAT12_720_FAT2_OFFSET]
+    assert repaired[_FAT12_720_FAT2_OFFSET:_FAT12_720_FAT2_OFFSET + 3 * _FAT12_720_SECTOR_SIZE] == source[_FAT12_720_SECTOR_SIZE:4 * _FAT12_720_SECTOR_SIZE]
+    assert repaired[_FAT12_720_FAT2_OFFSET + 3 * _FAT12_720_SECTOR_SIZE:] == source[_FAT12_720_FAT2_OFFSET + 3 * _FAT12_720_SECTOR_SIZE:]
 
 
 def test_prepare_yamaha_bytes_rejects_unsigned_relocated_bpb_when_primary_boot_is_valid(tmp_path):
@@ -290,8 +293,11 @@ def test_prepare_yamaha_bytes_rejects_unsigned_relocated_bpb_when_primary_boot_i
 
     result = prepare_yamaha_bytes(bytes(source), output_path)
 
-    assert not result.changed
-    assert output_path.read_bytes() == source
+    assert result.changed and not result.boot_sector_repaired
+    repaired = output_path.read_bytes()
+    assert repaired[:_FAT12_720_FAT2_OFFSET] == source[:_FAT12_720_FAT2_OFFSET]
+    assert repaired[_FAT12_720_FAT2_OFFSET:_FAT12_720_FAT2_OFFSET + 3 * _FAT12_720_SECTOR_SIZE] == source[_FAT12_720_SECTOR_SIZE:4 * _FAT12_720_SECTOR_SIZE]
+    assert repaired[_FAT12_720_FAT2_OFFSET + 3 * _FAT12_720_SECTOR_SIZE:] == source[_FAT12_720_FAT2_OFFSET + 3 * _FAT12_720_SECTOR_SIZE:]
 
 
 @pytest.mark.parametrize("geometry", _SUPPORTED_NON_720_FAT12_LAYOUTS)
