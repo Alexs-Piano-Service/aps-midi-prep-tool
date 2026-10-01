@@ -91,6 +91,47 @@ def test_secure_rip_publishes_validated_audio(cd, tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == [destination]
 
 
+def test_rip_syncs_through_writable_descriptor_without_changing_audio(cd, tmp_path, monkeypatch):
+    destination = tmp_path / "track.wav"
+    original = []
+    synchronized = []
+    fsync = media.os.fsync
+
+    def rip(args, **_options):
+        _wav(args[-1])
+        original.append(Path(args[-1]).read_bytes())
+
+    def writable_fsync(descriptor):
+        # Enforce Windows' writable-descriptor requirement on every platform.
+        # A zero-byte write checks access without modifying the validated WAV.
+        assert media.os.write(descriptor, b"") == 0
+        fsync(descriptor)
+        synchronized.append(descriptor)
+
+    monkeypatch.setattr(media, "_run_command", rip)
+    monkeypatch.setattr(media.os, "fsync", writable_fsync)
+    assert media.rip_cd_track("/dev/sr0", cd, destination) == destination
+    assert synchronized
+    assert destination.read_bytes() == original[0]
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("error", [errno.EBADF, errno.EIO, errno.ENOSPC])
+def test_rip_sync_failure_is_propagated_without_publishing(cd, tmp_path, monkeypatch, error):
+    destination = tmp_path / "track.wav"
+    failure = OSError(error, "Unable to synchronize ripped audio")
+
+    def failed_fsync(_descriptor):
+        raise failure
+
+    monkeypatch.setattr(media, "_run_command", lambda args, **_kwargs: _wav(args[-1]))
+    monkeypatch.setattr(media.os, "fsync", failed_fsync)
+    with pytest.raises(OSError) as caught:
+        media.rip_cd_track("/dev/sr0", cd, destination)
+    assert caught.value is failure
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("failure", ["truncated", "wrong_rate", "changed_cd", "reader_error", "cancelled"])
 def test_failed_rip_leaves_no_published_file(cd, tmp_path, monkeypatch, failure):
     destination = tmp_path / "track.wav"

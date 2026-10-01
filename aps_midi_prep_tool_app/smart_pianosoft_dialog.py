@@ -103,6 +103,9 @@ class SmartPianoSoftDialog(QDialog):
         source_row = QHBoxLayout()
         source_row.addWidget(self.source_edit, 1)
         self.source_button = QPushButton(self.text("choose_source"))
+        # These secondary actions must not replace the primary default when
+        # focused or reserve the native style's extra default-button margins.
+        self.source_button.setAutoDefault(False)
         menu = QMenu(self.source_button)
         if loaded_source is not None:
             menu.addAction(self.text("current_list"), self.use_current_list)
@@ -121,6 +124,7 @@ class SmartPianoSoftDialog(QDialog):
         self.cd_combo.addItem(self.text("paired_files"), "")
         self.cd_combo.setInsertPolicy(QComboBox.NoInsert)
         self.refresh_button = QPushButton(translate_text("Refresh", self.language))
+        self.refresh_button.setAutoDefault(False)
         self.refresh_button.clicked.connect(self.discover_cd)
         cd_row = QHBoxLayout()
         cd_row.addWidget(self.cd_combo, 1)
@@ -132,9 +136,16 @@ class SmartPianoSoftDialog(QDialog):
         output_row = QHBoxLayout()
         output_row.addWidget(self.output_edit, 1)
         browse = QPushButton(translate_text("Browse...", self.language))
+        browse.setAutoDefault(False)
         browse.clicked.connect(self.choose_output)
         output_row.addWidget(browse)
         form.addRow(self._label("output"), output_row)
+        # WrapLongRows can omit column spacing when deciding whether a field
+        # fits. Keep that gap inside the label so it counts toward row width.
+        label_gap = max(0, form.horizontalSpacing())
+        form.setHorizontalSpacing(0)
+        for row in range(form.rowCount()):
+            form.itemAt(row, QFormLayout.LabelRole).widget().setContentsMargins(0, 0, label_gap, 0)
         layout.addWidget(self.options)
 
         self.album_label = _WrappingLabel()

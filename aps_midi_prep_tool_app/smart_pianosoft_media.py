@@ -280,7 +280,8 @@ def rip_cd_track(device, track, destination, cancel=None, progress=None):
         if _device_identity(device) != identity or read_cd_toc(device, cancel=cancel) != toc:
             raise SmartPianoSoftMediaError("The audio CD changed during ripping; its output was discarded.")
         _check_cancel(cancel)
-        with open(temporary, "rb") as handle:
+        # Windows requires write access for fsync; preserve the validated bytes.
+        with open(temporary, "r+b") as handle:
             os.fsync(handle.fileno())
         _publish_new_file(temporary, destination, cancel)
         _progress(progress, total, total, f"CD track {track.number} read and verified.")

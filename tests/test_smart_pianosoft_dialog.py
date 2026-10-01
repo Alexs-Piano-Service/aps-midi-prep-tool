@@ -14,6 +14,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
 
+from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app import smart_pianosoft_dialog as dialogs
 from aps_midi_prep_tool_app import smart_pianosoft_media as media
 from aps_midi_prep_tool_app import smart_pianosoft_sync as sync
@@ -354,7 +355,11 @@ def test_immediate_close_prevents_deferred_discovery(tmp_path, qt_application, m
     assert not instance.is_busy
 
 
-def test_utilities_menu_opens_one_modal_beta_dialog_and_respects_busy_guard(window, monkeypatch):
+def test_utilities_menu_opens_one_modal_beta_dialog_and_respects_busy_guard(monkeypatch, request):
+    # Exercise the retained beta integration without changing the release default.
+    # Enable it before constructing the window, when its menu is assembled.
+    monkeypatch.setattr(main_window.MidiTitleWindow, "ENABLE_SMART_PIANOSOFT_UTILITY", True)
+    window = request.getfixturevalue("window")
     opened = []
     monkeypatch.setattr(dialogs.SmartPianoSoftDialog, "discover_cd", lambda _self: None)
 
@@ -398,6 +403,8 @@ def _assert_large_font_layout_fits(instance):
         assert button.width() >= button.sizeHint().width(), button.text()
         assert button.height() >= button.sizeHint().height(), button.text()
         assert button.parentWidget().rect().contains(button.geometry()), button.text()
+        if instance.options.isAncestorOf(button):
+            assert instance.options.rect().contains(_bounds_in(instance.options, button)), button.text()
     for box in (instance.pairing_buttons, instance.buttons):
         for first, second in combinations(box.buttons(), 2):
             assert not first.geometry().intersects(second.geometry())
@@ -462,4 +469,33 @@ def test_large_font_translations_reflow_and_scroll_after_repeated_resizes(
         assert instance.geometry() == geometry
     finally:
         instance.close()
+        qt_application.processEvents()
+
+
+def test_windows_style_form_buttons_fit_without_taking_the_primary_default(
+    tmp_path, qt_application, large_dialog_font,
+):
+    original_style = qt_application.style().objectName()
+    qt_application.setStyle("Windows")
+    settings = QSettings(str(tmp_path / "windows-style.ini"), QSettings.IniFormat)
+    settings.setValue("language", "es")
+    instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False)
+    instance.show()
+    try:
+        form_buttons = instance.options.findChildren(QPushButton)
+        assert len(form_buttons) == 3
+        for width in (760, 1400, 760):
+            instance.resize(width, 700)
+            for control in (instance.source_edit, *form_buttons, instance.output_edit):
+                control.setFocus()
+                QTest.qWait(20)
+                # Windows styles reserve extra margins for auto-default
+                # buttons. Focusing these secondary actions must not change
+                # the primary action or leave stale, narrower row geometry.
+                assert instance.start_button.isDefault()
+                assert not any(button.isDefault() for button in form_buttons)
+                _assert_large_font_layout_fits(instance)
+    finally:
+        instance.close()
+        qt_application.setStyle(original_style)
         qt_application.processEvents()
