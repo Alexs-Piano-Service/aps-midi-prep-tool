@@ -277,3 +277,80 @@ def test_empty_batch_does_not_create_recovery_storage_or_call_callbacks(recovery
     file_batch.publish_file_batch([], backup_callback=calls.append, progress_callback=lambda *args: calls.append(args))
     assert calls == []
     assert recovery_locations == []
+
+
+def test_batch_retirement_is_restored_after_later_progress_failure(tmp_path, recovery_locations):
+    import hashlib
+    old = _file(tmp_path, "retired.img", b"original disk")
+    current = _file(tmp_path, "current.img", b"previous disk")
+    staged = _file(tmp_path, "new.img", b"new disk")
+    original_mode = stat.S_IMODE(old.stat().st_mode)
+
+    def fail_after_removal(_index, _total, destination):
+        if Path(destination) == old:
+            assert not old.exists()
+            raise RuntimeError("cancel after retirement")
+
+    with pytest.raises(file_batch.FileBatchWriteError, match="cancel after retirement") as caught:
+        file_batch.publish_file_batch(
+            [(staged, current)], delete_files=[old],
+            expected_hashes={old: hashlib.sha256(old.read_bytes()).hexdigest()},
+            progress_callback=fail_after_removal,
+        )
+    assert old.read_bytes() == b"original disk"
+    assert stat.S_IMODE(old.stat().st_mode) == original_mode
+    assert current.read_bytes() == b"previous disk"
+    assert not caught.value.rollback_errors
+    assert not any(path.exists() for path in recovery_locations)
+
+
+def test_retirement_rollback_never_overwrites_new_file_at_retired_name(tmp_path, recovery_locations):
+    import hashlib
+    old = _file(tmp_path, "retired.img", b"original disk")
+
+    def competing_file(_index, _total, _destination):
+        old.write_bytes(b"new unrelated file")
+        raise RuntimeError("cancel after retirement")
+
+    with pytest.raises(file_batch.FileBatchWriteError) as caught:
+        file_batch.publish_file_batch(
+            [], delete_files=[old],
+            expected_hashes={old: hashlib.sha256(old.read_bytes()).hexdigest()},
+            progress_callback=competing_file,
+        )
+    assert old.read_bytes() == b"new unrelated file"
+    assert caught.value.rollback_errors
+    recovery = Path(caught.value.recovery_directory)
+    manifest = json.loads((recovery / "manifest.json").read_text())
+    record = manifest["files"][0]
+    assert record["operation"] == "delete"
+    assert record["prepared_file"] is None
+    assert (recovery / record["original_file"]).read_bytes() == b"original disk"
+
+
+def test_retirement_rejects_changes_after_snapshot_before_removal(tmp_path, recovery_locations):
+    import hashlib
+    old = _file(tmp_path, "retired.img", b"original disk")
+    staged = _file(tmp_path, "new.img", b"new disk")
+    current = tmp_path / "current.img"
+
+    def change_retired_after_first_write(_index, _total, destination):
+        if Path(destination) == current:
+            old.write_bytes(b"user edit")
+
+    with pytest.raises(file_batch.FileBatchWriteError, match="changed after approval"):
+        file_batch.publish_file_batch(
+            [(staged, current)], delete_files=[old],
+            expected_hashes={old: hashlib.sha256(old.read_bytes()).hexdigest()},
+            progress_callback=change_retired_after_first_write,
+        )
+    assert old.read_bytes() == b"user edit"
+    assert not current.exists()
+
+
+def test_retirement_requires_expected_ownership_hash(tmp_path, recovery_locations):
+    old = _file(tmp_path, "retired.img", b"original disk")
+    with pytest.raises(file_batch.FileBatchWriteError, match="requires an expected file hash"):
+        file_batch.publish_file_batch([], delete_files=[old])
+    assert old.read_bytes() == b"original disk"
+    assert not recovery_locations

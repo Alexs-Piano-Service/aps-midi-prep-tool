@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import posixpath
 import random
@@ -15,7 +16,7 @@ import uuid
 from dataclasses import dataclass, replace
 
 from .dos83_renamer import build_dos83_filename
-from .helpers.file_batch import FileBatchWriteError, publish_file_batch
+from .helpers.file_batch import FileBatchWriteError, publish_file_batch, _checked_file_hash
 from .helpers.portable_filename import is_windows_device_name
 from .conversion_review import build_conversion_report
 from .eseq_converter import (
@@ -107,12 +108,23 @@ class EmulatorImageBuildResult:
     disk_layout: str = "fill"
     warnings: tuple[str, ...] = ()
     contents_verified: bool = False
+    manifest_path: str = ""
+    retired_paths: tuple[str, ...] = ()
 
     @property
     def midi_files_found(self):
         """Compatibility alias for callers of the original E-SEQ-only builder."""
         return self.song_files_found
 
+
+class EmulatorOutputChanges(tuple):
+    """Tuple-compatible confirmation request with explicit retirement details."""
+
+    def __new__(cls, replacements, retirements=()):
+        replacements, retirements = tuple(replacements), tuple(retirements)
+        instance = super().__new__(cls, (*replacements, *retirements))
+        instance.retired_paths = retirements
+        return instance
 
 @dataclass(frozen=True)
 class _PreparedSong:
@@ -1167,6 +1179,105 @@ def _song_list_display_text(value, fallback=""):
     return text or fallback
 
 
+def _set_manifest_path(directory, prefix, starting_number):
+    return os.path.join(directory, f".aps-emulator-{prefix}-{starting_number:04d}.json")
+
+
+def _read_set_manifest(path, prefix, starting_number):
+    """Return bounded, validated ownership metadata; never infer ownership by glob."""
+    if not os.path.lexists(path):
+        return {}, None
+    try:
+        if os.lstat(path).st_size > 2 * 1024 * 1024:
+            raise ValueError("manifest is too large")
+        digest, identity = _checked_file_hash(path)
+        if identity[2] > 2 * 1024 * 1024:
+            raise ValueError("manifest is too large")
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        if _checked_file_hash(path) != (digest, identity):
+            raise ValueError("manifest changed while being read")
+        if (value.get("format") != "aps-emulator-set" or value.get("version") != 1
+                or value.get("prefix") != prefix or value.get("starting_number") != starting_number):
+            raise ValueError("set identity does not match")
+        count = value["images"]
+        extension = value["image_format"]
+        if (type(count) is not int or count < 1 or starting_number + count > MAX_IMAGE_NUMBER + 1
+                or extension not in EMULATOR_IMAGE_EXTENSIONS):
+            raise ValueError("invalid image range or format")
+        allowed = {os.path.basename(name) for name in _output_paths("", prefix, extension, count, starting_number)}
+        required = set(allowed)
+        allowed.add(os.path.basename(_song_lists_output_path("", prefix, starting_number, count)))
+        artifacts = value["artifacts"]
+        if not isinstance(artifacts, list) or not count <= len(artifacts) <= count + 1:
+            raise ValueError("invalid artifact list")
+        owned = {}
+        for item in artifacts:
+            name, checksum = item["filename"], item["sha256"]
+            if (name not in allowed or name in owned or not isinstance(checksum, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", checksum)):
+                raise ValueError("invalid owned filename or checksum")
+            owned[name] = checksum
+        if not required.issubset(owned):
+            raise ValueError("missing image ownership records")
+        return owned, digest
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise FloppyImageError(
+            f"Cannot verify emulator set ownership in {os.path.basename(path)}: {exc}. "
+            "No files were removed. Choose another prefix or output folder."
+        ) from exc
+
+
+def _plan_set_outputs(directory, prefix, starting_number, candidates):
+    manifest_path = _set_manifest_path(directory, prefix, starting_number)
+    owned, manifest_hash = _read_set_manifest(manifest_path, prefix, starting_number)
+    candidate_names = {os.path.basename(path) for path in candidates}
+    retired = []
+    expected = {manifest_path: manifest_hash}
+    for name, digest in owned.items():
+        if name in candidate_names:
+            continue
+        path = os.path.join(directory, name)
+        if not os.path.lexists(path):
+            continue
+        try:
+            actual, _identity = _checked_file_hash(path)
+            if actual != digest:
+                raise ValueError("contents have changed since the previous build")
+        except (OSError, ValueError) as exc:
+            raise FloppyImageError(
+                f"Cannot retire changed emulator output {name}: {exc}. "
+                "No files were removed. Choose another prefix or output folder."
+            ) from exc
+        retired.append(path)
+        expected[path] = digest
+    # Sets with the same prefix but a different first slot may overlap. Never
+    # retire or take ownership of another recorded set's output, even if equal.
+    affected = candidate_names | {os.path.basename(path) for path in retired}
+    for name in os.listdir(directory):
+        match = re.fullmatch(rf"\.aps-emulator-{re.escape(prefix)}-(\d{{4}})\.json", name)
+        if not match or int(match[1]) == starting_number:
+            continue
+        other, _digest = _read_set_manifest(os.path.join(directory, name), prefix, int(match[1]))
+        if affected.intersection(other):
+            raise FloppyImageError(
+                "The output range overlaps another recorded emulator set. "
+                "Choose another prefix, starting number, or output folder."
+            )
+    existing = []
+    for path in candidates:
+        if os.path.lexists(path):
+            try:
+                digest, _identity = _checked_file_hash(path)
+            except (OSError, ValueError) as exc:
+                raise FloppyImageError(f"Output path cannot be replaced as a regular file: {path}.") from exc
+            existing.append(path)
+            expected[path] = digest
+        else:
+            expected[path] = None
+    return manifest_path, EmulatorOutputChanges(existing, retired), expected
+
+
 def _build_emulator_song_lists_text(
     raw_images,
     final_paths,
@@ -1520,27 +1631,14 @@ def build_emulator_disk_images(
         output_candidates = [*final_paths]
         if song_list_path:
             output_candidates.append(song_list_path)
-        existing_paths = [path for path in output_candidates if os.path.lexists(path)]
+        manifest_path, existing_paths, expected_hashes = _plan_set_outputs(
+            output_directory, image_prefix, starting_number, output_candidates,
+        )
         if existing_paths:
-            invalid_paths = [
-                path
-                for path in existing_paths
-                if not os.path.isfile(path) or os.path.islink(path)
-            ]
-            if invalid_paths:
-                names = ", ".join(
-                    os.path.basename(path) for path in invalid_paths[:3]
-                )
-                if len(invalid_paths) > 3:
-                    names += ", ..."
-                raise FloppyImageError(
-                    f"Output path cannot be replaced as a regular file: {names}."
-                )
-
             overwrite_approved = bool(overwrite_existing)
             if not overwrite_approved and overwrite_callback is not None:
                 _raise_if_cancelled(cancel_callback)
-                overwrite_approved = bool(overwrite_callback(tuple(existing_paths)))
+                overwrite_approved = bool(overwrite_callback(existing_paths))
                 _raise_if_cancelled(cancel_callback)
             if not overwrite_approved:
                 if overwrite_callback is not None:
@@ -1606,6 +1704,22 @@ def build_emulator_disk_images(
                 )
             staged_outputs.append((staged_song_list_path, song_list_path))
 
+        ownership = {
+            "format": "aps-emulator-set", "version": 1,
+            "prefix": image_prefix, "starting_number": starting_number,
+            "images": len(raw_images), "image_format": output_ext,
+            "artifacts": [
+                {"filename": os.path.basename(destination),
+                 "sha256": _checked_file_hash(staged)[0]}
+                for staged, destination in staged_outputs
+            ],
+        }
+        staged_manifest = os.path.join(temp_directory, "emulator-set.json")
+        with open(staged_manifest, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(ownership, handle, indent=2)
+            handle.write("\n")
+        staged_outputs.append((staged_manifest, manifest_path))
+
         _raise_if_cancelled(cancel_callback)
         expected_images = {
             final_path: raw_path
@@ -1628,7 +1742,10 @@ def build_emulator_disk_images(
             verify_image_payloads(final_path, raw_path, disk_format, cancel_callback=cancel_callback)
 
         try:
-            publish_file_batch(staged_outputs, progress_callback=verify_published_output)
+            publish_file_batch(
+                staged_outputs, progress_callback=verify_published_output,
+                delete_files=existing_paths.retired_paths, expected_hashes=expected_hashes,
+            )
         except FileBatchWriteError as exc:
             if not exc.rollback_errors:
                 raise exc.original_exception from exc
@@ -1670,6 +1787,8 @@ def build_emulator_disk_images(
             disk_layout=disk_layout,
             warnings=warnings,
             contents_verified=True,
+            manifest_path=manifest_path,
+            retired_paths=existing_paths.retired_paths,
         )
     finally:
         shutil.rmtree(temp_directory, ignore_errors=True)

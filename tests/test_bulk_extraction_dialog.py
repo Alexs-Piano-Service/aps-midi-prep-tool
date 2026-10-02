@@ -54,6 +54,7 @@ def _controls(window, dialog):
         "output": next(edit for edit in edits
                        if edit.placeholderText() == window._t("bulk.output.placeholder")),
         "convert": checkbox("bulk.convert"),
+        "preserve_volume": dialog.findChild(QCheckBox, "bulkPreserveOriginalVolumeControls"),
         "long_names": checkbox("bulk.long_filenames"),
         "trim": checkbox("bulk.trim_titles"),
         "include": checkbox("bulk.include_sources"),
@@ -118,6 +119,7 @@ def _resume_job(window, monkeypatch, tmp_path):
         "output_directory": str(output),
         "options": {
             "convert_eseq": True,
+            "preserve_volume_controls": True,
             "long_midi_filenames": False,
             "trim_title_spaces": False,
             "include_eseq_sources": True,
@@ -158,6 +160,7 @@ def test_live_bulk_form_keeps_user_geometry_and_options_when_resized_or_resumed(
                 QTest.qWait(130)
                 assert dialog.geometry() == geometry
                 assert controls["include"].isEnabled() is convert
+                assert controls["preserve_volume"].isEnabled() is convert
                 assert controls["trim"].isEnabled() is convert
                 assert controls["include"].isChecked()
                 assert not controls["trim"].isChecked()
@@ -176,6 +179,7 @@ def test_live_bulk_form_keeps_user_geometry_and_options_when_resized_or_resumed(
         assert controls["source"].text() == job["source_directory"]
         assert controls["output"].text() == job["output_directory"]
         assert controls["convert"].isChecked()
+        assert controls["preserve_volume"].isChecked()
         assert not controls["long_names"].isChecked()
         assert not controls["trim"].isChecked()
         assert controls["include"].isChecked()
@@ -222,9 +226,16 @@ def test_bulk_translated_buttons_fit_at_large_font_and_small_window(window, monk
 
 
 @pytest.mark.parametrize("resume", [False, True])
-def test_bulk_extract_submits_selected_or_resumed_options(window, monkeypatch, tmp_path, resume):
+@pytest.mark.parametrize("preserve_volume", [False, True])
+def test_bulk_extract_submits_selected_or_resumed_options(
+    window, monkeypatch, tmp_path, resume, preserve_volume,
+):
     w, source, output = window
     job_path, job = _resume_job(w, monkeypatch, tmp_path)
+    job["options"]["preserve_volume_controls"] = preserve_volume
+    if resume:
+        # The saved job overrides even an opposite remembered preference.
+        w.settings.setValue(w.SETTING_BULK_EXTRACTION_PRESERVE_VOLUME, not preserve_volume)
     launches = []
     monkeypatch.setattr(w, "_start_bulk_extraction", lambda *args, **kwargs: launches.append((args, kwargs)))
 
@@ -233,6 +244,8 @@ def test_bulk_extract_submits_selected_or_resumed_options(window, monkeypatch, t
         if resume:
             controls["resume"].click()
         else:
+            assert not controls["preserve_volume"].isChecked()
+            controls["preserve_volume"].setChecked(preserve_volume)
             controls["long_names"].setChecked(False)
             controls["trim"].setChecked(False)
             controls["include"].setChecked(True)
@@ -248,3 +261,4 @@ def test_bulk_extract_submits_selected_or_resumed_options(window, monkeypatch, t
         (job["source_directory"], job["output_directory"]) if resume else (str(source), str(output)),
         {**job["options"], "job_record_path": job_path if resume else None, "resume": resume},
     )]
+    assert w.settings.value(w.SETTING_BULK_EXTRACTION_PRESERVE_VOLUME, type=bool) is preserve_volume

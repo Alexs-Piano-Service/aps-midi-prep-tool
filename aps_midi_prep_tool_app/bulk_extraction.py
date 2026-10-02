@@ -11,7 +11,12 @@ from .bulk_extraction_job import ExtractionJob, serialized_extraction
 from .helpers.atomic_file import atomic_write_bytes
 from .helpers.portable_filename import is_windows_device_name
 
-from .eseq_converter import convert_eseq_file_to_midi_path, is_eseq_file
+from .eseq_converter import (
+    CC7_POLICY_PRESERVE,
+    DEFAULT_ESEQ_TO_MIDI_CC7_POLICY,
+    convert_eseq_file_to_midi_path,
+    is_eseq_file,
+)
 from .eseq_pianodir import (
     is_eseq_directory_path,
     is_pianodir_path,
@@ -180,6 +185,7 @@ def bulk_extract_images(
     output_directory,
     *,
     convert_eseq=False,
+    preserve_volume_controls=False,
     include_eseq_sources=False,
     long_midi_filenames=False,
     trim_title_spaces=False,
@@ -232,6 +238,7 @@ def bulk_extract_images(
     if job_record_path is not None:
         job = ExtractionJob(job_record_path, source_directory, output_directory, {
             "convert_eseq": bool(convert_eseq),
+            "preserve_volume_controls": bool(preserve_volume_controls),
             "include_eseq_sources": bool(include_eseq_sources),
             "long_midi_filenames": bool(long_midi_filenames),
             "trim_title_spaces": bool(trim_title_spaces),
@@ -458,10 +465,13 @@ def bulk_extract_images(
                         os.makedirs(os.path.dirname(midi_path), exist_ok=True)
                         with tempfile.TemporaryDirectory(prefix=".aps_convert_", dir=os.path.dirname(midi_path)) as conversion_dir:
                             staged_midi_path = os.path.join(conversion_dir, os.path.basename(midi_path))
+                            conversion_options = {
+                                "cc7_policy": (CC7_POLICY_PRESERVE if preserve_volume_controls
+                                               else DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
+                            }
                             if trim_title_spaces and title_read_successfully:
-                                eseq_converter(extracted_path, staged_midi_path, title_override=conversion_title)
-                            else:
-                                eseq_converter(extracted_path, staged_midi_path)
+                                conversion_options["title_override"] = conversion_title
+                            eseq_converter(extracted_path, staged_midi_path, **conversion_options)
                             with open(staged_midi_path, "rb") as handle:
                                 atomic_write_bytes(midi_path, handle.read(), replace_existing=False)
                         files_converted += 1

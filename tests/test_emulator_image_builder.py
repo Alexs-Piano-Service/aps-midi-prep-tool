@@ -854,7 +854,10 @@ def test_incomplete_emulator_rollback_retains_originals_and_manifest(
     assert manifest["rollback_errors"] == error.rollback_errors
     for record in manifest["files"]:
         destination = Path(record["destination"])
-        assert (recovery / record["original_file"]).read_bytes() == originals[destination]
+        if record["existed"]:
+            assert (recovery / record["original_file"]).read_bytes() == originals[destination]
+        else:
+            assert destination.name == ".aps-emulator-ROLL-0001.json"
         assert (recovery / record["prepared_file"]).is_file()
     first_record = next(record for record in manifest["files"] if record["destination"] == str(first))
     assert first_record["published"] is True
@@ -1374,7 +1377,7 @@ def test_disabling_song_lists_applies_to_entire_recursive_build(tmp_path, disk_l
     assert result.song_files_found == 2
     assert result.images_created == (2 if disk_layout == "folders" else 1)
     assert result.song_list_path == ""
-    assert set(output.iterdir()) == {Path(path) for path in result.output_paths}
+    assert set(output.iterdir()) == {Path(path) for path in (*result.output_paths, result.manifest_path)}
 
 
 def _write_mng_catalogs(folder, album, songs):

@@ -235,7 +235,7 @@ All entries below are booleans except `eseq_to_midi_switch_mode` and `piano_over
 | `hide_recovery_complete_dialog` | Hide the recovery completion dialog. |
 | `hide_save_as_image_complete_dialog` | Hide the Save As Image completion dialog. |
 | `skip_eseq_to_midi_conversion_prompt` | Use remembered E-SEQ-to-MIDI choices without showing that options prompt. |
-| `eseq_to_midi_preserve_volume_controls` | Preserve all original volume commands during manual E-SEQ-to-MIDI conversion, including muted opening notes. Defaults to `false`; automatic preparation and batch conversion keep their default correction. |
+| `eseq_to_midi_preserve_volume_controls` | Preserve all original volume commands during manual E-SEQ-to-MIDI conversion, including muted opening notes. Defaults to `false`; Bulk Extraction has its own volume setting. |
 | `hide_gw_sector_report_read_v1` | Hide Greaseweazle read sector reports. |
 | `hide_gw_sector_report_write_v1` | Hide Greaseweazle write sector reports. |
 | `hide_gw_sector_report_convert_v1` | Hide Greaseweazle conversion sector reports. |
@@ -285,6 +285,7 @@ These are booleans; source, output, and job paths are listed above.
 | Setting | Meaning when `true` |
 | --- | --- |
 | `bulk_extraction_convert_eseq` | Convert extracted E-SEQ songs to MIDI. |
+| `bulk_extraction_preserve_volume_controls` | Preserve every E-SEQ volume command, including intentionally muted opening notes. Defaults to `false` (recommended startup-mute removal). Saved extraction jobs retain their recorded choice when resumed. |
 | `bulk_extraction_long_midi_filenames` | Use descriptive MIDI filenames. |
 | `bulk_extraction_trim_title_spaces` | Trim title spaces. |
 | `bulk_extraction_include_eseq_sources` | Include original E-SEQ sources alongside converted songs. |

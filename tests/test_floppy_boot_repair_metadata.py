@@ -53,9 +53,11 @@ def test_floppy_session_retains_source_boot_repair_evidence(tmp_path, monkeypatc
 
     class Device:
         def read_at(self, offset, size, _label):
-            # File recovery changes the image even when its boot sector was valid.
-            if offset >= geometry.data_offset:
-                raise OSError("Unreadable song sector")
+            # A complete alternate FAT can repair the working copy without
+            # repairing a valid boot sector or approximating any song bytes.
+            bad_sector = geometry.fat_offset + 512
+            if offset <= bad_sector < offset + size:
+                raise OSError("Unreadable first FAT sector")
             return bytes(data[offset:offset + size])
 
         def close(self):
@@ -79,8 +81,9 @@ def test_floppy_session_retains_source_boot_repair_evidence(tmp_path, monkeypatc
     try:
         assert session.source_boot_sector_repaired == blank_boot
         if not fallback:
-            assert session.repair_changed  # Song recovery alone must not imply boot repair.
+            assert session.repair_changed  # FAT repair alone must not imply boot repair.
         assert floppy_image._geometry_from_boot_sector(Path(session.working_img_path).read_bytes()[:512]) == geometry
         assert [entry.path for entry in session.list_entries().entries] == ["SONG.FIL"]
+        assert floppy_image._read_fat12_file_bytes(session.working_img_path, "SONG.FIL") == b"SONG"
     finally:
         session.cleanup()

@@ -114,3 +114,42 @@ def test_creation_and_completion_automatically_prune(root):
     complete = [path for path in root.iterdir()
                 if json.loads((path / "manifest.json").read_text())["status"] == "complete"]
     assert len(complete) == 5
+
+
+def test_first_save_persists_new_recovery_ancestors_before_creating_package(tmp_path, monkeypatch):
+    root = tmp_path / "new" / "state" / "recovery"
+    monkeypatch.setenv("APS_FLOPPY_SAVE_RECOVERY_DIR", str(root))
+    expected = [tmp_path, root.parent.parent, root.parent]
+    synced = []
+    sync = recovery.sync_directory
+    mkdtemp = recovery.tempfile.mkdtemp
+
+    def sync_directory(path):
+        synced.append(Path(path))
+        sync(path)
+
+    def new_package(*args, **kwargs):
+        assert synced == expected
+        return mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(recovery, "sync_directory", sync_directory)
+    monkeypatch.setattr(recovery.tempfile, "mkdtemp", new_package)
+    package = recovery.SaveRecoveryPackage("A:")
+    assert synced == [*expected, root]
+    assert json.loads((package.directory / "manifest.json").read_text())["status"] == "preparing"
+
+
+@pytest.mark.parametrize("ancestor", [0, 1, 2])
+def test_recovery_ancestor_sync_failure_prevents_package_creation(tmp_path, monkeypatch, ancestor):
+    root = tmp_path / "new" / "state" / "recovery"
+    monkeypatch.setenv("APS_FLOPPY_SAVE_RECOVERY_DIR", str(root))
+    failed_path = [tmp_path, root.parent.parent, root.parent][ancestor]
+
+    def fail(path):
+        if Path(path) == failed_path:
+            raise OSError("Recovery ancestor flush failed")
+
+    monkeypatch.setattr(recovery, "sync_directory", fail)
+    with pytest.raises(OSError, match="Recovery ancestor flush failed"):
+        recovery.SaveRecoveryPackage("A:")
+    assert list(root.iterdir()) == []

@@ -45,6 +45,21 @@ build button stays disabled until the updated proposal is shown. Every final
 IMG/HFE is reopened and its song and catalog contents are checked against the
 prepared output. This verifies delivered contents, not physical piano playback.
 
+## Rebuild an existing set
+
+APS records the files belonging to each build in a small hidden manifest beside
+the images. Keep this file in the working output folder. Rebuilding with the
+same prefix and starting number identifies obsolete disks, an old song list,
+or images in the previous format. The replacement prompt explicitly lists files
+to remove. Declining leaves the previous set intact; a failed build attempts to
+restore replacements and removals together.
+
+Only unchanged files recorded as belonging to that set can be retired. Edited
+obsolete files and overlapping recorded sets stop the rebuild. Files created before
+ownership records were introduced, or files whose manifest was removed, are
+left in place; review these older output folders before copying a set to USB.
+Changing the prefix or starting number creates a separate set.
+
 ## Choose image format and capacity
 
 Use the image format and capacity supported by both your player and emulator.

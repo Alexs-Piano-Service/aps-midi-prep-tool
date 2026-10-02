@@ -17,7 +17,8 @@ from test_fat12_directory_cycles import _set_fat
 from test_save_as_overwrite import _song, window
 
 
-def _windows_disk(tmp_path, monkeypatch, *, protected_boot=False, unreadable_song=False):
+def _windows_disk(tmp_path, monkeypatch, *, protected_boot=False, unreadable_song=False,
+                  unreadable_root=False, unreadable_fat=False):
     path = tmp_path / "original.img"
     image._create_blank_fat12_image_from_layout(path, image._PROTECTED_FAT12_LAYOUTS[0], "ORIGINAL")
     data = bytearray(path.read_bytes())
@@ -38,6 +39,10 @@ def _windows_disk(tmp_path, monkeypatch, *, protected_boot=False, unreadable_son
     bad = {0 if protected_boot else 200 * 512}
     if unreadable_song:
         bad.add(geometry.data_offset)
+    if unreadable_root:
+        bad.add(geometry.root_offset)
+    if unreadable_fat:
+        bad.add(geometry.fat_offset + 512)
     devices = []
 
     class Volume:
@@ -65,6 +70,51 @@ def _windows_disk(tmp_path, monkeypatch, *, protected_boot=False, unreadable_son
     monkeypatch.setattr(image, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setattr(image, "_WindowsRecoveryVolumeHandle", Volume)
     return image.FloppyDriveInfo("A:", len(data), model="Mock USB floppy"), path, songs, geometry, devices
+
+
+@pytest.mark.parametrize("area", ["root", "song"])
+@pytest.mark.parametrize("protected_boot", [False, True])
+def test_normal_floppy_open_rejects_unreadable_directory_or_song_data(
+    tmp_path, monkeypatch, area, protected_boot,
+):
+    drive, source, _songs, _geometry, devices = _windows_disk(
+        tmp_path, monkeypatch, protected_boot=protected_boot, **{f"unreadable_{area}": True},
+    )
+    original = source.read_bytes()
+    output = tmp_path / "previous.img"
+    output.write_bytes(b"previous image")
+    monkeypatch.setattr(image, "_read_windows_block_device_bytes",
+                        lambda *_a, **_k: pytest.fail("Known unreadable data must require explicit recovery"))
+    with pytest.raises(image.FastFloppyReadError, match="Start in recovery mode") as caught:
+        image._read_floppy_device_fast_image(drive.path, output, drive.size_bytes)
+    assert not caught.value.fallback_allowed
+    assert output.read_bytes() == b"previous image"
+    with pytest.raises(image.FloppyImageError, match="Start in recovery mode"):
+        image.FloppyImageSession.load_floppy(drive)
+    assert source.read_bytes() == original
+    assert all(device.closed for device in devices)
+
+
+def test_explicit_logical_recovery_reports_missing_root_directory_data(tmp_path, monkeypatch):
+    drive, source, _songs, geometry, _devices = _windows_disk(tmp_path, monkeypatch, unreadable_root=True)
+    original = source.read_bytes()
+    result = image.capture_logical_floppy_image(drive, tmp_path / "partial-root.img")
+    details = result["diagnostics"]
+    assert details["file_data_status"] == "incomplete_or_uncertain"
+    assert not details["file_map_complete"]
+    assert {"area": "root", "offset_bytes": geometry.root_offset, "length_bytes": 512} in details["unreadable_ranges"]
+    assert source.read_bytes() == original
+
+
+def test_normal_floppy_open_accepts_a_fully_readable_alternate_fat(tmp_path, monkeypatch):
+    drive, _source, songs, _geometry, _devices = _windows_disk(tmp_path, monkeypatch, unreadable_fat=True)
+    session = image.FloppyImageSession.load_floppy(drive)
+    try:
+        assert "FAT 2" in session.repair_note
+        for name, payload in songs.items():
+            assert image._read_fat12_file_bytes(session.working_img_path, name) == payload
+    finally:
+        session.cleanup()
 
 
 @pytest.mark.parametrize("protected_boot", [False, True])

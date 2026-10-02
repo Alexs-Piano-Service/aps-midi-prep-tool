@@ -1,6 +1,7 @@
 """Publish prepared files together, restoring earlier writes after a failure."""
 
 import json
+import hashlib
 import os
 import shutil
 import stat
@@ -35,6 +36,7 @@ def _write_recovery_manifest(directory, records, rollback_errors=()):
                 "original_mode": record.get("original_mode"),
                 "published": record.get("published", False),
                 "restored": record.get("restored", False),
+                "operation": record.get("operation", "write"),
             }
             for record in records
         ],
@@ -51,7 +53,28 @@ def _write_recovery_manifest(directory, records, rollback_errors=()):
     os.replace(temporary, os.path.join(directory, "manifest.json"))
 
 
-def publish_file_batch(prepared_files, *, backup_callback=None, progress_callback=None):
+def _checked_file_hash(path):
+    """Hash a stable regular file without accepting a final-component symlink."""
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"Destination is not a regular file: {path}")
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_size,
+                             info.st_mtime_ns, info.st_ctime_ns)
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        if identity(os.fstat(handle.fileno())) != identity(before):
+            raise OSError(f"Destination changed while being checked: {path}")
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+        if identity(os.fstat(handle.fileno())) != identity(before):
+            raise OSError(f"Destination changed while being checked: {path}")
+    if identity(os.lstat(path)) != identity(before):
+        raise OSError(f"Destination changed while being checked: {path}")
+    return digest.hexdigest(), identity(before)
+
+
+def publish_file_batch(prepared_files, *, backup_callback=None, progress_callback=None,
+                       delete_files=(), expected_hashes=None):
     """Publish (staged_path, destination) pairs, or undo earlier writes.
 
     Staged files must already contain the complete output and remain available
@@ -63,12 +86,18 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
     Destination symlinks keep their existing meaning. New targets are created
     exclusively so that a file appearing during publication is never replaced.
     Optional persistent backups are retained even when publication rolls back.
+    ``delete_files`` are retired in the same transaction, after writes. Each
+    requires a SHA-256 entry in ``expected_hashes``. Optional expectations for
+    writes protect approval-time contents too; None requires an absent target.
+    Checked destinations must be regular files, never symlinks.
     """
     records = []
     published = []
     recovery_directory = ""
     retain_recovery = False
     try:
+        if expected_hashes is not None:
+            expected_hashes = {os.fsdecode(path): digest for path, digest in expected_hashes.items()}
         destination_keys = set()
         for staged_path, destination in prepared_files:
             destination = os.fsdecode(destination)
@@ -82,19 +111,48 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
                 "destination": destination,
                 "resolved_destination": resolved,
                 "existed": False,
+                "operation": "write",
             })
+        for destination in delete_files:
+            destination = os.fsdecode(destination)
+            resolved = os.path.realpath(destination)
+            key = os.path.normcase(resolved)
+            if key in destination_keys:
+                raise ValueError(f"Duplicate output destination: {destination}")
+            destination_keys.add(key)
+            if expected_hashes is None or not expected_hashes.get(destination):
+                raise ValueError(f"Deletion requires an expected file hash: {destination}")
+            records.append({"destination": destination, "resolved_destination": resolved,
+                            "existed": False, "operation": "delete"})
         if not records:
             return
 
+        def check_expected(record):
+            destination = record["destination"]
+            if expected_hashes is None or destination not in expected_hashes:
+                return
+            expected = expected_hashes[destination]
+            if expected is None:
+                if os.path.lexists(destination):
+                    raise FileExistsError(f"Output appeared after approval: {destination}")
+                return
+            actual, identity = _checked_file_hash(destination)
+            if actual != expected or ("checked_identity" in record and
+                                      record["checked_identity"] != identity):
+                raise OSError(f"Output changed after approval: {destination}")
+            record["checked_identity"] = identity
+
         recovery_directory = tempfile.mkdtemp(prefix="aps_file_batch_")
         for index, record in enumerate(records):
+            check_expected(record)
             # Freeze prepared input too: callers may prepare a rename swap
             # directly from files that are also destinations in this batch.
-            record["prepared_file"] = f"prepared-{index:04d}.bin"
-            shutil.copyfile(
-                record["staged_path"],
-                os.path.join(recovery_directory, record["prepared_file"]),
-            )
+            if record["operation"] == "write":
+                record["prepared_file"] = f"prepared-{index:04d}.bin"
+                shutil.copyfile(
+                    record["staged_path"],
+                    os.path.join(recovery_directory, record["prepared_file"]),
+                )
             destination = record["resolved_destination"]
             try:
                 destination_stat = os.stat(destination)
@@ -108,6 +166,7 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
             # Keep the snapshot writable for cleanup on Windows even when
             # the destination itself has the read-only flag.
             shutil.copyfile(destination, os.path.join(recovery_directory, record["original_file"]))
+            check_expected(record)
         _write_recovery_manifest(recovery_directory, records)
 
         if backup_callback is not None:
@@ -118,12 +177,16 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
                         raise OSError(str(error))
 
         for index, record in enumerate(records, start=1):
-            with open(os.path.join(recovery_directory, record["prepared_file"]), "rb") as handle:
-                payload = handle.read()
-            atomic_write_bytes(
-                record["resolved_destination"], payload,
-                replace_existing=record["existed"],
-            )
+            check_expected(record)
+            if record["operation"] == "delete":
+                os.unlink(record["destination"])
+            else:
+                with open(os.path.join(recovery_directory, record["prepared_file"]), "rb") as handle:
+                    payload = handle.read()
+                atomic_write_bytes(
+                    record["resolved_destination"], payload,
+                    replace_existing=record["existed"],
+                )
             record["published"] = True
             published.append(record)
             if progress_callback is not None:
@@ -136,7 +199,10 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
                 if record["existed"]:
                     snapshot = os.path.join(recovery_directory, record["original_file"])
                     with open(snapshot, "rb") as handle:
-                        atomic_write_bytes(destination, handle.read())
+                        atomic_write_bytes(destination, handle.read(),
+                                           replace_existing=record["operation"] != "delete")
+                    if record["operation"] == "delete":
+                        os.chmod(destination, record["original_mode"])
                 else:
                     os.unlink(destination)
                 record["restored"] = True

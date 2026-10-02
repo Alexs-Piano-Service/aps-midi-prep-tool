@@ -82,6 +82,30 @@ counts. Keep the session open and use **Save** again to retry remaining changes.
 Successful conversions already point to their saved outputs, so retry does not
 collide with those outputs or repeat their writes.
 
+### If a Linux floppy file save stops
+
+Before replacing any files, APS keeps a persistent recovery package containing
+the original file contents, prepared replacements, their checksums, and the
+prepared image. When the floppy has enough free space and directory entries,
+APS also stages and verifies replacements on the floppy before publishing them.
+Full floppies use the verified host recovery copies instead.
+
+If copying fails or you cancel, APS attempts to restore the original file
+contents. Restoration stops if the disk identity or file contents no longer
+match known data, or if the drive cannot complete the writes. The error reports
+the retained recovery folder; keep it and check the disk before using it.
+This protects file contents, but is not a sector-exact disk rollback.
+
+Open `prepared.img` from the recovery folder in APS to recover the intended
+song set. To recover previous files, copy the numbered `.bin` files to a local
+folder using the filenames in the `originals` section of `manifest.json`.
+Failed, cancelled, and unfinished packages survive closing APS. On Linux their
+default location is `$XDG_STATE_HOME/APS MIDI Prep Tool/floppy-save-recovery`
+(normally `~/.local/state/APS MIDI Prep Tool/floppy-save-recovery`).
+`APS_FLOPPY_SAVE_RECOVERY_DIR` can select another host folder.
+Successful packages are retained for up to 30 days, with at most five kept.
+For Windows file saves, see the [Windows recovery guide](windows-disk-troubleshooting.md#recovering-a-failed-windows-file-save).
+
 ## Understand conversion reports
 
 Reports compare notes, timing, channels, pedal events, titles, and metadata.
@@ -98,12 +122,15 @@ When E-SEQ songs are converted to MIDI, APS automatically removes Yamaha
 startup channel-volume commands that would otherwise carry a mute into MIDI
 playback. This includes **ENSPIRE and other MIDI preparation profiles**, floppy
 extraction, emulator MIDI output, and MIDI copies made during Mark IV backup.
-Manual E-SEQ-to-MIDI conversion offers **Preserve original volume controls**.
+Manual E-SEQ-to-MIDI conversion and **Bulk Extraction** offer
+**Preserve original volume controls**.
 Leave it unchecked for the recommended startup-mute correction. Check it when
 the recording intentionally begins with muted notes or when preserving the
-original volume automation matters. The choice is remembered, including when
-the conversion confirmation is hidden. Automatic preparation and batch tools
-continue to use the recommended correction.
+original volume automation matters. Each dialog remembers its own choice;
+manual conversion retains it when the conversion confirmation is hidden.
+Bulk extraction also records it in saved jobs and restores it on resume.
+Older jobs retain their original startup-mute removal behavior. Other automatic
+preparation tools continue to use the recommended correction.
 
 Cleanup removes `CC7=0` commands at or before each part's first sounding note,
 including setup after a long opening pause. This is a heuristic: it cannot
@@ -187,7 +214,9 @@ The failed song is reported without creating or staging MIDI output.
 
 Final image verification reopens IMG files or decodes final HFE files and checks
 every contained file against the prepared output, including catalogs and song
-order. Corrupted final output fails verification.
+order. This includes files inside folders. Ordinary **Save As Image** also
+decodes converted output and compares its files before replacing the destination;
+failed verification or cancellation leaves the previous image intact.
 **Settings → Disk Options → Verify Floppy Contents After Writing** adds a physical
 readback comparison. If readback is cancelled,
 the result distinguishes completed writing from unverified contents.
@@ -200,6 +229,13 @@ floppy drive; those require the controller, firmware, media, and drive combinati
 <a id="preserve-recovery-and-extraction-work"></a>
 
 ## Keep a partial floppy capture
+
+An ordinary floppy read stops if any root-directory or allocated song sector is
+unreadable. Choose **Read Floppy → Start in recovery mode** to attempt explicit
+recovery; missing bytes are reported rather than presented as a successful read.
+A complete, unambiguous alternate FAT copy can still be used normally. APS also
+checks that files and directories do not share allocated clusters. If no sound,
+unambiguous FAT copy remains, explicit recovery is required before editing.
 
 Floppy discovery runs in separate helper processes with a ten-second wait and
 Cancel. APS terminates unfinished helpers on timeout or cancellation while

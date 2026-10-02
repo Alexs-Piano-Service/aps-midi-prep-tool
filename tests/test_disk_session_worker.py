@@ -3,6 +3,26 @@ import pytest
 from aps_midi_prep_tool_app import disk_session_worker
 
 
+def test_emulator_build_worker_keeps_retirement_details_in_confirmation(qt_application):
+    from aps_midi_prep_tool_app.emulator_image_builder import EmulatorOutputChanges
+
+    worker = disk_session_worker.EmulatorImageBuildWorker(
+        "source", "output", prefix="DSKA", starting_number=0,
+        safety_margin_bytes=0, album_title="", disk_format=object(), output_ext="img",
+    )
+    changes = EmulatorOutputChanges(["DSKA0000.img"], ["DSKA0002.img"])
+    requests = []
+
+    def approve(value):
+        requests.append(value)
+        worker.resolve_overwrite_request(True)
+
+    worker.overwriteRequested.connect(approve)
+    assert worker._request_overwrite_confirmation(changes) is True
+    assert requests == [changes]
+    assert requests[0].retired_paths == ("DSKA0002.img",)
+
+
 @pytest.mark.parametrize("disk_layout", ["fill", "folders"])
 def test_emulator_build_worker_forwards_layout_and_scan_options(monkeypatch, disk_layout):
     calls = []

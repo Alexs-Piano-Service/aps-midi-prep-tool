@@ -6,6 +6,7 @@ import pytest
 
 from aps_midi_prep_tool_app import disk_session_worker, emulator_image_builder, floppy_image
 from aps_midi_prep_tool_app.helpers import file_batch
+from test_fat12_directory_cycles import _set_fat
 
 
 @pytest.fixture
@@ -17,6 +18,27 @@ def prepared_image(tmp_path):
     floppy_image.create_blank_floppy_image(image, disk_format)
     floppy_image._copy_host_file_into_image(image, song, "SONG.MID")
     return image, disk_format
+
+
+@pytest.fixture
+def nested_prepared_image(tmp_path):
+    path = tmp_path / "nested.img"
+    floppy_image._create_blank_fat12_image_from_layout(path, floppy_image._PROTECTED_FAT12_LAYOUTS[0], "NESTED")
+    data = bytearray(path.read_bytes())
+    geometry = floppy_image._geometry_from_boot_sector(data[:512])
+    for cluster in (2, 3):
+        _set_fat(data, geometry, cluster, 0xFFF)
+    data[geometry.root_offset:geometry.root_offset + 32] = floppy_image._dos_directory_entry(b"FOLDER     ", 2, 0, 0x10)
+    directory = floppy_image._cluster_offset(geometry, 2)
+    data[directory:directory + 96] = b"".join([
+        floppy_image._dos_directory_entry(b".          ", 2, 0, 0x10),
+        floppy_image._dos_directory_entry(b"..         ", 0, 0, 0x10),
+        floppy_image._dos_directory_entry(b"SONG    MID", 3, len(b"original song payload")),
+    ])
+    start = floppy_image._cluster_offset(geometry, 3)
+    data[start:start + len(b"original song payload")] = b"original song payload"
+    path.write_bytes(data)
+    return path, floppy_image.DISK_FORMAT_BY_KEY["ibm.720"]
 
 
 def _damage_song(path):
@@ -58,6 +80,58 @@ def test_hfe_verification_decodes_delivered_container(tmp_path, prepared_image, 
 
     assert result["files_verified"] == 1
     assert conversions == [(delivered, disk_format.key)]
+
+
+@pytest.mark.parametrize("result", ["intact", "altered_song", "decode_failure", "cancelled"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_save_as_verifies_converted_payloads_before_replacing_destination(
+    tmp_path, request, monkeypatch, result, nested,
+):
+    prepared, disk_format = request.getfixturevalue("nested_prepared_image" if nested else "prepared_image")
+    song_path = "FOLDER/SONG.MID" if nested else "SONG.MID"
+    original = prepared.read_bytes()
+    output_dir = tmp_path / "delivery"
+    output_dir.mkdir()
+    destination = output_dir / "saved.hfe"
+    destination.write_bytes(b"previous good delivery")
+    conversions = []
+    session = object.__new__(floppy_image.FloppyImageSession)
+    session.disk_format = disk_format
+
+    def convert(source, output, format_key, **kwargs):
+        assert format_key == disk_format.key
+        assert destination.read_bytes() == b"previous good delivery"
+        if Path(output).suffix == ".hfe":
+            conversions.append("encode")
+            Path(output).write_bytes(b"new converted image")
+        else:
+            conversions.append("decode")
+            assert Path(source).read_bytes() == b"new converted image"
+            if result == "decode_failure":
+                raise floppy_image.FloppyImageError("Cannot decode staged image")
+            if result == "cancelled":
+                raise floppy_image.FloppyOperationCancelled("Cancelled verification")
+            shutil.copyfile(prepared, output)
+            if result == "altered_song":
+                _damage_song(output)
+        return ""
+
+    monkeypatch.setattr(floppy_image, "_gw_convert", convert)
+    if result == "intact":
+        session.write_image(prepared, destination, "hfe")
+        assert destination.read_bytes() == b"new converted image"
+    else:
+        error, message = {
+            "altered_song": (floppy_image.FloppyImageError, f"contents differ for {song_path}"),
+            "decode_failure": (floppy_image.FloppyImageError, "Cannot decode"),
+            "cancelled": (floppy_image.FloppyOperationCancelled, "Cancelled verification"),
+        }[result]
+        with pytest.raises(error, match=message):
+            session.write_image(prepared, destination, "hfe")
+        assert destination.read_bytes() == b"previous good delivery"
+    assert conversions == ["encode", "decode"]
+    assert prepared.read_bytes() == original
+    assert list(output_dir.iterdir()) == [destination]
 
 
 def test_failed_final_verification_restores_existing_delivery(tmp_path, monkeypatch):

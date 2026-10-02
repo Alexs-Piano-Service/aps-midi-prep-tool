@@ -8920,6 +8920,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     SETTING_BULK_EXTRACTION_SOURCE = "bulk_extraction_source"
     SETTING_BULK_EXTRACTION_OUTPUT = "bulk_extraction_output"
     SETTING_BULK_EXTRACTION_CONVERT_ESEQ = "bulk_extraction_convert_eseq"
+    SETTING_BULK_EXTRACTION_PRESERVE_VOLUME = "bulk_extraction_preserve_volume_controls"
     SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES = "bulk_extraction_long_midi_filenames"
     SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES = "bulk_extraction_trim_title_spaces"
     DEFAULT_BULK_EXTRACTION_TRIM_TITLE_SPACES = True
@@ -11686,35 +11687,50 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
         form_layout.addWidget(convert_checkbox, 4, 0, 1, 3)
 
+        volume_note = QLabel(self._lt(
+            "By default, Yamaha startup volume mutes are removed for MIDI playback (recommended)."
+        ))
+        volume_note.setWordWrap(True)
+        form_layout.addWidget(volume_note, 5, 0, 1, 3)
+        preserve_volume_checkbox = WrappedCheckBox(self._lt("Preserve original volume controls"), dialog)
+        preserve_volume_checkbox.setObjectName("bulkPreserveOriginalVolumeControls")
+        preserve_volume_checkbox.setToolTip(self._lt(
+            "Keep every original volume change, including zero-volume commands and notes played while muted."
+        ))
+        preserve_volume_checkbox.setChecked(self.settings.value(
+            self.SETTING_BULK_EXTRACTION_PRESERVE_VOLUME, False, type=bool,
+        ))
+        form_layout.addWidget(preserve_volume_checkbox, 6, 0, 1, 3)
+
         long_name_checkbox = QCheckBox(self._t("bulk.long_filenames"))
         long_name_checkbox.setToolTip(self._t("bulk.long_filenames.tooltip"))
         form_layout.addWidget(long_name_checkbox, 3, 0, 1, 3)
 
         trim_title_spaces_checkbox = QCheckBox(self._t("bulk.trim_titles"))
         trim_title_spaces_checkbox.setToolTip(self._t("bulk.trim_titles.tooltip"))
-        form_layout.addWidget(trim_title_spaces_checkbox, 5, 0, 1, 3)
+        form_layout.addWidget(trim_title_spaces_checkbox, 7, 0, 1, 3)
 
         include_sources_checkbox = QCheckBox(self._t("bulk.include_sources"))
         include_sources_checkbox.setToolTip(
             self._t("bulk.include_sources.tooltip")
         )
-        form_layout.addWidget(include_sources_checkbox, 6, 0, 1, 3)
+        form_layout.addWidget(include_sources_checkbox, 8, 0, 1, 3)
 
         retention_hint = QLabel(self._t("bulk.no_overwrite"))
         retention_hint.setWordWrap(True)
-        form_layout.addWidget(retention_hint, 7, 0, 1, 3)
+        form_layout.addWidget(retention_hint, 9, 0, 1, 3)
 
         save_progress_checkbox = QCheckBox(self._lt("Save progress for verified resume"))
         save_progress_checkbox.setToolTip(self._lt(
             "Progress records are removed after successful extraction. Failed or cancelled jobs keep their records for resuming."
         ))
         save_progress_checkbox.setChecked(True)
-        form_layout.addWidget(save_progress_checkbox, 8, 0, 1, 3)
+        form_layout.addWidget(save_progress_checkbox, 10, 0, 1, 3)
         resume_button = QPushButton(self._lt("Resume extraction job..."))
-        form_layout.addWidget(resume_button, 9, 0, 1, 3)
+        form_layout.addWidget(resume_button, 11, 0, 1, 3)
         resume_hint = QLabel("")
         resume_hint.setWordWrap(True)
-        form_layout.addWidget(resume_hint, 10, 0, 1, 3)
+        form_layout.addWidget(resume_hint, 12, 0, 1, 3)
         selected_job = {"path": ""}
 
         source_directory = self._bulk_extraction_default_source_directory()
@@ -11741,7 +11757,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         preparation_hint = QLabel()
         preparation_hint.setWordWrap(True)
         preparation_hint.setVisible(self._preparation_requires_dos83_filenames())
-        form_layout.addWidget(preparation_hint, 11, 0, 1, 3)
+        form_layout.addWidget(preparation_hint, 13, 0, 1, 3)
         if self._preparation_requires_dos83_filenames():
             long_name_checkbox.setChecked(False)
             long_name_checkbox.setEnabled(False)
@@ -11763,6 +11779,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             )
         )
         conversion_option_checkboxes = (
+            preserve_volume_checkbox,
             trim_title_spaces_checkbox,
             include_sources_checkbox,
         )
@@ -11829,6 +11846,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             output_edit.setText(job["output_directory"])
             options = job["options"]
             convert_checkbox.setChecked(bool(options.get("convert_eseq")))
+            preserve_volume_checkbox.setChecked(bool(options.get("preserve_volume_controls")))
             long_name_checkbox.setChecked(bool(options.get("long_midi_filenames")))
             trim_title_spaces_checkbox.setChecked(bool(options.get("trim_title_spaces")))
             include_sources_checkbox.setChecked(bool(options.get("include_eseq_sources")))
@@ -11837,7 +11855,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             for widget in (
                 source_edit, output_edit, source_browse, output_browse, naming_combo,
                 convert_checkbox, long_name_checkbox, trim_title_spaces_checkbox,
-                include_sources_checkbox, save_progress_checkbox,
+                include_sources_checkbox, preserve_volume_checkbox, save_progress_checkbox,
             ):
                 widget.setEnabled(False)
             resume_hint.setText(self._lt(
@@ -11892,6 +11910,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         source_directory = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
         output_directory = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
         convert_eseq = convert_checkbox.isChecked()
+        preserve_volume_controls = preserve_volume_checkbox.isChecked()
         include_eseq_sources = bool(
             convert_eseq and include_sources_checkbox.isChecked()
         )
@@ -11904,6 +11923,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_SOURCE, source_directory)
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_OUTPUT, output_directory)
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_CONVERT_ESEQ, convert_eseq)
+        self.settings.setValue(self.SETTING_BULK_EXTRACTION_PRESERVE_VOLUME, preserve_volume_controls)
         if not self._preparation_requires_dos83_filenames():
             self.settings.setValue(
                 self.SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES,
@@ -11925,6 +11945,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             source_directory,
             output_directory,
             convert_eseq=convert_eseq,
+            preserve_volume_controls=preserve_volume_controls,
             include_eseq_sources=include_eseq_sources,
             long_midi_filenames=long_midi_filenames,
             trim_title_spaces=trim_title_spaces,
@@ -11946,6 +11967,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         long_midi_filenames,
         trim_title_spaces,
         use_album_names,
+        preserve_volume_controls=False,
         job_record_path=None,
         resume=False,
     ):
@@ -11965,6 +11987,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             source_directory,
             output_directory,
             convert_eseq=convert_eseq,
+            preserve_volume_controls=preserve_volume_controls,
             include_eseq_sources=include_eseq_sources,
             long_midi_filenames=long_midi_filenames,
             trim_title_spaces=trim_title_spaces,
@@ -12005,6 +12028,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             "source_directory": source_directory,
             "output_directory": output_directory,
             "convert_eseq": bool(convert_eseq),
+            "preserve_volume_controls": bool(preserve_volume_controls),
             "include_eseq_sources": bool(include_eseq_sources),
             "long_midi_filenames": bool(long_midi_filenames),
             "trim_title_spaces": bool(trim_title_spaces),
@@ -12018,6 +12042,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             source=source_directory,
             output=output_directory,
             convert_eseq=bool(convert_eseq),
+            preserve_volume_controls=bool(preserve_volume_controls),
             include_eseq_sources=bool(include_eseq_sources),
             long_midi_filenames=bool(long_midi_filenames),
             trim_title_spaces=bool(trim_title_spaces),
@@ -12898,6 +12923,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if worker is None:
             return
 
+        retired = {
+            os.path.abspath(os.fspath(path))
+            for path in getattr(existing_paths, "retired_paths", ())
+        }
         paths = tuple(os.path.abspath(os.fspath(path)) for path in existing_paths or ())
         if not paths:
             worker.resolve_overwrite_request(False)
@@ -12908,7 +12937,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             progress_dialog.hide()
 
         preview_limit = 12
-        preview_lines = [f"• {os.path.basename(path)}" for path in paths[:preview_limit]]
+        def describe(path):
+            return (self._t("emulator.overwrite.remove", name=os.path.basename(path))
+                    if path in retired else os.path.basename(path))
+
+        preview_lines = [f"• {describe(path)}" for path in paths[:preview_limit]]
         if len(paths) > preview_limit:
             preview_lines.append(
                 self._t(
@@ -12923,12 +12956,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         prompt.setWindowTitle(self._t("emulator.overwrite.title"))
         prompt.setText(
             self._t(
-                "emulator.overwrite.message",
+                "emulator.overwrite.retire_message" if retired else "emulator.overwrite.message",
                 count=len(paths),
             )
         )
         prompt.setInformativeText("\n".join(preview_lines))
-        prompt.setDetailedText("\n".join(paths))
+        prompt.setDetailedText("\n".join(f"{describe(path)}: {path}" for path in paths))
         prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         prompt.setDefaultButton(QMessageBox.No)
         approved = self._exec_child_dialog(prompt) == QMessageBox.Yes

@@ -194,7 +194,7 @@ def test_bulk_extraction_conversion_omits_eseq_and_yamaha_directory_files(tmp_pa
     def session_loader(image_path, **_kwargs):
         return FakeImageSession(image_path, source_files)
 
-    def convert_to_midi(source_path, destination_path):
+    def convert_to_midi(source_path, destination_path, *, cc7_policy):
         Path(destination_path).write_bytes(b"converted " + Path(source_path).read_bytes())
 
     result = bulk_extract_images(
@@ -236,7 +236,7 @@ def test_bulk_extraction_can_include_eseq_sources_with_midi_conversions(tmp_path
     def session_loader(image_path, **_kwargs):
         return FakeImageSession(image_path, source_files)
 
-    def convert_to_midi(source_path, destination_path):
+    def convert_to_midi(source_path, destination_path, *, cc7_policy):
         Path(destination_path).write_bytes(b"converted " + Path(source_path).read_bytes())
 
     result = bulk_extract_images(
@@ -277,7 +277,7 @@ def test_bulk_extraction_can_use_long_filenames_and_trim_converted_titles(tmp_pa
     def session_loader(image_path, **_kwargs):
         return FakeImageSession(image_path, source_files)
 
-    def convert_to_midi(source_path, destination_path, *, title_override=None):
+    def convert_to_midi(source_path, destination_path, *, title_override=None, cc7_policy):
         converted_titles.append(title_override)
         Path(destination_path).write_bytes(str(title_override).encode("utf-8"))
 
@@ -627,7 +627,7 @@ def test_checkpoint_never_treats_invalid_converted_midi_as_verified(tmp_path):
         source, output, job_record_path=checkpoint, convert_eseq=True,
         session_loader=lambda path, **kwargs: FakeImageSession(path, {"SONG.FIL": b"eseq"}),
         eseq_detector=lambda path: True,
-        eseq_converter=lambda source, dest: Path(dest).write_bytes(b"bad midi"),
+        eseq_converter=lambda source, dest, **_options: Path(dest).write_bytes(b"bad midi"),
     )
 
     assert any("output verification" in error for error in result.errors)
@@ -662,7 +662,7 @@ def test_late_conversion_destination_collision_does_not_overwrite_other_file(tmp
     source.mkdir()
     (source / "disk.img").write_bytes(b"image")
 
-    def converter(source, destination):
+    def converter(source, destination, *, cc7_policy):
         # Another writer creates the planned final name after it was selected.
         (output / "disk" / "SONG.mid").write_bytes(b"other writer's file")
         Path(destination).write_bytes(_minimal_midi_bytes())

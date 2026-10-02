@@ -41,6 +41,7 @@ BOOLEAN_SETTINGS = frozenset({
     "read_floppy_trim_titles", "bulk_extraction_convert_eseq",
     "bulk_extraction_long_midi_filenames", "bulk_extraction_trim_title_spaces",
     "bulk_extraction_include_eseq_sources", "bulk_extraction_use_album_names",
+    "bulk_extraction_preserve_volume_controls",
     "emulator_image_include_subfolders", "emulator_image_shuffle",
     "emulator_image_include_song_lists", "check_updates_at_startup",
     "skip_update_reminders", "write_tag_sidecars", "write_metadata_summary",

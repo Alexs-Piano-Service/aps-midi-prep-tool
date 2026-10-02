@@ -129,15 +129,22 @@ def file_digest(path, check_cancelled=None):
 def read_extraction_job(path):
     with open(path, "r", encoding="utf-8") as handle:
         job = json.load(handle)
-    if not isinstance(job, dict) or job.get("version") != 1 or job.get("kind") != "aps-bulk-extraction":
+    if not isinstance(job, dict) or job.get("version") not in (1, 2) or job.get("kind") != "aps-bulk-extraction":
         raise ValueError("This is not a supported APS extraction job.")
     if not all(isinstance(job.get(key), kind) for key, kind in (
         ("source_directory", str), ("output_directory", str), ("options", dict), ("images", dict),
     )):
         raise ValueError("The extraction job is incomplete or malformed.")
     required_options = {"convert_eseq", "include_eseq_sources", "long_midi_filenames", "trim_title_spaces", "use_album_names"}
+    if job["version"] == 2:
+        required_options.add("preserve_volume_controls")
     if set(job["options"]) != required_options or any(type(value) is not bool for value in job["options"].values()):
         raise ValueError("The extraction job has malformed options.")
+    if job["version"] == 1:
+        # Older bulk jobs always removed Yamaha startup mutes. Normalize only
+        # in memory; a resume retains that policy when it next saves progress.
+        job["options"]["preserve_volume_controls"] = False
+        job["version"] = 2
     owned_paths = set()
     owned_directories = set()
     for name, image in job["images"].items():
@@ -217,7 +224,7 @@ class ExtractionJob:
             if os.path.lexists(self.path):
                 raise ValueError("The extraction job already exists. Resume it or choose a new job path.")
             self.data = {
-                "kind": "aps-bulk-extraction", "version": 1,
+                "kind": "aps-bulk-extraction", "version": 2,
                 "source_directory": source_directory, "output_directory": output_directory,
                 "options": options, "images": {},
             }

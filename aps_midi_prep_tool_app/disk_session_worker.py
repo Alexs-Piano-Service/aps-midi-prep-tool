@@ -189,6 +189,7 @@ class BulkExtractionWorker(_CancellableDiskWorker):
         output_directory,
         *,
         convert_eseq=False,
+        preserve_volume_controls=False,
         include_eseq_sources=False,
         long_midi_filenames=False,
         trim_title_spaces=False,
@@ -202,6 +203,7 @@ class BulkExtractionWorker(_CancellableDiskWorker):
         self.source_directory = source_directory
         self.output_directory = output_directory
         self.convert_eseq = bool(convert_eseq)
+        self.preserve_volume_controls = bool(preserve_volume_controls)
         self.include_eseq_sources = bool(include_eseq_sources)
         self.long_midi_filenames = bool(long_midi_filenames)
         self.trim_title_spaces = bool(trim_title_spaces)
@@ -221,6 +223,7 @@ class BulkExtractionWorker(_CancellableDiskWorker):
                 self.source_directory,
                 self.output_directory,
                 convert_eseq=self.convert_eseq,
+                preserve_volume_controls=self.preserve_volume_controls,
                 include_eseq_sources=self.include_eseq_sources,
                 long_midi_filenames=self.long_midi_filenames,
                 trim_title_spaces=self.trim_title_spaces,
@@ -322,7 +325,8 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         self._raise_if_cancelled()
         self._overwrite_response = False
         self._overwrite_response_event.clear()
-        self.overwriteRequested.emit(tuple(existing_paths or ()))
+        # Preserve the tuple-compatible emulator request's retirement details.
+        self.overwriteRequested.emit(existing_paths or ())
         while not self._overwrite_response_event.wait(0.1):
             self._raise_if_cancelled()
         self._raise_if_cancelled()

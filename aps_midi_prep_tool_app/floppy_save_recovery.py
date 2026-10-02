@@ -87,7 +87,17 @@ class SaveRecoveryPackage:
     def __init__(self, drive, prepared_image=None):
         prune_completed_packages()
         root = recovery_root()
+        missing = []
+        parent = root
+        while not parent.exists():
+            missing.append(parent)
+            parent = parent.parent
         root.mkdir(parents=True, exist_ok=True)
+        # Flushing the package and its payloads cannot make a newly created
+        # recovery-root hierarchy durable. Persist each new directory entry
+        # in its parent before any physical floppy mutation can begin.
+        for created in reversed(missing):
+            sync_directory(created.parent)
         self.directory = Path(tempfile.mkdtemp(prefix="save-", dir=root))
         sync_directory(root)
         self.manifest = {

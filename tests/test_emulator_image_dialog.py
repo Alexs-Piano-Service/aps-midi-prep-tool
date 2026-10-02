@@ -137,6 +137,37 @@ class _EmulatorDialogHarness(QWidget):
         self.build_call = (args, kwargs)
 
 
+@pytest.mark.parametrize("approved", [False, True])
+def test_rebuild_confirmation_identifies_retired_files_and_defaults_to_no(
+    qt_application, tmp_path, monkeypatch, approved,
+):
+    from aps_midi_prep_tool_app.emulator_image_builder import EmulatorOutputChanges
+
+    harness = _EmulatorDialogHarness(tmp_path)
+    responses = []
+    harness.emulatorImageWorker = SimpleNamespace(resolve_overwrite_request=responses.append)
+    harness.emulatorImageProgressDialog = None
+    harness._set_progress_dialog_message = lambda *_args: None
+    harness._show_centered_progress_dialog = lambda *_args: None
+    replacement = tmp_path / "DSKA0000.img"
+    obsolete = tmp_path / "DSKA0002.img"
+
+    def inspect(prompt):
+        assert "replaced or removed" in prompt.text()
+        assert "Unrelated files will be kept" in prompt.text()
+        assert "Remove: DSKA0002.img" in prompt.informativeText()
+        assert "Remove: DSKA0000.img" not in prompt.informativeText()
+        assert str(obsolete) in prompt.detailedText()
+        assert prompt.defaultButton() is prompt.button(QMessageBox.No)
+        return QMessageBox.Yes if approved else QMessageBox.No
+
+    monkeypatch.setattr(harness, "_exec_child_dialog", inspect)
+    MidiTitleWindow._on_emulator_overwrite_requested(
+        harness, EmulatorOutputChanges([replacement], [obsolete]),
+    )
+    assert responses == [approved]
+
+
 @pytest.mark.parametrize("profile_key", ("mark_ii", "mark_ii_xg", "mark_iii", "enspire"))
 def test_builder_respects_destination_format_despite_conflicting_saved_content(tmp_path, profile_key):
     app = QApplication.instance() or QApplication([])
