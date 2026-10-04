@@ -20,9 +20,9 @@ September 9 while GitHub's latest release was
 [v0.8.3, published September 18](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/tag/v0.8.3).
 The website is maintained separately from this repository; its current release
 labels need to say **v0.8.3** and **September 18, 2026**. The pending fixes here
-are **0.8.8 development**, not an update to the existing v0.8.3 packages.
+are **0.8.9 development**, not an update to the existing v0.8.3 packages.
 
-The 0.8.8 package list requires the signed standalone `APSMIDIPrepTool.exe`,
+The 0.8.9 package list requires the signed standalone `APSMIDIPrepTool.exe`,
 Windows installer, portable ZIP, Linux AppImage, and Windows test kit. Their
 exact filenames are in the metadata. The standalone EXE is the Windows
 self-update payload and must be present even when the installer and ZIP exist.
@@ -57,7 +57,7 @@ acceptance or change an unreleased version's publication status.
 
 The default package checks cover the five released cases: `ui`, `img`,
 `image_source_changes`, `hfe`, and `mp3`. The Smart PianoSoft synchronization
-utility is deferred from 0.8.8, and its retained `smart_pianosoft` case is an
+utility is deferred from 0.8.9, and its retained `smart_pianosoft` case is an
 optional development check. Opt in with
 `--aps-package-smoke OUTPUT --include-smart-pianosoft`, or add
 `-IncludeSmartPianoSoft` to the Windows package-test script. It uses an original
@@ -100,11 +100,11 @@ Any extra uploaded EXE, ZIP, or AppImage also needs acceptance.
 
 ```json
 {
-  "tag": "v0.8.8",
+  "tag": "v0.8.9",
   "commit": "FULL_VALIDATED_COMMIT_SHA",
   "packages": [
     {
-      "asset": "APSMIDIPrepTool-0.8.8-windows-portable.zip",
+      "asset": "APSMIDIPrepTool-0.8.9-windows-portable.zip",
       "sha256": "SHA256_OF_UPLOADED_ZIP",
       "platform": "windows-11",
       "clean_machine": true,

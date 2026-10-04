@@ -36,9 +36,9 @@ See [optional tools](../README.md#compatibility-and-optional-tools).
 ## Smart PianoSoft development (deferred)
 
 **The Smart PianoSoft synchronization utility is deferred and is not available
-from the menus or shortcuts in version 0.8.8.** Its implementation, tests, and
+from the menus or shortcuts in version 0.8.9.** Its implementation, tests, and
 research remain in the repository for future development. The workflow below
-describes that retained implementation, not a supported 0.8.8 command.
+describes that retained implementation, not a supported 0.8.9 command.
 
 The development dialog pairs Yamaha Smart PianoSoft floppies supplied for use
 with commercial audio CDs. It requires
@@ -74,7 +74,7 @@ filenames; the exported MIDI files retain the filenames from the Smart PianoSoft
 catalog so the catalog continues to identify them correctly.
 
 Physical CD and floppy reading is implemented for Linux. Secure CD reading
-uses `cdparanoia`, which is not bundled in the default 0.8.8 package. Development
+uses `cdparanoia`, which is not bundled in the default 0.8.9 package. Development
 builds can include it with `BUNDLE_CDDA=1`; source tests of CD reading need the
 `cdparanoia` package. The retained Windows implementation can use saved floppy
 images/folders and paired WAV files. Pre-emphasized CDs are rejected because

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from aps_midi_prep_tool_app import floppy_image
+from aps_midi_prep_tool_app.helpers import file_batch
 
 
 def _capture_directory_in(tmp_path, monkeypatch):
@@ -53,6 +54,123 @@ def test_cancelled_usb_capture_exports_recovered_bytes_and_coverage_without_rere
     assert Path(image_path).read_bytes() == capture.read_bytes()
     assert json.loads(Path(report_path).read_text())["partial_capture_path"] == image_path
     assert reads == [(0, 512), (512, 512)]
+
+
+def _capture_export_paths(tmp_path, existing):
+    source = tmp_path / "retained.img"
+    source.write_bytes(b"new partial capture")
+    destination = tmp_path / "export"
+    destination.mkdir()
+    image = destination / "keep.img"
+    report = destination / "keep.img.json"
+    if existing:
+        image.write_bytes(b"previous capture")
+        report.write_bytes(b"previous diagnostics")
+    diagnostics = {"partial_capture_path": str(source), "sector_states": [1, 3, 0]}
+    return source, image, report, diagnostics
+
+
+def _assert_capture_export_unchanged(source, image, report, diagnostics, existing):
+    assert source.read_bytes() == b"new partial capture"
+    assert diagnostics == {"partial_capture_path": str(source), "sector_states": [1, 3, 0]}
+    if existing:
+        assert image.read_bytes() == b"previous capture"
+        assert report.read_bytes() == b"previous diagnostics"
+        assert set(image.parent.iterdir()) == {image, report}
+    else:
+        assert not list(image.parent.iterdir())
+    assert not list(source.parent.glob("aps_file_batch_*"))
+
+
+def test_report_replacement_failure_restores_existing_capture_pair(tmp_path, monkeypatch):
+    _capture_directory_in(tmp_path, monkeypatch)
+    source, image, report, diagnostics = _capture_export_paths(tmp_path, existing=True)
+    real_replace = floppy_image.os.replace
+
+    def fail_report_replace(staged, destination):
+        if Path(destination) == report:
+            assert image.read_bytes() == source.read_bytes()
+            raise PermissionError("Report replacement failed")
+        return real_replace(staged, destination)
+
+    monkeypatch.setattr(floppy_image.os, "replace", fail_report_replace)
+
+    with pytest.raises(PermissionError, match="Report replacement failed"):
+        floppy_image.save_floppy_recovery_capture(diagnostics, image)
+
+    _assert_capture_export_unchanged(source, image, report, diagnostics, existing=True)
+
+
+def test_report_publication_failure_removes_new_capture_image(tmp_path, monkeypatch):
+    _capture_directory_in(tmp_path, monkeypatch)
+    source, image, report, diagnostics = _capture_export_paths(tmp_path, existing=False)
+    real_publish = file_batch.atomic_write_bytes
+
+    def fail_report_publish(destination, payload, **kwargs):
+        if Path(destination) == report:
+            assert image.read_bytes() == source.read_bytes()
+            raise PermissionError("Report publication failed")
+        return real_publish(destination, payload, **kwargs)
+
+    monkeypatch.setattr(file_batch, "atomic_write_bytes", fail_report_publish)
+
+    with pytest.raises(PermissionError, match="Report publication failed"):
+        floppy_image.save_floppy_recovery_capture(diagnostics, image)
+
+    _assert_capture_export_unchanged(source, image, report, diagnostics, existing=False)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure", ["image_copy", "report_write"])
+def test_capture_export_staging_failure_leaves_outputs_unchanged(tmp_path, monkeypatch, existing, failure):
+    source, image, report, diagnostics = _capture_export_paths(tmp_path, existing)
+
+    if failure == "image_copy":
+        def fail_copy(source_path, staged):
+            Path(staged).write_bytes(b"incomplete copy")
+            raise OSError("Capture staging failed")
+
+        monkeypatch.setattr(floppy_image.shutil, "copy2", fail_copy)
+    else:
+        def fail_report_write(details, handle, **kwargs):
+            handle.write("{\"incomplete\":")
+            raise OSError("Capture staging failed")
+
+        monkeypatch.setattr(floppy_image.json, "dump", fail_report_write)
+
+    with pytest.raises(OSError, match="Capture staging failed"):
+        floppy_image.save_floppy_recovery_capture(diagnostics, image)
+
+    _assert_capture_export_unchanged(source, image, report, diagnostics, existing)
+
+
+def test_capture_export_incomplete_rollback_reports_retained_recovery_copies(tmp_path, monkeypatch):
+    _capture_directory_in(tmp_path, monkeypatch)
+    source, image, report, diagnostics = _capture_export_paths(tmp_path, existing=True)
+    real_publish = file_batch.atomic_write_bytes
+
+    def fail_report_and_restore(destination, payload, **kwargs):
+        if Path(destination) == report:
+            raise OSError("Report publication failed")
+        if Path(destination) == image and payload == b"previous capture":
+            raise PermissionError("Image restoration failed")
+        return real_publish(destination, payload, **kwargs)
+
+    monkeypatch.setattr(file_batch, "atomic_write_bytes", fail_report_and_restore)
+
+    with pytest.raises(floppy_image.FloppyImageError, match="Recovery copies and a manifest") as error:
+        floppy_image.save_floppy_recovery_capture(diagnostics, image)
+
+    recovery = Path(error.value.recovery_directory)
+    assert str(recovery) in str(error.value)
+    assert str(image) in error.value.rollback_errors[0]
+    manifest = json.loads((recovery / "manifest.json").read_text())
+    originals = {record["destination"]: (recovery / record["original_file"]).read_bytes()
+                 for record in manifest["files"]}
+    assert originals == {str(image): b"previous capture", str(report): b"previous diagnostics"}
+    assert image.read_bytes() == source.read_bytes() == b"new partial capture"
+    assert report.read_bytes() == b"previous diagnostics"
+    assert set(image.parent.iterdir()) == {image, report}
 
 
 def test_failed_file_recovery_keeps_completed_acquisition(tmp_path, monkeypatch):

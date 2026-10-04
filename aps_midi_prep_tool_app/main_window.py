@@ -8854,7 +8854,7 @@ class BulkExtractionProgressDialog(QDialog):
 
 
 class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
-    # Deferred from 0.8.8. Keep the implementation available for development,
+    # Deferred from 0.8.9. Keep the implementation available for development,
     # but do not expose it through menus or persisted keyboard shortcuts.
     ENABLE_SMART_PIANOSOFT_UTILITY = False
     TITLE_COMPAT_LIMIT = 32

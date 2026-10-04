@@ -191,7 +191,7 @@ Every entry in this table accepts an absolute or relative path string.
 
 The retained Smart PianoSoft development code also recognizes `sps_source`
 (floppy device, image, or extracted folder) and `sps_output` (output parent
-folder). These path settings do not enable the deferred utility in 0.8.8 and
+folder). These path settings do not enable the deferred utility in 0.8.9 and
 are not needed for normal deployments.
 
 ### Appearance, interface, and updates

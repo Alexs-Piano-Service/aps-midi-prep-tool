@@ -63,8 +63,9 @@ def read_smf_layout(
 
     Unknown chunks may occur between tracks. By default bytes after the last
     declared track are opaque, as required by the channel-merging utility's
-    preservation behavior. Converters that historically consume all complete
-    chunks can request that behavior with include_trailing_chunks.
+    preservation behavior. Converters can inspect trailing unknown chunks with
+    include_trailing_chunks; extra MTrk chunks are rejected because they are not
+    declared by the header.
     """
     header = _read_smf_header(
         handle, file_size, prefix=prefix, max_header_bytes=max_header_bytes,
@@ -86,6 +87,8 @@ def read_smf_layout(
         if data_end > file_size:
             raise ValueError("Corrupt MIDI chunk length.")
         chunk_id = chunk_header[:4]
+        if chunk_id == b"MTrk" and found_tracks >= header.track_count:
+            raise ValueError("The MIDI file contains an undeclared trailing MTrk chunk.")
         chunks.append({
             "id": chunk_id,
             "start": offset,

@@ -232,6 +232,7 @@ class RecoveredFile:
     kind: str
     source_offset: int = -1
     origin: str = ""
+    source_entry_offset: int = -1
 
 
 @dataclass(frozen=True)
@@ -683,6 +684,20 @@ def _format_diagnostic_sector_ranges(ranges, *, limit=12):
     return ", ".join(labels) or "none"
 
 
+def _format_eseq_recovery_ambiguities(ambiguities):
+    lines = []
+    for group in ambiguities or ():
+        candidates = ", ".join(
+            f"{item['path']} (offset {item['source_offset']}, {item['origin'] or 'unknown origin'})"
+            for item in group
+        )
+        lines.append(
+            "E-SEQ header ambiguity: matching metadata identifies different payloads; "
+            f"preserved {candidates}. Review song selection and catalog order."
+        )
+    return lines
+
+
 def format_floppy_recovery_diagnostics(diagnostics):
     """Return a compact human-readable report for a JSON-safe diagnostic dict."""
 
@@ -801,6 +816,8 @@ def format_floppy_recovery_diagnostics(diagnostics):
             f"  SHA256: {details.get('sha256') or 'not calculated'}",
         ]
     )
+
+    lines.extend(_format_eseq_recovery_ambiguities(details.get("eseq_recovery_ambiguities")))
 
     geometry_scans = list(details.get("geometry_scans") or ())
     if geometry_scans:
@@ -3902,6 +3919,34 @@ def _finish_capture_output(temp_path, output_path):
     return _finish_temp_output(temp_path, output_path)
 
 
+def _save_greaseweazle_capture_copy(source_path, output_path, *, cancel_callback=None):
+    """Verify and sync a sibling copy before replacing a saved flux capture."""
+    output_path = os.path.abspath(os.fspath(output_path))
+    staged_path = _capture_temp_output_path(output_path, suffix=".scp")
+    try:
+        _raise_if_cancelled(cancel_callback)
+        expected_size = os.path.getsize(source_path)
+        expected_digest = floppy_save_recovery.digest(source_path)
+        _raise_if_cancelled(cancel_callback)
+        shutil.copy2(source_path, staged_path)
+
+        def verify_staged(_destination):
+            _raise_if_cancelled(cancel_callback)
+            if (os.path.getsize(staged_path) != expected_size
+                    or floppy_save_recovery.digest(staged_path) != expected_digest):
+                raise FloppyImageError("The saved SCP capture copy did not match the acquired data.")
+            _raise_if_cancelled(cancel_callback)
+
+        return _finish_temp_output(staged_path, output_path, before_replace=verify_staged)
+    finally:
+        try:
+            if os.name == "nt" and os.path.isfile(staged_path):
+                os.chmod(staged_path, stat.S_IRUSR | stat.S_IWUSR)
+            os.remove(staged_path)
+        except OSError:
+            pass
+
+
 def capture_floppy_drive_image(
     drive_info,
     output_path,
@@ -5059,6 +5104,8 @@ def retain_floppy_recovery_capture(source_path, diagnostics, *, temporary_parent
 
 def save_floppy_recovery_capture(diagnostics, output_path):
     """Export a retained acquisition and coverage report without rereading media."""
+    from .helpers.file_batch import FileBatchWriteError, publish_file_batch
+
     details = dict(diagnostics or {})
     source = details.get("partial_capture_path", "")
     if not source or not os.path.isfile(source):
@@ -5075,8 +5122,21 @@ def save_floppy_recovery_capture(diagnostics, output_path):
         details["partial_capture_diagnostics_path"] = report_path
         with open(report_temp, "w", encoding="utf-8") as handle:
             json.dump(details, handle, ensure_ascii=False, indent=2)
-        os.replace(image_temp, output_path)
-        os.replace(report_temp, report_path)
+        try:
+            publish_file_batch(((image_temp, output_path), (report_temp, report_path)))
+        except FileBatchWriteError as exc:
+            if not exc.rollback_errors:
+                raise exc.original_exception from exc
+            error = FloppyImageError(
+                f"Partial capture export failed: {exc}\n\n"
+                "Some output files could not be restored:\n"
+                + "\n".join(exc.rollback_errors)
+                + "\nRecovery copies and a manifest have been retained in:\n"
+                + exc.recovery_directory
+            )
+            error.rollback_errors = exc.rollback_errors
+            error.recovery_directory = exc.recovery_directory
+            raise error from exc
     finally:
         for path in (image_temp, report_temp):
             if os.path.exists(path):
@@ -8021,13 +8081,13 @@ def _extract_midi_blob_for_recovery(data, start):
         if chunk_type == b"MTrk":
             chunks.append(chunk)
             track_count += 1
-        elif track_count == 0 and chunk_type.isalpha():
-            continue
-        else:
-            break
 
     if track_count <= 0:
         return None
+    if track_count == declared_tracks:
+        # Complete songs retain their original format, extended header, and
+        # intervening unknown chunks. Reconstruct only incomplete salvage.
+        return data[start:cursor]
 
     recovered_format = fmt if track_count > 1 else 0
     recovered_header = (
@@ -8047,51 +8107,85 @@ def _recover_files_from_fat_context(data, geometry):
     if len(data) < geometry.fat_offset + geometry.fat_size:
         return files
 
-    # A damaged file need not invalidate every other file in that FAT. Explicit
-    # recovery tries each signature-valid copy, keeping each complete chain
-    # intact, before resorting to a contiguous salvage read.
+    # A damaged file or directory need not invalidate every other file in that
+    # FAT. Traverse each signature-valid copy independently, keeping complete
+    # fragmented chains intact and comparing alternatives for the same physical
+    # directory entry before resorting to a contiguous file salvage read.
     fats = list(dict.fromkeys(fat for _index, fat, valid in _fat12_copy_records(data, geometry) if valid))
     root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
-    for entry in _iter_fat_directory_entries(root_dir):
-        if _is_windows_volume_metadata_path(entry["name"]):
-            continue
-        if entry["attr"] & 0x10:
-            continue
-        name = _valid_recovery_filename(entry["name"], "")
-        if not name:
-            continue
-        size = int(entry["size"] or 0)
-        if size <= 0:
-            continue
-        payloads = []
-        for fat in fats:
+    file_records = {}
+    for fat in fats or (None,):
+        directory_clusters = set()
+        # Use a stack rather than Python recursion, so even a very deep damaged
+        # directory graph remains bounded by the disk's physical clusters.
+        pending = [(iter(_iter_fat_directory_entries(root_dir)), "", None)]
+        while pending:
+            directory_entries, parent_path, parent_clusters = pending[-1]
+            entry = next(directory_entries, None)
+            if entry is None:
+                pending.pop()
+                continue
+            path = entry["name"] if not parent_path else f"{parent_path}/{entry['name']}"
+            path = _normalize_image_path(path)
+            if entry["attr"] & 0x08 or _is_windows_volume_metadata_path(path):
+                continue
+            if entry["attr"] & 0x10:
+                if fat is None:
+                    continue
+                try:
+                    clusters = _fat12_cluster_chain_from_start(fat, entry["cluster"], geometry)
+                    if directory_clusters.intersection(clusters):
+                        continue
+                    directory = _read_cluster_chain_from_image(
+                        data, geometry, clusters, len(clusters) * geometry.cluster_size,
+                    )
+                except FloppyImageError:
+                    continue
+                directory_clusters.update(clusters)
+                pending.append((iter(_iter_fat_directory_entries(directory)), path, clusters))
+                continue
+            size = int(entry["size"] or 0)
+            if size <= 0 or not _valid_recovery_filename(entry["name"], ""):
+                continue
+            if parent_clusters is None:
+                source_entry_offset = geometry.root_offset + entry["offset"]
+            else:
+                cluster_index, entry_offset = divmod(entry["offset"], geometry.cluster_size)
+                source_entry_offset = _cluster_offset(geometry, parent_clusters[cluster_index]) + entry_offset
+            record = file_records.setdefault(
+                source_entry_offset, {"path": path, "entry": entry, "payloads": []},
+            )
+            if fat is None:
+                continue
             try:
                 clusters = _fat12_cluster_chain(fat, entry["cluster"], size, geometry)
                 payload = _read_cluster_chain_from_image(data, geometry, clusters, size)
             except FloppyImageError:
                 continue
-            if payload not in payloads:
-                payloads.append(payload)
+            if payload not in record["payloads"]:
+                record["payloads"].append(payload)
+
+    for source_entry_offset, record in file_records.items():
+        path, entry, payloads = record["path"], record["entry"], record["payloads"]
         if len(payloads) > 1:
             raise _Fat12RecoveryAmbiguityError(
-                f"Conflicting FAT12 copies recover different contents for {name}. "
+                f"Conflicting FAT12 copies recover different contents for {path}. "
                 "Recovery stopped without choosing a FAT copy or discarding an alternative. "
                 "Keep the original image for manual recovery."
             )
         if not payloads:
             try:
-                payloads.append(_fat12_contiguous_file_bytes(data, geometry, entry["cluster"], size))
+                payloads.append(_fat12_contiguous_file_bytes(data, geometry, entry["cluster"], entry["size"]))
             except FloppyImageError:
                 continue
         payload = payloads[0]
         source_offset = _cluster_offset(geometry, entry["cluster"])
-        if is_pianodir_path(name) and _is_probably_pianodir_bytes(payload):
-            files.append(RecoveredFile(PIANODIR_FILENAME, _padded_pianodir_bytes(payload), "PIANODIR", source_offset, "fat"))
+        if is_pianodir_path(path) and _is_probably_pianodir_bytes(payload):
+            files.append(RecoveredFile(path, _padded_pianodir_bytes(payload), "PIANODIR", source_offset, "fat", source_entry_offset))
         elif _is_probably_eseq_bytes(payload):
-            files.append(RecoveredFile(name, payload, "E-SEQ", source_offset, "fat"))
+            files.append(RecoveredFile(path, payload, "E-SEQ", source_offset, "fat", source_entry_offset))
         elif payload[:4] == b"MThd":
-            midi_payload = _extract_midi_blob_for_recovery(payload, 0) or payload
-            files.append(RecoveredFile(name, midi_payload, "MIDI", source_offset, "fat"))
+            files.append(RecoveredFile(path, payload, "MIDI", source_offset, "fat", source_entry_offset))
     return files
 
 
@@ -8174,16 +8268,30 @@ def _carve_recovery_files_from_bytes(data):
 
 
 def _recovered_file_identity_key(item, payload):
+    """Group matching E-SEQ metadata without asserting payload equality."""
     if item.kind == "E-SEQ" and len(payload) >= PIANODIR_TRACK_SOURCE_END:
         return (item.kind, bytes(payload[PIANODIR_TRACK_SOURCE_START:PIANODIR_TRACK_SOURCE_END]))
     return None
 
 
-def _dedupe_recovered_files(files):
+def _recovered_files_share_source(left, right):
+    """Only collapse candidates that identify the same on-disk object."""
+    if left.source_offset < 0 or left.source_offset != right.source_offset:
+        return False
+    if left.origin == right.origin == "fat":
+        if left.source_entry_offset >= 0 and right.source_entry_offset >= 0:
+            return left.source_entry_offset == right.source_entry_offset
+        return _normalize_image_path(left.image_path).upper() == _normalize_image_path(right.image_path).upper()
+    if "carve" in {left.origin, right.origin}:
+        return left.origin in {"fat", "carve"} and right.origin in {"fat", "carve"}
+    return left.origin == right.origin and left.image_path == right.image_path
+
+
+def _dedupe_recovered_files(files, diagnostics=None):
     selected = []
-    seen_payloads = set()
-    seen_offsets = {}
-    seen_identity_keys = {}
+    seen_payloads = {}
+    fat_payloads_by_offset = {}
+    identity_groups = {}
     used_paths = set()
     order_key_map = {}
     counters = {"MIDI": 1, "E-SEQ": 1, "PIANODIR": 1, "FILE": 1}
@@ -8202,17 +8310,25 @@ def _dedupe_recovered_files(files):
         source_order_key = b""
         if item.kind == "E-SEQ" and len(payload) >= PIANODIR_TRACK_SOURCE_START + ESEQ_ORDER_KEY_SIZE:
             source_order_key = bytes(payload[_eseq_order_key_slice()])
-        offset_key = None
-        if item.kind in {"E-SEQ", "MIDI"} and item.source_offset >= 0:
-            offset_key = (item.kind, item.source_offset)
-            if offset_key in seen_offsets:
-                continue
         identity_key = _recovered_file_identity_key(item, payload)
-        if identity_key is not None and identity_key in seen_identity_keys:
-            continue
         payload_key = (item.kind, len(payload), zlib.crc32(payload) & 0xFFFFFFFF)
-        if payload_key in seen_payloads and item.kind != "PIANODIR":
+        if item.origin == "carve" and item.source_offset >= 0 and any(
+            fat_payload.startswith(payload)
+            for fat_payload in fat_payloads_by_offset.get((item.kind, item.source_offset), ())
+        ):
+            # A carved prefix of this same FAT object adds no recovered bytes.
+            # Keep the FAT file's opaque trailers and full directory-declared
+            # contents instead of generating an artificial shortened copy.
             continue
+        # Matching bytes are only duplicates when they belong to the same
+        # source object. Separate directory entries and carved offsets remain
+        # separate files; checksums alone never establish byte equality.
+        if item.kind != "PIANODIR" and any(
+            payload == previous_payload and _recovered_files_share_source(item, previous_item)
+            for previous_item, previous_payload in seen_payloads.get(payload_key, ())
+        ):
+            continue
+        original_payload = payload
         if item.kind == "PIANODIR":
             if PIANODIR_FILENAME.upper() in used_paths:
                 continue
@@ -8228,19 +8344,36 @@ def _dedupe_recovered_files(files):
             counters["E-SEQ"] += 1
             target_order_key = build_eseq_order_key_from_path(image_path)
             if source_order_key:
-                order_key_map[source_order_key] = target_order_key
-                order_key_map[source_order_key[:11]] = target_order_key
+                # A shared embedded key cannot identify which retained variant
+                # the catalog meant. Keep its first-priority choice stable.
+                order_key_map.setdefault(source_order_key, target_order_key)
+                order_key_map.setdefault(source_order_key[:11], target_order_key)
             payload = _update_recovered_eseq_order_key(payload, image_path)
         else:
             index = counters["FILE"]
             image_path = _unique_recovery_path(item.image_path, used_paths, "REC", "BIN", index)
             counters["FILE"] += 1
-        seen_payloads.add(payload_key)
-        if offset_key is not None:
-            seen_offsets[offset_key] = image_path
+        seen_payloads.setdefault(payload_key, []).append((item, original_payload))
+        if item.origin == "fat" and item.source_offset >= 0:
+            fat_payloads_by_offset.setdefault((item.kind, item.source_offset), []).append(original_payload)
         if identity_key is not None:
-            seen_identity_keys[identity_key] = image_path
-        selected.append(RecoveredFile(image_path, payload, item.kind, item.source_offset, item.origin))
+            group = identity_groups.setdefault(
+                identity_key, {"files": [], "first_payload": original_payload, "ambiguous": False},
+            )
+            group["files"].append(
+                {"path": image_path, "source_offset": item.source_offset, "origin": item.origin}
+            )
+            if original_payload != group["first_payload"]:
+                group["ambiguous"] = True
+        selected.append(RecoveredFile(
+            image_path, payload, item.kind, item.source_offset, item.origin, item.source_entry_offset,
+        ))
+    if isinstance(diagnostics, dict):
+        ambiguities = [group["files"] for group in identity_groups.values() if group["ambiguous"]]
+        if ambiguities:
+            diagnostics["eseq_recovery_ambiguities"] = ambiguities
+        else:
+            diagnostics.pop("eseq_recovery_ambiguities", None)
     if not order_key_map:
         return selected
     return [
@@ -8250,6 +8383,7 @@ def _dedupe_recovered_files(files):
             item.kind,
             item.source_offset,
             item.origin,
+            item.source_entry_offset,
         )
         for item in selected
     ]
@@ -8718,7 +8852,8 @@ def _write_recovered_files_to_image(
     )
 
 
-def _recover_files_from_raw_image_bytes(data, disk_format_hint=None, diagnostics=None):
+def _recover_file_candidates_from_raw_image_bytes(data, disk_format_hint=None, diagnostics=None):
+    """Collect original payloads so multiple scans can share one deduplication pass."""
     if isinstance(diagnostics, dict):
         _populate_recovery_scan_diagnostics(
             data,
@@ -8751,7 +8886,16 @@ def _recover_files_from_raw_image_bytes(data, disk_format_hint=None, diagnostics
                 scan["error"] = " ".join(str(exc).split())[:240]
             continue
     recovered.extend(_carve_recovery_files_from_bytes(data))
-    recovered = _dedupe_recovered_files(recovered)
+    return recovered
+
+
+def _recover_files_from_raw_image_bytes(data, disk_format_hint=None, diagnostics=None):
+    recovered = _dedupe_recovered_files(
+        _recover_file_candidates_from_raw_image_bytes(
+            data, disk_format_hint=disk_format_hint, diagnostics=diagnostics,
+        ),
+        diagnostics=diagnostics,
+    )
     if isinstance(diagnostics, dict):
         diagnostics.update(_recovery_file_kind_counts(recovered))
         diagnostics["human_report"] = format_floppy_recovery_diagnostics(diagnostics)
@@ -9758,9 +9902,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     and os.path.isfile(source_capture)
                     and os.path.getsize(source_capture) > 0
                 ):
-                    saved_capture = os.path.abspath(gw_source.capture_save_path)
-                    os.makedirs(os.path.dirname(saved_capture), exist_ok=True)
-                    shutil.copy2(source_capture, saved_capture)
+                    _save_greaseweazle_capture_copy(
+                        source_capture, gw_source.capture_save_path, cancel_callback=cancel_callback,
+                    )
                 raise
             progress_step += 1
             conversion_sector_map = {}
@@ -9769,9 +9913,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 if saved_capture:
                     _raise_if_cancelled(cancel_callback)
                     _notify_progress(progress_callback, progress_step, total_steps, "Saving raw SCP capture...")
-                    os.makedirs(os.path.dirname(saved_capture), exist_ok=True)
-                    shutil.copy2(source_capture, saved_capture)
-                    source_capture = saved_capture
+                    source_capture = _save_greaseweazle_capture_copy(
+                        source_capture, saved_capture, cancel_callback=cancel_callback,
+                    )
                 _notify_progress(progress_callback, progress_step, total_steps, "Converting raw SCP capture...")
                 try:
                     conversion_output = _gw_convert(
@@ -10472,13 +10616,6 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
                     )
-                    if attempt.archival_quality and attempt.capture_save_path:
-                        _raise_if_cancelled(cancel_callback)
-                        _notify_progress(progress_callback, 68, 100, "Saving raw SCP capture...")
-                        saved_capture = os.path.abspath(attempt.capture_save_path)
-                        os.makedirs(os.path.dirname(saved_capture), exist_ok=True)
-                        shutil.copy2(capture, saved_capture)
-                        capture = saved_capture
                 except FloppyOperationCancelled:
                     raise
                 except Exception as exc:
@@ -10486,14 +10623,15 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     last_error = exc
                     if not os.path.isfile(capture) or os.path.getsize(capture) <= 0:
                         continue
-                    if attempt.archival_quality and attempt.capture_save_path:
-                        _raise_if_cancelled(cancel_callback)
-                        _notify_progress(progress_callback, 68, 100, "Saving partial raw SCP capture...")
-                        saved_capture = os.path.abspath(attempt.capture_save_path)
-                        os.makedirs(os.path.dirname(saved_capture), exist_ok=True)
-                        shutil.copy2(capture, saved_capture)
-                        capture = saved_capture
                     read_note = f"Greaseweazle reported a read error, but a partial {capture_ext.upper()} capture was available: {exc}"
+
+                if attempt.archival_quality and attempt.capture_save_path:
+                    _raise_if_cancelled(cancel_callback)
+                    save_message = "Saving partial raw SCP capture..." if read_note else "Saving raw SCP capture..."
+                    _notify_progress(progress_callback, 68, 100, save_message)
+                    capture = _save_greaseweazle_capture_copy(
+                        capture, attempt.capture_save_path, cancel_callback=cancel_callback,
+                    )
 
                 if attempt.archival_quality:
                     source_img = os.path.join(temp_dir, f"source_recovery_{attempt_index}.img")
@@ -10673,7 +10811,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             with open(source_img, "rb") as handle:
                 source_data = handle.read()
 
-        recovered_files = _recover_files_from_raw_image_bytes(
+        recovered_files = _recover_file_candidates_from_raw_image_bytes(
             source_data,
             disk_format_hint=disk_format_hint,
             diagnostics=diagnostics,
@@ -10683,14 +10821,19 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 with open(prepared, "rb") as handle:
                     prepared_data = handle.read()
                 if prepared_data != source_data:
-                    recovered_files = _dedupe_recovered_files(
-                        recovered_files + _recover_files_from_raw_image_bytes(
+                    recovered_files.extend(
+                        _recover_file_candidates_from_raw_image_bytes(
                             prepared_data,
                             disk_format_hint=disk_format_hint,
                         )
                     )
             except OSError:
                 pass
+
+        # Compare original bytes from both scans once, before generating unique
+        # filenames/order keys that would make identical copies look different.
+        dedupe_diagnostics = diagnostics if diagnostics is not None else {}
+        recovered_files = _dedupe_recovered_files(recovered_files, diagnostics=dedupe_diagnostics)
 
         if diagnostics is not None:
             diagnostics.update(_recovery_file_kind_counts(recovered_files))
@@ -10729,6 +10872,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             f"Recovery created an editable image copy from {len(recovered_files)} recovered file(s). "
             "Some names, order, or damaged song data may be missing."
         )
+        ambiguities = _format_eseq_recovery_ambiguities(dedupe_diagnostics.get("eseq_recovery_ambiguities"))
+        if ambiguities:
+            note += "\n" + "\n".join(ambiguities)
         if extra_note:
             note += f" {str(extra_note).strip()}"
         if diagnostics is not None:
@@ -10743,7 +10889,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             source_kind="recovered_image",
             source_name=source_name,
             gw_sector_reports=gw_sector_reports,
-            recovery_diagnostics=diagnostics,
+            recovery_diagnostics=dedupe_diagnostics,
         )
 
     @property

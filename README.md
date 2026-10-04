@@ -21,9 +21,9 @@
   · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-Development version: `0.8.8`
+Development version: `0.8.9`
 
-This checkout includes changes planned for 0.8.8. The download link above points
+This checkout includes changes planned for 0.8.9. The download link above points
 to the latest published release; see its release notes for shipped features.
 
 APS MIDI Prep Tool is a desktop app for Yamaha Disklavier and other legacy

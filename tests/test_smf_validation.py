@@ -15,6 +15,7 @@ from aps_midi_prep_tool_app.eseq_converter import (
 from aps_midi_prep_tool_app.floppy_image import FloppyImageError
 from aps_midi_prep_tool_app.midi_channel_merger import merge_midi_channels_to_channel0_bytes
 from aps_midi_prep_tool_app.midi_type0_converter import _convert_midi_bytes_to_type0
+from aps_midi_prep_tool_app.smf import parse_smf_layout
 
 
 _TRACK = b"\x00\x92\x3c\x40\x60\x82\x3c\x00\x00\xff\x2f\x00"
@@ -98,6 +99,30 @@ def test_extended_headers_and_unknown_chunks_survive_discovery_and_conversion(tm
         assert result.count(unknown) == 2
     eseq = convert_midi_bytes_to_eseq_bytes(source)
     assert parse_eseq_bytes(eseq).events
+
+
+@pytest.mark.parametrize("convert", [
+    _convert_midi_bytes_to_type0,
+    convert_midi_bytes_to_eseq_bytes,
+])
+@pytest.mark.parametrize("trailing_unknown", [b"", _chunk(b"JUNK", b"Trailing metadata")])
+def test_converters_reject_undeclared_trailing_track(convert, trailing_unknown):
+    extra_note_track = b"\x00\x92\x47\x40\x60\x82\x47\x00\x00\xff\x2f\x00"
+    source = _midi() + trailing_unknown + _chunk(b"MTrk", extra_note_track)
+
+    with pytest.raises(ValueError, match="undeclared trailing MTrk chunk"):
+        convert(source)
+
+
+def test_default_smf_layout_leaves_undeclared_trailing_track_opaque():
+    declared_source = _midi()
+    source = declared_source + _chunk(b"MTrk", _TRACK)
+
+    header, chunks, trailing_start = parse_smf_layout(source)
+
+    assert header.track_count == 1
+    assert [chunk["id"] for chunk in chunks] == [b"MTrk"]
+    assert trailing_start == len(declared_source)
 
 
 def test_valid_type2_is_discovered_but_not_flattened_by_converters(tmp_path):

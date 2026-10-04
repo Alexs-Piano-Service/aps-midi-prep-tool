@@ -5,7 +5,7 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [0.8.8] - Unreleased
+## [0.8.9] - Unreleased
 
 ### Added
 
@@ -290,7 +290,7 @@ with release sections grouped by version and date.
 - Modern MIDI destinations allow printable Latin-1 title edits, including
   accented names. Legacy destinations keep conservative ASCII validation.
   Unedited titles retain their original bytes during folder export.
-- Development metadata advances to 0.8.8 after the published 0.8.3 release.
+- Development metadata advances to 0.8.9 after the published 0.8.3 release.
   Release checks reject stale planned-changes wording in a released README.
 - Windows file-level floppy saves retry an unsupported free-space query with
   the older Windows API. Initial directory and file-metadata errors stop saving
