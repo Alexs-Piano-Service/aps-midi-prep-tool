@@ -65,9 +65,11 @@ def _run(tmp_path, *, reports=None, config=None, response=None, exception=None):
     }
     if exception:
         request["exception"] = exception
+    # This offline harness needs only core PHP, not host php.ini/extensions.
+    # Allow for a slow first PHP launch on Windows CI while still bounding hangs.
     process = subprocess.run(
-        [PHP, "-r", HARNESS, str(HELPER)],
-        input=json.dumps(request), capture_output=True, text=True, timeout=10,
+        [PHP, "-n", "-r", HARNESS, str(HELPER)],
+        input=json.dumps(request), capture_output=True, text=True, timeout=30,
         check=True,
     )
     assert not process.stderr
