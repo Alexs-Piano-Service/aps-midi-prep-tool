@@ -379,7 +379,8 @@ def bulk_extract_images(
                         extracted_midi_number += bool(saved.get("renamed_midi"))
                         files_reused += len(saved.get("outputs", []))
                         continue
-                    image_record["entries"][entry.path] = {"state": "failed", "outputs": []}
+                    previous_outputs = image_record["entries"].get(entry.path, {}).get("outputs", [])
+                    image_record["entries"][entry.path] = {"state": "failed", "outputs": previous_outputs}
                     job.save()
                 notify(
                     image_index,
@@ -420,6 +421,7 @@ def bulk_extract_images(
 
                 written_paths = []
                 converted_paths = set()
+                conversion_failed = False
                 rename_midi_entry = False
                 if convert_entry:
                     converted_song_number += 1
@@ -477,9 +479,13 @@ def bulk_extract_images(
                         files_converted += 1
                         written_paths.append(midi_path)
                         converted_paths.add(midi_path)
+                    except FloppyOperationCancelled:
+                        raise
                     except Exception as exc:
                         errors.append(f"{image_name} / {entry.path} (E-SEQ conversion): {exc}")
-                        continue
+                        conversion_failed = True
+                        if not include_eseq_sources:
+                            continue
 
                 if not convert_entry and long_midi_filenames:
                     try:
@@ -514,20 +520,31 @@ def bulk_extract_images(
                         )
 
                 if not convert_entry or include_eseq_sources:
+                    _raise_if_cancelled(cancel_callback)
                     try:
-                        os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-                        if os.path.lexists(destination_path):
-                            stem, extension = os.path.splitext(destination_path)
-                            suffix = 2
-                            while os.path.lexists(f"{stem}_{suffix}{extension}"):
-                                suffix += 1
-                            destination_path = f"{stem}_{suffix}{extension}"
-                        if job is not None:
-                            job.safe_output_path(destination_path)
-                        with open(extracted_path, "rb") as handle:
-                            atomic_write_bytes(destination_path, handle.read(), replace_existing=False)
-                        files_extracted += 1
+                        retained_source = (
+                            job.verified_source_path(image_name, entry.path)
+                            if job is not None and convert_entry else None
+                        )
+                        if retained_source is not None:
+                            destination_path = retained_source
+                            files_reused += 1
+                        else:
+                            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+                            if os.path.lexists(destination_path):
+                                stem, extension = os.path.splitext(destination_path)
+                                suffix = 2
+                                while os.path.lexists(f"{stem}_{suffix}{extension}"):
+                                    suffix += 1
+                                destination_path = f"{stem}_{suffix}{extension}"
+                            if job is not None:
+                                job.safe_output_path(destination_path)
+                            with open(extracted_path, "rb") as handle:
+                                atomic_write_bytes(destination_path, handle.read(), replace_existing=False)
+                            files_extracted += 1
                         written_paths.append(destination_path)
+                    except FloppyOperationCancelled:
+                        raise
                     except Exception as exc:
                         errors.append(f"{image_name} / {entry.path}: {exc}")
                         continue
@@ -547,7 +564,8 @@ def bulk_extract_images(
                         job.finish_entry(
                             image_name, entry.path,
                             [(path, path in converted_paths) for path in written_paths],
-                            converted=convert_entry, renamed_midi=rename_midi_entry,
+                            converted=convert_entry and not conversion_failed,
+                            renamed_midi=rename_midi_entry, failed=conversion_failed,
                         )
                     except (OSError, ValueError) as exc:
                         errors.append(f"{image_name} / {entry.path} (output verification): {exc}")

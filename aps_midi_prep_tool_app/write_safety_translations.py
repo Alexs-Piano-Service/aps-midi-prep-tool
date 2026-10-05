@@ -8,6 +8,32 @@ def _add(source, *values):
     WRITE_SAFETY_TRANSLATIONS[source] = dict(zip(_LANGUAGES, values, strict=True))
 
 
+_add("Verifying converted image contents...",
+     "Verificando el contenido de la imagen convertida...",
+     "Vérification du contenu de l’image convertie...",
+     "Inhalt des konvertierten Images wird überprüft...",
+     "Verifica del contenuto dell’immagine convertita...",
+     "Verificando o conteúdo da imagem convertida...",
+     "Проверка на съдържанието на преобразувания образ...",
+     "Inhoud van het geconverteerde image controleren...",
+     "Sprawdzanie zawartości przekonwertowanego obrazu...",
+     "変換したイメージの内容を検証しています...",
+     "변환된 이미지 내용을 확인하는 중...",
+     "正在验证转换后的映像内容...")
+_add("Converted image verification failed: sector data differs from the captured floppy.",
+     "Error al verificar la imagen convertida: los datos de los sectores difieren de la captura del disquete.",
+     "Échec de la vérification de l’image convertie : les données des secteurs diffèrent de la capture de la disquette.",
+     "Überprüfung des konvertierten Images fehlgeschlagen: Die Sektordaten unterscheiden sich vom erfassten Disketteninhalt.",
+     "Verifica dell’immagine convertita non riuscita: i dati dei settori differiscono dall’acquisizione del floppy.",
+     "Falha na verificação da imagem convertida: os dados dos setores diferem da captura do disquete.",
+     "Неуспешна проверка на преобразувания образ: данните на секторите се различават от заснетата дискета.",
+     "Verificatie van het geconverteerde image mislukt: de sectorgegevens verschillen van de vastgelegde diskette.",
+     "Weryfikacja przekonwertowanego obrazu nie powiodła się: dane sektorów różnią się od przechwyconej dyskietki.",
+     "変換したイメージの検証に失敗しました。セクターデータが取り込んだフロッピーディスクと異なります。",
+     "변환된 이미지 확인에 실패했습니다. 섹터 데이터가 캡처한 플로피와 다릅니다.",
+     "转换后的映像验证失败：扇区数据与采集的软盘不同。")
+
+
 _add("The prepared songs do not fit on one floppy disk. Remove songs from the list and try again.",
      "Las canciones preparadas no caben en un solo disquete. Quite canciones de la lista e inténtelo de nuevo.",
      "Les morceaux préparés ne tiennent pas sur une seule disquette. Retirez des morceaux de la liste et réessayez.",

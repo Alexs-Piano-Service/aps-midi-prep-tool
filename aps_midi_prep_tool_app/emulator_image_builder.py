@@ -110,6 +110,7 @@ class EmulatorImageBuildResult:
     contents_verified: bool = False
     manifest_path: str = ""
     retired_paths: tuple[str, ...] = ()
+    untracked_paths: tuple[str, ...] = ()
 
     @property
     def midi_files_found(self):
@@ -1278,6 +1279,49 @@ def _plan_set_outputs(directory, prefix, starting_number, candidates):
     return manifest_path, EmulatorOutputChanges(existing, retired), expected
 
 
+def _untracked_legacy_images(directory, prefix, starting_number, candidates):
+    """Find plausible older contiguous sets for warnings, never for ownership."""
+    recorded = set()
+    images = {extension: {} for extension in EMULATOR_IMAGE_EXTENSIONS}
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            manifest = re.fullmatch(rf"\.aps-emulator-{re.escape(prefix)}-(\d{{4}})\.json", entry.name)
+            if manifest:
+                try:
+                    owned, _digest = _read_set_manifest(entry.path, prefix, int(manifest[1]))
+                except FloppyImageError:
+                    # Invalid records cannot hide untracked disks. Publication's
+                    # ownership checks remain the responsibility of _plan_set_outputs.
+                    continue
+                recorded.update(os.path.normcase(name) for name in owned)
+                continue
+            match = re.fullmatch(
+                rf"{re.escape(prefix)}(\d{{4}})\.(img|hfe)", entry.name, re.IGNORECASE,
+            )
+            if match and entry.is_file(follow_symlinks=False):
+                images[match[2].lower()].setdefault(int(match[1]), []).append(entry.path)
+    current = {os.path.normcase(os.path.basename(path)) for path in candidates}
+    untracked = []
+    for extension in sorted(images):
+        number = starting_number
+        while number in images[extension]:
+            for path in sorted(images[extension][number]):
+                name = os.path.normcase(os.path.basename(path))
+                if name not in current and name not in recorded:
+                    untracked.append(path)
+            number += 1
+    return tuple(untracked)
+
+
+def _legacy_set_warnings(paths):
+    return tuple(
+        f"Untracked older emulator disk kept: {os.path.basename(path)}. "
+        "It may appear as an extra disk on the emulator. "
+        "Move it out of the output folder if it is no longer needed."
+        for path in paths
+    )
+
+
 def _build_emulator_song_lists_text(
     raw_images,
     final_paths,
@@ -1569,7 +1613,12 @@ def build_emulator_disk_images(
                         )
                     ),
                 ) for folder in album_order),
-                warnings=tuple(f"{song.image_path}: {song.warning}" for song in prepared_songs if song.warning),
+                warnings=(
+                    tuple(f"{song.image_path}: {song.warning}" for song in prepared_songs if song.warning)
+                    + _legacy_set_warnings(_untracked_legacy_images(
+                        output_directory, image_prefix, starting_number, preview_paths,
+                    ))
+                ),
                 album_titles=dict(reviewed_album_titles),
                 title_overrides=dict(reviewed_song_titles),
                 output_content=output_content,
@@ -1634,6 +1683,10 @@ def build_emulator_disk_images(
         manifest_path, existing_paths, expected_hashes = _plan_set_outputs(
             output_directory, image_prefix, starting_number, output_candidates,
         )
+        untracked_paths = _untracked_legacy_images(
+            output_directory, image_prefix, starting_number, output_candidates,
+        )
+        warnings += _legacy_set_warnings(untracked_paths)
         if existing_paths:
             overwrite_approved = bool(overwrite_existing)
             if not overwrite_approved and overwrite_callback is not None:
@@ -1789,6 +1842,7 @@ def build_emulator_disk_images(
             contents_verified=True,
             manifest_path=manifest_path,
             retired_paths=existing_paths.retired_paths,
+            untracked_paths=untracked_paths,
         )
     finally:
         shutil.rmtree(temp_directory, ignore_errors=True)

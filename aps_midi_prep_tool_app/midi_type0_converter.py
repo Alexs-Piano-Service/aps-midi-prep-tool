@@ -157,6 +157,8 @@ def _parse_track_events(track_data):
             if pos + data_len > end:
                 raise ValueError("Channel event exceeds track bounds.")
             data = track_data[pos:pos + data_len]
+            if any(byte >= 0x80 for byte in data):
+                raise ValueError("Invalid data byte in a MIDI channel event.")
             pos += data_len
             raw = bytes([status]) + data
             events.append((abs_tick, order, raw))
@@ -173,6 +175,8 @@ def _parse_track_events(track_data):
         if pos + data_len > end:
             raise ValueError("System message exceeds track bounds.")
         data = track_data[pos:pos + data_len]
+        if any(byte >= 0x80 for byte in data):
+            raise ValueError("Invalid data byte in a MIDI system message.")
         pos += data_len
         raw = bytes([status]) + data
         events.append((abs_tick, order, raw))

@@ -134,8 +134,14 @@ def test_drive_capture_stages_raw_and_converted_outputs_beside_destination(
         stages.append(destination)
         destination.write_bytes(b"converted floppy")
 
+    def decode(source, destination, selected_format, **_kwargs):
+        assert selected_format == disk_format.key
+        assert Path(source).read_bytes() == b"converted floppy"
+        Path(destination).write_bytes(b"captured floppy")
+
     monkeypatch.setattr(image, "_read_block_device", read)
     monkeypatch.setattr(image, "_write_image_direct", convert)
+    monkeypatch.setattr(image, "_gw_convert", decode)
 
     assert image.capture_floppy_drive_image(
         image.FloppyDriveInfo("fake-drive", disk_format.size_bytes), output, disk_format,

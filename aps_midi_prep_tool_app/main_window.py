@@ -9064,6 +9064,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.diskLoadFailureTitle = "Disk Load Failed"
         self.diskLoadShouldOfferCapture = False
         self.diskLoadContext = {}
+        self.lastDiskReadDiagnostics = {}
+        self.lastDiskReadContext = {}
         self.pendingFloppyReadConvertToMidi = False
         self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
@@ -12984,6 +12986,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _on_emulator_image_success(self, result):
         self._close_emulator_image_progress()
         warnings = tuple(getattr(result, "warnings", ()) or ())
+        untracked_paths = tuple(getattr(result, "untracked_paths", ()) or ())
         summary = self._t(
             "emulator.complete.message",
             files=result.files_prepared,
@@ -12996,10 +12999,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 "emulator.complete.song_list",
                 path=result.song_list_path,
             )
-        if warnings:
+        if len(warnings) > len(untracked_paths):
             summary += "\n\n" + self._lt(
                 "Some MIDI files were preserved with warnings and may not play correctly. "
                 "See Details for affected files."
+            )
+        if untracked_paths:
+            summary += "\n\n" + self._lt(
+                "Untracked older emulator disks were kept in the output folder. "
+                "They may appear as extra disks on the emulator. See Details for filenames."
             )
         if getattr(result, "contents_verified", False):
             summary += "\n\n" + self._lt("Delivered image contents verified. Playback on your piano has not been tested.")
@@ -13942,6 +13950,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
             return False
 
+        self.lastDiskReadDiagnostics = {}
+        self.lastDiskReadContext = {}
+        if load_kind.startswith("floppy"):
+            self.lastDiskRecoveryDiagnostics = {}
+            self.diskRecoveryContext = {}
         self._reset_gw_sector_report_dedupe()
         progress_dialog = QProgressDialog(progress_title, "Cancel", 0, progress_total, self)
         progress_dialog.setWindowTitle(progress_title)
@@ -14006,6 +14019,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @zip_import_operation
     def _on_disk_load_success(self, session, listing):
+        self._remember_disk_read_diagnostics(session)
         read_kind = self.diskLoadContext.get("load_kind", "")
         if self.diskLoadProgressDialog is not None:
             self.diskLoadProgressDialog.close()
@@ -16002,6 +16016,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @zip_import_operation
     def _on_disk_load_failure(self, message):
+        self._remember_disk_read_diagnostics(getattr(self, "diskLoadWorker", None))
         if self.diskLoadProgressDialog is not None:
             self.diskLoadProgressDialog.close()
             self.diskLoadProgressDialog = None
@@ -16140,6 +16155,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.diskLoadProgressDialog.close()
             self.diskLoadProgressDialog = None
         details = dict(details or {})
+        self._remember_disk_read_diagnostics(details.get("read_diagnostics"))
         message = details.get("message", "")
         if self._message_indicates_cancelled(message):
             self._on_disk_load_cancelled(message)
@@ -16314,6 +16330,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
 
     def _on_disk_load_cancelled(self, _message):
+        self._remember_disk_read_diagnostics(getattr(self, "diskLoadWorker", None))
         if self.diskLoadProgressDialog is not None:
             self.diskLoadProgressDialog.close()
             self.diskLoadProgressDialog = None
@@ -16477,6 +16494,16 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     self.lastPartialRecoveryDiagnostics = diagnostics
                 return diagnostics
         return dict(getattr(self, "lastDiskRecoveryDiagnostics", {}) or {})
+
+    def _remember_disk_read_diagnostics(self, *sources):
+        for source in sources:
+            value = source if isinstance(source, dict) else getattr(source, "read_diagnostics", None)
+            diagnostics = self._json_safe_disk_recovery_diagnostics(value)
+            if diagnostics:
+                self.lastDiskReadDiagnostics = diagnostics
+                self.lastDiskReadContext = dict(getattr(self, "diskLoadContext", {}) or {})
+                return diagnostics
+        return dict(getattr(self, "lastDiskReadDiagnostics", {}) or {})
 
     def save_partial_recovery_capture(self):
         from .floppy_image import save_floppy_recovery_capture
@@ -25237,6 +25264,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._log_event("Floppy", "Read options cancelled", default_recovery=default_recovery)
             return
 
+        self.lastDiskReadDiagnostics = {}
+        self.lastDiskReadContext = {}
         self.pendingFloppyReadConvertToMidi = bool(options.get("convert_to_midi"))
         self.pendingFloppyReadLongFilenames = bool(options.get("long_filenames"))
         self.pendingFloppyReadTrimTitles = bool(options.get("trim_titles"))
@@ -25287,6 +25316,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             QMessageBox.information(self, "Busy", "Please wait for disk processing to finish.")
             return
 
+        if source_kind.startswith("floppy") and source_kind != "floppy_usb_recovery":
+            self.lastDiskReadDiagnostics = {}
+            self.lastDiskReadContext = {}
+            self.lastDiskRecoveryDiagnostics = {}
+            self.diskRecoveryContext = {}
         self._reset_gw_sector_report_dedupe()
         is_image_conversion = source_kind == "image_convert"
         is_logical_recovery = source_kind == "floppy_usb_recovery"
@@ -30874,6 +30908,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             "image": image_context,
         }
         if include_floppy_recovery:
+            read_diagnostics = self._json_safe_disk_recovery_diagnostics(
+                getattr(self, "lastDiskReadDiagnostics", {})
+            )
+            if read_diagnostics:
+                context["floppy_read"] = read_diagnostics
             save_diagnostics = self._json_safe_disk_recovery_diagnostics(
                 getattr(self.image_session or getattr(self, "lastFileSaveSession", None), "last_floppy_save_diagnostics", {})
             )
@@ -31011,8 +31050,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         recovery_diagnostics = self._json_safe_disk_recovery_diagnostics(
             getattr(self, "lastDiskRecoveryDiagnostics", {})
         )
+        read_diagnostics = self._json_safe_disk_recovery_diagnostics(
+            getattr(self, "lastDiskReadDiagnostics", {})
+        )
         recovery_context = getattr(self, "diskRecoveryContext", {}) or {}
         recovery_is_floppy = str(recovery_context.get("load_kind") or "").startswith("floppy")
+        read_context = getattr(self, "lastDiskReadContext", {}) or {}
+        read_is_floppy = str(read_context.get("load_kind") or "").startswith("floppy")
 
         # Native group-box titles cannot wrap and can make the scroll body
         # wider than its viewport with translated text and larger font metrics.
@@ -31026,7 +31070,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._lt("Floppy context (optional)"), floppy_context_group,
         )
         floppy_context_checkbox.setChecked(
-            bool(recovery_diagnostics) or recovery_is_floppy or self.is_floppy_mode()
+            bool(recovery_diagnostics or read_diagnostics) or recovery_is_floppy or read_is_floppy or self.is_floppy_mode()
         )
         floppy_group_layout.addWidget(floppy_context_checkbox)
         floppy_context_fields = QWidget(floppy_context_group)
@@ -31093,16 +31137,17 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         content_layout.addWidget(floppy_context_group)
 
         include_recovery_diagnostics_checkbox = None
-        if recovery_diagnostics:
+        if recovery_diagnostics or read_diagnostics:
             include_recovery_diagnostics_checkbox = WrappedCheckBox(
-                "Include floppy recovery diagnostics",
+                "Include floppy read and recovery diagnostics",
                 dialog,
             )
             include_recovery_diagnostics_checkbox.setChecked(True)
             content_layout.addWidget(include_recovery_diagnostics_checkbox)
 
             recovery_diagnostics_note = QLabel(
-                "Includes drive details, sector counts, format and scan results, and recovery timing. "
+                "Includes drive details, read failures, requested offsets and sizes, sector counts, "
+                "format and scan results, and recovery timing. "
                 "Raw floppy image bytes are never included.",
                 dialog,
             )

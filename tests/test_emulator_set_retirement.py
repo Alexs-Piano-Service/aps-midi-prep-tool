@@ -1,4 +1,4 @@
-"""Rebuilding a recorded emulator set retires only its unchanged owned files."""
+"""Rebuilds retire recorded output and warn about preserved legacy disks."""
 
 import hashlib
 import json
@@ -109,8 +109,93 @@ def test_unrecorded_old_files_are_never_assumed_to_belong_to_the_set(collection)
     unrelated.write_bytes(b"unrecorded image")
     _build(collection)
     (source / "Album 2" / "song.mid").unlink()
-    _build(collection, overwrite_existing=True)
+    result = _build(collection, overwrite_existing=True)
     assert unrelated.read_bytes() == b"unrecorded image"
+    assert not result.warnings
+
+
+@pytest.mark.parametrize("include_song_lists", [False, True])
+def test_rebuilding_pre_manifest_set_warns_about_preserved_stale_disks(collection, include_song_lists):
+    source, output = collection
+    previous = _build(collection, include_song_lists=include_song_lists)
+    Path(previous.manifest_path).unlink()  # Output from an older APS version.
+    stale = Path(previous.output_paths[-1])
+    stale_bytes = stale.read_bytes()
+    (source / "Album 2" / "song.mid").unlink()
+    previews = []
+
+    def review(preview):
+        previews.append(preview)
+        return {"action": "build"}
+
+    result = _build(collection, overwrite_existing=True, review_callback=review,
+                    include_song_lists=include_song_lists)
+    assert result.images_created == 2
+    assert result.retired_paths == ()
+    assert result.untracked_paths == (str(stale),)
+    assert stale.read_bytes() == stale_bytes
+    assert any("DSKA0002.img" in warning and "untracked" in warning.lower()
+               for warning in result.warnings)
+    assert any("DSKA0002.img" in warning for warning in previews[0].warnings)
+    manifest = json.loads(Path(result.manifest_path).read_text())
+    assert stale.name not in {item["filename"] for item in manifest["artifacts"]}
+    if include_song_lists:
+        assert "DSKA0002.img" in Path(result.song_list_path).read_text()
+
+    # The new manifest must not hide the leftover disk on subsequent builds.
+    rebuilt = _build(collection, overwrite_existing=True)
+    assert any("DSKA0002.img" in warning for warning in rebuilt.warnings)
+    assert stale.read_bytes() == stale_bytes
+
+
+def test_legacy_warning_excludes_disks_owned_by_a_neighboring_recorded_set(collection):
+    source, output = collection
+    legacy = _build(collection)
+    Path(legacy.manifest_path).unlink()
+    neighbor = _build(collection, starting_number=3)
+    neighbor_bytes = {path: Path(path).read_bytes() for path in neighbor.output_paths}
+    (source / "Album 2" / "song.mid").unlink()
+    rebuilt = _build(collection, overwrite_existing=True)
+    assert rebuilt.untracked_paths == (legacy.output_paths[-1],)
+    assert len(rebuilt.warnings) == 1
+    assert {path: Path(path).read_bytes() for path in neighbor.output_paths} == neighbor_bytes
+
+
+@pytest.mark.parametrize("legacy_filename_case", ["generated", "upper_extension", "lower_prefix"])
+def test_legacy_format_change_warns_about_all_untracked_images_without_removing_them(collection, legacy_filename_case):
+    source, output = collection
+    previous = _build(collection, output_ext="hfe")
+    Path(previous.manifest_path).unlink()
+    legacy_paths = []
+    for path in previous.output_paths:
+        image = Path(path)
+        if legacy_filename_case == "upper_extension":
+            image = image.rename(image.with_suffix(".HFE"))
+        elif legacy_filename_case == "lower_prefix":
+            image = image.rename(image.with_name(image.name.lower()))
+        legacy_paths.append(str(image))
+    legacy_paths = tuple(legacy_paths)
+    legacy_bytes = {path: Path(path).read_bytes() for path in legacy_paths}
+    (source / "Album 2" / "song.mid").unlink()
+    rebuilt = _build(collection)
+    assert rebuilt.untracked_paths == legacy_paths
+    assert rebuilt.retired_paths == ()
+    assert all(Path(path).name in warning
+               for path, warning in zip(legacy_paths, rebuilt.warnings))
+    assert {path: Path(path).read_bytes() for path in legacy_paths} == legacy_bytes
+
+
+def test_legacy_warning_scan_does_not_trust_or_fail_on_corrupt_foreign_manifest(collection):
+    _source, output = collection
+    previous = _build(collection)
+    Path(previous.manifest_path).unlink()
+    foreign = output / ".aps-emulator-DSKA-0009.json"
+    foreign.write_bytes(b"damaged ownership record")
+    before = _contents(output)
+    assert builder._untracked_legacy_images(output, "DSKA", 0, previous.output_paths[:2]) == (
+        previous.output_paths[-1],
+    )
+    assert _contents(output) == before
 
 
 @pytest.mark.parametrize("bad_name", ["../outside.img", "/absolute.img", "personal.txt", "OTHER0000.img"])

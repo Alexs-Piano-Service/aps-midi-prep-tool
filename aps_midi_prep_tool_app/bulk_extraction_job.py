@@ -305,7 +305,21 @@ class ExtractionJob:
                 return False
         return True
 
-    def finish_entry(self, image_name, entry_name, paths, *, converted=False, renamed_midi=False):
+    def verified_source_path(self, image_name, entry_name):
+        """Reuse a retained source without considering its conversion complete."""
+        entry = self.image(image_name)["entries"].get(entry_name, {})
+        for output in entry.get("outputs", []):
+            if output.get("converted"):
+                continue
+            try:
+                path = self.safe_output_path(os.path.join(self.root, output["path"]))
+                if file_digest(path, self.check_cancelled) == output["sha256"]:
+                    return path
+            except (OSError, ValueError, KeyError):
+                continue
+        return None
+
+    def finish_entry(self, image_name, entry_name, paths, *, converted=False, renamed_midi=False, failed=False):
         outputs = []
         for path, is_converted in paths:
             path = self.safe_output_path(path)
@@ -319,7 +333,7 @@ class ExtractionJob:
         if not outputs and not _valid_skipped_entry(self.data, entry_name, {"reason": "eseq_directory"}):
             raise ValueError(f"No output was verified for {entry_name}")
         self.image(image_name)["entries"][entry_name] = {
-            "state": "complete" if outputs else "skipped", "outputs": outputs,
+            "state": "failed" if failed else ("complete" if outputs else "skipped"), "outputs": outputs,
             "reason": "" if outputs else "eseq_directory",
             "converted": converted, "renamed_midi": renamed_midi,
         }

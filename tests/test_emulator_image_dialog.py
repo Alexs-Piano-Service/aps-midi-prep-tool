@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from aps_midi_prep_tool_app.main_window import MidiTitleWindow
-from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
+from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, translate_text
 from aps_midi_prep_tool_app.preparation_profiles import SETTING_PROFILE, get_preparation_profile
 from aps_midi_prep_tool_app.ui_utils import center_dialog_on_parent
 
@@ -260,6 +260,55 @@ def test_completed_build_shows_all_file_warnings_even_without_song_lists(tmp_pat
         assert all(warning in detail for warning in warnings)
         assert all(warning in logged[0]["warnings"] for warning in warnings)
         assert bool("song-lists.txt" in summary) == include_song_lists
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("language", [item.code for item in SUPPORTED_LANGUAGES])
+@pytest.mark.parametrize("with_song_warning", [False, True])
+def test_completed_legacy_rebuild_visibly_warns_about_kept_disk_filenames(tmp_path, language, with_song_warning):
+    app = QApplication.instance() or QApplication([])
+    window = _EmulatorDialogHarness(tmp_path)
+    window.currentLanguage = language
+    window.status_label = QLabel(window)
+    window._close_emulator_image_progress = lambda: None
+    window._log_event = lambda *args, **kwargs: None
+    messages = []
+    window._exec_child_dialog = lambda message: messages.append(message)
+    name = "DSKA0002.img"
+    warning_template = (
+        "Untracked older emulator disk kept: {name}. It may appear as an extra disk on the emulator. "
+        "Move it out of the output folder if it is no longer needed."
+    )
+    warnings = (("DSKA0000.img / SONG.MID: damaged source preserved",) if with_song_warning else ())
+    warnings += (warning_template.format(name=name),)
+    result = SimpleNamespace(
+        source_directory=str(tmp_path), output_directory=str(tmp_path / "output"),
+        files_prepared=1, converted_files=0, images_created=2,
+        output_content="midi", shuffled=False, output_paths=("DSKA0000.img", "DSKA0001.img"),
+        song_list_path="", warnings=warnings, untracked_paths=(str(tmp_path / "output" / name),),
+    )
+    stale_summary = (
+        "Untracked older emulator disks were kept in the output folder. "
+        "They may appear as extra disks on the emulator. See Details for filenames."
+    )
+    music_summary = (
+        "Some MIDI files were preserved with warnings and may not play correctly. "
+        "See Details for affected files."
+    )
+    try:
+        MidiTitleWindow._on_emulator_image_success(window, result)
+        message, = messages
+        assert message.icon() == QMessageBox.Warning
+        assert translate_text(stale_summary, language) in message.text()
+        assert name in message.detailedText()
+        assert translate_text(warning_template, language, name=name) in message.detailedText()
+        assert (translate_text(music_summary, language) in message.text()) == with_song_warning
+        if language != "en":
+            assert translate_text(stale_summary, language) != stale_summary
+            assert translate_text(warning_template, language, name=name) != warning_template.format(name=name)
     finally:
         window.close()
         window.deleteLater()

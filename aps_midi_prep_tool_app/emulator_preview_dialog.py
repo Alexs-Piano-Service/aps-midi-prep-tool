@@ -28,6 +28,7 @@ _EMULATOR_DIAGNOSTICS = (
     "The preserved MIDI contains unreadable data and cannot be prepared as MIDI Type 0.",
     "Preparation did not produce MIDI Type 0.",
     "Preparation did not produce a valid {format} file for '{name}'.",
+    "Untracked older emulator disk kept: {name}. It may appear as an extra disk on the emulator. Move it out of the output folder if it is no longer needed.",
 )
 
 

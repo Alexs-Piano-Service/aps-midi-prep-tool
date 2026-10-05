@@ -1520,6 +1520,32 @@ DIALOG_TEXT_TRANSLATIONS = {
         "ko": "플로피 복구 진단 정보 포함",
         "zh-Hans": "包含软盘恢复诊断信息"
     },
+    "Include floppy read and recovery diagnostics": {
+        "es": "Incluir datos de diagnóstico de lectura y recuperación del disquete",
+        "fr": "Inclure les diagnostics de lecture et de récupération de disquette",
+        "de": "Diagnosedaten zum Lesen und Wiederherstellen der Diskette einbeziehen",
+        "it": "Includi dati diagnostici di lettura e recupero floppy",
+        "pt-BR": "Incluir diagnóstico de leitura e recuperação do disquete",
+        "bg": "Включване на диагностика от четенето и възстановяването на дискетата",
+        "nl": "Diagnostiek van floppylezen en floppyherstel opnemen",
+        "pl": "Dołącz diagnostykę odczytu i odzyskiwania dyskietki",
+        "ja": "フロッピー読み取りと復旧の診断情報を含める",
+        "ko": "플로피 읽기 및 복구 진단 정보 포함",
+        "zh-Hans": "包含软盘读取和恢复诊断信息"
+    },
+    "Includes drive details, read failures, requested offsets and sizes, sector counts, format and scan results, and recovery timing. Raw floppy image bytes are never included.": {
+        "es": "Incluye datos de la unidad, fallos de lectura, posiciones y tamaños solicitados, recuentos de sectores, resultados de formato y análisis, y tiempos de recuperación. Nunca incluye la imagen del disco.",
+        "fr": "Inclut les détails du lecteur, les échecs de lecture, les positions et tailles demandées, le nombre de secteurs, les résultats de format et d’analyse, ainsi que les durées de récupération. L’image du disque n’est jamais incluse.",
+        "de": "Enthält Laufwerksangaben, Lesefehler, angeforderte Positionen und Größen, Sektorzahlen, Format- und Scanergebnisse sowie Wiederherstellungszeiten. Das Disketten-Image selbst wird nie mitgesendet.",
+        "it": "Include dettagli dell’unità, errori di lettura, posizioni e dimensioni richieste, conteggi dei settori, risultati del formato e della scansione, e tempi di recupero. L’immagine del disco non viene mai inclusa.",
+        "pt-BR": "Inclui detalhes da unidade, falhas de leitura, posições e tamanhos solicitados, contagens de setores, resultados de formato e análise e tempos de recuperação. A imagem do disco nunca é incluída.",
+        "bg": "Включва данни за устройството, грешки при четене, заявени позиции и размери, брой сектори, резултати за формата и сканирането и времена на възстановяване. Самият дисков образ никога не се включва.",
+        "nl": "Bevat stationsgegevens, leesfouten, aangevraagde posities en groottes, sectoraantallen, formaat- en scanresultaten en hersteltijden. De diskimage zelf wordt nooit meegestuurd.",
+        "pl": "Zawiera dane napędu, błędy odczytu, żądane pozycje i rozmiary, liczby sektorów, wyniki rozpoznawania formatu i skanowania oraz czasy odzyskiwania. Sam obraz dysku nigdy nie jest dołączany.",
+        "ja": "ドライブ情報、読み取りエラー、要求した位置とサイズ、セクター数、形式とスキャンの結果、復旧時間を含めます。ディスクイメージ自体は一切含めません。",
+        "ko": "드라이브 정보, 읽기 오류, 요청한 위치와 크기, 섹터 수, 형식 및 스캔 결과, 복구 시간이 포함됩니다. 디스크 이미지 자체는 절대 포함되지 않습니다.",
+        "zh-Hans": "包含驱动器信息、读取失败、请求的位置和大小、扇区数量、格式和扫描结果以及恢复耗时。绝不会包含磁盘映像本身。"
+    },
     "Includes drive details, sector counts, format and scan results, and recovery timing. Raw floppy image bytes are never included.": {
         "en": "Includes drive details, sector counts, format and scan results, and recovery times. The disk image itself is never included.",
         "es": "Incluye datos de la unidad, recuentos de sectores, resultados de formato y análisis, y tiempos de recuperación. Nunca incluye la imagen del disco.",

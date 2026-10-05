@@ -4,6 +4,32 @@ from .conversion_dialog_translations import CONVERSION_DIALOG_TEXT_TRANSLATIONS
 from .floppy_guidance_translations import FLOPPY_GUIDANCE_TRANSLATIONS
 
 WORKFLOW_TEXT_TRANSLATIONS = {
+    "Untracked older emulator disks were kept in the output folder. They may appear as extra disks on the emulator. See Details for filenames.": {
+        "es": "Se conservaron discos antiguos del emulador sin registro en la carpeta de salida. Pueden aparecer como discos adicionales en el emulador. Consulte los nombres de archivo en Detalles.",
+        "fr": "Des anciens disques d'émulateur non répertoriés ont été conservés dans le dossier de sortie. Ils peuvent apparaître comme des disques supplémentaires sur l'émulateur. Consultez les noms de fichiers dans Détails.",
+        "de": "Nicht erfasste ältere Emulator-Disketten wurden im Ausgabeordner beibehalten. Sie können als zusätzliche Disketten im Emulator erscheinen. Die Dateinamen finden Sie unter Details.",
+        "it": "I vecchi dischi dell'emulatore non registrati sono stati conservati nella cartella di destinazione. Potrebbero apparire come dischi aggiuntivi nell'emulatore. Consulta i nomi dei file in Dettagli.",
+        "pt-BR": "Discos antigos do emulador sem registro foram mantidos na pasta de saída. Eles podem aparecer como discos extras no emulador. Veja os nomes dos arquivos em Detalhes.",
+        "bg": "По-стари незаписани в регистъра дискове за емулатора са запазени в изходната папка. Те може да се появят като допълнителни дискове в емулатора. Вижте имената на файловете в Подробности.",
+        "nl": "Niet-geregistreerde oudere emulatordisks zijn in de uitvoermap behouden. Ze kunnen als extra disks op de emulator verschijnen. Zie Details voor de bestandsnamen.",
+        "pl": "Starsze niezarejestrowane dyski emulatora zachowano w folderze wyjściowym. Mogą pojawić się w emulatorze jako dodatkowe dyski. Nazwy plików znajdziesz w Szczegółach.",
+        "ja": "未登録の古いエミュレーターディスクが出力フォルダーに保持されました。エミュレーターに余分なディスクとして表示される場合があります。ファイル名は詳細をご確認ください。",
+        "ko": "등록되지 않은 이전 에뮬레이터 디스크가 출력 폴더에 보존되었습니다. 에뮬레이터에 추가 디스크로 나타날 수 있습니다. 파일 이름은 자세히 보기에서 확인하세요.",
+        "zh-Hans": "未登记的旧模拟器磁盘已保留在输出文件夹中。它们可能在模拟器中显示为额外磁盘。请在详细信息中查看文件名。",
+    },
+    "Untracked older emulator disk kept: {name}. It may appear as an extra disk on the emulator. Move it out of the output folder if it is no longer needed.": {
+        "es": "Se conservó un disco antiguo del emulador sin registro: {name}. Puede aparecer como un disco adicional en el emulador. Sáquelo de la carpeta de salida si ya no lo necesita.",
+        "fr": "Ancien disque d'émulateur non répertorié conservé : {name}. Il peut apparaître comme un disque supplémentaire sur l'émulateur. Déplacez-le hors du dossier de sortie si vous n'en avez plus besoin.",
+        "de": "Nicht erfasste ältere Emulator-Diskette beibehalten: {name}. Sie kann als zusätzliche Diskette im Emulator erscheinen. Verschieben Sie sie aus dem Ausgabeordner, wenn sie nicht mehr benötigt wird.",
+        "it": "Vecchio disco dell'emulatore non registrato conservato: {name}. Potrebbe apparire come disco aggiuntivo nell'emulatore. Spostalo fuori dalla cartella di destinazione se non è più necessario.",
+        "pt-BR": "Disco antigo do emulador sem registro mantido: {name}. Ele pode aparecer como um disco extra no emulador. Mova-o para fora da pasta de saída se não for mais necessário.",
+        "bg": "Запазен по-стар диск за емулатора, който не е записан в регистъра: {name}. Той може да се появи като допълнителен диск в емулатора. Преместете го извън изходната папка, ако вече не е нужен.",
+        "nl": "Niet-geregistreerde oudere emulatordisk behouden: {name}. Deze kan als extra disk op de emulator verschijnen. Verplaats deze uit de uitvoermap als deze niet meer nodig is.",
+        "pl": "Zachowano starszy niezarejestrowany dysk emulatora: {name}. Może pojawić się w emulatorze jako dodatkowy dysk. Przenieś go poza folder wyjściowy, jeśli nie jest już potrzebny.",
+        "ja": "未登録の古いエミュレーターディスクを保持しました: {name}。エミュレーターに余分なディスクとして表示される場合があります。不要な場合は出力フォルダーの外へ移動してください。",
+        "ko": "등록되지 않은 이전 에뮬레이터 디스크가 보존되었습니다: {name}. 에뮬레이터에 추가 디스크로 나타날 수 있습니다. 더 이상 필요하지 않으면 출력 폴더 밖으로 이동하세요.",
+        "zh-Hans": "已保留未登记的旧模拟器磁盘：{name}。它可能在模拟器中显示为额外磁盘。如果不再需要，请将其移出输出文件夹。",
+    },
     "Some MIDI files were preserved with warnings and may not play correctly. See Details for affected files.": {
         "es": "Algunos archivos MIDI se conservaron con advertencias y podrían no reproducirse correctamente. Consulte los archivos afectados en Detalles.",
         "fr": "Certains fichiers MIDI ont été conservés avec des avertissements et peuvent mal se lire. Consultez les fichiers concernés dans Détails.",

@@ -129,6 +129,27 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Ordinary USB floppy reads retain boot-probe, fast-read, and raw-fallback
+  diagnostics in bug reports, including numeric Windows errors and read ranges.
+- Fast floppy opening reads only sectors containing file bytes and active
+  directory entries. Unreadable cluster slack or directory sectors after a
+  verified end marker no longer prevent opening readable songs.
+- Fast floppy opening follows folders and fragmented file chains without
+  requiring an exact whole-disk image. Cycles and cross-links still stop opening.
+- Exact Windows floppy imaging retries failed requests in smaller sector-aligned
+  ranges. Unreadable sectors still prevent saving or replacing an exact image.
+- MIDI Type 0 conversion rejects invalid channel and system-message data bytes
+  before replacing an output file.
+- E-SEQ-to-MIDI conversion preserves the order of tempo and meter changes at
+  the same tick, including a return to an earlier value.
+- Bulk Extraction keeps requested E-SEQ sources when MIDI conversion fails.
+  Saved jobs retry the conversion and reuse unchanged retained sources.
+- **Image Floppy** verifies HFE conversions against every captured sector
+  before saving. A failed verification preserves the existing destination.
+- Emulator disk-set rebuilds warn about untracked disks from older sets,
+  identify their filenames, and keep those files for review.
+- Damaged-image MIDI recovery keeps neighboring song tracks out of truncated
+  songs and recovers each song separately.
 - Failed exact floppy imaging offers a separate, explicitly labeled logical
   recovery image with diagnostics. Protected or unreadable sectors no longer
   leave disks whose songs are readable without an imaging recovery path.

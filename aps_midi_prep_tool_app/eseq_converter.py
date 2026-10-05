@@ -866,19 +866,16 @@ def convert_eseq_bytes_to_midi_bytes(
             ),
         )
 
-    seen_tempos = set()
+    # Source order decides the effective state at a shared tick; an A/B/A
+    # sequence must keep its final A even though that value occurred earlier.
     for tick, mpqn in parsed.tempo_events:
-        if (tick, mpqn) in seen_tempos or tick == 0:
+        if tick == 0:
             continue
-        seen_tempos.add((tick, mpqn))
         add_track_event(tick, _write_midi_tempo(mpqn))
 
-    seen_signatures = set()
     for tick, numerator, denominator_power in parsed.time_signature_events:
-        marker = (tick, numerator, denominator_power)
-        if marker in seen_signatures or tick == 0:
+        if tick == 0:
             continue
-        seen_signatures.add(marker)
         add_track_event(tick, _write_midi_time_signature(numerator, denominator_power))
 
     cc7_indexes = _cc7_indexes_for_policy(parsed.events, cc7_policy)

@@ -70,10 +70,17 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
         self.source = source
         self.final_total = int(final_total or 0)
         self.final_message = final_message or ""
+        self.read_diagnostics = {}
+
+    def _remember_read_diagnostics(self, source):
+        value = getattr(source, "read_diagnostics", None)
+        if isinstance(value, dict) and value:
+            self.read_diagnostics = dict(value)
 
     def run(self):
         session = None
         capture = None
+        self.read_diagnostics = {}
         try:
             if self.load_kind == "image":
                 session = FloppyImageSession.load(
@@ -127,6 +134,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
             else:
                 raise ValueError(f"Unsupported disk session load kind: {self.load_kind}")
 
+            self._remember_read_diagnostics(session)
             if self.final_message:
                 self._emit_progress(self.final_total, self.final_total, self.final_message)
 
@@ -136,12 +144,14 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
             self.sessionLoaded.emit(session, listing)
             session = None
         except FloppyOperationCancelled as exc:
+            self._remember_read_diagnostics(exc)
             if session is not None:
                 session.cleanup()
             if capture is not None:
                 capture.cleanup()
             self._emit_cancelled(exc)
         except Exception as exc:
+            self._remember_read_diagnostics(exc)
             if session is not None:
                 session.cleanup()
             if capture is not None:
@@ -150,16 +160,17 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                 self._emit_cancelled(exc)
                 return
             if isinstance(exc, BlankDiskImageError):
-                self.loadFailedWithDetails.emit(
-                    {
-                        "type": "blank_disk_image",
-                        "message": str(exc),
-                        "sector_map": exc.sector_map,
-                        "disk_format": exc.disk_format,
-                        "source_path": exc.source_path,
-                        "source": self.source,
-                    }
-                )
+                details = {
+                    "type": "blank_disk_image",
+                    "message": str(exc),
+                    "sector_map": exc.sector_map,
+                    "disk_format": exc.disk_format,
+                    "source_path": exc.source_path,
+                    "source": self.source,
+                }
+                if self.read_diagnostics:
+                    details["read_diagnostics"] = self.read_diagnostics
+                self.loadFailedWithDetails.emit(details)
                 return
             if isinstance(exc, GreaseweazleConversionError):
                 details = {
@@ -173,7 +184,15 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                     "source": self.source,
                 }
                 details.update(getattr(exc, "details", {}) or {})
+                if self.read_diagnostics:
+                    details["read_diagnostics"] = self.read_diagnostics
                 self.loadFailedWithDetails.emit(details)
+                return
+            if self.read_diagnostics:
+                self.loadFailedWithDetails.emit({
+                    "type": "floppy_read", "message": str(exc), "source": self.source,
+                    "read_diagnostics": self.read_diagnostics,
+                })
                 return
             self.loadFailed.emit(str(exc))
 

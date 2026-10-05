@@ -58,6 +58,11 @@ from . import floppy_save_recovery, windows_write_guard
 class FloppyImageError(Exception):
     """Raised when a floppy image cannot be loaded or edited."""
 
+    def __init__(self, message="", *, winerror=None):
+        super().__init__(message)
+        if winerror is not None:
+            self.winerror = int(winerror)
+
 
 class AmbiguousDosFilenameError(FloppyImageError):
     """A filename cannot safely identify a single FAT directory entry."""
@@ -1999,6 +2004,21 @@ def _write_image_direct(source_img, output_path, output_ext, disk_format):
     )
 
 
+def verify_image_sectors(delivered_path, captured_raw_path, disk_format, *, cancel_callback=None):
+    """Decode an exact capture and compare every byte, including non-FAT sectors."""
+    with tempfile.TemporaryDirectory(prefix="aps_verify_capture_") as temp_dir:
+        _raise_if_cancelled(cancel_callback)
+        readback = os.path.join(temp_dir, "readback.img")
+        _gw_convert(delivered_path, readback, disk_format.key, cancel_callback=cancel_callback)
+        _raise_if_cancelled(cancel_callback)
+        with open(captured_raw_path, "rb") as captured, open(readback, "rb") as decoded:
+            if captured.read() != decoded.read():
+                raise FloppyImageError(
+                    "Converted image verification failed: sector data differs from the captured floppy."
+                )
+        _raise_if_cancelled(cancel_callback)
+
+
 def verify_image_payloads(delivered_path, prepared_raw_path, disk_format, *, cancel_callback=None):
     """Reopen delivered bytes, decoding HFE if needed, and compare all files.
 
@@ -3251,7 +3271,11 @@ class _WindowsVolumeHandle:
             None,
         )
         if self.handle == self._ctypes.c_void_p(-1).value:
-            raise FloppyImageError(_windows_last_error_message(f"Could not open floppy device {self.path}"))
+            raise self._read_error(f"Could not open floppy device {self.path}")
+
+    def _read_error(self, prefix):
+        error_code = self._ctypes.get_last_error()
+        return FloppyImageError(_windows_last_error_message(prefix), winerror=error_code)
 
     def _creation_flags(self):
         return self.FILE_ATTRIBUTE_NORMAL
@@ -3316,7 +3340,7 @@ class _WindowsVolumeHandle:
             self.FILE_BEGIN,
         )
         if not ok:
-            raise FloppyImageError(_windows_last_error_message(f"Could not seek to {label}"))
+            raise self._read_error(f"Could not seek to {label}")
 
     def read_at(self, offset, size, label):
         self._seek(offset, label)
@@ -3330,7 +3354,7 @@ class _WindowsVolumeHandle:
             None,
         )
         if not ok:
-            raise FloppyImageError(_windows_last_error_message(f"Could not read {label}"))
+            raise self._read_error(f"Could not read {label}")
         if bytes_read.value <= 0:
             return b""
         return buffer.raw[:bytes_read.value]
@@ -3628,6 +3652,7 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
         deadline_at=None,
         submitted_callback=None,
     ):
+        self.last_read_error = None
         _raise_if_cancelled(cancel_callback)
         if deadline_at is not None and time.monotonic() >= float(deadline_at):
             raise _RecoveryReadDeadlineExceeded(
@@ -3645,7 +3670,8 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
         if not event:
             error_code = self._ctypes.get_last_error()
             raise FloppyImageError(
-                self._error_message("Could not create a floppy read event", error_code)
+                self._error_message("Could not create a floppy read event", error_code),
+                winerror=error_code,
             )
 
         buffer = _windows_io_buffer(size)
@@ -3672,10 +3698,14 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
             else:
                 error_code = self._ctypes.get_last_error()
                 if error_code == self.ERROR_HANDLE_EOF:
+                    self.last_read_error = FloppyImageError(
+                        self._error_message(f"Could not read {label}", error_code), winerror=error_code,
+                    )
                     return b""
                 if error_code != self.ERROR_IO_PENDING:
                     raise FloppyImageError(
-                        self._error_message(f"Could not read {label}", error_code)
+                        self._error_message(f"Could not read {label}", error_code),
+                        winerror=error_code,
                     )
                 operation_started = True
                 while True:
@@ -3711,6 +3741,10 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
                                 terminal
                                 and completion_error == self.ERROR_HANDLE_EOF
                             ):
+                                self.last_read_error = FloppyImageError(
+                                    self._error_message(f"Could not finish reading {label}", completion_error),
+                                    winerror=completion_error,
+                                )
                                 return b""
                             raise _RecoveryReadDeadlineExceeded(
                                 "The physical-floppy recovery read reached its overall time limit."
@@ -3722,7 +3756,8 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
                             self._error_message(
                                 f"Could not wait while reading {label}",
                                 error_code,
-                            )
+                            ),
+                            winerror=error_code,
                         )
                     raise FloppyImageError(
                         f"Could not wait while reading {label}: unexpected wait result {wait_result}."
@@ -3736,9 +3771,13 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
             ) = self._overlapped_result(overlapped)
             if not succeeded:
                 if completion_observed and error_code == self.ERROR_HANDLE_EOF:
+                    self.last_read_error = FloppyImageError(
+                        self._error_message(f"Could not finish reading {label}", error_code), winerror=error_code,
+                    )
                     return b""
                 raise FloppyImageError(
-                    self._error_message(f"Could not finish reading {label}", error_code)
+                    self._error_message(f"Could not finish reading {label}", error_code),
+                    winerror=error_code,
                 )
             return buffer.raw[:completed_bytes]
         finally:
@@ -3790,9 +3829,9 @@ def _close_block_device(device):
         os.close(device)
 
 
-def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=None, cancel_callback=None):
+def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=None, cancel_callback=None, *, diagnostics=None):
     if os.name == "nt":
-        if not size_bytes:
+        if int(size_bytes or 0) <= 0:
             raise FloppyImageError(
                 "Could not read the Windows floppy device because its disk size could not be detected. "
                 "Insert a formatted 720K or 1.44M floppy, or use Greaseweazle with an explicit disk format."
@@ -3801,65 +3840,99 @@ def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=
         remaining = int(size_bytes)
         cursor = 0
         chunk_size = 64 * 1024
+        sector_size = _YAMAHA_BYTES_PER_SECTOR
         last_progress = -1
-        with _WindowsRecoveryVolumeHandle(device_path, write=False) as volume:
-            while remaining > 0:
-                _raise_if_cancelled(cancel_callback)
-                current_size = min(chunk_size, remaining)
-                try:
-                    chunk = _read_device_exact(
-                        volume, cursor, current_size, "floppy image", cancel_callback=cancel_callback,
-                    )
-                except FloppyOperationCancelled:
+        details = diagnostics if diagnostics is not None else {}
+        details.update(requested_bytes=int(size_bytes), exact_capture_completed=False)
+        details.setdefault("successful_ranges", [])
+        details.setdefault("split_read_requests", 0)
+
+        def read_range(device, offset, size):
+            _raise_if_cancelled(cancel_callback)
+            try:
+                return _read_device_exact(
+                    device, offset, size, "floppy image", cancel_callback=cancel_callback,
+                )
+            except FloppyOperationCancelled:
+                raise
+            except FloppyImageError as exc:
+                record = _read_failure_record(exc, offset, size, "floppy image")
+                first = details.setdefault("first_failed_read", record)
+                details.setdefault("failed_read_offset_bytes", first["offset_bytes"])
+                details.setdefault("failed_read_length_bytes", first["length_bytes"])
+                details.setdefault("failed_sector_exact", (
+                    first["length_bytes"] == sector_size and first["offset_bytes"] % sector_size == 0
+                ))
+                if isinstance(exc, _FloppyReadStalled) or size <= sector_size:
+                    details["final_failed_read"] = record
                     raise
-                except FloppyImageError as exc:
-                    exc.read_diagnostics = {
-                        "failed_read_offset_bytes": cursor,
-                        "failed_read_length_bytes": current_size,
-                        "failed_sector_exact": False,
-                    }
-                    raise
-                if not chunk:
-                    raise FloppyImageError(
-                        "Could not read floppy device: the drive stopped returning data before the full disk was read. "
-                        "Check that a disk is inserted and that the selected format matches the disk."
-                    )
-                chunks.append(chunk)
-                cursor += len(chunk)
-                remaining -= len(chunk)
-                if progress_callback is not None and size_bytes > 0:
-                    progress = min(70, int((cursor / int(size_bytes)) * 70))
-                    if progress > last_progress:
-                        last_progress = progress
-                        progress_callback(
-                            progress,
-                            100,
-                            f"Reading floppy image: {display_bytes(cursor)} of {display_bytes(size_bytes)}...",
-                        )
-        _raise_if_cancelled(cancel_callback)
+                # The failed request is retried once as disjoint, aligned halves.
+                # At most 255 requests cover a 64 KiB range down to 512 B leaves;
+                # a failing leaf aborts exact imaging without substituting bytes.
+                left_size = max(sector_size, (size // sector_size // 2) * sector_size)
+            # Leave the failed request's exception context before retrying, so
+            # an EOF in a child read cannot inherit its parent's Windows code.
+            details["split_read_requests"] += 1
+            left = read_range(device, offset, left_size)
+            details["split_read_requests"] += 1
+            right = read_range(device, offset + left_size, size - left_size)
+            return left + right
+
+        try:
+            with _WindowsRecoveryVolumeHandle(device_path, write=False) as volume:
+                device = _DiagnosticReadDevice(volume, details)
+                while remaining > 0:
+                    _raise_if_cancelled(cancel_callback)
+                    current_size = min(chunk_size, remaining)
+                    chunk = read_range(device, cursor, current_size)
+                    chunks.append(chunk)
+                    cursor += len(chunk)
+                    remaining -= len(chunk)
+                    if progress_callback is not None and size_bytes > 0:
+                        progress = min(70, int((cursor / int(size_bytes)) * 70))
+                        if progress > last_progress:
+                            last_progress = progress
+                            progress_callback(
+                                progress,
+                                100,
+                                f"Reading floppy image: {display_bytes(cursor)} of {display_bytes(size_bytes)}...",
+                            )
+            _raise_if_cancelled(cancel_callback)
+        except (FloppyOperationCancelled, FloppyImageError) as exc:
+            if not isinstance(exc, FloppyOperationCancelled):
+                details["final_error"] = _read_failure_record(exc)
+            exc.read_diagnostics = dict(details)
+            raise
+        details["exact_capture_completed"] = True
         return b"".join(chunks)
     raise FloppyImageError("Windows raw floppy byte reads are only available on Windows.")
 
 
-def _read_block_device(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None):
+def _read_block_device(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None, *, diagnostics=None):
     if os.name == "nt":
         data = _read_windows_block_device_bytes(
             device_path,
             size_bytes,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
+            diagnostics=diagnostics,
         )
         with open(output_path, "wb") as output:
             output.write(data)
         return
 
     total_size = int(size_bytes or 0)
+    details = diagnostics if diagnostics is not None else {}
+    details.update(selected_capacity_bytes=total_size, exact_capture_completed=False)
     copied = 0
     chunk_size = 64 * 1024
     try:
         source = open(device_path, "rb", buffering=0)
     except OSError as exc:
-        raise FloppyImageError(f"Could not open floppy device {device_path}: {exc}") from exc
+        error = FloppyImageError(f"Could not open floppy device {device_path}: {exc}")
+        details["open_error"] = _read_failure_record(exc)
+        error.read_diagnostics = details
+        raise error from exc
     with source, open(output_path, "wb") as output:
         while True:
             _raise_if_cancelled(cancel_callback)
@@ -3874,15 +3947,18 @@ def _read_block_device(device_path, output_path, size_bytes, progress_callback=N
                 chunk = source.read(current_size)
             except OSError as exc:
                 error = FloppyImageError(f"Could not read floppy device {device_path}: {exc}")
-                error.read_diagnostics = {
-                    "failed_read_offset_bytes": copied, "failed_read_length_bytes": current_size,
-                    "failed_sector_exact": False,
-                }
+                failure = _read_failure_record(exc, copied, current_size, "floppy image")
+                details.update(
+                    failed_read_offset_bytes=copied, failed_read_length_bytes=current_size,
+                    failed_sector_exact=False, first_failed_read=failure, final_failed_read=failure,
+                )
+                error.read_diagnostics = details
                 raise error from exc
             if not chunk:
                 break
             # Destination failures must not invite another physical-media read.
             output.write(chunk)
+            _record_successful_read(details, copied, len(chunk))
             copied += len(chunk)
             if progress_callback is not None and total_size > 0:
                 progress = min(70, int((copied / total_size) * 70))
@@ -3892,10 +3968,17 @@ def _read_block_device(device_path, output_path, size_bytes, progress_callback=N
                     f"Reading floppy image: {display_bytes(copied)} of {display_bytes(total_size)}...",
                 )
     if total_size and copied < total_size:
-        raise FloppyImageError(
+        error = FloppyImageError(
             "Could not read floppy device: the drive stopped returning data before the full disk was read. "
             "Check that a disk is inserted and that the selected format matches the disk."
         )
+        failure = _read_failure_record(error, copied, min(chunk_size, total_size - copied), "floppy image")
+        details.update(first_failed_read=failure, final_failed_read=failure,
+                       failed_read_offset_bytes=copied, failed_read_length_bytes=failure["length_bytes"],
+                       failed_sector_exact=False)
+        error.read_diagnostics = details
+        raise error
+    details["exact_capture_completed"] = True
 
 
 def _capture_temp_output_path(output_path, *, suffix=None):
@@ -4029,6 +4112,11 @@ def capture_floppy_drive_image(
                 converted_temp_path,
                 output_ext,
                 disk_format,
+            )
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(progress_callback, 92, 100, "Verifying converted image contents...")
+            verify_image_sectors(
+                converted_temp_path, raw_temp_path, disk_format, cancel_callback=cancel_callback,
             )
             _raise_if_cancelled(cancel_callback)
             _notify_progress(
@@ -6321,6 +6409,92 @@ def _fat12_geometry_from_layout(layout):
     )
 
 
+def _read_failure_record(exc, offset=None, length=None, label=None):
+    """Keep machine-readable error codes independent of the displayed language."""
+    record = {"message": str(exc)}
+    if offset is not None:
+        record["offset_bytes"] = int(offset)
+    if length is not None:
+        record["length_bytes"] = int(length)
+    if label is not None:
+        record["label"] = str(label)
+    seen = set()
+    error = exc
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        for key in ("winerror", "errno"):
+            value = getattr(error, key, None)
+            if isinstance(value, int) and key not in record:
+                record[key] = value
+        # An implicit context may be an earlier failed strategy rather than
+        # the cause of this request. Never attribute its code to a new failure.
+        error = error.__cause__
+    return record
+
+
+def _record_successful_read(diagnostics, offset, length):
+    if not length:
+        return
+    ranges = [
+        (item["offset_bytes"], item["offset_bytes"] + item["length_bytes"])
+        for item in diagnostics.get("successful_ranges", [])
+    ]
+    ranges.append((int(offset), int(offset) + int(length)))
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    diagnostics["successful_ranges"] = [
+        {"offset_bytes": start, "length_bytes": end - start} for start, end in merged
+    ]
+
+
+class _DiagnosticReadDevice:
+    """Record actual I/O without including synthesized bytes as successful reads."""
+
+    def __init__(self, device, diagnostics):
+        self.device = device
+        self.diagnostics = diagnostics
+        diagnostics.setdefault("successful_ranges", [])
+        diagnostics.setdefault("failed_requests", [])
+
+    def read_at_recovery(self, offset, size, label, **kwargs):
+        self.diagnostics["read_calls"] = self.diagnostics.get("read_calls", 0) + 1
+        try:
+            reader = getattr(self.device, "read_at_recovery", None)
+            if callable(reader):
+                data = reader(offset, size, label, **kwargs)
+            elif hasattr(self.device, "read_at"):
+                data = self.device.read_at(offset, size, label)
+            else:
+                data = os.pread(self.device, size, offset)
+            if not data:
+                error = getattr(self.device, "last_read_error", None)
+                if isinstance(error, FloppyImageError):
+                    raise error
+                raise FloppyImageError(f"Could not read {label}: the drive returned no data.")
+        except FloppyOperationCancelled:
+            raise
+        except Exception as exc:
+            record = _read_failure_record(exc, offset, size, label)
+            self.diagnostics["failed_read_calls"] = self.diagnostics.get("failed_read_calls", 0) + 1
+            failures = self.diagnostics.setdefault("failed_requests", [])
+            if len(failures) < 128:
+                failures.append(record)
+            else:
+                self.diagnostics["failed_requests_omitted"] = self.diagnostics.get("failed_requests_omitted", 0) + 1
+            self.diagnostics.setdefault("first_failed_read", record)
+            self.diagnostics["last_failed_read"] = record
+            raise
+        _record_successful_read(self.diagnostics, offset, len(data))
+        return data
+
+    def close(self):
+        _close_block_device(self.device)
+
+
 def _read_device_exact(device, offset, size, label, cancel_callback=None):
     chunks = []
     remaining = int(size)
@@ -6347,6 +6521,9 @@ def _read_device_exact(device, offset, size, label, cancel_callback=None):
         except OSError as exc:
             raise FloppyImageError(f"Could not read {label}: {exc}") from exc
         if not chunk:
+            error = getattr(device, "last_read_error", None)
+            if isinstance(error, FloppyImageError):
+                raise error
             raise FloppyImageError(
                 f"Could not read {label}: the floppy stopped returning data before the requested sector was read. "
                 "Check the disk and try again, or use Greaseweazle for a lower-level read."
@@ -6358,13 +6535,23 @@ def _read_device_exact(device, offset, size, label, cancel_callback=None):
     return b"".join(chunks)
 
 
-def _try_read_device_exact(device, offset, size, cancel_callback=None):
+def _try_read_device_exact(device, offset, size, cancel_callback=None, *, diagnostics=None):
     try:
-        return _read_device_exact(device, offset, size, "floppy sector", cancel_callback=cancel_callback)
+        data = _read_device_exact(device, offset, size, "floppy sector", cancel_callback=cancel_callback)
     except (FloppyOperationCancelled, _FloppyReadStalled):
         raise
-    except FloppyImageError:
+    except FloppyImageError as exc:
+        if diagnostics is not None:
+            diagnostics["boot_probe"] = {
+                "status": "read_failed", "offset_bytes": int(offset), "length_bytes": int(size),
+                "error": _read_failure_record(exc, offset, size, "floppy sector"),
+            }
         return None
+    if diagnostics is not None:
+        diagnostics["boot_probe"] = {
+            "status": "read_success", "offset_bytes": int(offset), "length_bytes": len(data),
+        }
+    return data
 
 
 def _read_device_best_effort(device, offset, size, label, *, sector_size=_YAMAHA_BYTES_PER_SECTOR, cancel_callback=None):
@@ -6442,35 +6629,12 @@ def _decode_dos_directory_name(raw_name):
 
 
 def _iter_root_file_entries(root_dir):
-    for pos in range(0, len(root_dir), 32):
-        entry = root_dir[pos:pos + 32]
-        if len(entry) < 32:
-            break
-        first = entry[0]
-        attr = entry[11]
-        if first == 0x00:
-            break
-        if first == 0xE5 or attr == 0x0F:
+    # Directory chains are acquired by the targeted reader before FAT
+    # validation. Ordinary folders no longer require a whole-disk fallback.
+    for entry in _iter_fat_directory_entries(root_dir):
+        if entry["attr"] & 0x08 or _is_windows_volume_metadata_path(entry["name"]):
             continue
-        if attr & 0x08:
-            continue
-        name = _decode_dos_directory_name(entry[:11])
-        if not name or _is_windows_volume_metadata_path(name):
-            continue
-        if attr & 0x10:
-            raise FastFloppyReadError(
-                "Fast floppy read does not support disks with subdirectories. "
-                "Use image loading or Greaseweazle for this disk.",
-                fallback_allowed=True,
-            )
-
-        yield {
-            "name": name,
-            "attr": attr,
-            "cluster": _u16le(entry, 26),
-            "size": int.from_bytes(entry[28:32], "little"),
-            "modified_time": _fat_datetime_to_timestamp(_u16le(entry, 22), _u16le(entry, 24)),
-        }
+        yield entry
 
 
 def _fat12_next_cluster(fat, cluster):
@@ -6826,7 +6990,7 @@ def _fat12_allocation_signature(fat, geometry):
     )
 
 
-def _select_fat12_copy(data, geometry, root_dir, *, diagnostics=None, unreadable_ranges=()):
+def _select_fat12_copy(data, geometry, root_dir, *, diagnostics=None, unreadable_ranges=(), directory_reader=None):
     """Select only a complete, structurally sound and unambiguous allocation map."""
     records = list(_fat12_copy_records(data, geometry))
     valid = []
@@ -6844,10 +7008,14 @@ def _select_fat12_copy(data, geometry, root_dir, *, diagnostics=None, unreadable
             continue
         if fat not in checked:
             try:
+                if directory_reader is not None:
+                    directory_reader(fat)
                 _collect_fat12_listing_entries(
                     data, geometry, fat, root_dir, allow_contiguous_fallback=allow_contiguous,
                 )
                 checked[fat] = None
+            except (FloppyOperationCancelled, _FloppyReadStalled):
+                raise
             except FloppyImageError as exc:
                 checked[fat] = exc
         error = checked[fat]
@@ -7326,11 +7494,131 @@ def _reconstruct_yamaha_root_dir_from_pianodir(data):
     return bytes(root_dir)
 
 
+def _read_floppy_directory_sectors(device, ranges, *, sector_size, label,
+                                   cancel_callback=None, allow_incomplete=False, cache=None):
+    """Read only through a terminator observed in successfully acquired bytes."""
+    directory = bytearray(sum(size for _offset, size in ranges))
+    requested = []
+    unreadable = []
+    position = 0
+    for offset, size in ranges:
+        for relative in range(0, size, sector_size):
+            _raise_if_cancelled(cancel_callback)
+            length = min(sector_size, size - relative)
+            start = offset + relative
+            if cache is not None and start in cache:
+                sector, bad = cache[start]
+            else:
+                sector, bad = _read_device_best_effort(
+                    device, start, length, label, sector_size=sector_size,
+                    cancel_callback=cancel_callback,
+                )
+                if cache is not None:
+                    cache[start] = (sector, bad)
+            requested.append((start, length))
+            unreadable.extend(bad)
+            if bad and not allow_incomplete:
+                raise FastFloppyReadError(
+                    f"The {label} contains unreadable sectors. "
+                    "Use Read Floppy with Start in recovery mode; an ordinary read cannot omit directory entries."
+                )
+            directory[position:position + length] = sector
+            position += length
+            # Zero-filled failed reads do not establish the directory end.
+            if not bad and any(sector[index] == 0 for index in range(0, len(sector), 32)):
+                return bytes(directory), requested, unreadable
+    return bytes(directory), requested, unreadable
+
+
+def _acquire_floppy_subdirectories(device, data, geometry, fat, root_dir, *,
+                                  cancel_callback=None, allow_incomplete=False, cache=None,
+                                  acquired_ranges=None):
+    """Acquire a directory graph while validating ownership of whole chains."""
+    owners = {}
+    file_entries = []
+    requested = []
+    unreadable = []
+    pending = [(iter(_iter_root_file_entries(root_dir)), "")]
+    while pending:
+        _raise_if_cancelled(cancel_callback)
+        entries, parent = pending[-1]
+        entry = next(entries, None)
+        if entry is None:
+            pending.pop()
+            continue
+        if entry["attr"] & 0x08:
+            continue
+        path = entry["name"] if not parent else f"{parent}/{entry['name']}"
+        is_directory = bool(entry["attr"] & 0x10)
+        clusters = (
+            _fat12_cluster_chain_from_start(fat, entry["cluster"], geometry)
+            if is_directory else _fat12_cluster_chain(
+                fat, entry["cluster"], entry["size"], geometry, include_allocated_tail=True,
+            )
+        )
+        for cluster in clusters:
+            if cluster in owners:
+                raise _Fat12CorruptionError(
+                    f"FAT12 cluster {cluster} is shared by {owners[cluster]!r} and {path!r}; "
+                    "the disk or image is corrupt (cross-linked allocations). Use Recover Damaged Image."
+                )
+            owners[cluster] = path
+        if _is_windows_volume_metadata_path(path):
+            continue
+        if not is_directory:
+            file_entries.append({**entry, "name": path})
+            continue
+        ranges = [(_cluster_offset(geometry, cluster), geometry.cluster_size) for cluster in clusters]
+        directory, reads, bad = _read_floppy_directory_sectors(
+            device, ranges, sector_size=geometry.bytes_per_sector,
+            label=f"floppy directory {path}", cancel_callback=cancel_callback,
+            allow_incomplete=allow_incomplete, cache=cache,
+        )
+        requested.extend(reads)
+        unreadable.extend(bad)
+        read_offsets = {offset for offset, _length in reads}
+        cursor = 0
+        for offset, size in ranges:
+            for relative in range(0, size, geometry.bytes_per_sector):
+                start = offset + relative
+                if start in read_offsets:
+                    length = min(geometry.bytes_per_sector, size - relative)
+                    position = cursor + relative
+                    data[start:start + length] = directory[position:position + length]
+                    if acquired_ranges is not None:
+                        acquired_ranges.append((start, length))
+            cursor += size
+        pending.append((iter(_iter_fat_directory_entries(directory)), path))
+    return file_entries, requested, unreadable
+
+
+def _floppy_required_file_sector_runs(file_chains, geometry):
+    sectors = set()
+    sector_size = geometry.bytes_per_sector
+    for entry, clusters in file_chains:
+        remaining = entry["size"]
+        for cluster in clusters:
+            length = min(remaining, geometry.cluster_size)
+            first = _cluster_offset(geometry, cluster) // sector_size
+            sectors.update(range(first, first + (length + sector_size - 1) // sector_size))
+            remaining -= length
+    runs = []
+    for sector in sorted(sectors):
+        if runs and sector == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], sector)
+        else:
+            runs.append((sector, sector))
+    return [(start * sector_size, (end - start + 1) * sector_size) for start, end in runs]
+
+
 def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None, *, diagnostics=None, allow_incomplete=False):
     try:
         device = _open_block_device_for_read(device_path)
     except FloppyImageError as exc:
         raise FastFloppyReadError(str(exc), fallback_allowed=False) from exc
+    if diagnostics is not None:
+        diagnostics["selected_capacity_bytes"] = int(size_bytes or 0)
+        device = _DiagnosticReadDevice(device, diagnostics)
     try:
         fallback_allowed = False
         try:
@@ -7341,6 +7629,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                 0,
                 _YAMAHA_BYTES_PER_SECTOR,
                 cancel_callback=cancel_callback,
+                diagnostics=diagnostics,
             )
             boot_unreadable = sector0 is None
             sector0 = sector0 or b"\x00" * _YAMAHA_BYTES_PER_SECTOR
@@ -7350,10 +7639,12 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             boot = sector0
             fat_area = None
             root_dir = None
+            root_requested_ranges = []
 
             if geometry is None:
                 fallback_allowed = True
                 matched_layout = None
+                candidate_root_failure = None
                 candidate_layouts = sorted(
                     _PROTECTED_FAT12_LAYOUTS,
                     key=lambda layout: (
@@ -7380,16 +7671,22 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                             media_descriptor,
                             cancel_callback=cancel_callback,
                         )
-                        candidate_root, candidate_root_bad_ranges = _read_device_best_effort(
-                            device,
-                            candidate_geometry.root_offset,
-                            candidate_geometry.root_size,
-                            "floppy root directory",
+                        candidate_root, candidate_root_reads, candidate_root_bad_ranges = _read_floppy_directory_sectors(
+                            device, [(candidate_geometry.root_offset, candidate_geometry.root_size)],
                             sector_size=candidate_geometry.bytes_per_sector,
+                            label="floppy root directory",
                             cancel_callback=cancel_callback,
+                            allow_incomplete=allow_incomplete,
                         )
                     except (FloppyOperationCancelled, _FloppyReadStalled):
                         raise
+                    except FastFloppyReadError as exc:
+                        # A plausible FAT signature does not establish this
+                        # candidate's directory offset. Try the other layouts
+                        # before treating this range as required directory data.
+                        if candidate_root_failure is None:
+                            candidate_root_failure = exc
+                        continue
                     except FloppyImageError:
                         continue
                     if not any(
@@ -7410,10 +7707,15 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                     root_dir = candidate_root
                     fat_bad_ranges = candidate_fat_bad_ranges
                     root_bad_ranges = candidate_root_bad_ranges
+                    root_requested_ranges = candidate_root_reads
                     matched_layout = layout
                     fallback_allowed = False
                     break
                 if geometry is None or matched_layout is None:
+                    if diagnostics is not None:
+                        diagnostics["layout_probe"] = {"recognized": False}
+                    if candidate_root_failure is not None:
+                        raise candidate_root_failure
                     raise FastFloppyReadError(
                         "Fast floppy read only supports valid FAT12 disks or Yamaha protected FAT12 disks. "
                         "If this is a non-FAT disk or a difficult original, try reading it with Greaseweazle.",
@@ -7444,6 +7746,17 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             else:
                 _notify_progress(progress_callback, 5, 100, "Fast floppy read: FAT12 boot sector recognized...")
 
+            if diagnostics is not None:
+                diagnostics.update(
+                    detected_capacity_bytes=geometry.total_size,
+                    detected_geometry={
+                        "bytes_per_sector": geometry.bytes_per_sector,
+                        "sectors_per_cluster": geometry.sectors_per_cluster,
+                        "total_sectors": geometry.total_sectors,
+                    },
+                    layout_probe={"recognized": True, "protected_boot": repair_result.boot_sector_repaired},
+                )
+
             if size_bytes and geometry.total_size > size_bytes:
                 raise FloppyImageError(
                     "The detected FAT12 geometry is larger than the selected floppy device. "
@@ -7467,13 +7780,12 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         boot_sector_repaired=repair_result.boot_sector_repaired,
                     )
             if root_dir is None:
-                root_dir, root_bad_ranges = _read_device_best_effort(
-                    device,
-                    geometry.root_offset,
-                    geometry.root_size,
-                    "floppy root directory",
+                root_dir, root_requested_ranges, root_bad_ranges = _read_floppy_directory_sectors(
+                    device, [(geometry.root_offset, geometry.root_size)],
                     sector_size=geometry.bytes_per_sector,
+                    label="floppy root directory",
                     cancel_callback=cancel_callback,
+                    allow_incomplete=allow_incomplete,
                 )
                 if root_bad_ranges:
                     if not allow_incomplete:
@@ -7497,10 +7809,22 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             image[geometry.fat_offset:geometry.fat_offset + len(fat_area)] = fat_area
             image[geometry.root_offset:geometry.root_offset + len(root_dir)] = root_dir
 
-            file_entries = list(_iter_root_file_entries(root_dir))
+            directory_cache = {}
+            directory_graphs = {}
+            acquired_directory_ranges = []
+
+            def acquire_directories(candidate_fat):
+                directory_graphs[candidate_fat] = _acquire_floppy_subdirectories(
+                    device, image, geometry, candidate_fat, root_dir,
+                    cancel_callback=cancel_callback, allow_incomplete=allow_incomplete,
+                    cache=directory_cache, acquired_ranges=acquired_directory_ranges,
+                )
+
             fat, fat_note = _select_fat12_copy(
                 image, geometry, root_dir, diagnostics=diagnostics, unreadable_ranges=fat_bad_ranges,
+                directory_reader=acquire_directories,
             )
+            file_entries, _directory_requested_ranges, directory_bad_ranges = directory_graphs[fat]
             if fat_note:
                 for index in range(geometry.num_fats):
                     offset = geometry.fat_offset + index * geometry.fat_size
@@ -7516,38 +7840,21 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                 clusters = _fat12_cluster_chain(fat, entry["cluster"], entry["size"], geometry)
                 file_chains.append((entry, clusters))
 
-            clusters_to_read = sorted({cluster for _entry, clusters in file_chains for cluster in clusters})
-            cluster_runs = []
-            run_start = None
-            previous = None
-            for cluster in clusters_to_read:
-                if run_start is None:
-                    run_start = previous = cluster
-                    continue
-                if cluster == previous + 1:
-                    previous = cluster
-                    continue
-                cluster_runs.append((run_start, previous))
-                run_start = previous = cluster
-            if run_start is not None:
-                cluster_runs.append((run_start, previous))
-
-            total_data_bytes = sum(((end - start) + 1) * geometry.cluster_size for start, end in cluster_runs)
-            pass_label = "pass" if len(cluster_runs) == 1 else "passes"
+            sector_runs = _floppy_required_file_sector_runs(file_chains, geometry)
+            total_data_bytes = sum(size for _offset, size in sector_runs)
+            pass_label = "pass" if len(sector_runs) == 1 else "passes"
             _notify_progress(
                 progress_callback,
                 25,
                 100,
-                f"Fast floppy read: reading {display_bytes(total_data_bytes)} of file data in {len(cluster_runs)} {pass_label}...",
+                f"Fast floppy read: reading {display_bytes(total_data_bytes)} of file data in {len(sector_runs)} {pass_label}...",
             )
             read_data_bytes = 0
             last_progress = 25
-            chunk_size = max(geometry.cluster_size, 16 * 1024)
+            chunk_size = max(geometry.bytes_per_sector, 16 * 1024)
             bad_file_ranges = []
-            for start_cluster, end_cluster in cluster_runs:
+            for offset, run_size in sector_runs:
                 _raise_if_cancelled(cancel_callback)
-                offset = geometry.data_offset + ((start_cluster - 2) * geometry.cluster_size)
-                run_size = ((end_cluster - start_cluster) + 1) * geometry.cluster_size
                 if offset < geometry.data_offset or offset + run_size > total_size:
                     raise FloppyImageError("A file points outside the floppy data area; the FAT directory appears corrupt.")
                 run_cursor = 0
@@ -7558,7 +7865,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         device,
                         offset + run_cursor,
                         current_size,
-                        f"clusters {start_cluster}-{end_cluster}",
+                        f"file-data sectors {offset // geometry.bytes_per_sector}-{(offset + run_size) // geometry.bytes_per_sector - 1}",
                         sector_size=geometry.bytes_per_sector,
                         cancel_callback=cancel_callback,
                     )
@@ -7596,9 +7903,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
             if diagnostics is not None:
                 requested_ranges = [
                     (0, len(boot)), (geometry.fat_offset, len(fat_area)),
-                    (geometry.root_offset, len(root_dir)),
-                    *[(geometry.data_offset + (start - 2) * geometry.cluster_size,
-                       (end - start + 1) * geometry.cluster_size) for start, end in cluster_runs],
+                    *root_requested_ranges, *acquired_directory_ranges, *sector_runs,
                 ]
                 omitted = []
                 cursor = 0
@@ -7612,14 +7917,15 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                     {"area": area, "offset_bytes": offset, "length_bytes": length}
                     for area, ranges in (
                         ("boot", [(0, geometry.bytes_per_sector)] if boot_unreadable else []),
-                        ("fat", fat_bad_ranges), ("root", root_bad_ranges), ("file_data", bad_file_ranges),
+                        ("fat", fat_bad_ranges), ("root", root_bad_ranges),
+                        ("directory", directory_bad_ranges), ("file_data", bad_file_ranges),
                     ) for offset, length in ranges
                 ]
                 diagnostics.update(
                     read_method="allocated_files", unreadable_ranges=unreadable,
                     omitted_ranges=omitted, omitted_sectors_zero_filled=bool(omitted),
                     allocated_file_data_complete=not bool(bad_file_ranges),
-                    file_map_complete=not bool(fat_bad_ranges or root_bad_ranges),
+                    file_map_complete=not bool(fat_bad_ranges or root_bad_ranges or directory_bad_ranges),
                     file_data_zero_filled=bool(bad_file_ranges),
                     boot_sector_reconstructed=repair_result.boot_sector_repaired,
                     filesystem_repair_note=repair_result.note,
@@ -8072,6 +8378,9 @@ def _extract_midi_blob_for_recovery(data, start):
     track_count = 0
     while cursor + 8 <= len(data) and track_count < declared_tracks:
         chunk_type = data[cursor:cursor + 4]
+        # A new song header ends this file even when its declared tracks are missing.
+        if chunk_type == b"MThd":
+            break
         chunk_size = int.from_bytes(data[cursor + 4:cursor + 8], "big")
         chunk_end = cursor + 8 + chunk_size
         if chunk_size < 0 or chunk_end > len(data):
@@ -9633,6 +9942,14 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             raise FloppyImageError("Invalid floppy drive selection.")
 
         temp_dir = tempfile.mkdtemp(prefix="aps_floppy_drive_")
+        acquisition = {
+            "source_path": drive_info.path,
+            "selected_capacity_bytes": int(drive_info.size_bytes or 0),
+            "fast_path": {"successful_ranges": [], "failed_requests": []},
+            "read_method": "logical_working_image",
+            "exact_raw_copy": False,
+            "stage": "fast_read",
+        }
         try:
             source_copy = os.path.join(temp_dir, "source.img")
             working_img = os.path.join(temp_dir, "working.img")
@@ -9643,7 +9960,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     drive_info.size_bytes,
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
+                    diagnostics=acquisition["fast_path"],
                 )
+                acquisition["stage"] = "scanning_working_image"
                 disk_format = _disk_format_for_image(working_img)
                 _notify_progress(progress_callback, 98, 100, "Scanning fast-read floppy contents...")
                 read_image_listing(working_img)
@@ -9652,12 +9971,16 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             except _FloppyReadStalled:
                 raise
             except FastFloppyReadError as fast_exc:
+                acquisition["first_error"] = _read_failure_record(fast_exc)
                 if not fast_exc.fallback_allowed:
                     raise FloppyImageError(
                         "Fast floppy read recognized this disk but could not finish without losing data.\n\n"
                         f"Details: {fast_exc}\n\n"
                         "Use Disk > Read Floppy... with Start in recovery mode for a slower full-disk recovery pass."
                     ) from fast_exc
+                acquisition["fallback_reason"] = str(fast_exc)
+                acquisition["raw_fallback"] = {}
+                acquisition["stage"] = "raw_read"
                 _notify_progress(
                     progress_callback,
                     0,
@@ -9670,7 +9993,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         drive_info.size_bytes,
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
+                        diagnostics=acquisition["raw_fallback"],
                     )
+                    acquisition.update(read_method="exact_raw", exact_raw_copy=True,
+                                       stage="preparing_working_image")
                     _raise_if_cancelled(cancel_callback)
                     _notify_progress(progress_callback, 75, 100, "Creating working copy...")
                     repair_result = prepare_yamaha_bytes(raw_data, working_img)
@@ -9681,7 +10007,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         drive_info.size_bytes,
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
+                        diagnostics=acquisition["raw_fallback"],
                     )
+                    acquisition.update(read_method="exact_raw", exact_raw_copy=True,
+                                       stage="preparing_working_image")
                     _raise_if_cancelled(cancel_callback)
                     _notify_progress(progress_callback, 75, 100, "Creating working copy...")
                     repair_result = prepare_yamaha_image(source_copy, working_img)
@@ -9691,6 +10020,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     boot_sector_repaired=repair_result.boot_sector_repaired,
                 )
                 disk_format = _disk_format_for_image(working_img)
+                acquisition["stage"] = "scanning_working_image"
                 _notify_progress(progress_callback, 90, 100, "Scanning floppy contents...")
                 read_image_listing(working_img)
             except FloppyImageError as scan_exc:
@@ -9701,7 +10031,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 ) from scan_exc
             _notify_progress(progress_callback, 100, 100, "Opening floppy contents...")
             _raise_if_cancelled(cancel_callback)
-            return cls(
+            acquisition["detected_capacity_bytes"] = disk_format.size_bytes
+            acquisition["stage"] = "complete"
+            session = cls(
                 drive_info.path,
                 "img",
                 temp_dir,
@@ -9712,7 +10044,22 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 source_name=drive_info.display_name,
                 drive_info=drive_info,
             )
-        except Exception:
+            session.read_diagnostics = acquisition
+            return session
+        except Exception as exc:
+            failure_details = dict(getattr(exc, "read_diagnostics", {}) or {})
+            if "raw_fallback" in acquisition:
+                acquisition["raw_fallback"].update(failure_details)
+            elif failure_details:
+                acquisition["fast_path"].update(failure_details)
+            detected_capacity = acquisition["fast_path"].get("detected_capacity_bytes")
+            if detected_capacity is not None:
+                acquisition["detected_capacity_bytes"] = detected_capacity
+            if isinstance(exc, FloppyOperationCancelled):
+                acquisition["cancelled"] = True
+            else:
+                acquisition["final_error"] = _read_failure_record(exc)
+            exc.read_diagnostics = acquisition
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
 
