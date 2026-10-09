@@ -11,18 +11,6 @@ from .eseq_converter import (
     parse_eseq_bytes,
 )
 
-_SYSTEM_MESSAGE_DATA_LENGTHS = {
-    0xF1: 1,
-    0xF2: 2,
-    0xF3: 1,
-    0xF6: 0,
-    0xF8: 0,
-    0xFA: 0,
-    0xFB: 0,
-    0xFC: 0,
-    0xFE: 0,
-}
-
 _LEGACY_TITLE_MIN_CODEPOINT = 0x20
 _LEGACY_TITLE_MAX_CODEPOINT = 0x7E
 _ESEQ_TITLE_START = 0x57
@@ -244,16 +232,8 @@ def _find_first_track_name_event(track_data, *, validate_remainder=False):
             running_status = status
             continue
 
-        if not status_from_stream:
-            raise ValueError("System messages cannot use running status.")
-
-        data_len = _SYSTEM_MESSAGE_DATA_LENGTHS.get(status)
-        if data_len is None:
-            raise ValueError(f"Unsupported system status byte: 0x{status:02X}")
-        if pos + data_len > track_end:
-            raise ValueError("System message exceeds track bounds.")
-        pos += data_len
-        running_status = None
+        # Wire-level system messages require an F7 escape event in an SMF.
+        raise ValueError(f"Unsupported system status byte: 0x{status:02X}")
 
     return first_title_event
 

@@ -32,6 +32,10 @@ ESEQ_MIDI_DIVISION = 384
 ESEQ_DEFAULT_BPM = 117
 ESEQ_DELAY15_MAX = 0x3FFF
 ESEQ_DIRECTORY_U16_MAX = 0xFFFF
+# Conversion resource limits, not restrictions imposed by the file format.
+# Even a tiny SMF can describe millions of bars or an enormous silent delay.
+MAX_ESEQ_GENERATED_MARKERS = 100_000
+MAX_ESEQ_OUTPUT_BYTES = 16 * 1024 * 1024
 DEFAULT_MIDI_MPQN = 500000
 DEFAULT_TIME_SIGNATURE = (4, 2)
 DEFAULT_KEY_SIGNATURE = (0, 0)
@@ -924,6 +928,7 @@ def _collect_merged_midi_events(midi_bytes, *, include_end_tick=False):
         events = _normalize_midi_sysex_packets(events, track_index=track_index)
         max_end_tick = max(max_end_tick, end_tick)
         for abs_tick, order, raw in events:
+            _validate_midi_conversion_metadata(raw)
             merged.append((abs_tick, track_index, order, raw))
 
     merged.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -1058,6 +1063,27 @@ def _read_vlq_from_bytes(data, offset):
     raise EseqConversionError("Invalid variable-length quantity.")
 
 
+def _validate_midi_conversion_metadata(raw):
+    """Validate metadata semantics before selecting either timing writer.
+
+    Unknown meta events retain their opaque payloads. The SMF parser already
+    checks event framing; these fixed-size fields also need value checks so a
+    writer cannot silently ignore, truncate, or mask a malformed setting.
+    """
+    if raw[:2] not in (b"\xFF\x51", b"\xFF\x58", b"\xFF\x20"):
+        return
+    size, offset = _read_vlq_from_bytes(raw, 2)
+    payload = raw[offset:]
+    if raw[1] == 0x51:
+        if size != 3 or len(payload) != 3 or int.from_bytes(payload, "big") == 0:
+            raise EseqConversionError("Invalid MIDI tempo: expected exactly 3 bytes and a nonzero value.")
+    elif raw[1] == 0x58:
+        if size != 4 or len(payload) != 4 or payload[0] == 0:
+            raise EseqConversionError("Invalid MIDI time signature: expected exactly 4 bytes and a positive numerator.")
+    elif size != 1 or len(payload) != 1 or payload[0] > 15:
+        raise EseqConversionError("Invalid MIDI channel prefix: expected exactly 1 byte with a value from 0 to 15.")
+
+
 def _choose_eseq_title(merged_events, title_override, filename_hint):
     if title_override is not None:
         if title_override.strip():
@@ -1125,9 +1151,28 @@ def _normalize_midi_sysex_packets(events, *, track_index):
     return events
 
 
-def _encode_eseq_delta(delta, *, prefer_long=False, avoid_long=False):
+def _eseq_delta_size(delta, *, prefer_long=False, avoid_long=False):
+    """Count encoded delay bytes without expanding the commanded duration."""
     if delta < 0:
         raise EseqConversionError("Negative E-SEQ deltas are not supported.")
+    ticks = int(delta)
+    if avoid_long:
+        return 2 * ((ticks + 0x7E) // 0x7F)
+    chunks, remainder = divmod(ticks, ESEQ_DELAY15_MAX)
+    return 3 * chunks + (3 if prefer_long or remainder > 0x7F else 2) * bool(remainder)
+
+
+def _check_eseq_output_size(size, *, pad_output=False):
+    if pad_output:
+        size = ((size + 2047) // 2048) * 2048
+    if size > MAX_ESEQ_OUTPUT_BYTES:
+        raise EseqConversionError(
+            f"E-SEQ output exceeds the conversion size limit of {MAX_ESEQ_OUTPUT_BYTES:,} bytes."
+        )
+
+
+def _encode_eseq_delta(delta, *, prefer_long=False, avoid_long=False):
+    _check_eseq_output_size(_eseq_delta_size(delta, prefer_long=prefer_long, avoid_long=avoid_long))
     out = bytearray()
     remaining = int(delta)
     if avoid_long:
@@ -1173,21 +1218,75 @@ def _build_time_signature_markers(time_signature_events, last_tick):
         else:
             deduped.append(marker)
 
-    markers = set()
+    # Count every segment before expanding any of them. Segments cannot
+    # overlap after shared-tick deduplication, so no marker set/sort is needed.
+    # The budget includes markers later omitted inside SysEx or a prelude.
+    segments = []
+    marker_count = 0
     for index, (tick, numerator, denominator_power) in enumerate(deduped):
         next_tick = deduped[index + 1][0] if index + 1 < len(deduped) else last_tick
         denominator = 1 << denominator_power
         measure_ticks = max(1, int(round(ESEQ_MIDI_DIVISION * numerator * 4.0 / denominator)))
-        cursor = tick
         stop_tick = max(next_tick, tick)
         if index == len(deduped) - 1 and last_tick > stop_tick:
             stop_tick = last_tick
-        markers.add((cursor, numerator, denominator_power))
-        cursor += measure_ticks
-        while cursor < stop_tick:
-            markers.add((cursor, numerator, denominator_power))
-            cursor += measure_ticks
-    return sorted(markers, key=lambda item: (item[0], item[1], item[2]))
+        count = max(1, (stop_tick - tick + measure_ticks - 1) // measure_ticks)
+        marker_count += count
+        if marker_count > MAX_ESEQ_GENERATED_MARKERS:
+            raise EseqConversionError(
+                f"E-SEQ barline marker count exceeds the conversion limit of {MAX_ESEQ_GENERATED_MARKERS:,}."
+            )
+        segments.append((tick, numerator, denominator_power, measure_ticks, count))
+    _check_eseq_output_size(marker_count * 3)
+    return [
+        (tick + index * measure_ticks, numerator, denominator_power)
+        for tick, numerator, denominator_power, measure_ticks, count in segments
+        for index in range(count)
+    ]
+
+
+def _iter_eseq_stream_parts(combined_events, last_tick, visible_before, visible_after):
+    """Plan delays and payloads without allocating the encoded delays."""
+    previous_tick = 0
+    first_nonzero_delta = True
+    sysex_open = False
+    for abs_tick, _, raw in combined_events:
+        if sysex_open and raw[:1] != b"\xF7":
+            raise EseqConversionError(
+                "Cannot preserve an event interleaved with MIDI SysEx continuation packets in E-SEQ."
+            )
+        delta = abs_tick - previous_tick
+        prefer_long = first_nonzero_delta and delta > 0 and visible_before is not None and visible_before > 0
+        avoid_long = first_nonzero_delta and delta > 0 and visible_before == 0
+        # Strip the SMF continuation marker, retaining the transmitted F7.
+        yield delta, prefer_long, avoid_long, raw[1:] if raw[:1] == b"\xF7" else raw
+        if delta > 0:
+            first_nonzero_delta = False
+        if raw[:1] in (b"\xF0", b"\xF7"):
+            sysex_open = not raw[1:].endswith(b"\xF7")
+        previous_tick = abs_tick
+    yield max(0, last_tick - previous_tick), visible_after is None or visible_after > 0, visible_after == 0, b"\xF2"
+
+
+def _build_eseq_stream(combined_events, last_tick, timing_hint, *, header_size, pad_output):
+    visible_before = timing_hint.visible_before_ticks if timing_hint is not None else None
+    visible_after = timing_hint.visible_after_ticks if timing_hint is not None else None
+    output_size = header_size
+    # Check the entire output, including the header, terminator and padding,
+    # before constructing the stream or expanding a single delay.
+    for delta, prefer_long, avoid_long, raw in _iter_eseq_stream_parts(
+        combined_events, last_tick, visible_before, visible_after,
+    ):
+        output_size += _eseq_delta_size(delta, prefer_long=prefer_long, avoid_long=avoid_long) + len(raw)
+        _check_eseq_output_size(output_size, pad_output=pad_output)
+
+    stream = bytearray()
+    for delta, prefer_long, avoid_long, raw in _iter_eseq_stream_parts(
+        combined_events, last_tick, visible_before, visible_after,
+    ):
+        stream.extend(_encode_eseq_delta(delta, prefer_long=prefer_long, avoid_long=avoid_long))
+        stream.extend(raw)
+    return stream
 
 
 def _finalize_eseq_header(
@@ -1383,26 +1482,20 @@ def convert_midi_bytes_to_eseq_bytes(
         if raw[:2] == b"\xFF\x51":
             meta_len, payload_start = _read_vlq_from_bytes(raw, 2)
             payload = raw[payload_start:payload_start + meta_len]
-            if len(payload) >= 3:
-                tempo_events.append((scaled_tick, int.from_bytes(payload[:3], "big")))
+            tempo_events.append((scaled_tick, int.from_bytes(payload, "big")))
             continue
 
         if raw[:2] == b"\xFF\x58":
             meta_len, payload_start = _read_vlq_from_bytes(raw, 2)
             payload = raw[payload_start:payload_start + meta_len]
-            if len(payload) >= 3:
-                time_signature_events.append((scaled_tick, payload[0], payload[1]))
+            time_signature_events.append((scaled_tick, payload[0], payload[1]))
             continue
 
         if raw[:2] == b"\xFF\x20":
-            try:
-                meta_len, payload_start = _read_vlq_from_bytes(raw, 2)
-            except EseqConversionError:
-                continue
+            meta_len, payload_start = _read_vlq_from_bytes(raw, 2)
             payload = raw[payload_start:payload_start + meta_len]
-            if payload:
-                normalized_events.append((scaled_tick, event_sequence, b"\xFF" + bytes([payload[0] & 0x0F])))
-                event_sequence += 1
+            normalized_events.append((scaled_tick, event_sequence, b"\xFF" + payload))
+            event_sequence += 1
             continue
 
         if raw and raw[0] == 0xFF:
@@ -1548,48 +1641,22 @@ def convert_midi_bytes_to_eseq_bytes(
     combined_events.sort(key=lambda item: (item[0], item[1]))
     playback_flags = analyze_eseq_playback_flags(raw for _tick, _order, raw in normalized_events)
 
-    stream = bytearray()
-    previous_tick = 0
-    first_event = True
-    first_nonzero_delta = True
-    visible_before = timing_hint.visible_before_ticks if timing_hint is not None else None
-    visible_after = timing_hint.visible_after_ticks if timing_hint is not None else None
-    sysex_open = False
-    for abs_tick, _, raw in combined_events:
-        if sysex_open and raw[:1] != b"\xF7":
-            raise EseqConversionError(
-                "Cannot preserve an event interleaved with MIDI SysEx continuation packets in E-SEQ."
-            )
-        if first_event:
-            first_event = False
-        else:
-            delta = abs_tick - previous_tick
-            stream.extend(
-                _encode_eseq_delta(
-                    delta,
-                    prefer_long=first_nonzero_delta and delta > 0 and visible_before is not None and visible_before > 0,
-                    avoid_long=first_nonzero_delta and delta > 0 and visible_before == 0,
-                )
-            )
-            if delta > 0:
-                first_nonzero_delta = False
-        # Strip only the continuation packet marker. Its terminal F7, if
-        # present, remains the SysEx message's actual transmitted terminator.
-        stream.extend(raw[1:] if raw[:1] == b"\xF7" else raw)
-        if raw[:1] in (b"\xF0", b"\xF7"):
-            sysex_open = not raw[1:].endswith(b"\xF7")
-        previous_tick = abs_tick
-    if last_tick > previous_tick:
-        stream.extend(
-            _encode_eseq_delta(
-                last_tick - previous_tick,
-                prefer_long=visible_after is None or visible_after > 0,
-                avoid_long=visible_after == 0,
-            )
-        )
-        previous_tick = last_tick
-    end_tick = previous_tick
-    stream.extend(b"\xF2")
+    output_header_size = (
+        CLAVINOVA_MDA_HEADER_SIZE if container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA else ESEQ_HEADER_SIZE
+    )
+    if (
+        container_variant == ESEQ_CONTAINER_DISKLAVIER
+        and header_hint is not None
+        and header_hint.prefix_00_stream is not None
+        and _is_q11_eseq(header_hint.prefix_00_stream)
+    ):
+        output_header_size = max(Q11_EVENT_STREAM_START, len(header_hint.prefix_00_stream))
+    stream = _build_eseq_stream(
+        combined_events, last_tick, timing_hint,
+        header_size=output_header_size,
+        pad_output=container_variant != ESEQ_CONTAINER_CLAVINOVA_MDA,
+    )
+    end_tick = max(last_tick, combined_events[-1][0])
     if normalized_events:
         real_event_ticks = [tick for tick, _, _ in normalized_events]
         note_ticks = [tick for tick, _, raw in normalized_events if _is_note_on_event(raw)]

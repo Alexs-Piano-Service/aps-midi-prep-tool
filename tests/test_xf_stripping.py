@@ -166,6 +166,47 @@ def test_strip_xf_rejects_invalid_or_unsupported_midi(source, message):
         strip_xf_from_midi_bytes(source)
 
 
+@pytest.mark.parametrize("status", [0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF8,
+                                   0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE])
+@pytest.mark.parametrize("cleanup_mode", ["targeted", "broad"])
+@pytest.mark.parametrize("destination_kind", ["new", "existing", "in_place"])
+def test_xf_cleanup_rejects_direct_system_status_without_changing_files(
+    tmp_path, status, cleanup_mode, destination_kind,
+):
+    known_xf = b"\xff\x7f\x04\x43\x7b\x02\x00"
+    wire_event = bytes([status]) + b"\x00" * {0xF1: 1, 0xF2: 2, 0xF3: 1}.get(status, 0)
+    source_bytes = _midi(_track([(0, known_xf), (0, wire_event)]))
+    source = tmp_path / "source.mid"
+    source.write_bytes(source_bytes)
+    destination = source if destination_kind == "in_place" else tmp_path / "destination.mid"
+    if destination_kind == "existing":
+        destination.write_bytes(b"existing output")
+
+    with pytest.raises(ValueError, match=f"Unsupported system status byte: 0x{status:02X}"):
+        strip_xf_from_midi_path(source, destination, cleanup_mode=cleanup_mode)
+
+    assert source.read_bytes() == source_bytes
+    if destination_kind == "new":
+        assert not destination.exists()
+    elif destination_kind == "existing":
+        assert destination.read_bytes() == b"existing output"
+    assert not list(tmp_path.glob(".aps_write_*"))
+
+
+@pytest.mark.parametrize("event_prefix", [b"\xf7", b"\xff\x01"], ids=["escaped", "meta"])
+@pytest.mark.parametrize("cleanup_mode", ["targeted", "broad"])
+def test_xf_cleanup_preserves_system_status_bytes_in_length_delimited_payloads(event_prefix, cleanup_mode):
+    known_xf = b"\xff\x7f\x04\x43\x7b\x02\x00"
+    payload = bytes(range(0xF0, 0x100))
+    retained_event = event_prefix + bytes([len(payload)]) + payload
+    source = _midi(_track([(0, known_xf), (10, retained_event)]))
+
+    stripped, changed = strip_xf_from_midi_bytes(source, cleanup_mode=cleanup_mode)
+
+    assert changed
+    assert stripped == _midi(_track([(10, retained_event)]))
+
+
 @pytest.mark.parametrize(
     ("target_index", "expected_rows"),
     [(-1, [(2, "first.mid"), (5, "second.mid")]), (1, [(5, "second.mid")])],

@@ -8,18 +8,6 @@ from math import ceil
 from .helpers.file_backup import copy_file_backup, plan_file_backups
 from .smf import parse_smf_layout
 
-_SYSTEM_MESSAGE_DATA_LENGTHS = {
-    0xF1: 1,
-    0xF2: 2,
-    0xF3: 1,
-    0xF6: 0,
-    0xF8: 0,
-    0xFA: 0,
-    0xFB: 0,
-    0xFC: 0,
-    0xFE: 0,
-}
-
 DISKLAVIER_PIANO_CHANNEL = 0
 DISKLAVIER_LEGACY_PEDAL_CHANNEL = 2
 DISKLAVIER_ACOUSTIC_GRAND_PROGRAM = 0
@@ -166,22 +154,10 @@ def _parse_track_events(track_data):
             running_status = status
             continue
 
-        if not status_from_stream:
-            raise ValueError("System messages cannot use running status.")
-
-        data_len = _SYSTEM_MESSAGE_DATA_LENGTHS.get(status)
-        if data_len is None:
-            raise ValueError(f"Unsupported system status byte: 0x{status:02X}")
-        if pos + data_len > end:
-            raise ValueError("System message exceeds track bounds.")
-        data = track_data[pos:pos + data_len]
-        if any(byte >= 0x80 for byte in data):
-            raise ValueError("Invalid data byte in a MIDI system message.")
-        pos += data_len
-        raw = bytes([status]) + data
-        events.append((abs_tick, order, raw))
-        order += 1
-        running_status = None
+        # SMF permits channel messages, F0/F7 packets, and FF meta events.
+        # Wire-level system messages belong inside length-prefixed F7 escape
+        # packets; emitting them directly can become control opcodes in E-SEQ.
+        raise ValueError(f"Unsupported system status byte: 0x{status:02X}")
 
     return events, abs_tick
 
@@ -1655,6 +1631,8 @@ def _convert_midi_bytes_to_type0(
             continue
         rebuilt.extend(chunk_bytes)
 
+    trailing_start = chunks[-1]["data_end"] if chunks else header_end
+    rebuilt.extend(midi_bytes[trailing_start:])
     return bytes(rebuilt), True
 
 

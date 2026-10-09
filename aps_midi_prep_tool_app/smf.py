@@ -65,7 +65,8 @@ def read_smf_layout(
     declared track are opaque, as required by the channel-merging utility's
     preservation behavior. Converters can inspect trailing unknown chunks with
     include_trailing_chunks; extra MTrk chunks are rejected because they are not
-    declared by the header.
+    declared by the header. Incomplete non-track trailers remain opaque, and
+    the returned offset identifies the start of those preserved bytes.
     """
     header = _read_smf_header(
         handle, file_size, prefix=prefix, max_header_bytes=max_header_bytes,
@@ -74,21 +75,26 @@ def read_smf_layout(
     found_tracks = 0
     offset = header.header_end
     while found_tracks < header.track_count or (
-        include_trailing_chunks and offset + 8 <= file_size
+        include_trailing_chunks and offset < file_size
     ):
-        if offset + 8 > file_size:
-            raise ValueError("A declared MIDI track is missing or malformed.")
+        trailing = found_tracks >= header.track_count
         handle.seek(offset)
         chunk_header = handle.read(8)
-        if len(chunk_header) != 8:
+        chunk_id = chunk_header[:4]
+        if trailing and chunk_id == b"MTrk":
+            raise ValueError("The MIDI file contains an undeclared trailing MTrk chunk.")
+        if offset + 8 > file_size or len(chunk_header) != 8:
+            if trailing:
+                break
             raise ValueError("A declared MIDI track is missing or malformed.")
         data_start = offset + 8
         data_end = data_start + int.from_bytes(chunk_header[4:8], "big")
         if data_end > file_size:
+            if trailing:
+                # All declared music is complete. Application trailers need
+                # not be chunks; never scan their payload for track markers.
+                break
             raise ValueError("Corrupt MIDI chunk length.")
-        chunk_id = chunk_header[:4]
-        if chunk_id == b"MTrk" and found_tracks >= header.track_count:
-            raise ValueError("The MIDI file contains an undeclared trailing MTrk chunk.")
         chunks.append({
             "id": chunk_id,
             "start": offset,

@@ -220,5 +220,50 @@ def test_unread_sectors_are_attributed_only_with_readable_fat_and_directory(tmp_
     assert "readable FAT" in note
     states[geometry.fat_offset // 512] = 3
     affected, note = floppy_image._recovery_affected_files(image, diagnostics)
+    assert affected == [{"path": "SONG.MID", "status": "contains unread sectors", "unread_sectors": [song_sector]}]
+    assert "FAT 2" in note
+    states[(geometry.fat_offset + geometry.fat_size) // 512] = 3
+    affected, note = floppy_image._recovery_affected_files(image, diagnostics)
     assert affected == []
-    assert "FAT was not fully read" in note
+    assert "unreadable" in note
+
+
+@pytest.mark.parametrize("fat_sector", [0, 1], ids=["missing-signature", "missing-unused-allocations"])
+def test_retained_capture_maps_song_damage_using_readable_second_fat(tmp_path, monkeypatch, fat_sector):
+    from test_fat12_mirror_validation import _fragmented_image
+
+    source, data, geometry, _payload = _fragmented_image(tmp_path)
+    source.write_bytes(data)
+    song_sector = floppy_image._cluster_offset(geometry, 4) // geometry.bytes_per_sector
+    bad_offsets = {
+        geometry.fat_offset + fat_sector * geometry.bytes_per_sector,
+        song_sector * geometry.bytes_per_sector,
+    }
+
+    class Device:
+        closed = False
+
+        def read_at(self, offset, size, _label):
+            if any(offset <= start < offset + size for start in bad_offsets):
+                raise OSError("Unreadable test sector")
+            return bytes(data[offset:offset + size])
+
+        def close(self):
+            self.closed = True
+
+    device = Device()
+    monkeypatch.setattr(floppy_image, "_open_block_device_for_recovery_read", lambda _path: device)
+    capture = tmp_path / "capture.img"
+    diagnostics = floppy_image._read_block_device_recovery_image("mock", capture, len(data))
+    details = floppy_image.retain_floppy_recovery_capture(capture, diagnostics, temporary_parent=tmp_path)
+
+    expected = [{"path": "SONG.MID", "status": "contains unread sectors", "unread_sectors": [song_sector]}]
+    assert details["affected_files"] == expected
+    assert "FAT 2" in details["affected_files_note"]
+    assert details["bad_sectors"] == 2
+    report = json.loads(Path(details["partial_capture_diagnostics_path"]).read_text())
+    assert report["affected_files"] == expected
+    assert "FAT 2" in report["affected_files_note"]
+    assert Path(details["partial_capture_path"]).read_bytes() == capture.read_bytes()
+    assert source.read_bytes() == data
+    assert device.closed

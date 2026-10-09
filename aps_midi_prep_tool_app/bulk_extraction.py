@@ -447,7 +447,11 @@ def bulk_extract_images(
                             conversion_title,
                             parts[-1],
                         )
-                    midi_path = _available_midi_path(
+                    retained_midi = (
+                        job.verified_midi_path(image_name, entry.path)
+                        if job is not None else None
+                    )
+                    midi_path = retained_midi or _available_midi_path(
                         image_output_directory,
                         parts,
                         reserved_keys,
@@ -464,19 +468,22 @@ def bulk_extract_images(
                         path=entry.path,
                     )
                     try:
-                        os.makedirs(os.path.dirname(midi_path), exist_ok=True)
-                        with tempfile.TemporaryDirectory(prefix=".aps_convert_", dir=os.path.dirname(midi_path)) as conversion_dir:
-                            staged_midi_path = os.path.join(conversion_dir, os.path.basename(midi_path))
-                            conversion_options = {
-                                "cc7_policy": (CC7_POLICY_PRESERVE if preserve_volume_controls
-                                               else DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
-                            }
-                            if trim_title_spaces and title_read_successfully:
-                                conversion_options["title_override"] = conversion_title
-                            eseq_converter(extracted_path, staged_midi_path, **conversion_options)
-                            with open(staged_midi_path, "rb") as handle:
-                                atomic_write_bytes(midi_path, handle.read(), replace_existing=False)
-                        files_converted += 1
+                        if retained_midi is None:
+                            os.makedirs(os.path.dirname(midi_path), exist_ok=True)
+                            with tempfile.TemporaryDirectory(prefix=".aps_convert_", dir=os.path.dirname(midi_path)) as conversion_dir:
+                                staged_midi_path = os.path.join(conversion_dir, os.path.basename(midi_path))
+                                conversion_options = {
+                                    "cc7_policy": (CC7_POLICY_PRESERVE if preserve_volume_controls
+                                                   else DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
+                                }
+                                if trim_title_spaces and title_read_successfully:
+                                    conversion_options["title_override"] = conversion_title
+                                eseq_converter(extracted_path, staged_midi_path, **conversion_options)
+                                with open(staged_midi_path, "rb") as handle:
+                                    atomic_write_bytes(midi_path, handle.read(), replace_existing=False)
+                            files_converted += 1
+                        else:
+                            files_reused += 1
                         written_paths.append(midi_path)
                         converted_paths.add(midi_path)
                     except FloppyOperationCancelled:
@@ -485,6 +492,12 @@ def bulk_extract_images(
                         errors.append(f"{image_name} / {entry.path} (E-SEQ conversion): {exc}")
                         conversion_failed = True
                         if not include_eseq_sources:
+                            continue
+                    if job is not None and not conversion_failed and retained_midi is None:
+                        try:
+                            job.checkpoint_output(image_name, entry.path, midi_path, converted=True)
+                        except (OSError, ValueError) as exc:
+                            errors.append(f"{image_name} / {entry.path} (output verification): {exc}")
                             continue
 
                 if not convert_entry and long_midi_filenames:
@@ -541,6 +554,8 @@ def bulk_extract_images(
                                 job.safe_output_path(destination_path)
                             with open(extracted_path, "rb") as handle:
                                 atomic_write_bytes(destination_path, handle.read(), replace_existing=False)
+                            if job is not None:
+                                job.checkpoint_output(image_name, entry.path, destination_path)
                             files_extracted += 1
                         written_paths.append(destination_path)
                     except FloppyOperationCancelled:

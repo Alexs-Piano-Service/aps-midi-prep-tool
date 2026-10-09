@@ -74,7 +74,7 @@ def test_directory_diagnosis_requires_matching_catalog_and_fat_chains(tmp_path, 
         start = geometry.data_offset + 6 * geometry.cluster_size
         data[start + 0x27:start + 0x32] = b"OTHER   FIL"
     else:
-        data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size] = bytes(geometry.fat_size)
+        data[geometry.fat_offset:geometry.fat_offset + geometry.fat_area_size] = bytes(geometry.fat_area_size)
     source.write_bytes(data)
     with pytest.raises(floppy_image.FloppyImageError, match="Could not identify"):
         repair.inspect_boot_sector_image(source)

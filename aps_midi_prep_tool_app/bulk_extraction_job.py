@@ -307,29 +307,55 @@ class ExtractionJob:
 
     def verified_source_path(self, image_name, entry_name):
         """Reuse a retained source without considering its conversion complete."""
+        return self._verified_output_path(image_name, entry_name, converted=False)
+
+    def verified_midi_path(self, image_name, entry_name):
+        """Reuse a conversion even when preserving its source was interrupted."""
+        return self._verified_output_path(image_name, entry_name, converted=True)
+
+    def _verified_output_path(self, image_name, entry_name, *, converted):
         entry = self.image(image_name)["entries"].get(entry_name, {})
         for output in entry.get("outputs", []):
-            if output.get("converted"):
+            if output.get("converted") != converted:
                 continue
             try:
                 path = self.safe_output_path(os.path.join(self.root, output["path"]))
                 if file_digest(path, self.check_cancelled) == output["sha256"]:
+                    if converted:
+                        with open(path, "rb") as handle:
+                            inspect_music_bytes(handle.read())
                     return path
             except (OSError, ValueError, KeyError):
                 continue
         return None
 
+    def _output_record(self, path, converted, *, check_cancelled=None):
+        path = self.safe_output_path(path)
+        if converted:
+            with open(path, "rb") as handle:
+                inspect_music_bytes(handle.read())
+        return {
+            "path": os.path.relpath(path, self.root), "sha256": file_digest(path, check_cancelled),
+            "converted": converted,
+        }
+
+    def checkpoint_output(self, image_name, entry_name, path, *, converted=False):
+        """Record a newly published output before another operation can cancel.
+
+        Defer cooperative cancellation until this ownership record is saved.
+        The entry remains retryable until all its requested outputs are ready.
+        """
+        output = self._output_record(path, converted)
+        entry = self.image(image_name)["entries"][entry_name]
+        entry["outputs"] = [
+            previous for previous in entry["outputs"] if previous["path"] != output["path"]
+        ] + [output]
+        entry["state"] = "failed"
+        self.save()
+
     def finish_entry(self, image_name, entry_name, paths, *, converted=False, renamed_midi=False, failed=False):
-        outputs = []
-        for path, is_converted in paths:
-            path = self.safe_output_path(path)
-            if is_converted:
-                with open(path, "rb") as handle:
-                    inspect_music_bytes(handle.read())
-            outputs.append({
-                "path": os.path.relpath(path, self.root), "sha256": file_digest(path, self.check_cancelled),
-                "converted": is_converted,
-            })
+        outputs = [self._output_record(path, is_converted, check_cancelled=self.check_cancelled)
+                   for path, is_converted in paths]
         if not outputs and not _valid_skipped_entry(self.data, entry_name, {"reason": "eseq_directory"}):
             raise ValueError(f"No output was verified for {entry_name}")
         self.image(image_name)["entries"][entry_name] = {

@@ -111,7 +111,49 @@ def test_unrecorded_old_files_are_never_assumed_to_belong_to_the_set(collection)
     (source / "Album 2" / "song.mid").unlink()
     result = _build(collection, overwrite_existing=True)
     assert unrelated.read_bytes() == b"unrecorded image"
-    assert not result.warnings
+    assert str(unrelated) not in result.retired_paths
+    assert result.untracked_paths == (str(unrelated),)
+    assert any(unrelated.name in warning for warning in result.warnings)
+    manifest = json.loads(Path(result.manifest_path).read_text())
+    assert unrelated.name not in {item["filename"] for item in manifest["artifacts"]}
+
+
+@pytest.mark.parametrize("extension", ["img", "hfe"])
+def test_legacy_warning_finds_preserved_stale_disks_after_a_numbering_gap(collection, extension):
+    source, output = collection
+    previous = _build(collection, output_ext=extension)
+    Path(previous.manifest_path).unlink()
+    Path(previous.output_paths[1]).unlink()
+    stale = Path(previous.output_paths[2])
+    stale_bytes = stale.read_bytes()
+    for index in (1, 2):
+        (source / f"Album {index}" / "song.mid").unlink()
+    previews = []
+
+    def review(preview):
+        previews.append(preview)
+        return {"action": "build"}
+
+    result = _build(collection, output_ext=extension, overwrite_existing=True,
+                    review_callback=review)
+
+    assert result.images_created == 1
+    assert result.untracked_paths == (str(stale),)
+    assert result.retired_paths == ()
+    assert stale.read_bytes() == stale_bytes
+    assert any(stale.name in warning for warning in result.warnings)
+    assert any(stale.name in warning for warning in previews[0].warnings)
+    manifest = json.loads(Path(result.manifest_path).read_text())
+    assert stale.name not in {item["filename"] for item in manifest["artifacts"]}
+
+
+def test_legacy_warning_ignores_disks_below_the_starting_number(collection):
+    _source, output = collection
+    previous = _build(collection)
+    Path(previous.manifest_path).unlink()
+    assert builder._untracked_legacy_images(output, "DSKA", 2, ()) == (
+        previous.output_paths[2],
+    )
 
 
 @pytest.mark.parametrize("include_song_lists", [False, True])

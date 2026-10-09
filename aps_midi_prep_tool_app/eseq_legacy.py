@@ -99,11 +99,14 @@ def build_legacy_eseq_bytes(
         _normalize_midi_sysex_packets,
         _read_vlq_from_bytes,
         _sanitize_ascii_filename_key,
+        _validate_midi_conversion_metadata,
     )
 
     if not isinstance(division, int) or not 0 < division <= 0x7FFF:
         raise EseqConversionError("Legacy E-SEQ conversion requires a positive PPQN MIDI division.")
     merged_events = list(merged_events)
+    for _tick, _track, _order, raw in merged_events:
+        _validate_midi_conversion_metadata(raw)
     _normalize_midi_sysex_packets(
         [(tick, order, raw) for tick, _track, order, raw in merged_events], track_index=None,
     )
@@ -133,14 +136,10 @@ def build_legacy_eseq_bytes(
             if len(payload) != size:
                 raise EseqConversionError("Malformed MIDI meta event in legacy E-SEQ conversion.")
             if raw[1] == 0x51:
-                if size != 3 or int.from_bytes(payload, "big") == 0:
-                    raise EseqConversionError("Invalid MIDI tempo in legacy E-SEQ conversion.")
                 mpqn = int.from_bytes(payload, "big")
                 continue
             if raw[1] != 0x20:
                 continue
-            if size != 1 or payload[0] > 15:
-                raise EseqConversionError("Invalid MIDI channel prefix in legacy E-SEQ conversion.")
             raw = b"\xFF" + payload
         elif raw[0] in (0xF0, 0xF7):
             packet = _decode_midi_sysex_event(raw)

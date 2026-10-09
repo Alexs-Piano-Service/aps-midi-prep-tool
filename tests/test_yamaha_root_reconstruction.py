@@ -1,4 +1,7 @@
 import math
+from pathlib import Path
+
+import pytest
 
 from aps_midi_prep_tool_app import floppy_image as image
 from aps_midi_prep_tool_app.eseq_converter import parse_eseq_bytes
@@ -122,3 +125,119 @@ def test_reconstruction_does_not_claim_a_trailer_after_an_unknown_opcode():
     entry, recovered, _allocated = _rebuild(payload)
     assert entry["size"] == 0x78
     assert recovered == payload[:0x78]
+
+
+def _fragmented_image_with_destroyed_root(*, conflicting=False, invalid_first_signature=False,
+                                          broken_link=0, second_song=False):
+    geometry = image._yamaha_720_geometry()
+    data = bytearray(geometry.total_size)
+    data[:geometry.bytes_per_sector] = b"\xe5" * geometry.bytes_per_sector
+    data[geometry.root_offset:geometry.root_offset + geometry.root_size] = b"\xe5" * geometry.root_size
+    payload = _song(b"\x90\x3c\x40\xf3\x01\x80\x3c\x00" * 200 + b"\xf2")
+    catalog = bytearray(image.PIANODIR_TARGET_FILE_SIZE)
+    catalog[:len(image.PIANODIR_HEADER)] = image.PIANODIR_HEADER
+    catalog[len(image.PIANODIR_HEADER):len(image.PIANODIR_HEADER) + image.PIANODIR_TRACK_SIZE] = payload[0x27:0x77]
+    catalog_chain = list(range(2, 2 + math.ceil(len(catalog) / geometry.cluster_size)))
+    first = catalog_chain[-1] + 1
+    song_chain = [first, first + 2]
+    assert geometry.cluster_size < len(payload) <= 2 * geometry.cluster_size
+    fat = bytearray(geometry.fat_size)
+    fat[:3] = b"\xf9\xff\xff"
+    allocations = [(catalog_chain, catalog), (song_chain, payload)]
+    if second_song:
+        second_payload = bytearray(_song(b"\x90\x3d\x40\xf2"))
+        second_payload[0x27:0x32] = b"SECOND     "
+        offset = len(image.PIANODIR_HEADER) + image.PIANODIR_TRACK_SIZE
+        catalog[offset:offset + image.PIANODIR_TRACK_SIZE] = second_payload[0x27:0x77]
+        allocations.append(([first + 4], second_payload))
+    for chain, contents in allocations:
+        for index, cluster in enumerate(chain):
+            _set_fat(fat, cluster, chain[index + 1] if index + 1 < len(chain) else 0xFFF)
+            chunk = contents[index * geometry.cluster_size:(index + 1) * geometry.cluster_size]
+            offset = image._cluster_offset(geometry, cluster)
+            data[offset:offset + len(chunk)] = chunk
+
+    neighbor = image._cluster_offset(geometry, first + 1)
+    data[neighbor:neighbor + geometry.cluster_size] = b"N" * geometry.cluster_size
+    _set_fat(fat, first + 1, 0xFFF)
+    if conflicting:
+        alternate_tail = first + 3
+        offset = image._cluster_offset(geometry, alternate_tail)
+        alternate = bytearray(payload[geometry.cluster_size:])
+        alternate[2] ^= 1
+        data[offset:offset + len(alternate)] = alternate
+        _set_fat(fat, alternate_tail, 0xFFF)
+    first_fat = bytearray(fat)
+    _set_fat(first_fat, first, alternate_tail if conflicting else broken_link)
+    if invalid_first_signature:
+        first_fat[:3] = bytes(3)
+    data[geometry.fat_offset:geometry.fat_offset + geometry.fat_size] = first_fat
+    data[geometry.fat_offset + geometry.fat_size:geometry.fat_offset + 2 * geometry.fat_size] = fat
+    return bytes(data), geometry, payload
+
+
+@pytest.mark.parametrize("invalid_first_signature,broken_link", [(False, 0), (False, 0xFF7), (True, 0)])
+def test_reconstruction_uses_good_second_fat_for_fragmented_song(tmp_path, invalid_first_signature, broken_link):
+    data, geometry, payload = _fragmented_image_with_destroyed_root(
+        invalid_first_signature=invalid_first_signature,
+        broken_link=broken_link,
+    )
+    assert image._detect_yamaha_layout(data) is None
+    assert image._detect_protected_fat12_layout(data) is None
+    output = tmp_path / "recovered.img"
+    result = image.prepare_yamaha_bytes(data, output)
+    assert result.boot_sector_repaired
+    assert "Selected FAT 2" in result.note
+    assert image._read_fat12_file_bytes(output, "SONG") == payload
+    assert output.read_bytes()[geometry.data_offset:] == data[geometry.data_offset:]
+
+
+def test_reconstruction_uses_complete_catalog_map_over_partly_readable_first_fat(tmp_path):
+    data, _geometry, payload = _fragmented_image_with_destroyed_root(second_song=True)
+    output = tmp_path / "recovered.img"
+    result = image.prepare_yamaha_bytes(data, output)
+    assert "Selected FAT 2" in result.note
+    assert {entry.path for entry in image.read_image_listing(output).entries} == {"PIANODIR.FIL", "SONG", "SECOND"}
+    assert image._read_fat12_file_bytes(output, "SONG") == payload
+
+
+def test_reconstruction_rejects_conflicting_fragmented_song_maps_before_writing(tmp_path):
+    data, _geometry, _payload = _fragmented_image_with_destroyed_root(conflicting=True)
+    output = tmp_path / "recovered.img"
+    with pytest.raises(image._Fat12RecoveryAmbiguityError, match="conflicting.*PIANODIR"):
+        image.prepare_yamaha_bytes(data, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mode", ["recover", "open-converted"])
+def test_root_reconstruction_ambiguity_stops_high_level_fallbacks(tmp_path, monkeypatch, mode):
+    data, _geometry, _payload = _fragmented_image_with_destroyed_root(conflicting=True)
+    source = tmp_path / "source.img"
+    source.write_bytes(data)
+    monkeypatch.setattr(image, "_recover_file_candidates_from_raw_image_bytes",
+                        lambda *_a, **_k: pytest.fail("Conflicting catalog maps must not fall back to carving"))
+    calls = []
+    if mode == "recover":
+        def run():
+            return image.FloppyImageSession._recover_from_raw_image(
+                source, str(tmp_path), source_name="source.img",
+            )
+    else:
+        monkeypatch.setattr(image, "_conversion_candidate_formats", lambda *_a, **_k: [
+            image.DISK_FORMAT_BY_KEY["ibm.720"], image.DISK_FORMAT_BY_KEY["ibm.1440"],
+        ])
+
+        def convert(_source, destination, _format, **_kwargs):
+            assert not calls, "Conflicting catalog maps must not retry another geometry"
+            calls.append(destination)
+            Path(destination).write_bytes(data)
+            return ""
+
+        monkeypatch.setattr(image, "_gw_convert", convert)
+
+        def run():
+            return image.FloppyImageSession._load_converted(source, "scp", str(tmp_path))
+
+    with pytest.raises(image._Fat12RecoveryAmbiguityError, match="conflicting.*PIANODIR"):
+        run()
+    assert source.read_bytes() == data

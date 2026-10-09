@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import zlib
+from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -2069,9 +2070,22 @@ def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_fo
         readback_path = os.path.join(verify_dir, "readback.img")
         try:
             if target_kind == "floppy_usb":
+                read_size = target.size_bytes or disk_format.size_bytes
+                if verify_entire_image:
+                    # A smaller logical volume may occupy only a prefix of the
+                    # medium. Verify every byte we wrote, not its untouched tail.
+                    read_size = os.path.getsize(prepared_path)
+                    if read_size <= 0:
+                        raise FloppyImageError("The prepared format image is empty.")
+                    capacity = int(target.size_bytes or 0)
+                    if capacity > 0 and read_size > capacity:
+                        raise FloppyImageError(
+                            "The prepared format image exceeds the reported floppy capacity."
+                        )
                 _read_block_device(
-                    target.path, readback_path, target.size_bytes or disk_format.size_bytes,
+                    target.path, readback_path, read_size,
                     progress_callback=progress_callback, cancel_callback=cancel_callback,
+                    uncached=True,
                 )
             else:
                 _gw_read_floppy(target, readback_path, progress_callback=progress_callback,
@@ -3908,7 +3922,91 @@ def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=
     raise FloppyImageError("Windows raw floppy byte reads are only available on Windows.")
 
 
-def _read_block_device(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None, *, diagnostics=None):
+def _read_linux_block_device_direct(
+    device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None, *, diagnostics=None,
+):
+    """Read verification bytes from a Linux block device without its page cache.
+
+    fsync confirms writes but leaves cached pages available to ordinary reads.
+    Direct I/O requires aligned buffers, lengths and offsets. Failure to perform
+    it must fail verification instead of silently accepting cached bytes.
+    """
+    import array
+    import ctypes
+    import fcntl
+    import mmap
+
+    total_size = int(size_bytes or 0)
+    details = diagnostics if diagnostics is not None else {}
+    details.update(selected_capacity_bytes=total_size, exact_capture_completed=False,
+                   read_method="linux_direct_io", os_cache_bypassed=False)
+    descriptor = None
+    copied = 0
+    try:
+        _raise_if_cancelled(cancel_callback)
+        if not getattr(os, "O_DIRECT", 0) or not hasattr(os, "preadv"):
+            raise FloppyImageError("Uncached Linux floppy verification requires direct I/O support.")
+        descriptor = os.open(device_path, os.O_RDONLY | os.O_DIRECT | getattr(os, "O_CLOEXEC", 0))
+        if not stat.S_ISBLK(os.fstat(descriptor).st_mode):
+            raise FloppyImageError("The verification source is no longer a Linux block device.")
+        sector = array.array("I", [0])
+        fcntl.ioctl(descriptor, 0x1268, sector, True)  # Linux BLKSSZGET.
+        sector_size = int(sector[0])
+        chunk_size = 64 * 1024
+        if sector_size <= 0 or sector_size > chunk_size or sector_size & (sector_size - 1):
+            raise FloppyImageError("The floppy reported an unsupported direct-I/O sector size.")
+        if total_size <= 0 or total_size % sector_size:
+            raise FloppyImageError("Uncached floppy verification requires a positive, sector-aligned image size.")
+        details.update(os_cache_bypassed=True, bytes_per_sector=sector_size)
+        # MAP_SHARED also avoids the O_DIRECT/private-buffer restriction when
+        # another application thread starts a subprocess during the read.
+        with mmap.mmap(-1, chunk_size + sector_size, flags=mmap.MAP_SHARED) as buffer, open(output_path, "wb") as output:
+            address = ctypes.addressof(ctypes.c_char.from_buffer(buffer))
+            aligned_start = (-address) % sector_size
+            while copied < total_size:
+                _raise_if_cancelled(cancel_callback)
+                current_size = min(chunk_size, total_size - copied)
+                view = memoryview(buffer)[aligned_start:aligned_start + current_size]
+                try:
+                    count = os.preadv(descriptor, [view], copied)
+                    if not isinstance(count, int) or count <= 0 or count > current_size or count % sector_size:
+                        raise FloppyImageError(
+                            f"Uncached floppy read returned an incomplete or unaligned sector at byte {copied:,}."
+                        )
+                except (OSError, FloppyImageError) as exc:
+                    failure = _read_failure_record(exc, copied, current_size, "uncached floppy verification")
+                    details.update(failed_read_offset_bytes=copied, failed_read_length_bytes=current_size,
+                                   failed_sector_exact=current_size == sector_size,
+                                   first_failed_read=failure, final_failed_read=failure)
+                    raise
+                finally:
+                    view.release()
+                output.write(buffer[aligned_start:aligned_start + count])
+                _record_successful_read(details, copied, count)
+                copied += count
+                if progress_callback is not None:
+                    progress_callback(min(70, int(copied / total_size * 70)), 100,
+                                      f"Verifying floppy: {display_bytes(copied)} of {display_bytes(total_size)}...")
+        _raise_if_cancelled(cancel_callback)
+        details["exact_capture_completed"] = True
+    except FloppyOperationCancelled as exc:
+        details["cancelled"] = True
+        exc.read_diagnostics = dict(details)
+        raise
+    except (OSError, FloppyImageError) as exc:
+        details["final_error"] = _read_failure_record(exc)
+        if isinstance(exc, FloppyImageError):
+            exc.read_diagnostics = dict(details)
+            raise
+        error = FloppyImageError(f"Could not verify floppy device {device_path} with uncached direct I/O: {exc}")
+        error.read_diagnostics = dict(details)
+        raise error from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _read_block_device(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None, *, diagnostics=None, uncached=False):
     if os.name == "nt":
         data = _read_windows_block_device_bytes(
             device_path,
@@ -3926,9 +4024,18 @@ def _read_block_device(device_path, output_path, size_bytes, progress_callback=N
     details.update(selected_capacity_bytes=total_size, exact_capture_completed=False)
     copied = 0
     chunk_size = 64 * 1024
+    source = None
     try:
         source = open(device_path, "rb", buffering=0)
+        if uncached and sys.platform.startswith("linux") and stat.S_ISBLK(os.fstat(source.fileno()).st_mode):
+            source.close()
+            return _read_linux_block_device_direct(
+                device_path, output_path, size_bytes,
+                progress_callback=progress_callback, cancel_callback=cancel_callback, diagnostics=diagnostics,
+            )
     except OSError as exc:
+        if source is not None:
+            source.close()
         error = FloppyImageError(f"Could not open floppy device {device_path}: {exc}")
         details["open_error"] = _read_failure_record(exc)
         error.read_diagnostics = details
@@ -5127,8 +5234,17 @@ def _recovery_affected_files(image_path, diagnostics):
         ]
 
     try:
-        data, geometry, fat, root_dir = _read_fat12_image_context(image_path)
-        if unread_in_range(0, sector_size) or unread_in_range(geometry.fat_offset, geometry.fat_size):
+        fat_diagnostics = {}
+        unreadable_ranges = [
+            (index * sector_size, sector_size)
+            for index, state in enumerate(states) if state not in (1, 2)
+        ]
+        data, geometry, fat, root_dir = _read_fat12_image_context(
+            image_path, diagnostics=fat_diagnostics, unreadable_ranges=unreadable_ranges,
+        )
+        selected_copy = fat_diagnostics["fat_selected_copy"]
+        selected_fat_offset = geometry.fat_offset + (selected_copy - 1) * geometry.fat_size
+        if unread_in_range(0, sector_size) or unread_in_range(selected_fat_offset, geometry.fat_size):
             return [], "Song damage cannot be mapped because the boot sector or FAT was not fully read."
         if unread_in_range(geometry.root_offset, geometry.root_size):
             return [], "Song damage cannot be mapped because the root directory was not fully read."
@@ -5166,7 +5282,7 @@ def _recovery_affected_files(image_path, diagnostics):
                     affected.append({"path": path, "status": "contains unread sectors", "unread_sectors": unread})
 
         visit(root_dir)
-        return affected, "Mapped against readable FAT and directory entries; unlisted/deleted songs may remain unknown."
+        return affected, f"Mapped against readable FAT {selected_copy} and directory entries; unlisted/deleted songs may remain unknown."
     except (OSError, FloppyImageError, ValueError) as exc:
         return [], f"Song damage could not be mapped: {exc}"
 
@@ -5298,8 +5414,17 @@ def _write_block_device(input_path, device_path, progress_callback=None, cancel_
                 chunk = source.read(chunk_size)
                 if not chunk:
                     break
-                target.write(chunk)
-                written += len(chunk)
+                remaining = memoryview(chunk)
+                while remaining:
+                    _raise_if_cancelled(cancel_callback)
+                    count = target.write(remaining)
+                    if not isinstance(count, int) or count <= 0 or count > len(remaining):
+                        raise FloppyImageError(
+                            f"Could not write floppy device {device_path}: "
+                            f"invalid write result after {written:,} of {total_size:,} bytes."
+                        )
+                    written += count
+                    remaining = remaining[count:]
                 if progress_callback is not None and total_size > 0:
                     progress = min(98, int((written / total_size) * 98))
                     progress_callback(
@@ -5908,22 +6033,34 @@ def _read_fat12_block_device_listing(device_path, *, diagnostics=None):
             )
         fat_area, fat_bad_ranges = _read_fat_area_best_effort(fd, geometry, boot_sector[21])
         root_dir = _read_device_exact(fd, geometry.root_offset, geometry.root_size, "floppy root directory")
+        has_subdirectories = any(entry["attr"] & 0x10 for entry in _iter_fat_directory_entries(root_dir))
+        if has_subdirectories and electone_mdr_to_midi.root_directory_has_mdr_entries(root_dir):
+            # Preserve the full reader's contiguous-file compatibility for MDR
+            # disks whose damaged file chains cannot use targeted acquisition.
+            return _read_fat12_image_listing(device_path, diagnostics=diagnostics)
+
+        # Directory validation needs their real sector bytes, including hidden
+        # Windows metadata. Acquire those sectors without reading song data or
+        # unused media; the remaining scratch bytes are never file payloads.
+        data_size = geometry.total_size if has_subdirectories else geometry.data_offset
+        data = bytearray(boot_sector.ljust(data_size, b"\x00"))
+        data[geometry.fat_offset:geometry.fat_offset + geometry.fat_area_size] = fat_area
+        data[geometry.root_offset:geometry.root_offset + geometry.root_size] = root_dir
+        directory_cache = {}
+
+        def acquire_directories(candidate_fat):
+            _acquire_floppy_subdirectories(
+                fd, data, geometry, candidate_fat, root_dir,
+                cache=directory_cache, include_windows_metadata=True,
+            )
+
+        fat, _note = _select_fat12_copy(
+            data, geometry, root_dir, diagnostics=diagnostics, unreadable_ranges=fat_bad_ranges,
+            directory_reader=acquire_directories if has_subdirectories else None,
+        )
+        entries = _collect_fat12_listing_entries(data, geometry, fat, root_dir)
     finally:
         os.close(fd)
-
-    if any(
-        entry["attr"] & 0x10 and not _is_windows_volume_metadata_path(entry["name"])
-        for entry in _iter_fat_directory_entries(root_dir)
-    ):
-        return _read_fat12_image_listing(device_path, diagnostics=diagnostics)
-
-    data = bytearray(boot_sector.ljust(geometry.data_offset, b"\x00"))
-    data[geometry.fat_offset:geometry.fat_offset + geometry.fat_area_size] = fat_area
-    data[geometry.root_offset:geometry.root_offset + geometry.root_size] = root_dir
-    fat, _note = _select_fat12_copy(
-        data, geometry, root_dir, diagnostics=diagnostics, unreadable_ranges=fat_bad_ranges,
-    )
-    entries = _collect_fat12_listing_entries(data, geometry, fat, root_dir)
     free_clusters = sum(
         1
         for cluster in range(2, _fat12_data_cluster_count(geometry) + 2)
@@ -7055,7 +7192,7 @@ def _select_fat12_copy(data, geometry, root_dir, *, diagnostics=None, unreadable
     return selected_fat, note
 
 
-def _read_fat12_image_context(img_path, *, diagnostics=None):
+def _read_fat12_image_context(img_path, *, diagnostics=None, unreadable_ranges=()):
     with open(img_path, "rb") as handle:
         data = handle.read()
 
@@ -7079,7 +7216,9 @@ def _read_fat12_image_context(img_path, *, diagnostics=None):
     if len(root_dir) != geometry.root_size:
         raise FloppyImageError("Could not read the FAT12 root directory from this image; the image may be corrupt.")
 
-    fat, _note = _select_fat12_copy(data, geometry, root_dir, diagnostics=diagnostics)
+    fat, _note = _select_fat12_copy(
+        data, geometry, root_dir, diagnostics=diagnostics, unreadable_ranges=unreadable_ranges,
+    )
     return data, geometry, fat, root_dir
 
 
@@ -7369,7 +7508,7 @@ def _dos_directory_entry(name_bytes, first_cluster, size, attr=0x20):
 
 
 def _reconstructed_eseq_file_size(payload):
-    """Recover a file boundary using only bytes from its allocated FAT chain."""
+    """Recover a file boundary within a FAT chain or a bounded carve candidate."""
     stream_start = _eseq_event_stream_start(payload)
     declared_sizes = (
         int.from_bytes(payload[3:7], "little"),
@@ -7421,13 +7560,42 @@ def _reconstruct_yamaha_root_dir_from_pianodir(data):
         return None
 
     geometry = _yamaha_720_geometry()
-    fat_area = data[geometry.fat_offset:geometry.fat_offset + geometry.fat_area_size]
-    if len(fat_area) != geometry.fat_area_size:
-        return None
-    if not _fat_signature_at(fat_area, 0) or not _fat_signature_at(fat_area, geometry.fat_size):
-        return None
+    candidates = []
+    checked = set()
+    for _index, fat, signature_valid in _fat12_copy_records(data, geometry):
+        if not signature_valid or fat in checked:
+            continue
+        checked.add(fat)
+        try:
+            root = _reconstruct_yamaha_root_dir_with_fat(data, geometry, fat)
+            if root is None:
+                continue
+            # A catalog match alone does not establish independent ownership:
+            # reject overlapping songs and catalog/file cross-links as well.
+            _collect_fat12_listing_entries(data, geometry, fat, root)
+            chains = tuple(
+                tuple(_fat12_cluster_chain(
+                    fat, entry["cluster"], entry["size"], geometry, include_allocated_tail=True,
+                ))
+                for entry in _iter_fat_directory_entries(root)
+            )
+        except FloppyImageError:
+            continue
+        candidates.append((root, chains))
 
-    fat = fat_area[:geometry.fat_size]
+    if not candidates:
+        return None
+    selected = candidates[0]
+    if any(candidate != selected for candidate in candidates[1:]):
+        raise _Fat12RecoveryAmbiguityError(
+            "The FAT12 copies reconstruct conflicting PIANODIR/song maps. "
+            "APS cannot safely rebuild the root directory or choose song contents."
+        )
+    return selected[0]
+
+
+def _reconstruct_yamaha_root_dir_with_fat(data, geometry, fat):
+    """Reconstruct one complete catalog using a single allocation-table copy."""
     chain_starts = _fat12_chain_starts(fat, geometry)
     pianodir_cluster = None
     for cluster in chain_starts:
@@ -7479,7 +7647,9 @@ def _reconstruct_yamaha_root_dir_from_pianodir(data):
             break
 
         if matched_cluster is None:
-            continue
+            # A partially readable copy must not compete with a mirror that
+            # still accounts for every catalog song.
+            return None
         entries.append(_dos_directory_entry(name_bytes, matched_cluster, matched_size))
         used_starts.add(matched_cluster)
 
@@ -7532,13 +7702,15 @@ def _read_floppy_directory_sectors(device, ranges, *, sector_size, label,
 
 def _acquire_floppy_subdirectories(device, data, geometry, fat, root_dir, *,
                                   cancel_callback=None, allow_incomplete=False, cache=None,
-                                  acquired_ranges=None):
+                                  acquired_ranges=None, include_windows_metadata=False):
     """Acquire a directory graph while validating ownership of whole chains."""
     owners = {}
     file_entries = []
     requested = []
     unreadable = []
-    pending = [(iter(_iter_root_file_entries(root_dir)), "")]
+    root_entries = (_iter_fat_directory_entries(root_dir) if include_windows_metadata
+                    else _iter_root_file_entries(root_dir))
+    pending = [(iter(root_entries), "")]
     while pending:
         _raise_if_cancelled(cancel_callback)
         entries, parent = pending[-1]
@@ -7563,7 +7735,7 @@ def _acquire_floppy_subdirectories(device, data, geometry, fat, root_dir, *,
                     "the disk or image is corrupt (cross-linked allocations). Use Recover Damaged Image."
                 )
             owners[cluster] = path
-        if _is_windows_volume_metadata_path(path):
+        if not include_windows_metadata and _is_windows_volume_metadata_path(path):
             continue
         if not is_directory:
             file_entries.append({**entry, "name": path})
@@ -7931,6 +8103,15 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                     filesystem_repair_note=repair_result.note,
                 )
 
+            if root_bad_ranges or directory_bad_ranges:
+                # Missing directory bytes hide allocations from this targeted
+                # plan. Even an explicitly incomplete read must acquire the
+                # remaining disk before it can salvage those missing songs.
+                raise FastFloppyReadError(
+                    "Unreadable directory sectors left the floppy file map incomplete. "
+                    "A bounded full-disk recovery is required to search for missing songs.",
+                    fallback_allowed=True,
+                )
             with open(output_path, "wb") as handle:
                 handle.write(image)
             _raise_if_cancelled(cancel_callback)
@@ -8333,20 +8514,6 @@ def _is_probably_eseq_bytes(data):
     return len(data) >= 0x77 and data[7:15] == b"COM-ESEQ"
 
 
-def _eseq_declared_size(data, start):
-    if start < 0 or start + 0x77 > len(data):
-        return 0
-    declared = int.from_bytes(data[start + 3:start + 7], "little")
-    if 0x77 <= declared <= len(data) - start:
-        return declared
-    stream_length = int.from_bytes(data[start + 0x1F:start + 0x23], "little") if start + 0x23 <= len(data) else 0
-    if stream_length > 0:
-        stream_end = 0x77 + stream_length
-        if 0x77 <= stream_end <= len(data) - start:
-            return stream_end
-    return 0
-
-
 def _eseq_recovery_filename(data, fallback_index):
     fallback = f"REC{fallback_index:03d}.FIL"
     if len(data) >= 0x32:
@@ -8419,11 +8586,12 @@ def _recover_files_from_fat_context(data, geometry):
     # A damaged file or directory need not invalidate every other file in that
     # FAT. Traverse each signature-valid copy independently, keeping complete
     # fragmented chains intact and comparing alternatives for the same physical
-    # directory entry before resorting to a contiguous file salvage read.
+    # directory entry. A missing chain does not establish contiguous allocation;
+    # leave those bytes to the separate, explicitly carved recovery candidates.
     fats = list(dict.fromkeys(fat for _index, fat, valid in _fat12_copy_records(data, geometry) if valid))
     root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
     file_records = {}
-    for fat in fats or (None,):
+    for fat in fats:
         directory_clusters = set()
         # Use a stack rather than Python recursion, so even a very deep damaged
         # directory graph remains bounded by the disk's physical clusters.
@@ -8439,8 +8607,6 @@ def _recover_files_from_fat_context(data, geometry):
             if entry["attr"] & 0x08 or _is_windows_volume_metadata_path(path):
                 continue
             if entry["attr"] & 0x10:
-                if fat is None:
-                    continue
                 try:
                     clusters = _fat12_cluster_chain_from_start(fat, entry["cluster"], geometry)
                     if directory_clusters.intersection(clusters):
@@ -8464,8 +8630,6 @@ def _recover_files_from_fat_context(data, geometry):
             record = file_records.setdefault(
                 source_entry_offset, {"path": path, "entry": entry, "payloads": []},
             )
-            if fat is None:
-                continue
             try:
                 clusters = _fat12_cluster_chain(fat, entry["cluster"], size, geometry)
                 payload = _read_cluster_chain_from_image(data, geometry, clusters, size)
@@ -8483,10 +8647,7 @@ def _recover_files_from_fat_context(data, geometry):
                 "Keep the original image for manual recovery."
             )
         if not payloads:
-            try:
-                payloads.append(_fat12_contiguous_file_bytes(data, geometry, entry["cluster"], entry["size"]))
-            except FloppyImageError:
-                continue
+            continue
         payload = payloads[0]
         source_offset = _cluster_offset(geometry, entry["cluster"])
         if is_pianodir_path(path) and _is_probably_pianodir_bytes(payload):
@@ -8535,7 +8696,6 @@ def _carve_recovery_files_from_bytes(data):
         pianodir = data[pianodir_offset:pianodir_offset + PIANODIR_TARGET_FILE_SIZE]
         files.append(RecoveredFile(PIANODIR_FILENAME, _padded_pianodir_bytes(pianodir), "PIANODIR", pianodir_offset, "carve"))
 
-    eseq_index = 1
     search_start = 0
     eseq_starts = set()
     while True:
@@ -8544,22 +8704,11 @@ def _carve_recovery_files_from_bytes(data):
             break
         start = marker - 7
         search_start = marker + 1
-        if start < 0 or start in eseq_starts:
+        if start < 0 or start + 0x77 > len(data):
             continue
         eseq_starts.add(start)
-        size = _eseq_declared_size(data, start)
-        if size <= 0:
-            next_marker = data.find(b"COM-ESEQ", marker + 1)
-            following = next_marker - 7 if next_marker >= 7 else len(data)
-            size = min(following - start, 256 * 1024)
-        if size < 0x77:
-            continue
-        payload = data[start:min(len(data), start + size)]
-        if not _is_probably_eseq_bytes(payload):
-            continue
-        files.append(RecoveredFile(_eseq_recovery_filename(payload, eseq_index), payload, "E-SEQ", start, "carve"))
-        eseq_index += 1
 
+    midi_files = []
     midi_index = 1
     search_start = 0
     while True:
@@ -8570,9 +8719,34 @@ def _carve_recovery_files_from_bytes(data):
         payload = _extract_midi_blob_for_recovery(data, start)
         if not payload:
             continue
-        files.append(RecoveredFile(f"REC{midi_index:03d}.MID", payload, "MIDI", start, "carve"))
+        midi_files.append(RecoveredFile(f"REC{midi_index:03d}.MID", payload, "MIDI", start, "carve"))
         midi_index += 1
 
+    # Yamaha length fields can undercount or saturate at 0xFFFF. Inspect the
+    # opcodes as root reconstruction does, but never let a damaged stream or
+    # oversized header consume a neighboring recognized song/catalog. No song
+    # can exceed the largest supported floppy image.
+    # A bare signature may be ordinary title/SysEx text. Only a plausible
+    # header (including Yamaha's FE marker) can bound another file. Still try
+    # standalone candidates with a damaged first byte, as recovery did before.
+    plausible_starts = {start for start in eseq_starts if data[start] == 0xFE}
+    boundaries = sorted(plausible_starts | {item.source_offset for item in files + midi_files} | {len(data)})
+    max_size = max(disk_format.size_bytes for disk_format in DISK_FORMATS)
+    eseq_index = 1
+    recovered_end = 0
+    for start in sorted(eseq_starts):
+        if start < recovered_end:
+            continue
+        following = boundaries[bisect_right(boundaries, start)]
+        candidate = data[start:min(following, start + max_size)]
+        if not _is_probably_eseq_bytes(candidate):
+            continue
+        payload = candidate[:_reconstructed_eseq_file_size(candidate)]
+        files.append(RecoveredFile(_eseq_recovery_filename(payload, eseq_index), payload, "E-SEQ", start, "carve"))
+        recovered_end = start + len(payload)
+        eseq_index += 1
+
+    files.extend(midi_files)
     return files
 
 
@@ -8722,7 +8896,8 @@ def _preferred_recovery_formats_for_data(data, files, disk_format_hint=None):
 
 
 def _recovery_range_fully_readable(diagnostics, offset, size):
-    states = (diagnostics or {}).get("_sector_states")
+    details = diagnostics or {}
+    states = details.get("_sector_states", details.get("sector_states"))
     if not isinstance(states, list):
         return None
     sector_size = max(
@@ -8734,6 +8909,42 @@ def _recovery_range_fully_readable(diagnostics, offset, size):
     if end_sector > len(states):
         return False
     return all(states[index] in {1, 2} for index in range(start_sector, end_sector))
+
+
+def _recovery_directory_map_complete(data, diagnostics):
+    """Check that zero-filled acquisition gaps cannot hide directory entries."""
+    geometry = _geometry_from_boot_sector(data[:512])
+    if geometry is None or not diagnostics:
+        return True
+    root_dir = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
+    fat, _note = _select_fat12_copy(data, geometry, root_dir)
+    pending = [[(geometry.root_offset, geometry.root_size)]]
+    seen_clusters = set()
+    while pending:
+        directory = bytearray()
+        terminated = False
+        for offset, size in pending.pop():
+            for relative in range(0, size, geometry.bytes_per_sector):
+                start = offset + relative
+                length = min(geometry.bytes_per_sector, size - relative)
+                if _recovery_range_fully_readable(diagnostics, start, length) is False:
+                    return False
+                sector = data[start:start + length]
+                directory.extend(sector)
+                if any(sector[index] == 0 for index in range(0, len(sector), 32)):
+                    terminated = True
+                    break
+            if terminated:
+                break
+        for entry in _iter_fat_directory_entries(directory):
+            if not entry["attr"] & 0x10 or entry["attr"] & 0x08:
+                continue
+            clusters = _fat12_cluster_chain_from_start(fat, entry["cluster"], geometry)
+            if seen_clusters.intersection(clusters):
+                return False
+            seen_clusters.update(clusters)
+            pending.append([(_cluster_offset(geometry, cluster), geometry.cluster_size) for cluster in clusters])
+    return True
 
 
 def _recovery_geometry_label(geometry):
@@ -9995,11 +10206,6 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         cancel_callback=cancel_callback,
                         diagnostics=acquisition["raw_fallback"],
                     )
-                    acquisition.update(read_method="exact_raw", exact_raw_copy=True,
-                                       stage="preparing_working_image")
-                    _raise_if_cancelled(cancel_callback)
-                    _notify_progress(progress_callback, 75, 100, "Creating working copy...")
-                    repair_result = prepare_yamaha_bytes(raw_data, working_img)
                 else:
                     _read_block_device(
                         drive_info.path,
@@ -10009,11 +10215,32 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         cancel_callback=cancel_callback,
                         diagnostics=acquisition["raw_fallback"],
                     )
-                    acquisition.update(read_method="exact_raw", exact_raw_copy=True,
-                                       stage="preparing_working_image")
+                    with open(source_copy, "rb") as handle:
+                        raw_data = handle.read()
+                acquisition.update(read_method="exact_raw", exact_raw_copy=True,
+                                   stage="preparing_working_image")
+                _raise_if_cancelled(cancel_callback)
+                if pianodisc_system3.looks_like_pianodisc_system3_bytes(raw_data):
+                    # Recognition follows a completed raw capture, never a
+                    # partially acquired FAT working image. The proprietary
+                    # source stays read-only while its songs become MIDI files.
+                    _notify_progress(progress_callback, 90, 100, "Decoding PianoDisc System 3 songs...")
                     _raise_if_cancelled(cancel_callback)
-                    _notify_progress(progress_callback, 75, 100, "Creating working copy...")
-                    repair_result = prepare_yamaha_image(source_copy, working_img)
+                    with open(source_copy, "wb") as handle:
+                        handle.write(raw_data)
+                    session = cls._from_pianodisc_system3_image(
+                        drive_info.path, "img", temp_dir, source_copy,
+                        source_kind="floppy_usb", source_name=drive_info.display_name,
+                        drive_info=drive_info,
+                    )
+                    _raise_if_cancelled(cancel_callback)
+                    _notify_progress(progress_callback, 100, 100, "Opening floppy contents...")
+                    _raise_if_cancelled(cancel_callback)
+                    acquisition.update(detected_capacity_bytes=len(raw_data), stage="complete")
+                    session.read_diagnostics = acquisition
+                    return session
+                _notify_progress(progress_callback, 75, 100, "Creating working copy...")
+                repair_result = prepare_yamaha_bytes(raw_data, working_img)
                 repair_result = YamahaRepairResult(
                     repair_result.note + f" Fast floppy file-level read was unavailable: {fast_exc}",
                     repair_result.changed,
@@ -11111,6 +11338,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     handle.write(visible_data)
             disk_format = _disk_format_for_image(prepared)
             listing = read_image_listing(prepared)
+            if not _recovery_directory_map_complete(prepared_data, diagnostics):
+                raise FloppyImageError(
+                    "Unreadable directory sectors may hide songs; scanning the full acquisition for recoverable files."
+                )
             if listing.entries:
                 if diagnostics is not None:
                     diagnostics.update(_listing_recovery_kind_counts(listing))
@@ -11137,6 +11368,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 )
         except FloppyOperationCancelled as exc:
             attach_recovery_cancellation(exc)
+            raise
+        except _Fat12RecoveryAmbiguityError:
             raise
         except Exception as exc:
             if diagnostics is not None:
@@ -11253,6 +11486,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         *,
         source_kind="image",
         source_name=None,
+        drive_info=None,
         gw_sector_reports=None,
     ):
         try:
@@ -11279,6 +11513,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             ),
             source_kind=source_kind,
             source_name=source_name or os.path.basename(source_path),
+            drive_info=drive_info,
             gw_sector_reports=gw_sector_reports,
             virtual_files=virtual_files,
             conversion_warnings=conversion.errors,
@@ -11466,7 +11701,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 )
             except FloppyOperationCancelled:
                 raise
-            except BlankDiskImageError:
+            except (BlankDiskImageError, _Fat12RecoveryAmbiguityError):
                 raise
             except GreaseweazleConversionError as exc:
                 can_treat_blank_failure_as_final = (
@@ -12598,6 +12833,12 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 report = self._write_image_direct(modified_img, temp_output, output_ext, cancel_callback=cancel_callback)
                 reports = _gw_sector_reports(report)
                 _raise_if_cancelled(cancel_callback)
+                if output_ext.lower().lstrip(".") not in RAW_IMAGE_EXTENSIONS:
+                    _notify_progress(progress_callback, 4, 5, "Verifying converted image contents...")
+                    verify_image_payloads(
+                        temp_output, modified_img, self.disk_format, cancel_callback=cancel_callback,
+                    )
+                    _raise_if_cancelled(cancel_callback)
                 saved_fingerprint = _image_source_fingerprint(temp_output)
                 FloppyImageSession._assert_source_unchanged(self)
                 _finish_temp_output(
@@ -12705,6 +12946,19 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         cancel_callback=cancel_callback,
                     )
                 else:
+                    prepared_size = os.path.getsize(modified_img)
+                    capacity = int(target.size_bytes or 0)
+                    if capacity > 0 and prepared_size > capacity:
+                        error = FloppyImageError(
+                            f"The prepared image ({prepared_size:,} bytes) exceeds the reported floppy "
+                            f"capacity ({capacity:,} bytes). No files were written. "
+                            "Choose a smaller image or use Save To Floppy to copy files into the existing format."
+                        )
+                        error.diagnostics = {
+                            "method": "raw", "stage": "preflight", "target_mutation_attempted": False,
+                            "prepared_bytes": prepared_size, "reported_capacity_bytes": capacity,
+                        }
+                        raise error
                     _notify_progress(progress_callback, 4, 5, f"Writing floppy {target.path}...")
                     self.last_write_verification = {"confidence": "partial_or_uncertain", "hardware_tested": False}
                     outcome = _write_block_device(

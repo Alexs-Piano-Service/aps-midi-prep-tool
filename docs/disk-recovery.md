@@ -49,6 +49,9 @@ with a separate `-logical-recovery.img` filename.
 The logical image uses readable filesystem information and song clusters,
 reconstructs supported Yamaha metadata where possible, and records omitted,
 unreadable, or zero-filled ranges. Keep its adjacent `.recovery-….json` report.
+If directory sectors cannot be read, recovery scans the disk for songs before
+saving the image. Recovered songs may receive generated filenames when their
+original directory entries are lost.
 The result is a reconstructed working image. Exact sector preservation and
 archival capture are not claimed. Check the report and recovered songs before
 relying on the copy; the physical source is only read.
@@ -101,7 +104,10 @@ image's data area during the initial scan.
 
 Recovery tries each usable allocation table before carving contiguous song
 data. If competing chains produce different plausible versions of the same
-song, it reports the ambiguity. Source images remain unchanged.
+song, it reports the ambiguity. A broken chain is never treated as evidence
+that a file was contiguous. E-SEQ carving checks stream boundaries as well as
+header lengths, which some Yamaha files undercount or saturate. Source images
+remain unchanged.
 
 **Disk → Recover Damaged Image...** also clears hidden/system attributes in the
 recovered image. Both repair tools make files visible automatically, including

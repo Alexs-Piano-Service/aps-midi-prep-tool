@@ -1280,7 +1280,7 @@ def _plan_set_outputs(directory, prefix, starting_number, candidates):
 
 
 def _untracked_legacy_images(directory, prefix, starting_number, candidates):
-    """Find plausible older contiguous sets for warnings, never for ownership."""
+    """Find older same-prefix disks for warnings, never for ownership."""
     recorded = set()
     images = {extension: {} for extension in EMULATOR_IMAGE_EXTENSIONS}
     with os.scandir(directory) as entries:
@@ -1303,13 +1303,13 @@ def _untracked_legacy_images(directory, prefix, starting_number, candidates):
     current = {os.path.normcase(os.path.basename(path)) for path in candidates}
     untracked = []
     for extension in sorted(images):
-        number = starting_number
-        while number in images[extension]:
+        for number in sorted(images[extension]):
+            if number < starting_number:
+                continue
             for path in sorted(images[extension][number]):
                 name = os.path.normcase(os.path.basename(path))
                 if name not in current and name not in recorded:
                     untracked.append(path)
-            number += 1
     return tuple(untracked)
 
 

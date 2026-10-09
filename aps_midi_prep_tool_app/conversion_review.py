@@ -28,6 +28,7 @@ def _music_error_patterns():
     fields = {
         "status": r"[0-9A-F]{2}",
         "format": r"\d+",
+        "limit": r"(?:[1-9]\d{0,2}(?:,\d{3})+|\d+)",
         "location": r"(?:track [1-9]\d*|merged tracks), tick \d+",
         "track_label": r"(?:track [1-9]\d*|merged tracks)",
         "value": r".*?",

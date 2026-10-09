@@ -157,3 +157,97 @@ def test_conversion_cancellation_cleans_staging_and_stops_before_copying_source(
         )
     assert not any(path.exists() for path in staged_paths)
     assert not (output / "disk" / name).exists()
+
+
+@pytest.mark.parametrize("interruption", ["after_midi", "after_source", "source_error"])
+def test_resume_reuses_midi_published_before_source_preservation_finishes(
+    tmp_path, monkeypatch, interruption,
+):
+    from aps_midi_prep_tool_app import bulk_extraction
+
+    source, output, name, payload, loader = _album(tmp_path, "FIL")
+    checkpoint = output / "job.json"
+    calls = []
+    cancelled = False
+    write_bytes = bulk_extraction.atomic_write_bytes
+
+    def converter(_source, destination, **_options):
+        calls.append(destination)
+        Path(destination).write_bytes(_minimal_midi_bytes())
+
+    def interrupted_write(path, data, **kwargs):
+        nonlocal cancelled
+        is_source = Path(path).suffix == ".FIL"
+        if interruption == "source_error" and is_source:
+            raise OSError("source preservation failed")
+        write_bytes(path, data, **kwargs)
+        if interruption == ("after_source" if is_source else "after_midi"):
+            cancelled = True
+
+    options = dict(
+        convert_eseq=True, include_eseq_sources=True, job_record_path=checkpoint,
+        session_loader=loader, eseq_converter=converter,
+    )
+    monkeypatch.setattr(bulk_extraction, "atomic_write_bytes", interrupted_write)
+    if interruption == "source_error":
+        first = bulk_extract_images(source, output, **options)
+        assert any("source preservation failed" in error for error in first.errors)
+    else:
+        with pytest.raises(FloppyOperationCancelled):
+            bulk_extract_images(source, output, **options, cancel_callback=lambda: cancelled)
+
+    music = output / "disk" / "MUSIC"
+    midi = music / "SONG.mid"
+    assert midi.read_bytes() == _minimal_midi_bytes()
+    entry = read_extraction_job(checkpoint)["images"]["disk.img"]["entries"][name]
+    assert entry["state"] == "failed"
+    assert any(record["converted"] and record["path"] == "disk/MUSIC/SONG.mid"
+               for record in entry["outputs"])
+
+    if interruption == "source_error":
+        # Repeated failures must also retain ownership of the first MIDI.
+        retry = bulk_extract_images(source, output, **options, resume=True)
+        assert retry.files_converted == 0 and retry.files_reused == 1
+        assert len(calls) == 1
+
+    monkeypatch.setattr(bulk_extraction, "atomic_write_bytes", write_bytes)
+    resumed = bulk_extract_images(source, output, **options, resume=True)
+    assert not resumed.errors
+    assert resumed.files_converted == 0
+    assert resumed.files_reused == (2 if interruption == "after_source" else 1)
+    assert len(calls) == 1
+    assert list(music.glob("*.mid")) == [midi]
+    assert (output / "disk" / name).read_bytes() == payload
+    assert not checkpoint.exists()
+
+
+def test_resume_preserves_modified_midi_from_an_incomplete_entry(tmp_path, monkeypatch):
+    from aps_midi_prep_tool_app import bulk_extraction
+
+    source, output, name, payload, loader = _album(tmp_path, "FIL")
+    checkpoint = output / "job.json"
+    write_bytes = bulk_extraction.atomic_write_bytes
+
+    def fail_source_copy(path, data, **kwargs):
+        if Path(path).suffix == ".FIL":
+            raise OSError("source preservation failed")
+        write_bytes(path, data, **kwargs)
+
+    options = dict(
+        convert_eseq=True, include_eseq_sources=True, job_record_path=checkpoint,
+        session_loader=loader,
+        eseq_converter=lambda _source, dest, **_kwargs: Path(dest).write_bytes(_minimal_midi_bytes()),
+    )
+    monkeypatch.setattr(bulk_extraction, "atomic_write_bytes", fail_source_copy)
+    assert bulk_extract_images(source, output, **options).errors
+    midi = output / "disk" / "MUSIC" / "SONG.mid"
+    midi.write_bytes(b"user edited MIDI")
+
+    monkeypatch.setattr(bulk_extraction, "atomic_write_bytes", write_bytes)
+    resumed = bulk_extract_images(source, output, **options, resume=True)
+    assert not resumed.errors
+    assert resumed.files_converted == 1 and resumed.files_reused == 0
+    assert midi.read_bytes() == b"user edited MIDI"
+    assert midi.with_name("SONG_converted.mid").read_bytes() == _minimal_midi_bytes()
+    assert (output / "disk" / name).read_bytes() == payload
+    assert not checkpoint.exists()

@@ -23,21 +23,6 @@ def is_yamaha_xf_payload(payload):
     return kind in {0x10, 0x12, 0x21} and len(payload) >= {0x10: 6, 0x12: 6, 0x21: 5}[kind]
 
 
-_SYSTEM_MESSAGE_DATA_LENGTHS = {
-    0xF1: 1,
-    0xF2: 2,
-    0xF3: 1,
-    0xF6: 0,
-    0xF8: 0,
-    0xF9: 0,
-    0xFA: 0,
-    0xFB: 0,
-    0xFC: 0,
-    0xFD: 0,
-    0xFE: 0,
-}
-
-
 def _read_vlq(data, offset):
     value = 0
     for _ in range(4):
@@ -141,16 +126,8 @@ def _strip_xf_track(track_data, *, cleanup_mode=XF_CLEANUP_TARGETED):
             pending_delta = 0
             continue
 
-        if not status_from_stream:
-            raise ValueError("Invalid MIDI running status.")
-        data_length = _SYSTEM_MESSAGE_DATA_LENGTHS.get(status)
-        if data_length is None:
-            raise ValueError(f"Unsupported MIDI status 0x{status:02X}.")
-        payload, offset = _take(track_data, offset, data_length)
-        output.extend(_encode_vlq(pending_delta))
-        output.append(status)
-        output.extend(payload)
-        pending_delta = 0
+        # Wire-level system messages require an F7 escape event in an SMF.
+        raise ValueError(f"Unsupported system status byte: 0x{status:02X}")
 
     output.extend(_encode_vlq(pending_delta))
     output.extend(b"\xFF\x2F\x00")

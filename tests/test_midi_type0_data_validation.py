@@ -1,11 +1,17 @@
-"""Status bytes must not be consumed as channel or system-message operands."""
+"""SMF tracks accept channel messages, length-prefixed SysEx, and meta events."""
 
 import struct
 
 import pytest
 
-from aps_midi_prep_tool_app.eseq_converter import convert_midi_bytes_to_eseq_bytes
-from aps_midi_prep_tool_app.midi_channel_merger import merge_midi_channels_to_channel0_bytes
+from aps_midi_prep_tool_app.eseq_converter import (
+    convert_midi_bytes_to_eseq_bytes,
+    convert_midi_file_to_eseq_path,
+)
+from aps_midi_prep_tool_app.midi_channel_merger import (
+    merge_midi_channels_to_channel0_bytes,
+    merge_midi_channels_to_channel0_path,
+)
 from aps_midi_prep_tool_app.midi_type0_converter import (
     _convert_midi_bytes_to_type0,
     _parse_track_events,
@@ -15,12 +21,11 @@ from aps_midi_prep_tool_app.midi_type0_converter import (
 
 CHANNEL_MESSAGES = [(status | 3, 1 if status in (0xC0, 0xD0) else 2)
                     for status in range(0x80, 0xF0, 0x10)]
-SYSTEM_MESSAGES = [(0xF1, 1), (0xF2, 2), (0xF3, 1)]
+INVALID_SMF_STATUSES = [status for status in range(0xF1, 0xFF) if status != 0xF7]
 END_OF_TRACK = b"\x00\xff\x2f\x00"
 INVALID_EVENTS = [
     pytest.param(b"\x00\x93\x3c\x80", id="explicit-channel"),
     pytest.param(b"\x00\x93\x3c\x40\x00\x3e\xff", id="running-status"),
-    pytest.param(b"\x00\xf2\x40\x90", id="system-common"),
 ]
 
 
@@ -65,53 +70,69 @@ def test_channel_operand_limits_work_with_explicit_and_running_status(status, da
     assert end_tick == 2
 
 
-@pytest.mark.parametrize("status,data_length,operand", [
-    (status, data_length, operand)
-    for status, data_length in SYSTEM_MESSAGES
-    for operand in range(data_length)
+def _wire_message(status):
+    return bytes([status]) + bytes({0xF1: 1, 0xF2: 2, 0xF3: 1}.get(status, 0))
+
+
+@pytest.mark.parametrize("status", INVALID_SMF_STATUSES)
+def test_direct_system_statuses_are_not_smf_track_events(status):
+    with pytest.raises(ValueError, match=f"Unsupported system status byte: 0x{status:02X}"):
+        _parse_track_events(b"\x00" + _wire_message(status) + END_OF_TRACK)
+
+
+@pytest.mark.parametrize("status", INVALID_SMF_STATUSES)
+@pytest.mark.parametrize("convert", [
+    _convert_midi_bytes_to_type0,
+    convert_midi_bytes_to_eseq_bytes,
+    lambda source: convert_midi_bytes_to_eseq_bytes(source, timing_policy="preserve"),
+    merge_midi_channels_to_channel0_bytes,
 ])
-@pytest.mark.parametrize("invalid", [0x80, 0xFF])
-def test_system_common_operands_reject_status_bytes(status, data_length, operand, invalid):
-    data = bytearray([64] * data_length)
-    data[operand] = invalid
-
-    with pytest.raises(ValueError, match="Invalid data byte in a MIDI system message"):
-        _parse_track_events(b"\x00" + bytes([status]) + data + END_OF_TRACK)
-
-
-@pytest.mark.parametrize("status,data_length", SYSTEM_MESSAGES)
-@pytest.mark.parametrize("value", [0, 0x7F])
-def test_system_common_operand_limits_remain_valid(status, data_length, value):
-    raw = bytes([status] + [value] * data_length)
-
-    events, end_tick = _parse_track_events(b"\x00" + raw + END_OF_TRACK)
-
-    assert events == [(0, 0, raw)]
-    assert end_tick == 0
-
-
-@pytest.mark.parametrize("status", [0xF6, 0xF8, 0xFA, 0xFB, 0xFC, 0xFE])
-def test_supported_system_messages_without_operands_remain_valid(status):
-    raw = bytes([status])
-
-    events, end_tick = _parse_track_events(b"\x00" + raw + END_OF_TRACK)
-
-    assert events == [(0, 0, raw)]
-    assert end_tick == 0
+def test_converters_reject_direct_system_statuses_before_transformation(status, convert):
+    # In particular, F2 must not become an E-SEQ terminator that silently
+    # drops the second note while returning a successful conversion.
+    before = b"\x00\x93\x3c\x40\x60\x83\x3c\x00"
+    after = b"\x00\x93\x40\x40\x60\x83\x40\x00"
+    source = _midi(before + b"\x00" + _wire_message(status) + after)
+    with pytest.raises(ValueError, match=f"Unsupported system status byte: 0x{status:02X}"):
+        convert(source)
 
 
 @pytest.mark.parametrize("prefix", [b"\xff\x01", b"\xf0", b"\xf7"])
 def test_meta_and_sysex_payloads_keep_high_bit_bytes_opaque(prefix):
-    payload = b"\x80\x90\xf0\xf7\xff"
+    payload = b"\x80\x90\xf0\xf7\xff" + bytes(INVALID_SMF_STATUSES)
     raw = prefix + bytes([len(payload)]) + payload
 
     events, end_tick = _parse_track_events(b"\x00" + raw + END_OF_TRACK)
 
     assert events == [(0, 0, raw)]
     assert end_tick == 0
-    converted, changed = _convert_midi_bytes_to_type0(_midi(b"\x00" + raw))
-    assert changed
-    assert _parse_track_events(converted[22:])[0] == [(0, 0, raw)]
+    for convert in (_convert_midi_bytes_to_type0, merge_midi_channels_to_channel0_bytes):
+        converted, _changed = convert(_midi(b"\x00" + raw))
+        assert _parse_track_events(converted[22:])[0] == [(0, 0, raw)]
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["new-output", "existing-output"])
+@pytest.mark.parametrize("convert", [
+    convert_midi_file_to_type0_path,
+    lambda source, dest: convert_midi_file_to_eseq_path(source, dest, timing_policy="preserve"),
+    merge_midi_channels_to_channel0_path,
+])
+def test_direct_f2_cannot_publish_or_overwrite_a_conversion(tmp_path, existing, convert):
+    source = tmp_path / "source.mid"
+    original = _midi(b"\x00\xf2\x00\x00\x00\x93\x3c\x40\x60\x83\x3c\x00")
+    source.write_bytes(original)
+    destination = tmp_path / "converted.song"
+    if existing:
+        destination.write_bytes(b"existing destination")
+
+    with pytest.raises(ValueError, match="Unsupported system status byte: 0xF2"):
+        convert(source, destination)
+
+    assert source.read_bytes() == original
+    assert destination.exists() is existing
+    if existing:
+        assert destination.read_bytes() == b"existing destination"
+    assert set(tmp_path.iterdir()) == ({source, destination} if existing else {source})
 
 
 @pytest.mark.parametrize("events", INVALID_EVENTS)

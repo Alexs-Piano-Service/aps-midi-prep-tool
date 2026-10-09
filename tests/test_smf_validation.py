@@ -106,12 +106,53 @@ def test_extended_headers_and_unknown_chunks_survive_discovery_and_conversion(tm
     convert_midi_bytes_to_eseq_bytes,
 ])
 @pytest.mark.parametrize("trailing_unknown", [b"", _chunk(b"JUNK", b"Trailing metadata")])
-def test_converters_reject_undeclared_trailing_track(convert, trailing_unknown):
-    extra_note_track = b"\x00\x92\x47\x40\x60\x82\x47\x00\x00\xff\x2f\x00"
-    source = _midi() + trailing_unknown + _chunk(b"MTrk", extra_note_track)
+@pytest.mark.parametrize("extra_track", [
+    _chunk(b"MTrk", b"\x00\x92\x47\x40\x60\x82\x47\x00\x00\xff\x2f\x00"),
+    b"MTrk", b"MTrk\x00\x00", b"MTrk\xff\xff\xff\xff",
+], ids=["complete", "missing-length", "partial-length", "oversized-length"])
+def test_converters_reject_undeclared_trailing_track(convert, trailing_unknown, extra_track):
+    source = _midi() + trailing_unknown + extra_track
 
     with pytest.raises(ValueError, match="undeclared trailing MTrk chunk"):
         convert(source)
+
+
+@pytest.mark.parametrize("unknown_chunk", [b"", _chunk(b"JUNK", b"Trailing metadata")])
+@pytest.mark.parametrize("trailer", [
+    b"Legacy application trailer: retain this text",
+    b"APPX\xff\xff\xff\xff\x00\x80\xfe",
+    b"short",
+    b"opaque trailer containing " + _chunk(b"MTrk", _TRACK),
+], ids=["text", "binary", "short", "embedded-track-header"])
+def test_converters_accept_opaque_trailers_without_adding_music(unknown_chunk, trailer):
+    source = _midi() + unknown_chunk
+    with_trailer = source + trailer
+
+    header, chunks, trailing_start = parse_smf_layout(with_trailer, include_trailing_chunks=True)
+    assert header.track_count == 1
+    assert [chunk["id"] for chunk in chunks] == ([b"MTrk", b"JUNK"] if unknown_chunk else [b"MTrk"])
+    assert trailing_start == len(source)
+
+    expected_type0, _changed = _convert_midi_bytes_to_type0(source)
+    converted, changed = _convert_midi_bytes_to_type0(with_trailer)
+    assert changed
+    assert converted == expected_type0 + trailer
+    for timing_policy in ("preserve", "mid2eseq"):
+        assert convert_midi_bytes_to_eseq_bytes(with_trailer, timing_policy=timing_policy) == (
+            convert_midi_bytes_to_eseq_bytes(source, timing_policy=timing_policy)
+        )
+
+
+def test_unknown_trailing_chunk_payload_is_not_scanned_for_track_headers():
+    unknown = _chunk(b"JUNK", _chunk(b"MTrk", _TRACK))
+    source = _midi()
+    expected_type0, _changed = _convert_midi_bytes_to_type0(source)
+
+    converted, changed = _convert_midi_bytes_to_type0(source + unknown)
+
+    assert changed
+    assert converted == expected_type0 + unknown
+    assert convert_midi_bytes_to_eseq_bytes(source + unknown) == convert_midi_bytes_to_eseq_bytes(source)
 
 
 def test_default_smf_layout_leaves_undeclared_trailing_track_opaque():

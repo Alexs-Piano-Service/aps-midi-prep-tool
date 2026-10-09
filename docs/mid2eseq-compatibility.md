@@ -31,6 +31,19 @@ that input on the existing preservation path. Removing all origin metadata
 removes this automatic distinction. API callers can select `preserve` or
 `mid2eseq` explicitly. Clavinova MDA continues to use its existing writer.
 
+Both timing policies reject malformed tempo, time-signature, and channel-prefix
+metadata before writing a destination. Tempo requires exactly three bytes and
+a nonzero value, time signature requires exactly four bytes and a positive
+numerator, and channel prefix requires one byte in the range 0–15.
+
+The preservation writer limits conversion to 100,000 generated barline markers
+and 16 MiB of output, including the header and padding. It counts markers before
+expansion and calculates the complete encoded size before building the event
+stream, including long silent gaps and archival timing hints. The marker budget
+also counts barlines that would later be omitted during SysEx or opening silence.
+Exceeding either limit produces an error and leaves any existing destination
+unchanged. These are application resource limits, not Yamaha format limits.
+
 Pedal routing is a separate `pedal_policy="auto"` default for fresh Disklavier
 MIDI. For each of CC64 and CC67 on channel 1, any intermediate value
 1–126 identifies a continuous lane. Move the whole lane, including 0/127

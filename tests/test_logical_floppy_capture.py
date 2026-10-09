@@ -18,7 +18,7 @@ from test_save_as_overwrite import _song, window
 
 
 def _windows_disk(tmp_path, monkeypatch, *, protected_boot=False, unreadable_song=False,
-                  unreadable_root=False, unreadable_fat=False):
+                  unreadable_root=False, unreadable_fat=False, unreadable_subdirectory=False):
     path = tmp_path / "original.img"
     image._create_blank_fat12_image_from_layout(path, image._PROTECTED_FAT12_LAYOUTS[0], "ORIGINAL")
     data = bytearray(path.read_bytes())
@@ -35,6 +35,18 @@ def _windows_disk(tmp_path, monkeypatch, *, protected_boot=False, unreadable_son
         data[start:start + 32] = entry
         start = geometry.data_offset + index * geometry.cluster_size
         data[start:start + len(payload)] = payload
+    if unreadable_subdirectory:
+        # Keep the MIDI in the readable root so a partial listing is nonempty.
+        # The E-SEQ's only directory entry lives in the unreadable folder.
+        song_entry = bytes(data[geometry.root_offset:geometry.root_offset + 32])
+        _set_fat(data, geometry, 4, 0xFFF)
+        data[geometry.root_offset:geometry.root_offset + 32] = image._dos_directory_entry(b"MUSIC", 4, 0, attr=0x10)
+        start = image._cluster_offset(geometry, 4)
+        data[start:start + 96] = (
+            image._dos_directory_entry(b".", 4, 0, attr=0x10)
+            + image._dos_directory_entry(b"..", 0, 0, attr=0x10)
+            + song_entry
+        )
     path.write_bytes(data)
     bad = {0 if protected_boot else 200 * 512}
     if unreadable_song:
@@ -43,6 +55,8 @@ def _windows_disk(tmp_path, monkeypatch, *, protected_boot=False, unreadable_son
         bad.add(geometry.root_offset)
     if unreadable_fat:
         bad.add(geometry.fat_offset + 512)
+    if unreadable_subdirectory:
+        bad.add(image._cluster_offset(geometry, 4))
     devices = []
 
     class Volume:
@@ -95,14 +109,70 @@ def test_normal_floppy_open_rejects_unreadable_directory_or_song_data(
     assert all(device.closed for device in devices)
 
 
-def test_explicit_logical_recovery_reports_missing_root_directory_data(tmp_path, monkeypatch):
-    drive, source, _songs, geometry, _devices = _windows_disk(tmp_path, monkeypatch, unreadable_root=True)
+@pytest.mark.parametrize("protected_boot", [False, True])
+def test_explicit_logical_recovery_reports_missing_root_directory_data(tmp_path, monkeypatch, protected_boot):
+    drive, source, songs, geometry, devices = _windows_disk(
+        tmp_path, monkeypatch, unreadable_root=True, protected_boot=protected_boot,
+    )
     original = source.read_bytes()
     result = image.capture_logical_floppy_image(drive, tmp_path / "partial-root.img")
     details = result["diagnostics"]
     assert details["file_data_status"] == "incomplete_or_uncertain"
+    assert not details.get("file_map_complete", False)
+    if not protected_boot:
+        assert {"area": "root", "offset_bytes": geometry.root_offset, "length_bytes": 512} in details["unreadable_ranges"]
+    assert details["read_method"] == "bounded_full_disk_recovery"
+    recovered = {
+        entry.path: image._read_fat12_file_bytes(result["output_path"], entry.path)
+        for entry in image.read_image_listing(result["output_path"]).entries
+    }
+    # The MIDI's original filename existed only in the unreadable directory;
+    # recovery must preserve its bytes even when it assigns a generated name.
+    assert set(recovered.values()) == set(songs.values())
+    assert details["files_listed"] == 2
+    assert not details["recovery_diagnostics"]["root_directory_readable"]
+    root_sector = geometry.root_offset // geometry.bytes_per_sector
+    assert details["recovery_diagnostics"]["sector_states"][root_sector] == 3
+    assert all(device.closed for device in devices)
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("area", ["root", "subdirectory"])
+def test_fast_recovery_does_not_publish_an_incomplete_directory_map(tmp_path, monkeypatch, area):
+    drive, _source, _songs, _geometry, devices = _windows_disk(
+        tmp_path, monkeypatch, **{f"unreadable_{area}": True},
+    )
+    output = tmp_path / "previous.img"
+    output.write_bytes(b"existing image")
+    diagnostics = {}
+    with pytest.raises(image.FastFloppyReadError, match="file map incomplete") as caught:
+        image._read_floppy_device_fast_image(
+            drive.path, output, drive.size_bytes, allow_incomplete=True, diagnostics=diagnostics,
+        )
+    assert caught.value.fallback_allowed
+    assert not diagnostics["file_map_complete"]
+    assert output.read_bytes() == b"existing image"
+    assert all(device.closed for device in devices)
+
+
+def test_logical_recovery_salvages_song_from_unreadable_subdirectory(tmp_path, monkeypatch):
+    drive, source, songs, geometry, devices = _windows_disk(tmp_path, monkeypatch, unreadable_subdirectory=True)
+    original = source.read_bytes()
+    result = image.capture_logical_floppy_image(drive, tmp_path / "partial-directory.img")
+    details = result["diagnostics"]
+    assert details["read_method"] == "bounded_full_disk_recovery"
     assert not details["file_map_complete"]
-    assert {"area": "root", "offset_bytes": geometry.root_offset, "length_bytes": 512} in details["unreadable_ranges"]
+    assert details["file_data_status"] == "incomplete_or_uncertain"
+    assert {"area": "directory", "offset_bytes": image._cluster_offset(geometry, 4), "length_bytes": 512} in details["unreadable_ranges"]
+    recovered = {
+        entry.path: image._read_fat12_file_bytes(result["output_path"], entry.path)
+        for entry in image.read_image_listing(result["output_path"]).entries
+    }
+    assert recovered["SONG.MID"] == songs["SONG.MID"]
+    assert set(recovered.values()) == set(songs.values())
+    assert details["files_listed"] == 2
+    assert not details["recovery_diagnostics"]["filesystem_repair_succeeded"]
+    assert all(device.closed for device in devices)
     assert source.read_bytes() == original
 
 
@@ -223,8 +293,11 @@ def test_image_floppy_offers_recovery_after_worker_stops_and_requires_consent(
     assert source.read_bytes() == original
 
 
-def test_logical_recovery_cancellation_keeps_existing_destination(tmp_path, monkeypatch):
-    drive, _source, _songs, _geometry, _devices = _windows_disk(tmp_path, monkeypatch)
+@pytest.mark.parametrize("unreadable_root", [False, True])
+def test_logical_recovery_cancellation_keeps_existing_destination(tmp_path, monkeypatch, unreadable_root):
+    drive, _source, _songs, _geometry, _devices = _windows_disk(
+        tmp_path, monkeypatch, unreadable_root=unreadable_root,
+    )
     output = tmp_path / "logical.img"
     output.write_bytes(b"existing image")
     stopped = []

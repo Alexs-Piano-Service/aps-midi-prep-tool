@@ -87,6 +87,8 @@ def test_real_parser_failures_translate_and_preserve_path_context(language, pars
     ("Cannot safely preserve embedded E-SEQ SysEx status 0x{status} in MIDI.", {"status": "90"}),
     ("MIDI format {format} is not a Standard MIDI File type.", {"format": "65535"}),
     ("Unsupported E-SEQ pedal policy '{value}'.", {"value": "Save {filename}: <A&B> 'policy'"}),
+    ("E-SEQ output exceeds the conversion size limit of {limit} bytes.", {"limit": "16,777,216"}),
+    ("E-SEQ barline marker count exceeds the conversion limit of {limit}.", {"limit": "100,000"}),
 ))
 def test_parameterized_diagnostics_keep_numeric_details(language, source, values):
     raw = source.format(**values)

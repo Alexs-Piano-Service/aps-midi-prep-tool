@@ -82,10 +82,11 @@ def test_hfe_verification_decodes_delivered_container(tmp_path, prepared_image, 
     assert conversions == [(delivered, disk_format.key)]
 
 
-@pytest.mark.parametrize("result", ["intact", "altered_song", "decode_failure", "cancelled"])
+@pytest.mark.parametrize("result", ["intact", "altered_song", "decode_failure", "cancelled", "cancelled_after_verification"])
 @pytest.mark.parametrize("nested", [False, True])
-def test_save_as_verifies_converted_payloads_before_replacing_destination(
-    tmp_path, request, monkeypatch, result, nested,
+@pytest.mark.parametrize("operation", ["save_as", "commit"])
+def test_save_verifies_converted_payloads_before_replacing_destination(
+    tmp_path, request, monkeypatch, result, nested, operation,
 ):
     prepared, disk_format = request.getfixturevalue("nested_prepared_image" if nested else "prepared_image")
     song_path = "FOLDER/SONG.MID" if nested else "SONG.MID"
@@ -97,6 +98,27 @@ def test_save_as_verifies_converted_payloads_before_replacing_destination(
     conversions = []
     session = object.__new__(floppy_image.FloppyImageSession)
     session.disk_format = disk_format
+    cancelled = False
+    cancel_callback = lambda: cancelled
+    if operation == "commit":
+        modified = tmp_path / "commit-modified.img"
+        working = tmp_path / "working.img"
+        shutil.copyfile(prepared, modified)
+        working.write_bytes(b"previous working image")
+        session.source_kind = "image"
+        session.source_path = str(destination)
+        session.source_ext = "hfe"
+        session.working_img_path = str(working)
+        session._source_fingerprint = fingerprint = floppy_image._image_source_fingerprint(destination)
+        session._extracted_files = {song_path: "previous extracted file"}
+        session.repair_changed = True
+        session.create_modified_image = lambda **kwargs: str(modified)
+
+    def save():
+        if operation == "commit":
+            session.commit_to_source(cancel_callback=cancel_callback)
+        else:
+            session.write_image(prepared, destination, "hfe", cancel_callback=cancel_callback)
 
     def convert(source, output, format_key, **kwargs):
         assert format_key == disk_format.key
@@ -116,22 +138,45 @@ def test_save_as_verifies_converted_payloads_before_replacing_destination(
                 _damage_song(output)
         return ""
 
+    verify = floppy_image.verify_image_payloads
+
+    def verify_then_cancel(*args, **kwargs):
+        nonlocal cancelled
+        verification = verify(*args, **kwargs)
+        if result == "cancelled_after_verification":
+            cancelled = True
+        return verification
+
     monkeypatch.setattr(floppy_image, "_gw_convert", convert)
+    monkeypatch.setattr(floppy_image, "verify_image_payloads", verify_then_cancel)
     if result == "intact":
-        session.write_image(prepared, destination, "hfe")
+        save()
         assert destination.read_bytes() == b"new converted image"
     else:
         error, message = {
             "altered_song": (floppy_image.FloppyImageError, f"contents differ for {song_path}"),
             "decode_failure": (floppy_image.FloppyImageError, "Cannot decode"),
             "cancelled": (floppy_image.FloppyOperationCancelled, "Cancelled verification"),
+            "cancelled_after_verification": (floppy_image.FloppyOperationCancelled, "cancelled"),
         }[result]
         with pytest.raises(error, match=message):
-            session.write_image(prepared, destination, "hfe")
+            save()
         assert destination.read_bytes() == b"previous good delivery"
     assert conversions == ["encode", "decode"]
     assert prepared.read_bytes() == original
     assert list(output_dir.iterdir()) == [destination]
+    if operation == "commit":
+        assert not modified.exists()
+        if result == "intact":
+            assert working.read_bytes() == original
+            assert session._source_fingerprint == floppy_image._image_source_fingerprint(destination)
+            assert session._extracted_files == {}
+            assert session.repair_changed is False
+        else:
+            assert working.read_bytes() == b"previous working image"
+            assert session._source_fingerprint == fingerprint
+            assert session._extracted_files == {song_path: "previous extracted file"}
+            assert session.repair_changed is True
 
 
 def test_failed_final_verification_restores_existing_delivery(tmp_path, monkeypatch):

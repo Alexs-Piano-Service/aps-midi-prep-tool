@@ -132,6 +132,35 @@ def test_nested_recovery_does_not_choose_between_conflicting_fat_song_chains(tmp
         image._recover_files_from_fat_context(bytes(data), geometry)
 
 
+@pytest.mark.parametrize("kind", ["MIDI", "E-SEQ"])
+def test_broken_fragmented_chain_never_promotes_neighbor_bytes_to_fat_recovery(tmp_path, kind):
+    _source, data, geometry = _blank_image(tmp_path)
+    payload = _song(kind)
+    neighbor = _song(kind, large=False)
+    extension = b"MID" if kind == "MIDI" else b"FIL"
+    assert geometry.cluster_size < len(payload) <= 2 * geometry.cluster_size
+    data[geometry.root_offset:geometry.root_offset + 64] = (
+        image._dos_directory_entry(b"SONG    " + extension, 2, len(payload))
+        + image._dos_directory_entry(b"NEIGHBOR" + extension, 3, len(neighbor))
+    )
+    # SONG used clusters 2 -> 4, but both FAT copies lost its first link.
+    # Physical cluster 3 belongs to another complete song.
+    for cluster, chunk in ((2, payload[:geometry.cluster_size]),
+                           (3, neighbor), (4, payload[geometry.cluster_size:])):
+        offset = image._cluster_offset(geometry, cluster)
+        data[offset:offset + len(chunk)] = chunk
+        _set_fat(data, geometry, cluster, 0 if cluster == 2 else 0xFFF)
+
+    recovered = image._recover_files_from_fat_context(bytes(data), geometry)
+
+    assert [(song.image_path, song.data, song.origin) for song in recovered] == [
+        ("NEIGHBOR." + extension.decode(), neighbor, "fat"),
+    ]
+    candidates = image._recover_file_candidates_from_raw_image_bytes(bytes(data))
+    assert not any(song.origin == "fat" and song.source_offset == geometry.data_offset
+                   for song in candidates)
+
+
 @pytest.mark.parametrize("damage", ["self_reference", "two_directory_cycle", "sibling_alias", "fat_cycle"])
 def test_directory_cycles_are_bounded_and_reachable_songs_survive(tmp_path, damage):
     _source, data, geometry = _blank_image(tmp_path)
