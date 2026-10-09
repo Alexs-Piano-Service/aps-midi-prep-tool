@@ -83,8 +83,8 @@ def test_equal_smaller_and_unknown_capacity_raw_writes_retain_existing_behavior(
     assert not modified.exists()
 
 
-@pytest.mark.parametrize("verify", [False, True])
-def test_file_level_hd_source_fits_dd_target_without_changing_geometry(tmp_path, monkeypatch, verify):
+@pytest.fixture(params=[False, True], ids=["native-stat", "stat-without-rdev"])
+def file_level_save(tmp_path, monkeypatch, request):
     monkeypatch.setenv("APS_FLOPPY_SAVE_RECOVERY_DIR", str(tmp_path / "recovery"))
     source = tmp_path / "source-hd.img"
     destination = tmp_path / "target-dd.img"
@@ -94,17 +94,62 @@ def test_file_level_hd_source_fits_dd_target_without_changing_geometry(tmp_path,
     song = tmp_path / "SONG.MID"
     song.write_bytes(payload)
     image._copy_host_file_into_image(source, song, "SONG.MID")
-    before = source.read_bytes()
     target = image.FloppyDriveInfo(str(destination), 737_280)
     monkeypatch.setattr(image, "_write_block_device", lambda *_a, **_k: pytest.fail("File-level save must not use raw writing"))
+    if request.param:
+        fstat = image.os.fstat
+
+        def without_rdev(descriptor):
+            info = fstat(descriptor)
+            return SimpleNamespace(**{
+                name: getattr(info, name) for name in dir(info)
+                if name.startswith("st_") and name != "st_rdev"
+            })
+
+        # Exercise Windows stat fields on Linux too, without changing global os.
+        monkeypatch.setattr(image, "os", SimpleNamespace(**{**vars(image.os), "fstat": without_rdev}))
     session = image.FloppyImageSession.load(source)
     try:
-        session.write_to_floppy_target("floppy_usb", target, file_level=True, verify_after_write=verify)
-
-        assert destination.stat().st_size == 737_280
-        assert image._geometry_from_boot_sector(destination.read_bytes()[:512]).total_size == 737_280
-        assert image._read_fat12_file_bytes(destination, "SONG.MID") == payload
-        assert source.read_bytes() == before
-        assert session.last_write_verification["confidence"] == ("contents_verified" if verify else "written")
+        yield session, source, destination, target, payload
     finally:
         session.cleanup()
+
+
+@pytest.mark.parametrize("verify", [False, True])
+def test_file_level_hd_source_fits_dd_target_without_changing_geometry(file_level_save, verify):
+    session, source, destination, target, payload = file_level_save
+    before = source.read_bytes()
+
+    session.write_to_floppy_target("floppy_usb", target, file_level=True, verify_after_write=verify)
+
+    assert destination.stat().st_size == 737_280
+    assert image._geometry_from_boot_sector(destination.read_bytes()[:512]).total_size == 737_280
+    assert image._read_fat12_file_bytes(destination, "SONG.MID") == payload
+    assert source.read_bytes() == before
+    assert session.last_write_verification["confidence"] == ("contents_verified" if verify else "written")
+
+
+def test_file_level_save_stops_before_writing_if_target_media_changes(file_level_save, monkeypatch):
+    session, source, destination, target, _payload = file_level_save
+    before = source.read_bytes()
+    changed_disk = []
+    extract = session._extract_from_image
+
+    def change_media_after_extraction(*args, **kwargs):
+        result = extract(*args, **kwargs)
+        if not changed_disk:
+            data = bytearray(destination.read_bytes())
+            data[39] ^= 1  # Change the FAT volume serial while keeping a valid filesystem.
+            destination.write_bytes(data)
+            changed_disk.append(bytes(data))
+        return result
+
+    monkeypatch.setattr(session, "_extract_from_image", change_media_after_extraction)
+    with pytest.raises(image.FloppyImageError, match="target floppy changed"):
+        session.write_to_floppy_target("floppy_usb", target, file_level=True)
+
+    assert changed_disk
+    assert destination.read_bytes() == changed_disk[0]
+    assert source.read_bytes() == before
+    assert session.last_floppy_save_diagnostics["target_mutation_attempted"] is False
+    assert session.last_write_verification["confidence"] == "not_written"

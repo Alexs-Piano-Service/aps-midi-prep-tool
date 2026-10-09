@@ -12340,7 +12340,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     boot = handle.read(512)
                 if len(boot) != 512:
                     raise FloppyImageError("Could not identify the target floppy before saving.")
-                return (info.st_dev, info.st_ino, info.st_rdev, hashlib.sha256(boot).hexdigest()), boot
+                # Windows image files have no st_rdev; keep the device number
+                # in the identity on platforms that expose it.
+                return (info.st_dev, info.st_ino, getattr(info, "st_rdev", 0), hashlib.sha256(boot).hexdigest()), boot
 
             identity, boot = media_identity()
 
