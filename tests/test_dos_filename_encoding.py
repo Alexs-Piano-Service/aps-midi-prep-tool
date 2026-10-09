@@ -1,6 +1,7 @@
 """OEM short filenames retain their identity through image repair and export."""
 
 import io
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import mido
@@ -94,7 +95,10 @@ def test_regenerated_catalog_keeps_original_oem_filenames(tmp_path):
     session = image.FloppyImageSession.load(source)
     try:
         output = tmp_path / "catalog.img"
-        session.export_to_images(str(output), "img", session.disk_format, generate_pianodir=True)
+        # Windows CI tees stdout to a strict legacy-code-page stream. Console
+        # diagnostics must not prevent exporting songs with OEM filenames.
+        with io.TextIOWrapper(io.BytesIO(), encoding="cp1252") as console, redirect_stdout(console):
+            session.export_to_images(str(output), "img", session.disk_format, generate_pianodir=True)
         catalog = image._read_fat12_file_bytes(output, "PIANODIR.FIL")
         names = {catalog[offset:offset + 11] for offset in
                  (len(PIANODIR_HEADER), len(PIANODIR_HEADER) + PIANODIR_TRACK_SIZE)}

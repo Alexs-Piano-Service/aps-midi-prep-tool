@@ -53,8 +53,7 @@ def extract_midi_type_label_from_midi(midi_path):
             midi_bytes = f.read()
         format_type = _extract_midi_format_type(midi_bytes)
         return f"Type {format_type}"
-    except Exception as e:
-        print(f"Error detecting MIDI type for {midi_path}: {e}")
+    except Exception:
         return "Error"
 
 
@@ -414,11 +413,8 @@ def read_first_title_from_midi(midi_path):
 
 def extract_first_title_from_midi(midi_path):
     try:
-        result = read_first_title_from_midi(midi_path)
-        print(f"extract: {os.path.basename(midi_path)} => '{result}'")
-        return result
+        return read_first_title_from_midi(midi_path)
     except Exception as e:
-        print(f"Error extracting title from {midi_path}: {e}")
         return f"Error reading MIDI title from {os.path.basename(midi_path)}: {e}"
 
 
@@ -430,11 +426,8 @@ def read_eseq_title_from_file(file_path):
 
 def extract_eseq_title_from_file(file_path):
     try:
-        result = read_eseq_title_from_file(file_path)
-        print(f"extract eseq: {os.path.basename(file_path)} => '{result}'")
-        return result
+        return read_eseq_title_from_file(file_path)
     except Exception as e:
-        print(f"Error extracting E-SEQ title from {file_path}: {e}")
         return f"Error reading E-SEQ title from {os.path.basename(file_path)}: {e}"
 
 

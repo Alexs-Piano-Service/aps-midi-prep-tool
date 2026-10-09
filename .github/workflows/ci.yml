@@ -82,13 +82,22 @@ jobs:
       - name: Check Python syntax
         run: python -m compileall -q aps_midi_prep_tool.py aps_midi_prep_tool_app scripts
       - name: Run automated tests
+        shell: bash
         env:
           APS_REQUIRE_AUDIO_TESTS: ${{ runner.os == 'Linux' && '1' || '0' }}
-        # Preserve the first failure and native Qt diagnostics if a later worker aborts.
-        run: python -m pytest -x -vv --capture=tee-sys --ignore=tests/windows --durations=20 --full-trace --junitxml=test-results/regression.xml
+        # Keep native crash/hang diagnostics even when pytest cannot finish its XML.
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          python -m pip freeze > test-results/dependencies.txt
+          python -u -m pytest -x -vv --capture=tee-sys --ignore=tests/windows --durations=20 --full-trace -o faulthandler_timeout=120 --junitxml=test-results/regression.xml 2>&1 | tee test-results/regression.log
       - name: Run native Windows image, audio, and process tests
         if: runner.os == 'Windows'
-        run: python -m pytest -q tests/windows --windows-require-tools --junitxml=test-results/windows.xml
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          python -u -m pytest -q tests/windows --windows-require-tools -o faulthandler_timeout=120 --junitxml=test-results/windows.xml 2>&1 | tee test-results/windows.log
       - name: Build portable Windows manual test kit
         if: runner.os == 'Windows'
         run: python -m scripts.build_windows_test_kit --output dist/windows-test-kit
@@ -105,7 +114,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ matrix.os }}
-          path: test-results/*.xml
+          path: test-results/
           if-no-files-found: warn
       - name: Check whitespace
         run: git diff --check
