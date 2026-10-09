@@ -201,7 +201,7 @@ def test_resume_reuses_midi_published_before_source_preservation_finishes(
     assert midi.read_bytes() == _minimal_midi_bytes()
     entry = read_extraction_job(checkpoint)["images"]["disk.img"]["entries"][name]
     assert entry["state"] == "failed"
-    assert any(record["converted"] and record["path"] == "disk/MUSIC/SONG.mid"
+    assert any(record["converted"] and Path(record["path"]) == midi.relative_to(output)
                for record in entry["outputs"])
 
     if interruption == "source_error":
