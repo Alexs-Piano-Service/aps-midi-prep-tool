@@ -81,23 +81,37 @@ jobs:
         run: gw convert --help
       - name: Check Python syntax
         run: python -m compileall -q aps_midi_prep_tool.py aps_midi_prep_tool_app scripts
-      - name: Run automated tests
+      - name: Run automated tests on Linux
+        if: runner.os == 'Linux'
         shell: bash
         env:
-          APS_REQUIRE_AUDIO_TESTS: ${{ runner.os == 'Linux' && '1' || '0' }}
+          APS_REQUIRE_AUDIO_TESTS: '1'
         # Keep native crash/hang diagnostics even when pytest cannot finish its XML.
         run: |
           set -o pipefail
           mkdir -p test-results
           python -m pip freeze > test-results/dependencies.txt
           python -u -m pytest -x -vv --capture=tee-sys --ignore=tests/windows --durations=20 --full-trace -o faulthandler_timeout=120 --junitxml=test-results/regression.xml 2>&1 | tee test-results/regression.log
+      - name: Run automated tests on Windows
+        if: runner.os == 'Windows'
+        # Git Bash enables backup/restore privileges, bypassing Windows ACL checks.
+        # Keep a native shell so permission tests exercise normal Windows access.
+        shell: pwsh
+        env:
+          APS_REQUIRE_AUDIO_TESTS: '0'
+        run: |
+          New-Item -ItemType Directory -Force -Path test-results | Out-Null
+          python -m pip freeze | Set-Content -Encoding utf8 -Path test-results/dependencies.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -u -m pytest -x -vv --capture=tee-sys --ignore=tests/windows --durations=20 --full-trace -o faulthandler_timeout=120 --junitxml=test-results/regression.xml 2>&1 | Tee-Object -FilePath test-results/regression.log
+          exit $LASTEXITCODE
       - name: Run native Windows image, audio, and process tests
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          set -o pipefail
-          mkdir -p test-results
-          python -u -m pytest -q tests/windows --windows-require-tools -o faulthandler_timeout=120 --junitxml=test-results/windows.xml 2>&1 | tee test-results/windows.log
+          New-Item -ItemType Directory -Force -Path test-results | Out-Null
+          python -u -m pytest -q tests/windows --windows-require-tools -o faulthandler_timeout=120 --junitxml=test-results/windows.xml 2>&1 | Tee-Object -FilePath test-results/windows.log
+          exit $LASTEXITCODE
       - name: Build portable Windows manual test kit
         if: runner.os == 'Windows'
         run: python -m scripts.build_windows_test_kit --output dist/windows-test-kit
