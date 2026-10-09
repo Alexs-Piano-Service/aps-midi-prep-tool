@@ -10,7 +10,6 @@ import os
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QTableWidgetItem
 
 from .eseq_pianodir import PIANODIR_ROW_PATH
 
@@ -39,7 +38,7 @@ def _rows(snapshot):
 
 
 def _clone_row(row):
-    return [QTableWidgetItem(item) if item is not None else None for item in row]
+    return [item.clone() if item is not None else None for item in row]
 
 
 def _material_state(snapshot):
@@ -194,7 +193,7 @@ class PreparationLayer:
 
                 if raw(current_row) != raw(automatic):
                     title = raw(current_row)
-                    row[4] = QTableWidgetItem(current_row[4])
+                    row[4] = current_row[4].clone()
                     row[4].setData(edited_title_role, True)
                     title_field = "pendingImageTitleEdits" if image_mode else "pendingEdits"
                     if image_mode and path in now.get("pendingSmartPianoSoftTitleEdits", {}):
@@ -211,7 +210,7 @@ class PreparationLayer:
                     old_suffix, auto_suffix = os.path.splitext(original_name)[1], os.path.splitext(auto_name)[1]
                     if path not in explicit_material and old_suffix.lower() != auto_suffix.lower() and suffix.lower() == auto_suffix.lower():
                         name = stem + old_suffix
-                    row[3] = QTableWidgetItem(current_row[3])
+                    row[3] = current_row[3].clone()
                     row[3].setText(name)
                     if image_mode:
                         merged.setdefault("pendingImageRenames", {})[path] = os.path.join(os.path.dirname(path), name).replace("\\", "/")
