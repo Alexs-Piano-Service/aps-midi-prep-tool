@@ -84,7 +84,8 @@ jobs:
       - name: Run automated tests
         env:
           APS_REQUIRE_AUDIO_TESTS: ${{ runner.os == 'Linux' && '1' || '0' }}
-        run: python -m pytest -q --ignore=tests/windows --durations=20 --full-trace --junitxml=test-results/regression.xml
+        # Preserve the first failure and native Qt diagnostics if a later worker aborts.
+        run: python -m pytest -x -vv --capture=tee-sys --ignore=tests/windows --durations=20 --full-trace --junitxml=test-results/regression.xml
       - name: Run native Windows image, audio, and process tests
         if: runner.os == 'Windows'
         run: python -m pytest -q tests/windows --windows-require-tools --junitxml=test-results/windows.xml

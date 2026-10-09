@@ -17,22 +17,55 @@ from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 
 
+@pytest.fixture(autouse=True)
+def _finish_boot_repair_workers(window):
+    # Run before the window fixture schedules parent deletion, including when
+    # an assertion or a Qt callback fails before wait_for_worker() is reached.
+    yield
+    workers = window.findChildren(boot_sector_dialog.BootSectorRepairWorker)
+    for worker in workers:
+        worker.requestInterruption()
+    for worker in workers:
+        assert worker.wait(10000), "Boot repair worker did not stop during test cleanup"
+
+
 def wait_for_worker(dialog):
     loop = QEventLoop()
     timer = QTimer()
     timer.setSingleShot(True)
     timer.timeout.connect(loop.quit)
     if dialog.worker is not None:
-        dialog.worker.finished.connect(loop.quit)
-        timer.start(10000)
-        loop.exec()
-        timer.stop()
+        worker = dialog.worker
+        worker.finished.connect(loop.quit)
+        # A small repair may finish before this helper connects. Its queued
+        # UI cleanup still needs dispatching, but no finished signal will recur.
+        if not worker.isFinished():
+            timer.start(10000)
+            loop.exec()
+            timer.stop()
     QApplication.processEvents()
     if dialog.worker is not None:
         dialog.worker.requestInterruption()
         dialog.worker.wait(10000)
         QApplication.processEvents()
         pytest.fail("Boot repair worker did not finish in time")
+
+
+def test_wait_for_worker_handles_a_finished_worker_with_queued_cleanup(window, tmp_path, monkeypatch):
+    monkeypatch.setattr(boot_sector_dialog, "repair_boot_sector_batch", lambda *_a, **_k: ImageRepairBatch(()))
+    dialog = BootSectorRepairDialog(window)
+    dialog.path_edit.setText(str(tmp_path))
+    dialog.run_button.click()
+    assert dialog.worker.wait(10000)
+
+    class UnexpectedLoop(QEventLoop):
+        def exec(self):
+            pytest.fail("An already finished worker must not wait for another finished signal")
+
+    monkeypatch.setitem(globals(), "QEventLoop", UnexpectedLoop)
+    wait_for_worker(dialog)
+    assert dialog.worker is None
+    assert dialog.run_button.isEnabled()
 
 
 @pytest.mark.parametrize("kind", ["blank", "omitted"])

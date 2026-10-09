@@ -10,6 +10,13 @@ import pytest
 from aps_midi_prep_tool_app import floppy_image as image
 
 
+@pytest.fixture(autouse=True)
+def posix_file_io(monkeypatch):
+    # Keep ordinary-file readback fixtures on the POSIX path on every host;
+    # native Windows device APIs are exercised by their separate mock tests.
+    monkeypatch.setattr(image, "os", SimpleNamespace(**{**vars(os), "name": "posix"}))
+
+
 def _mock_writer(monkeypatch, *, max_write=None, failure=None):
     payload = bytes(range(256)) * 80 + b"final"
     state = SimpleNamespace(data=bytearray(), calls=0, flushes=0, syncs=0, progress=[])

@@ -112,7 +112,7 @@ jobs:
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q --ignore=tests/windows
+        run: python -m pytest -x -vv --capture=tee-sys --ignore=tests/windows
 
       - name: Run native Windows image, audio, and process tests
         run: python -m pytest -q tests/windows --windows-require-tools

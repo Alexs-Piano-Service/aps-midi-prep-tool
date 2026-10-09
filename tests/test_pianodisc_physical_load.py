@@ -21,12 +21,26 @@ def _device(tmp_path, *, damaged_song=False):
 
 
 def _platform(monkeypatch, windows, payload):
-    if not windows:
-        return
     # Do not alter global os.name, which would affect pathlib and pytest.
     fake_os = SimpleNamespace(**vars(os))
-    fake_os.name = "nt"
+    fake_os.name = "nt" if windows else "posix"
     monkeypatch.setattr(image, "os", fake_os)
+    if not windows:
+        # Exercise the real FAT acquisition with a portable fixture handle;
+        # Windows has no os.pread, and these tests never need device APIs.
+        class FixtureDevice:
+            def __init__(self, path):
+                self.handle = open(path, "rb")
+
+            def read_at(self, offset, size, _label):
+                self.handle.seek(offset)
+                return self.handle.read(size)
+
+            def close(self):
+                self.handle.close()
+
+        monkeypatch.setattr(image, "_open_block_device_for_read", FixtureDevice)
+        return
 
     def no_fast_fat(*_args, **_kwargs):
         raise image.FastFloppyReadError("Not a FAT disk", fallback_allowed=True)
@@ -113,6 +127,7 @@ def test_pianodisc_floppy_cancellation_cleans_private_capture(
 
 def test_failed_raw_floppy_capture_never_publishes_pianodisc_session(tmp_path, monkeypatch):
     drive, payload = _device(tmp_path)
+    _platform(monkeypatch, False, payload)
     captures = []
 
     def incomplete(_source, destination, _size, *, diagnostics, **_kwargs):

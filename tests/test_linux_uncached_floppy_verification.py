@@ -3,7 +3,6 @@
 import builtins
 import ctypes
 import errno
-import fcntl
 import io
 import mmap
 import os
@@ -13,6 +12,11 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+
+if not sys.platform.startswith("linux"):
+    pytest.skip("Linux direct-I/O verification tests", allow_module_level=True)
+
+fcntl = pytest.importorskip("fcntl", reason="Linux direct-I/O verification requires fcntl")
 
 from aps_midi_prep_tool_app import floppy_image as image
 
