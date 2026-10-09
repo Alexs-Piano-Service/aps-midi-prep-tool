@@ -9,7 +9,7 @@ import uuid
 from functools import wraps
 
 from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QTableWidgetItem
 
 from .localized_dialogs import QMessageBox
 from .message_catalog import tr
@@ -263,7 +263,9 @@ class PendingChangesMixin:
             "restore_sources_after_undo_all": (
                 self._undo_all_requires_source_reset and self._pending_changes_to_discard()
             ),
-            "rows": [[self.table.item(row, col).clone() if self.table.item(row, col) is not None else None
+            # Python-constructed copies own their native items. Qt-created
+            # clone() wrappers can outlive row deletion on PySide6 6.11.
+            "rows": [[QTableWidgetItem(self.table.item(row, col)) if self.table.item(row, col) is not None else None
                       for col in range(self.table.columnCount())]
                      for row in range(self.table.rowCount())],
             "album": self.imagePianodirTitleEdit.text(),
@@ -490,7 +492,7 @@ class PendingChangesMixin:
             for row, items in enumerate(snapshot["rows"]):
                 for column, item in enumerate(items):
                     if item is not None:
-                        self.table.setItem(row, column, item.clone())
+                        self.table.setItem(row, column, QTableWidgetItem(item))
             self.imagePianodirTitleEdit.setText(snapshot["album"])
             self.imagePianodirCatalogEdit.setText(snapshot["catalog"])
             self._restored_staging_assets.append(snapshot["assets"])

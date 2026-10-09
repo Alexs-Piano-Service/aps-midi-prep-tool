@@ -1,10 +1,11 @@
-"""Staging works when PySide does not expose the item copy constructor."""
+"""Staged item copies preserve data and follow Qt/Python ownership changes."""
 
 import pytest
+import shiboken6
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QTableWidgetItem
 
-from aps_midi_prep_tool_app import pending_changes, preparation_layer
+from aps_midi_prep_tool_app import preparation_layer
 from test_inspection_staging import _load_folder, window  # noqa: F401
 from test_preparation_automatic import destination_window  # noqa: F401
 from test_preparation_layers import (
@@ -16,19 +17,6 @@ from test_preparation_layers import (
 _CUSTOM_ROLE = Qt.UserRole + 600
 _RAW_TITLE_ROLE = Qt.UserRole + 1
 _EDITED_TITLE_ROLE = Qt.UserRole + 2
-
-
-@pytest.fixture(autouse=True)
-def _unavailable_item_copy_constructor(monkeypatch):
-    def construct(*args, **kwargs):
-        if args and isinstance(args[0], QTableWidgetItem):
-            raise TypeError("QTableWidgetItem(existing_item) is unavailable")
-        return QTableWidgetItem(*args, **kwargs)
-
-    # Keep this guard effective even when the modules no longer import the
-    # constructor: reintroducing the old copy expression must fail here.
-    for module in (pending_changes, preparation_layer):
-        monkeypatch.setattr(module, "QTableWidgetItem", construct, raising=False)
 
 
 def _decorate(item, label):
@@ -64,6 +52,8 @@ def test_staged_capture_and_restore_preserve_independent_table_items(window, tmp
     try:
         saved_item = snapshot["rows"][0][3]
         assert saved_item is not item
+        assert shiboken6.ownedByPython(saved_item)
+        assert saved_item.tableWidget() is None
         assert _item_values(saved_item) == expected
         identity = snapshot["rows"][0][1].data(preparation_layer.PREPARATION_ID_ROLE)
         assert identity
@@ -75,11 +65,39 @@ def test_staged_capture_and_restore_preserve_independent_table_items(window, tmp
 
         restored = window.table.item(0, 3)
         assert restored is not saved_item
+        assert not shiboken6.ownedByPython(restored)
         assert _item_values(restored) == expected
         assert window.table.item(0, 1).data(preparation_layer.PREPARATION_ID_ROLE) == identity
         _mutate(restored)
         assert _item_values(saved_item) == expected
         assert [source.read_bytes() for source in sources] == originals
+    finally:
+        snapshot["assets"].cleanup()
+
+
+@pytest.mark.parametrize("clear_method", ["remove_row", "clear_rows", "clear_contents"])
+def test_removing_restored_items_invalidates_wrappers_but_preserves_snapshot(window, tmp_path, clear_method):
+    _load_folder(window, tmp_path)
+    snapshot = window._capture_staged_state()
+    try:
+        window._restore_staged_snapshot(snapshot)
+        saved_items = [item for item in snapshot["rows"][0] if item is not None]
+        restored_items = [window.table.item(0, column) for column, item in
+                          enumerate(snapshot["rows"][0]) if item is not None]
+        values = [_item_values(item) for item in saved_items]
+
+        if clear_method == "remove_row":
+            window.table.removeRow(0)
+        elif clear_method == "clear_rows":
+            window.table.setRowCount(0)
+        else:
+            window.table.clearContents()
+
+        # A stale wrapper must not survive the C++ destructor: reading it can
+        # segfault, or a later allocation can reuse its address and identity.
+        assert all(not shiboken6.isValid(item) for item in restored_items)
+        assert all(shiboken6.isValid(item) for item in saved_items)
+        assert [_item_values(item) for item in saved_items] == values
     finally:
         snapshot["assets"].cleanup()
 
@@ -130,6 +148,7 @@ def test_preparation_rebase_clones_baseline_and_deliberate_edits(image_mode):
     assert result["preparation_layer"] is None
 
     for column in (1, 3, 4, 5):
+        assert shiboken6.ownedByPython(row[column])
         assert all(row[column] is not original[column] for original in source_rows)
         _mutate(row[column])
     assert [[_item_values(item) if item is not None else None for item in original]
