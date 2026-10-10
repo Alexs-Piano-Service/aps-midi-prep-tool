@@ -516,6 +516,87 @@ def test_cancelled_extraction_keeps_checkpoint_and_resumes_completed_songs(tmp_p
     assert resumed.job_record_path == ""
 
 
+@pytest.mark.parametrize("filename,long_names", [
+    ("SONG.MID", False), ("SONG.MID", True), ("NOTES.TXT", False),
+], ids=["midi", "long-midi-name", "other-file"])
+@pytest.mark.parametrize("convert_eseq", [False, True])
+@pytest.mark.parametrize("change", ["unchanged", "edited_output", "changed_source"])
+def test_resume_verifies_plain_output_checkpoint_before_reusing_it(
+    tmp_path, monkeypatch, filename, long_names, convert_eseq, change,
+):
+    from aps_midi_prep_tool_app import bulk_extraction
+    from aps_midi_prep_tool_app.bulk_extraction_job import read_extraction_job
+
+    source, output = tmp_path / "images", tmp_path / "output"
+    source.mkdir()
+    image = source / "disk.img"
+    image.write_bytes(b"image")
+    payload = _minimal_midi_bytes() if filename.endswith(".MID") else b"original notes"
+    entry_name = f"MUSIC/{filename}"
+    checkpoint = output / "job.json"
+    cancelled = False
+    write_bytes = bulk_extraction.atomic_write_bytes
+    opened = []
+
+    def loader(path, **_kwargs):
+        opened.append(path)
+        return FakeImageSession(path, {entry_name: payload})
+
+    def interrupt_after_publication(path, data, **kwargs):
+        nonlocal cancelled
+        write_bytes(path, data, **kwargs)
+        cancelled = True
+
+    options = dict(
+        convert_eseq=convert_eseq, long_midi_filenames=long_names,
+        job_record_path=checkpoint, session_loader=loader,
+    )
+    monkeypatch.setattr(bulk_extraction, "atomic_write_bytes", interrupt_after_publication)
+    with pytest.raises(FloppyOperationCancelled):
+        bulk_extract_images(source, output, **options, cancel_callback=lambda: cancelled)
+
+    saved = read_extraction_job(checkpoint)["images"]["disk.img"]["entries"][entry_name]
+    assert saved["state"] == "failed"
+    assert len(saved["outputs"]) == 1
+    assert saved["outputs"][0]["converted"] is False
+    retained = output / saved["outputs"][0]["path"]
+    assert retained.read_bytes() == payload
+    monkeypatch.setattr(bulk_extraction, "atomic_write_bytes", write_bytes)
+
+    if change == "changed_source":
+        image.write_bytes(b"IMAGE")  # Same length; resume must compare the hash.
+        previous_checkpoint = checkpoint.read_bytes()
+        opened.clear()
+        with pytest.raises(ValueError, match="Source image changed"):
+            bulk_extract_images(source, output, **options, resume=True)
+        assert not opened
+        assert checkpoint.read_bytes() == previous_checkpoint
+        assert retained.read_bytes() == payload
+        assert list(retained.parent.iterdir()) == [retained]
+        return
+
+    edited = bytes([payload[0] ^ 1]) + payload[1:]
+    if change == "edited_output":
+        retained.write_bytes(edited)  # A same-size edit must not pass verification.
+
+    resumed = bulk_extract_images(source, output, **options, resume=True)
+
+    assert not resumed.errors
+    assert resumed.files_converted == 0
+    assert resumed.files_reused == int(change == "unchanged")
+    assert resumed.files_extracted == int(change == "edited_output")
+    outputs = list(retained.parent.iterdir())
+    if change == "edited_output":
+        assert retained.read_bytes() == edited
+        replacement, = [path for path in outputs if path != retained]
+        assert replacement.read_bytes() == payload
+    else:
+        assert outputs == [retained]
+        assert retained.read_bytes() == payload
+    assert not checkpoint.exists()
+    assert resumed.job_record_path == ""
+
+
 def _interrupt_after_completed_image(source, output, checkpoint, loader):
     # Even a cancellation after the final output must retain a resumable record.
     def cancel_at_completion(detail):

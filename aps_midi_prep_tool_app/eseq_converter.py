@@ -1212,7 +1212,15 @@ def _build_time_signature_markers(time_signature_events, last_tick):
     sorted_events = sorted(time_signature_events, key=lambda item: item[0])
     deduped = []
     for tick, numerator, denominator_power in sorted_events:
-        marker = (int(tick), max(1, int(numerator)), max(0, min(int(denominator_power), 7)))
+        denominator_power = int(denominator_power)
+        # This writer preserves meter; legacy MID2ESEQ deliberately omits it.
+        # Keep the meter within the standard header's one-byte denominator range.
+        if not 0 <= denominator_power <= 7:
+            raise EseqConversionError(
+                f"Unsupported MIDI time signature denominator exponent {denominator_power}: "
+                "E-SEQ preservation supports values from 0 to 7 (denominators 1 to 128)."
+            )
+        marker = (int(tick), max(1, int(numerator)), denominator_power)
         if deduped and deduped[-1][0] == marker[0]:
             deduped[-1] = marker
         else:
@@ -1602,7 +1610,7 @@ def convert_midi_bytes_to_eseq_bytes(
                     restored_header[ESEQ_ORDER_KEY_START:ESEQ_TITLE_END + 1] = header_hint.slice_27_77
                     restored_meter = _eseq_header_time_signature(restored_header)
             early_signatures = {
-                tick: (max(1, int(numerator)), max(0, min(int(denominator_power), 7)))
+                tick: (int(numerator), int(denominator_power))
                 for tick, numerator, denominator_power in time_signature_events
                 if tick < first_stream_tick
             }

@@ -537,7 +537,7 @@ def bulk_extract_images(
                     try:
                         retained_source = (
                             job.verified_source_path(image_name, entry.path)
-                            if job is not None and convert_entry else None
+                            if job is not None else None
                         )
                         if retained_source is not None:
                             destination_path = retained_source

@@ -6032,7 +6032,12 @@ def _read_fat12_block_device_listing(device_path, *, diagnostics=None):
                 "The disk may not be an IBM/Yamaha floppy, or it may need recovery."
             )
         fat_area, fat_bad_ranges = _read_fat_area_best_effort(fd, geometry, boot_sector[21])
-        root_dir = _read_device_exact(fd, geometry.root_offset, geometry.root_size, "floppy root directory")
+        # Sectors after an observed directory terminator are unused, even if
+        # they are unreadable. Required directory sectors must still be read.
+        root_dir, _, _ = _read_floppy_directory_sectors(
+            fd, [(geometry.root_offset, geometry.root_size)],
+            sector_size=geometry.bytes_per_sector, label="floppy root directory",
+        )
         has_subdirectories = any(entry["attr"] & 0x10 for entry in _iter_fat_directory_entries(root_dir))
         if has_subdirectories and electone_mdr_to_midi.root_directory_has_mdr_entries(root_dir):
             # Preserve the full reader's contiguous-file compatibility for MDR

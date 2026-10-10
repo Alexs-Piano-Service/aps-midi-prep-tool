@@ -45,6 +45,81 @@ def _assert_closed(descriptors):
 
 
 @pytest.mark.parametrize("layout", [0, 2])
+@pytest.mark.parametrize("with_directory", [False, True], ids=["flat", "hidden-directory"])
+@pytest.mark.parametrize("terminator_sector", [0, 1])
+def test_listing_stops_root_reads_after_a_readable_terminator(
+    tmp_path, monkeypatch, layout, with_directory, terminator_sector,
+):
+    source, data, geometry = _disk(tmp_path, layout, with_directory=with_directory)
+    entry_bytes = 64 if with_directory else 32
+    entries = data[geometry.root_offset:geometry.root_offset + entry_bytes]
+    start = geometry.root_offset + terminator_sector * geometry.bytes_per_sector
+    data[geometry.root_offset:start] = b"\xe5" * (start - geometry.root_offset)
+    data[start:start + entry_bytes] = entries
+    source.write_bytes(data)
+    unused_root = start + geometry.bytes_per_sector
+    allowed = [(0, geometry.data_offset)]
+    if with_directory:
+        allowed.append((image._cluster_offset(geometry, 3), geometry.bytes_per_sector))
+    reads, descriptors = _track_reads(
+        monkeypatch, allowed, bad=[(unused_root, geometry.data_offset - unused_root)],
+    )
+    diagnostics = {}
+
+    listing = image._read_fat12_block_device_listing(source, diagnostics=diagnostics)
+
+    assert [(entry.path, entry.size) for entry in listing.entries] == [("SONG.MID", 4)]
+    allocated_clusters = 3 if with_directory else 1
+    assert listing.free_space == (image._fat12_data_cluster_count(geometry) - allocated_clusters) * geometry.cluster_size
+    assert diagnostics["fat_copies_structurally_valid"] == [1, 2]
+    assert not any(offset < geometry.data_offset and offset + size > unused_root for offset, size in reads)
+    assert source.read_bytes() == data
+    _assert_closed(descriptors)
+
+
+@pytest.mark.parametrize("layout", [0, 2])
+@pytest.mark.parametrize("unreadable_sector", [0, 1])
+def test_listing_rejects_unreadable_root_sectors_before_a_terminator(
+    tmp_path, monkeypatch, layout, unreadable_sector,
+):
+    source, data, geometry = _disk(tmp_path, layout, with_directory=False)
+    entry = data[geometry.root_offset:geometry.root_offset + 32]
+    bad = geometry.root_offset + unreadable_sector * geometry.bytes_per_sector
+    data[geometry.root_offset:bad] = b"\xe5" * (bad - geometry.root_offset)
+    data[bad:bad + 32] = entry
+    source.write_bytes(data)
+    reads, descriptors = _track_reads(
+        monkeypatch, [(0, geometry.data_offset)], bad=[(bad, geometry.bytes_per_sector)],
+    )
+
+    with pytest.raises(image.FloppyImageError, match="root directory"):
+        image._read_fat12_block_device_listing(source)
+
+    assert any(offset <= bad < offset + size for offset, size in reads)
+    assert source.read_bytes() == data
+    _assert_closed(descriptors)
+
+
+@pytest.mark.parametrize("layout", [0, 2])
+def test_listing_reads_the_last_entry_of_a_root_without_a_terminator(tmp_path, monkeypatch, layout):
+    source, data, geometry = _disk(tmp_path, layout, with_directory=False)
+    entry = data[geometry.root_offset:geometry.root_offset + 32]
+    root_end = geometry.root_offset + geometry.root_size
+    data[geometry.root_offset:root_end] = b"\xe5" * geometry.root_size
+    data[root_end - 32:root_end] = entry
+    source.write_bytes(data)
+    reads, descriptors = _track_reads(monkeypatch, [(0, geometry.data_offset)])
+
+    listing = image._read_fat12_block_device_listing(source)
+
+    assert [(entry.path, entry.size) for entry in listing.entries] == [("SONG.MID", 4)]
+    for sector in range(geometry.root_offset, root_end, geometry.bytes_per_sector):
+        assert any(offset <= sector and sector + geometry.bytes_per_sector <= offset + size for offset, size in reads)
+    assert source.read_bytes() == data
+    _assert_closed(descriptors)
+
+
+@pytest.mark.parametrize("layout", [0, 2])
 def test_hidden_directory_listing_reads_no_song_data_or_unused_sectors(tmp_path, monkeypatch, layout):
     source, original, geometry = _disk(tmp_path, layout)
     directory = image._cluster_offset(geometry, 3)
@@ -140,16 +215,23 @@ def test_fragmented_nested_directories_read_only_active_directory_sectors(tmp_pa
 
 
 @pytest.mark.parametrize("failure", ["cancelled", "stalled"])
-def test_cancelled_or_stalled_directory_acquisition_closes_descriptor_without_retry(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("target", ["root", "subdirectory"])
+def test_cancelled_or_stalled_directory_acquisition_closes_descriptor_without_retry(
+    tmp_path, monkeypatch, failure, target,
+):
     source, _data, geometry = _disk(tmp_path, 2)
     directory = image._cluster_offset(geometry, 3)
     _reads, descriptors = _track_reads(monkeypatch, [(0, geometry.data_offset), (directory, 512)])
     calls = []
     exception_type = image.FloppyOperationCancelled if failure == "cancelled" else image._FloppyReadStalled
+    target_offset = geometry.root_offset if target == "root" else directory
+    read_directory = image._read_floppy_directory_sectors
 
-    def fail(*_args, **_kwargs):
-        calls.append(True)
-        raise exception_type("stop directory acquisition")
+    def fail(device, ranges, **kwargs):
+        if ranges[0][0] == target_offset:
+            calls.append(target_offset)
+            raise exception_type("stop directory acquisition")
+        return read_directory(device, ranges, **kwargs)
 
     monkeypatch.setattr(image, "_read_floppy_directory_sectors", fail)
     with pytest.raises(exception_type, match="stop directory acquisition"):
