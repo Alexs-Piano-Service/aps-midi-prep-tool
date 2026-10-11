@@ -9797,6 +9797,7 @@ class _WindowsFileSaveMixin:
                 raise FloppyImageError("Read the target floppy before replacing its existing files with Save To Floppy.")
 
         original_records = {}
+        baseline_hashes = {}
         for key, entry in _floppy_progress_files(
             ((key, entry) for key, entry in target.items() if not entry.is_directory),
             "Backing up files..." if backup_originals else (
@@ -9820,10 +9821,10 @@ class _WindowsFileSaveMixin:
             if not direct:
                 if baseline[key].size != entry.size:
                     raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
-                if check_originals:
-                    expected_bytes = _read_fat12_file_bytes(baseline_path, baseline[key].path)
-                    if hashlib.sha256(expected_bytes).hexdigest() != record["sha256"]:
-                        raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
+                expected_bytes = _read_fat12_file_bytes(baseline_path, baseline[key].path)
+                baseline_hashes[key] = hashlib.sha256(expected_bytes).hexdigest()
+                if check_originals and baseline_hashes[key] != record["sha256"]:
+                    raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
         package.checkpoint(
             original_metadata={target[key].path: record for key, record in original_records.items()},
             backup_originals=bool(backup_originals),
@@ -9847,7 +9848,11 @@ class _WindowsFileSaveMixin:
                     if os.path.exists(extracted):
                         os.remove(extracted)
             intended[key] = {"size": entry.size, "sha256": floppy_save_recovery.digest(saved)}
-            if original_records.get(key, {}).get("sha256") != intended[key]["sha256"]:
+            # Edits to the loaded floppy are measured against its local copy,
+            # independently of whether original payloads were read or backed up.
+            previous_hash = (baseline_hashes.get(key) if same_source and not direct
+                             else original_records.get(key, {}).get("sha256"))
+            if previous_hash != intended[key]["sha256"]:
                 replacements[key] = saved
 
         affected = set(replacements) & set(target)
@@ -12375,6 +12380,21 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     "Use Disk > Write Current Image to Floppy... for disks with folders."
                 )
 
+            baseline_hashes = None
+            if (self.source_kind == "floppy_usb"
+                    and os.path.realpath(self.source_path) == os.path.realpath(drive_path)):
+                baseline = {_image_entry_key(entry): entry
+                            for entry in read_image_listing(self.working_img_path).entries}
+                if set(baseline) != set(target) or any(
+                    baseline[key].size != entry.size for key, entry in target.items()
+                ):
+                    raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
+                baseline_hashes = {}
+                for key, entry in baseline.items():
+                    _raise_if_cancelled(cancel_callback)
+                    data = _read_fat12_file_bytes(self.working_img_path, entry.path)
+                    baseline_hashes[key] = hashlib.sha256(data).hexdigest()
+
             def media_identity():
                 # Read only the boot sector, never unused floppy data sectors.
                 with open(drive_path, "rb") as handle:
@@ -12416,15 +12436,15 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     raise FloppyImageError("The target floppy directory changed during saving.")
                 return entries
 
-            def verify(expected, cancel=None, action=None, content_keys=None):
+            def verify(expected, cancel=None, action=None, content_keys=None, *, progress=progress_callback):
                 if action:
-                    _notify_progress(progress_callback, 0, 0, action)
+                    _notify_progress(progress, 0, 0, action)
                 actual = listing_now()
                 if set(actual) != set(expected):
                     raise FloppyImageError("Floppy verification failed: the file list changed.")
                 entries = actual.items()
                 if action:
-                    entries = _floppy_progress_files(entries, action, progress_callback)
+                    entries = _floppy_progress_files(entries, action, progress)
                 for key, entry in entries:
                     _raise_if_cancelled(cancel)
                     check_contents = content_keys is None or key in content_keys
@@ -12477,6 +12497,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     else:
                         expected_originals[key]["sha256"] = floppy_save_recovery.digest(path)
                     os.remove(path)
+                    if (check_originals and baseline_hashes is not None
+                            and baseline_hashes[key] != expected_originals[key]["sha256"]):
+                        raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
             intended = {}
             diagnostics["stage"] = "prepare_replacements"
             for key, entry in _floppy_progress_files(
@@ -12488,7 +12511,11 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 if not _files_have_same_content(path, saved):
                     raise FloppyImageError(f"The prepared recovery file did not verify: {entry.path}")
                 intended[key] = package.manifest["replacements"][entry.path]
-                if (intended[key]["sha256"] != expected_originals.get(key, {}).get("sha256")
+                # Saving back to the loaded floppy must not turn unchanged
+                # files into replacements when optional physical reads are off.
+                previous_hash = (baseline_hashes.get(key) if baseline_hashes is not None
+                                 else expected_originals.get(key, {}).get("sha256"))
+                if (intended[key]["sha256"] != previous_hash
                         or _must_refresh_floppy_sync_entry(entry)):
                     replacements[key] = saved
             verify(expected_originals, cancel_callback,
@@ -12572,9 +12599,17 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     "error": {"message": "Original-file backups were disabled; automatic restoration is unavailable."},
                 }
             elif package is not None and diagnostics["target_mutation_attempted"]:
-                _notify_progress(progress_callback, 0, 0, "Restoring original files...")
+                def restoration_progress(step, total, message):
+                    try:
+                        _notify_progress(progress_callback, step, total, message)
+                    except FloppyOperationCancelled:
+                        # Worker progress callbacks also enforce cancellation.
+                        # That must not interrupt restoration or its verification.
+                        pass
+
                 restoration = diagnostics["restoration"] = {"status": "checking", "restored": []}
                 try:
+                    _notify_progress(restoration_progress, 0, 0, "Restoring original files...")
                     # Ignore cancellation only for safe restoration. Refuse to
                     # delete any bytes we cannot identify as ours or originals.
                     actual = listing_now()
@@ -12607,7 +12642,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         if key not in restored or fingerprint(restored[key], drive_path) != expected_originals[key]["sha256"]:
                             raise FloppyImageError(f"Restored floppy file did not verify: {target[key].path}")
                         restoration["restored"].append(target[key].path)
-                    verify(expected_originals, action="Restoring original files...")
+                    verify(expected_originals, action="Restoring original files...", progress=restoration_progress)
                     restoration["status"] = "complete"
                 except Exception as restore_error:
                     restoration.update(status="incomplete", error=_disk_io_error_details(restore_error))

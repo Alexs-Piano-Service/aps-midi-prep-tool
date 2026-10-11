@@ -267,7 +267,10 @@ Notes...** lets users change the mode and whether future merges ask again.
 | `auto_write_protect_on_load` | Automatically protect originals when loaded. |
 | `allow_floppy_save` | Remember permission to save to the original floppy. |
 | `confirm_image_save` | Remember permission to save to the original image. |
-| `verify_floppy_after_write` | Read back a floppy after writing to verify it. |
+| `floppy_backup_originals` | Back up original floppy files on this computer before saving files to the floppy; defaults to `true`. |
+| `floppy_check_originals` | Recheck original floppy file contents before saving to detect changes; defaults to `false`. |
+| `floppy_verify_copies` | Read copied files back from the floppy and compare them with the prepared files; defaults to `false`. |
+| `verify_floppy_after_write` | Read back a floppy after writing a full disk image to verify it; separate from file-save verification. |
 
 Prefer `long_midi_filenames` when making a new file. The two legacy filename
 keys remain supported for compatibility; when the current key exists, it

@@ -2,6 +2,7 @@
 
 import builtins
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -62,16 +63,83 @@ def test_disabled_options_never_read_floppy_payloads(
         return original_open(path, mode, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", no_floppy_reads)
-    monkeypatch.setattr(floppy_image, "_read_fat12_file_bytes", lambda *a: pytest.fail("Unexpected baseline content check"))
     save_session._sync_modified_image_files_to_windows_drive(
         "prepared.img", "A:", backup_originals=False, check_originals=False, verify_copies=False,
     )
 
-    # Without original hashes, even a same-size matching filename is replaced.
-    assert save_session.last_floppy_save_diagnostics["files_copied"] == 1
+    assert save_session.last_floppy_save_diagnostics["files_removed"] == 0
+    assert save_session.last_floppy_save_diagnostics["files_copied"] == 0
+    assert save_session.last_floppy_save_diagnostics["target_mutation_attempted"] is False
     _, manifest = _package(save_session)
     assert manifest["originals"] == {}
     assert manifest["original_metadata"]["OLD.MID"]["sha256"] is None
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("verify", [False, True])
+def test_save_without_backup_or_recheck_never_rewrites_unchanged_song(
+    save_session, mounted_drive, monkeypatch, cancel, verify,
+):
+    (mounted_drive / "OLD.MID").unlink()
+    save_session.originals = {
+        "CHANGE.MID": b"old recording",
+        "KEEP.MID": b"unchanged recording",
+    }
+    for name, payload in save_session.originals.items():
+        (mounted_drive / name).write_bytes(payload)
+    save_session.prepared = dict(save_session.originals, **{"CHANGE.MID": b"new recording"})
+    removed, copied = [], []
+    cancelled = threading.Event()
+    remove = floppy_image.os.remove
+    copy = floppy_image._copy_prepared_floppy_file
+
+    def record_remove(path):
+        if Path(path).parent == mounted_drive:
+            removed.append(Path(path).name)
+        return remove(path)
+
+    def record_copy(source, destination, **kwargs):
+        copied.append(Path(destination).name)
+        created = kwargs.pop("created_callback", None)
+
+        def file_created():
+            if created is not None:
+                created()
+            if cancel and Path(destination).name == "CHANGE.MID":
+                cancelled.set()
+
+        return copy(source, destination, created_callback=file_created, **kwargs)
+
+    monkeypatch.setattr(floppy_image.os, "remove", record_remove)
+    monkeypatch.setattr(floppy_image, "_copy_prepared_floppy_file", record_copy)
+    kwargs = dict(
+        backup_originals=False, check_originals=False, verify_copies=verify,
+        cancel_callback=cancelled.is_set,
+    )
+    if cancel:
+        with pytest.raises(floppy_image.FloppyOperationCancelled):
+            save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:", **kwargs)
+        assert save_session.last_floppy_save_diagnostics["status"] == "cancelled"
+        assert save_session.last_floppy_save_diagnostics["restoration"]["status"] == "unavailable"
+    else:
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:", **kwargs)
+        assert (mounted_drive / "CHANGE.MID").read_bytes() == b"new recording"
+    assert (mounted_drive / "KEEP.MID").read_bytes() == b"unchanged recording"
+    assert removed == ["CHANGE.MID"]
+    assert copied == ["CHANGE.MID"]
+
+
+def test_delivery_without_source_baseline_writes_all_prepared_files(
+    save_session, mounted_drive,
+):
+    (mounted_drive / "OLD.MID").unlink()
+    save_session.source_kind = "image"
+    save_session.prepared = dict(save_session.originals)
+    save_session._sync_modified_image_files_to_windows_drive(
+        "prepared.img", "A:", backup_originals=False, check_originals=False, verify_copies=False,
+    )
+    assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+    assert save_session.last_floppy_save_diagnostics["files_copied"] == 1
 
 
 @pytest.mark.parametrize("backup", [False, True])

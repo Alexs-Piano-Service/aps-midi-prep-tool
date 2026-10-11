@@ -497,7 +497,7 @@ def test_optional_floppy_reads_and_backups(
     if backup_originals and not check_originals and not verify_copies:
         assert sorted(original_reads) == ["CHANGE.MID", "KEEP.MID"]
     if not backup_originals and not check_originals:
-        # Without content hashes, unchanged-looking names are also rewritten.
+        # This image delivery has no loaded-target baseline or original hashes.
         assert published == {"CHANGE.MID", "KEEP.MID"}
     for action, enabled in (("Backing up files...", backup_originals),
                             ("Checking original files...", check_originals),
