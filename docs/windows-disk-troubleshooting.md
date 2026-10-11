@@ -54,8 +54,8 @@ and use a backed-up or spare disk.
 
 If APS has already closed, open `prepared.img` from the recovery folder shown
 in the error dialog, if that file is present. Then use **Disk → Write Current
-Image to Floppy…** with a backed-up or spare disk. Enable **Settings → Disk
-Options → Verify Floppy Contents After Writing** for that manual write. See
+Image to Floppy…** with a backed-up or spare disk. Enable **Settings → Floppy
+Settings → Verify Floppy Contents After Writing** for that manual write. See
 [recovery packages](#recovering-a-failed-windows-file-save) for saves that do not
 include `prepared.img`.
 
@@ -207,7 +207,7 @@ The failure dialog shows the recovery directory. On Windows, the default is
 | --- | --- |
 | `prepared.img` (Image/Floppy Mode only) | Open it in APS to recover the intended song set. |
 | Replacement `.bin` files | Copy them to a local folder using the filenames in the `replacements` section of `manifest.json`. These are the intended new files. |
-| Original `.bin` files | Copy them to a local folder using their original filenames from `manifest.json` to recover the previous files. |
+| Original `.bin` files (when floppy backups are enabled) | Copy them to a local folder using their original filenames from `manifest.json` to recover the previous files. |
 | `manifest.json` | Maps the numbered `.bin` files to names and checksums and records completed changes and any remaining cleanup. |
 
 Failed, cancelled, and unfinished packages remain available after APS closes
@@ -229,18 +229,21 @@ catalog without constructing a disk image. Unrelated files and folders remain
 on the floppy; a confirmation lists matching filenames that will be replaced.
 Prepared files are copied through Windows filesystem I/O.
 
-In Image/Floppy Mode, APS still prepares an image, checks the floppy's names and
-song bytes against the opened session, reads its actual allocation unit, and
-saves a persistent recovery package.
+In Image/Floppy Mode, APS prepares an image, checks the floppy's names and sizes
+against the opened session, reads its actual allocation unit, and saves a
+persistent recovery package on the computer. Original-file backups are enabled
+by default under **Settings → Floppy Settings**. Checking original file contents
+and verifying copied files are independent options, both off by default.
 If another disk was inserted or the files changed, read that target again before
 saving. To save an image's songs to another disk, use an empty, formatted disk;
 replacing an existing disk image remains a separate, explicitly selected write.
 
-All changed songs are staged under temporary `APSxxxxx.TMP` names and checked
-before any original song is replaced. Deliberate deletions follow song publication;
-`PIANODIR.FIL` is published last. The final file names, sizes, and SHA-256 hashes
-must match the prepared image. This mounted-filesystem check is distinct from the
-optional physical image readback.
+Changed songs are prepared locally before any original song is replaced.
+Backups and temporary save copies never consume floppy space. Files being
+replaced or deleted are removed after preparation, then replacements are copied
+directly to their final names; `PIANODIR.FIL` is published last. Final filenames
+and sizes are checked. When copied-file verification is enabled, file contents
+are also compared. Full-image writes have a separate physical readback option.
 
 For existing files, APS reads the mounted Windows attributes and records them in
 the recovery manifest as `windows_attributes`. Before publishing any song, it
@@ -251,33 +254,29 @@ Unrelated files retain their attributes. This uses the Windows
 [file attribute API](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileattributesw).
 
 On failure or cancellation, APS attempts to restore temporarily changed
-attributes only when the volume identity and the file's expected content hash
-still match. It does not roll back published song bytes. If attribute restoration
+attributes only when the volume identity and expected file size still match,
+and the expected content hash matches when available. It does not roll back published song bytes. If attribute restoration
 is unsafe or fails, `attributes_pending` in the manifest records the filenames,
 original flags, and expected hashes, and the failure dialog lists those files.
 Keep the recovery package until both the song contents and attributes have been
 checked on the intended disk.
 
-Safe staging needs room for both the old and new files, including a free FAT
-root-directory entry for each temporary file. APS counts free root-directory
+Space checks count the final file set, including space and directory entries
+reclaimed from replaced or deleted files. APS counts free root-directory
 slots when Windows permits reading the FAT metadata; this counts volume labels
 and long-filename entries as occupied. If raw metadata access is denied, APS
 records that the directory capacity could not be checked and continues through
 filesystem I/O without requesting administrator access. If either checked
 capacity is insufficient, APS stops before changing the floppy. Use **Save As Image** to retain the
 prepared disk, then deliberately choose an image write to backed-up or spare media.
-APS does not delete originals to make staging room or automatically switch write
-methods after a denied raw write.
+APS does not automatically switch write methods after a denied raw write.
 
-On cancellation or failure, APS attempts to remove only temporary files created
-by that save. Cleanup requires a matching Windows volume identity, the expected
-file listing, and unchanged hashes for every retained original. If those checks
-fail, or a temporary file cannot be deleted, the recovery manifest and failure
-dialog list the temporary names that may remain. Already published files are
-never removed by this cleanup. A failure during publication can still leave a
-partial song set. APS keeps the recovery package and identifies the failed phase
-and completed changes. It does not automatically restore files onto possibly
-removed or substituted media. Do not treat a failed save as a usable disk.
+A failed or cancelled copy can leave a partial song set or an incomplete final
+file on the floppy. APS keeps the local recovery package and identifies the
+failed phase and completed changes. It does not automatically restore files
+onto possibly removed or substituted media. Original files are recoverable
+from the package only when backups were enabled. Do not treat a failed save as
+a usable disk.
 
 ## Windows raw writes and verification
 

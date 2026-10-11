@@ -82,19 +82,31 @@ counts. Keep the session open and use **Save** again to retry remaining changes.
 Successful conversions already point to their saved outputs, so retry does not
 collide with those outputs or repeat their writes.
 
+### Floppy backups and save checks
+
+**Settings → Floppy Settings** controls floppy file saves separately from local
+file and image backups. Original-file backups are enabled by default and are
+stored on the computer. Checking original files before replacement and verifying
+copied files are separate options, both off by default.
+
+APS prepares replacement files on the computer and writes only final filenames
+to the floppy. Backups and temporary save copies do not use floppy space.
+Space checks account for files being replaced or deleted, so a save can succeed
+on a full disk when the resulting file set fits.
+
 ### If a Linux floppy file save stops
 
 Before replacing any files, APS keeps a persistent recovery package containing
-the original file contents, prepared replacements, their checksums, and the
-prepared image. When the floppy has enough free space and directory entries,
-APS also stages and verifies replacements on the floppy before publishing them.
-Full floppies use the verified host recovery copies instead.
+prepared replacements, their checksums, and the prepared image on the computer.
+When floppy backups are enabled, the package also contains the original files.
 
-If copying fails or you cancel, APS attempts to restore the original file
-contents. Restoration stops if the disk identity or file contents no longer
+If copying fails or you cancel with backups enabled, APS attempts to restore the
+original file contents. Restoration stops if the disk identity or file contents no longer
 match known data, or if the drive cannot complete the writes. The error reports
 the retained recovery folder; keep it and check the disk before using it.
 This protects file contents, but is not a sector-exact disk rollback.
+With backups disabled, original files cannot be restored automatically; the
+prepared replacement files remain available locally.
 
 Open `prepared.img` from the recovery folder in APS to recover the intended
 song set. To recover previous files, copy the numbered `.bin` files to a local
@@ -217,8 +229,9 @@ every contained file against the prepared output, including catalogs and song
 order. This includes files inside folders. Ordinary **Save As Image** also
 decodes converted output and compares its files before replacing the destination;
 failed verification or cancellation leaves the previous image intact.
-**Settings → Disk Options → Verify Floppy Contents After Writing** adds a physical
-readback comparison. If readback is cancelled,
+**Settings → Floppy Settings → Verify Floppy Contents After Writing** adds a physical
+readback comparison for full-image writes. File saves use the separate
+**Verify Files Copied to Floppy** option. If readback is cancelled,
 the result distinguishes completed writing from unverified contents.
 
 Automated tests use self-created songs, temporary FAT12 images, fault injection,

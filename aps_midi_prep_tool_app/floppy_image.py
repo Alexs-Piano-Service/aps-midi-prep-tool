@@ -1290,6 +1290,17 @@ def _notify_progress(progress_callback, step, total, message):
         progress_callback(step, total, message)
 
 
+def _floppy_progress_files(items, action, progress_callback, *, display_names=None):
+    """Report the current file before I/O and count it only after completion."""
+    items = list(items)
+    for index, (key, entry) in enumerate(items, start=1):
+        name = (display_names or {}).get(key, entry.path)
+        message = f"{action}\nFile {index} of {len(items)}: {name}"
+        _notify_progress(progress_callback, index - 1, len(items), message)
+        yield key, entry
+        _notify_progress(progress_callback, index, len(items), message)
+
+
 FLOPPY_DRIVE_MODEL_HINTS = (
     "floppy",
     "fdd",
@@ -2065,7 +2076,7 @@ def verify_image_payloads(delivered_path, prepared_raw_path, disk_format, *, can
 def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_format,
                                     *, progress_callback=None, cancel_callback=None,
                                     verify_entire_image=False):
-    _notify_progress(progress_callback, 4, 5, "Reading back floppy contents for verification...")
+    _notify_progress(progress_callback, 0, 0, "Reading back floppy contents for verification...")
     with tempfile.TemporaryDirectory(prefix="aps_floppy_readback_") as verify_dir:
         readback_path = os.path.join(verify_dir, "readback.img")
         try:
@@ -2092,6 +2103,7 @@ def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_fo
                                 cancel_callback=cancel_callback)
             if verify_entire_image and floppy_save_recovery.digest(readback_path) != floppy_save_recovery.digest(prepared_path):
                 raise FloppyImageError("The physical floppy differs from the prepared format image.")
+            _notify_progress(progress_callback, 0, 0, "Verifying saved files...")
             return verify_image_payloads(readback_path, prepared_path, disk_format,
                                          cancel_callback=cancel_callback)
         except FloppyOperationCancelled:
@@ -7450,7 +7462,7 @@ def _run_mtools_image_command(command_runner, args, message, cancel_callback=Non
 
 
 def _copy_prepared_floppy_file(source, destination, cancel_callback=None, *, created_callback=None):
-    """Own a new staging name throughout a cancellable native filesystem copy."""
+    """Copy to an exclusively created destination with cancellation checks."""
     _raise_if_cancelled(cancel_callback)
     with open(source, "rb") as incoming, open(destination, "xb") as outgoing:
         if created_callback is not None:
@@ -9626,36 +9638,60 @@ def _finish_windows_save_recovery(session, status):
 class _WindowsFileSaveMixin:
     def _sync_modified_image_files_to_windows_drive(
         self, modified_img, drive_path, progress_callback=None, cancel_callback=None,
-        *, finalize_recovery=True,
+        *, finalize_recovery=True, backup_originals=True, check_originals=True,
+        verify_copies=True,
     ):
         diagnostics = self.last_floppy_save_diagnostics = {
             "operation": "save_files", "method": "windows_filesystem",
             "drive": drive_path, "stage": "prepare_recovery", "status": "running",
             "target_mutation_attempted": False, "files_removed": 0, "files_copied": 0,
-            "files_staged": 0, "bytes_staged": 0,
+            "files_staged": 0, "bytes_staged": 0, "bytes_copied": 0,
+            "write_strategy": "direct_files",
+            "backup_originals": bool(backup_originals),
+            "check_originals": bool(check_originals),
+            "verify_copies": bool(verify_copies),
+            "file_contents_verified": False,
+            "original_content_mutation_attempted": False,
         }
         package = None
-        cleanup = {"owned": {}, "attributes_pending": {}}
+        cleanup = {"attributes_pending": {}}
         try:
             _raise_if_cancelled(cancel_callback)
+            _notify_progress(progress_callback, 0, 0, "Preparing files...")
             package = floppy_save_recovery.SaveRecoveryPackage(drive_path, modified_img)
             diagnostics["recovery_directory"] = str(package.directory)
             self._sync_windows_drive_files(
                 modified_img, drive_path, diagnostics, package, cleanup,
                 progress_callback=progress_callback, cancel_callback=cancel_callback,
+                backup_originals=backup_originals, check_originals=check_originals,
+                verify_copies=verify_copies,
             )
-            diagnostics.update(status="complete", stage="complete")
+            _notify_progress(progress_callback, 0, 0, "Finishing floppy save...")
+            diagnostics.update(status="complete" if verify_copies else "files_saved", stage="complete")
             diagnostics.pop("file", None)
             if finalize_recovery:
                 package.complete(diagnostics)
             else:
-                package.checkpoint(status="contents_verified", diagnostics=dict(diagnostics))
+                package.checkpoint(
+                    status="contents_verified" if verify_copies else "files_saved",
+                    diagnostics=dict(diagnostics),
+                )
                 self._pending_windows_save_recovery = package
         except Exception as exc:
             diagnostics["status"] = "cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed"
             diagnostics["error"] = _disk_io_error_details(exc)
             if exc.__cause__ is not None:
                 diagnostics["cause"] = _disk_io_error_details(exc.__cause__)
+            if not backup_originals and diagnostics["original_content_mutation_attempted"]:
+                diagnostics["restoration"] = {
+                    "status": "unavailable",
+                    "error": {"message": "Original-file backups were disabled for this save."},
+                }
+            elif diagnostics["original_content_mutation_attempted"]:
+                diagnostics["restoration"] = {
+                    "status": "not_attempted",
+                    "error": {"message": "Original files are retained in the local recovery directory."},
+                }
             changed = diagnostics["target_mutation_attempted"]
             self.last_write_verification = {
                 "confidence": "partial_or_uncertain" if changed else "not_written",
@@ -9663,15 +9699,17 @@ class _WindowsFileSaveMixin:
             }
             if package is not None:
                 self._restore_windows_drive_attributes(diagnostics, package, cleanup)
-                self._cleanup_windows_drive_staging(diagnostics, package, cleanup)
                 try:
                     package.checkpoint(status=diagnostics["status"], diagnostics=dict(diagnostics))
                 except OSError as journal_error:
                     diagnostics["journal_error"] = str(journal_error)
             raise
-        diagnostics.update(status="complete", stage="complete")
+        diagnostics.update(status="complete" if verify_copies else "files_saved", stage="complete")
         diagnostics.pop("file", None)
-        self.last_write_verification = {"confidence": "contents_verified", "hardware_tested": False}
+        self.last_write_verification = {
+            "confidence": "contents_verified" if verify_copies else "written",
+            "hardware_tested": False,
+        }
 
     def _restore_windows_drive_attributes(self, diagnostics, package, cleanup):
         pending = cleanup["attributes_pending"]
@@ -9684,7 +9722,9 @@ class _WindowsFileSaveMixin:
                 if cleanup.get("identity") is None or _windows_volume_identity(root) != cleanup["identity"]:
                     raise FloppyImageError("The target floppy cannot be identified for attribute restoration.")
                 path = _windows_drive_file_path(root, name)
-                if floppy_save_recovery.digest(path) != record["sha256"]:
+                if (os.path.getsize(path) != record["size"]
+                        or (record.get("sha256") is not None
+                            and floppy_save_recovery.digest(path) != record["sha256"])):
                     raise FloppyImageError("The file changed; its attributes were not restored.")
                 if _windows_volume_identity(root) != cleanup["identity"]:
                     raise FloppyImageError("The target floppy changed during attribute restoration.")
@@ -9697,59 +9737,12 @@ class _WindowsFileSaveMixin:
         diagnostics["attributes_pending"] = sorted(pending)
         package.manifest["attributes_pending"] = dict(pending)
 
-    def _cleanup_windows_drive_staging(self, diagnostics, package, cleanup):
-        # Ownership starts only after exclusive creation, and ends at publication.
-        # Ignore cancellation here: cleanup is part of stopping safely.
-        owned = cleanup["owned"]
-        result = diagnostics["staging_cleanup"] = {"status": "not_needed", "removed": []}
-        diagnostics["staging_files_remaining"] = sorted(owned)
-        if not owned:
-            return
-        try:
-            identity = cleanup.get("identity")
-            root = cleanup["root"]
-            def check_identity():
-                if identity is None or _windows_volume_identity(root) != identity:
-                    raise FloppyImageError("The target floppy cannot be identified for staging cleanup.")
-            check_identity()
-            actual = {_image_entry_key(entry): entry for entry in cleanup["listing"]().entries}
-            target = cleanup["target"]
-            if set(actual) - set(owned) != set(target):
-                raise FloppyImageError("The target floppy contents changed; staging cleanup was skipped.")
-            for key, entry in target.items():
-                if actual[key].is_directory != entry.is_directory:
-                    raise FloppyImageError("The target floppy contents changed; staging cleanup was skipped.")
-                if not entry.is_directory:
-                    expected = package.manifest["originals"][entry.path]
-                    path = _windows_drive_file_path(root, entry.path)
-                    if actual[key].size != expected["size"] or floppy_save_recovery.digest(path) != expected["sha256"]:
-                        raise FloppyImageError("An original file changed; staging cleanup was skipped.")
-            if any(actual[name].is_directory for name in owned if name in actual):
-                raise FloppyImageError("A staging name now belongs to a folder; cleanup was skipped.")
-            # Check again after all content reads and before each deletion.
-            result["status"] = "complete"
-            for name, path in list(owned.items()):
-                check_identity()
-                try:
-                    os.remove(path)
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    result["status"] = "incomplete"
-                    result.setdefault("errors", {})[name] = _disk_io_error_details(exc)
-                    continue
-                result["removed"].append(name)
-                del owned[name]
-        except Exception as exc:
-            result.update(status="skipped" if not result["removed"] else "incomplete",
-                          error=_disk_io_error_details(exc))
-        diagnostics["staging_files_remaining"] = sorted(owned)
-        package.manifest["staging_files_remaining"] = sorted(owned)
-
     def _sync_windows_drive_files(
         self, modified_img, drive_path, diagnostics, package, cleanup,
         progress_callback=None, cancel_callback=None,
+        *, backup_originals=True, check_originals=True, verify_copies=True,
     ):
+        _notify_progress(progress_callback, 0, 0, "Checking floppy...")
         root = _windows_filesystem_root(drive_path)
         if not root:
             raise FloppyImageError(f"Invalid Windows floppy drive path: {drive_path}")
@@ -9775,7 +9768,6 @@ class _WindowsFileSaveMixin:
         target_listing = target_listing_now(diagnostics=diagnostics["preflight_listing"])
         source = {_image_entry_key(entry): entry for entry in source_listing.entries}
         target = {_image_entry_key(entry): entry for entry in target_listing.entries}
-        cleanup.update(target=target, listing=target_listing_now)
         if not direct and any(entry.directory for entry in (*source.values(), *target.values())):
             raise FloppyImageError(
                 "File-level Save To Floppy only supports root-directory floppy files. "
@@ -9804,28 +9796,45 @@ class _WindowsFileSaveMixin:
             if target:
                 raise FloppyImageError("Read the target floppy before replacing its existing files with Save To Floppy.")
 
-        originals = {}
-        for key, entry in target.items():
+        original_records = {}
+        for key, entry in _floppy_progress_files(
+            ((key, entry) for key, entry in target.items() if not entry.is_directory),
+            "Backing up files..." if backup_originals else (
+                "Checking original files..." if check_originals else "Checking floppy..."
+            ), progress_callback,
+        ):
             _raise_if_cancelled(cancel_callback)
-            if entry.is_directory:
-                continue
             path = _windows_drive_file_path(root, entry.path)
-            original = package.retain("originals", entry.path, path)
-            originals[key] = original
+            record = original_records[key] = {"size": entry.size, "sha256": None}
+            if backup_originals:
+                package.retain("originals", entry.path, path)
+                record.update(package.manifest["originals"][entry.path])
+            elif check_originals:
+                record["sha256"] = floppy_save_recovery.digest(path)
             # Query Windows directly; the image's DOS flags need not reflect
             # the attributes on the currently mounted destination.
             diagnostics.update(stage="read_file_attributes", file=entry.path)
-            package.manifest["originals"][entry.path]["windows_attributes"] = _windows_file_attributes(path)
+            record["windows_attributes"] = _windows_file_attributes(path)
+            if backup_originals:
+                package.manifest["originals"][entry.path]["windows_attributes"] = record["windows_attributes"]
             if not direct:
-                expected_bytes = _read_fat12_file_bytes(baseline_path, baseline[key].path)
-                if baseline[key].size != entry.size or hashlib.sha256(expected_bytes).hexdigest() != floppy_save_recovery.digest(original):
+                if baseline[key].size != entry.size:
                     raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
+                if check_originals:
+                    expected_bytes = _read_fat12_file_bytes(baseline_path, baseline[key].path)
+                    if hashlib.sha256(expected_bytes).hexdigest() != record["sha256"]:
+                        raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
+        package.checkpoint(
+            original_metadata={target[key].path: record for key, record in original_records.items()},
+            backup_originals=bool(backup_originals),
+        )
 
         diagnostics["stage"] = "prepare_replacements"
+        _notify_progress(progress_callback, 0, 0, "Preparing files...")
         replacements = {}
-        intended = ({key: {"size": entry.size, "sha256": floppy_save_recovery.digest(originals[key])}
+        intended = ({key: {"size": entry.size, "sha256": original_records[key]["sha256"]}
                      for key, entry in target.items() if not entry.is_directory} if direct else {})
-        for key, entry in source.items():
+        for key, entry in _floppy_progress_files(source.items(), "Preparing files...", progress_callback):
             _raise_if_cancelled(cancel_callback)
             if direct:
                 saved = package.retain("replacements", entry.path, prepared_files[entry.path])
@@ -9838,30 +9847,35 @@ class _WindowsFileSaveMixin:
                     if os.path.exists(extracted):
                         os.remove(extracted)
             intended[key] = {"size": entry.size, "sha256": floppy_save_recovery.digest(saved)}
-            if key not in originals or floppy_save_recovery.digest(originals[key]) != intended[key]["sha256"]:
+            if original_records.get(key, {}).get("sha256") != intended[key]["sha256"]:
                 replacements[key] = saved
 
         affected = set(replacements) & set(target)
         if not direct:
             affected |= set(target) - set(source)
         original_attributes = {
-            key: package.manifest["originals"][target[key].path]["windows_attributes"]
+            key: original_records[key]["windows_attributes"]
             for key in affected
         }
         if any(attributes & 0x01 for attributes in original_attributes.values()) and cleanup.get("identity") is None:
             raise FloppyImageError("The target floppy must be identified before changing read-only file attributes.")
 
-        # Retain all predecessors until every new file has been staged and read
-        # back. Near-full media is rejected instead of freeing space by deletion.
+        # Backups and prepared replacements are already on the host. Reclaim
+        # replaced/deleted files before copying directly to their final names;
+        # the floppy needs room for the final contents only.
         needed = sum(allocated_size(source[key].size, target_listing.cluster_size) for key in replacements)
-        diagnostics.update(stage="check_staging_space", staging_bytes_required=needed,
+        reclaimed = sum(allocated_size(target[key].size, target_listing.cluster_size) for key in affected)
+        available = target_listing.free_space + reclaimed
+        diagnostics.update(stage="check_final_space", replacement_bytes_required=needed,
+                           reclaimed_bytes=reclaimed, available_bytes=available,
                            free_bytes=target_listing.free_space)
-        if needed > target_listing.free_space:
+        if needed > available:
             raise FloppyImageError(
-                f"Safe floppy saving needs {needed} bytes of staging space; only {target_listing.free_space} are available. "
-                "No files were changed. Save As Image, then write a backed-up or spare disk instead."
+                f"Saving these files needs {needed} bytes; only {available} are available after replacing old files. "
+                "No files were changed."
             )
-        diagnostics["stage"] = "check_staging_directory_space"
+        diagnostics["stage"] = "check_final_directory_space"
+        _notify_progress(progress_callback, 0, 0, "Checking floppy...")
         try:
             free_entries = _windows_free_root_directory_entries(drive_path, cancel_callback=cancel_callback)
         except FloppyOperationCancelled:
@@ -9871,62 +9885,45 @@ class _WindowsFileSaveMixin:
             # access for a file save; preserve the limitation in the diagnostics.
             diagnostics["root_directory_check"] = {"status": "unavailable", "error": _disk_io_error_details(exc)}
         else:
+            available_entries = free_entries + len(affected)
             diagnostics["root_directory_check"] = {
-                "status": "complete", "free_entries": free_entries, "required_entries": len(replacements),
+                "status": "complete", "free_entries": free_entries,
+                "reclaimed_entries": len(affected), "available_entries": available_entries,
+                "required_entries": len(replacements),
             }
-            if len(replacements) > free_entries:
+            if len(replacements) > available_entries:
                 raise FloppyImageError(
-                    f"Safe floppy saving needs {len(replacements)} free root-directory entries; only {free_entries} are available. "
-                    "No files were changed. Save As Image, then write a backed-up or spare disk instead."
+                    f"Saving these files needs {len(replacements)} root-directory entries; only {available_entries} are available after replacing old files. "
+                    "No files were changed."
                 )
         package.checkpoint(status="ready", expected=intended)
 
-        def check_originals(staged_names=()):
+        def check_identity():
             if cleanup.get("identity") is not None and _windows_volume_identity(root) != cleanup["identity"]:
                 raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
+
+        def check_target():
+            action = "Checking original files..." if check_originals else "Checking floppy..."
+            _notify_progress(progress_callback, 0, 0, action)
+            check_identity()
             listing = target_listing_now()
             actual = {_image_entry_key(entry): entry for entry in listing.entries}
-            if set(actual) != set(target) | set(staged_names):
+            if set(actual) != set(target):
                 raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
-            for key, entry in target.items():
+            for key, entry in _floppy_progress_files(
+                target.items(), action, progress_callback,
+            ):
                 _raise_if_cancelled(cancel_callback)
-                if entry.is_directory:
-                    continue
-                if floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != package.manifest["originals"][target[key].path]["sha256"]:
+                if actual[key].is_directory != entry.is_directory or actual[key].size != entry.size:
+                    raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
+                if (check_originals and not entry.is_directory
+                        and floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != original_records[key]["sha256"]):
                     raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
 
-        check_originals()
-        staged = {}
-        for key, saved in replacements.items():
-            _raise_if_cancelled(cancel_callback)
-            entry = source[key]
-            diagnostics.update(stage="stage_file", file=entry.path)
-            # 8.3 names also work on Yamaha FAT volumes. Never reuse a name.
-            name = "APS" + uuid.uuid4().hex[:5].upper() + ".TMP"
-            while name in source or name in target or os.path.lexists(_windows_drive_file_path(root, name)):
-                name = "APS" + uuid.uuid4().hex[:5].upper() + ".TMP"
-            path = _windows_drive_file_path(root, name)
-            staged[key] = path
-            package.before("stage", name)
-            diagnostics["target_mutation_attempted"] = True
-            _notify_progress(progress_callback, len(staged), max(1, len(replacements)), f"Copying {entry.path} to floppy...")
-            def stage_created():
-                cleanup["owned"][name] = path
-                package.checkpoint(staging_files_remaining=sorted(cleanup["owned"]))
-            _copy_prepared_floppy_file(saved, path, cancel_callback=cancel_callback,
-                                      created_callback=stage_created)
-            floppy_save_recovery.sync_file(path)
-            if os.path.getsize(path) != entry.size or floppy_save_recovery.digest(path) != intended[key]["sha256"]:
-                raise FloppyImageError(f"Staged floppy file verification failed: {entry.path}")
-            diagnostics["files_staged"] += 1
-            diagnostics["bytes_staged"] += entry.size
-            package.after()
-
-        # Recheck names and contents immediately before publication.
-        check_originals(os.path.basename(path).upper() for path in staged.values())
-
+        check_target()
         # Clear every affected Read-only destination before publishing any song.
         # A failure here can restore metadata without rolling back file contents.
+        _notify_progress(progress_callback, 0, 0, "Finishing file updates...")
         for key in sorted(affected):
             _raise_if_cancelled(cancel_callback)
             entry = target[key]
@@ -9940,7 +9937,8 @@ class _WindowsFileSaveMixin:
             if _windows_volume_identity(root) != cleanup["identity"]:
                 raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
             cleanup["attributes_pending"][entry.path] = {
-                "attributes": attributes, "sha256": package.manifest["originals"][entry.path]["sha256"],
+                "attributes": attributes, "sha256": original_records[key]["sha256"],
+                "size": original_records[key]["size"],
             }
             package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
             package.before("clear_readonly", entry.path)
@@ -9949,75 +9947,99 @@ class _WindowsFileSaveMixin:
             package.after()
 
         if cleanup["attributes_pending"]:
-            check_originals(os.path.basename(path).upper() for path in staged.values())
+            check_target()
 
-        def publish(key):
+        for key, entry in _floppy_progress_files(
+            ((key, target[key]) for key in sorted(affected)),
+            "Removing old files...", progress_callback,
+        ):
             _raise_if_cancelled(cancel_callback)
-            entry = source[key]
-            diagnostics.update(stage="publish_file", file=entry.path)
-            destination_name = target[key].path if key in target else entry.path
-            destination = _windows_drive_file_path(root, destination_name)
-            if key in original_attributes:
-                cleanup["attributes_pending"][destination_name] = {
-                    "attributes": original_attributes[key],
-                    "sha256": package.manifest["originals"][destination_name]["sha256"],
-                }
-                package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
-            package.before("replace", entry.path)
-            diagnostics["target_mutation_attempted"] = True
-            os.replace(staged[key], destination)
-            del cleanup["owned"][os.path.basename(staged[key]).upper()]
-            package.manifest["staging_files_remaining"] = sorted(cleanup["owned"])
-            diagnostics["files_copied"] += 1
-            if key in original_attributes:
-                cleanup["attributes_pending"][destination_name]["sha256"] = intended[key]["sha256"]
-                package.checkpoint(attributes_pending=dict(cleanup["attributes_pending"]))
-                if cleanup.get("identity") is not None and _windows_volume_identity(root) != cleanup["identity"]:
-                    raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
-                _set_windows_file_attributes(destination, original_attributes[key])
-                del cleanup["attributes_pending"][destination_name]
-                package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
-            package.after()
-
-        catalogs = [key for key in replacements if is_eseq_directory_path(source[key].path)]
-        for key in sorted(set(replacements) - set(catalogs)):
-            publish(key)
-
-        for key in sorted(set(target) - set(source)) if not direct else ():
-            _raise_if_cancelled(cancel_callback)
-            entry = target[key]
+            check_identity()
             diagnostics.update(stage="remove_file", file=entry.path)
             package.before("delete", entry.path)
             diagnostics["target_mutation_attempted"] = True
+            diagnostics["original_content_mutation_attempted"] = True
             os.remove(_windows_drive_file_path(root, entry.path))
             cleanup["attributes_pending"].pop(entry.path, None)
             package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
             diagnostics["files_removed"] += 1
             package.after()
 
-        for key in sorted(catalogs):
-            publish(key)
+        catalogs = {key for key in replacements if is_eseq_directory_path(source[key].path)}
+        ordered_replacements = [key for key in replacements if key not in catalogs] + sorted(catalogs)
+        for key, entry in _floppy_progress_files(
+            ((key, source[key]) for key in ordered_replacements),
+            "Copying files to floppy...", progress_callback,
+        ):
+            _raise_if_cancelled(cancel_callback)
+            check_identity()
+            diagnostics.update(stage="copy_file", file=entry.path)
+            destination_name = target[key].path if key in target else entry.path
+            destination = _windows_drive_file_path(root, destination_name)
+            package.before("replace", entry.path)
+            diagnostics["target_mutation_attempted"] = True
 
+            def file_created():
+                # A file with this final name now belongs to this save. Keep the
+                # expected metadata for safe attribute recovery if copying fails.
+                if key in original_attributes:
+                    cleanup["attributes_pending"][destination_name] = {
+                        "attributes": original_attributes[key],
+                        "sha256": intended[key]["sha256"] if verify_copies else None,
+                        "size": intended[key]["size"],
+                    }
+                    package.checkpoint(attributes_pending=dict(cleanup["attributes_pending"]))
+
+            _copy_prepared_floppy_file(replacements[key], destination,
+                                      cancel_callback=cancel_callback, created_callback=file_created)
+            check_identity()
+            if verify_copies:
+                _notify_progress(
+                    progress_callback, diagnostics["files_copied"], len(replacements),
+                    f"Verifying copied files...\nFile {diagnostics['files_copied'] + 1} of {len(replacements)}: {entry.path}",
+                )
+            floppy_save_recovery.sync_file(destination)
+            if (os.path.getsize(destination) != entry.size
+                    or (verify_copies and floppy_save_recovery.digest(destination) != intended[key]["sha256"])):
+                raise FloppyImageError(f"Copied floppy file verification failed: {entry.path}")
+            check_identity()
+            diagnostics["files_copied"] += 1
+            diagnostics["bytes_copied"] += entry.size
+            if key in original_attributes:
+                _set_windows_file_attributes(destination, original_attributes[key])
+                del cleanup["attributes_pending"][destination_name]
+                package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
+            package.after()
+
+        check_identity()
         diagnostics.update(stage="post_write_listing", post_write_listing={})
         diagnostics.pop("file", None)
+        final_action = "Verifying saved files..." if verify_copies else "Finishing floppy save..."
+        _notify_progress(progress_callback, 0, 0, final_action)
         final = target_listing_now(diagnostics=diagnostics["post_write_listing"])
         actual = {_image_entry_key(entry): entry for entry in final.entries}
         expected_directories = {key for key, entry in target.items() if entry.is_directory} if direct else set()
         if set(actual) != set(intended) | expected_directories:
             raise FloppyImageError("Floppy verification failed: the final file list differs from the prepared image.")
-        diagnostics["stage"] = "verify_file_contents"
-        for key, entry in actual.items():
+        diagnostics["stage"] = "verify_file_contents" if verify_copies else "check_saved_file_sizes"
+        for key in expected_directories:
             _raise_if_cancelled(cancel_callback)
-            if key in expected_directories:
-                if not entry.is_directory:
-                    raise FloppyImageError("An unrelated folder changed during floppy saving.")
-                continue
+            if not actual[key].is_directory:
+                raise FloppyImageError("An unrelated folder changed during floppy saving.")
+        for key, entry in _floppy_progress_files(
+            ((key, entry) for key, entry in actual.items() if key not in expected_directories),
+            final_action, progress_callback,
+        ):
+            _raise_if_cancelled(cancel_callback)
             diagnostics["file"] = entry.path
-            if entry.size != intended[key]["size"] or floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != intended[key]["sha256"]:
+            if (entry.size != intended[key]["size"]
+                    or (verify_copies and intended[key]["sha256"] is not None
+                        and floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != intended[key]["sha256"])):
                 raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
             if key in original_attributes and _windows_file_attributes(_windows_drive_file_path(root, entry.path)) != original_attributes[key]:
                 raise FloppyImageError(f"Floppy verification failed: file attributes differ for {entry.path}.")
-        diagnostics["file_contents_verified"] = True
+        diagnostics["file_contents_verified"] = bool(verify_copies)
+        diagnostics["file_contents_verification_scope"] = "prepared_files" if verify_copies else "none"
 
 
 class PreparedWindowsFileSave(_WindowsFileSaveMixin):
@@ -10041,12 +10063,15 @@ class PreparedWindowsFileSave(_WindowsFileSaveMixin):
         self.last_write_verification = {}
 
     def write_to_floppy_target(self, target_kind, target, *, file_level=True,
-                               verify_after_write=True, progress_callback=None, cancel_callback=None):
+                               verify_after_write=True, progress_callback=None, cancel_callback=None,
+                               backup_originals=True, check_originals=True, verify_copies=True):
         if target_kind != "floppy_usb" or not file_level:
             raise FloppyImageError("Prepared files require a Windows filesystem floppy target.")
         self._sync_modified_image_files_to_windows_drive(
             None, getattr(target, "path", target),
             progress_callback=progress_callback, cancel_callback=cancel_callback,
+            backup_originals=backup_originals, check_originals=check_originals,
+            verify_copies=verify_copies,
         )
 
 
@@ -12304,6 +12329,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         drive_path,
         progress_callback=None,
         cancel_callback=None,
+        *,
+        backup_originals=True,
+        check_originals=True,
+        verify_copies=True,
     ):
         if os.name == "nt" and _windows_filesystem_root(drive_path):
             return self._sync_modified_image_files_to_windows_drive(
@@ -12312,6 +12341,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
                 finalize_recovery=False,
+                backup_originals=backup_originals,
+                check_originals=check_originals,
+                verify_copies=verify_copies,
             )
 
         diagnostics = self.last_floppy_save_diagnostics = {
@@ -12319,12 +12351,17 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             "stage": "preflight_listing", "status": "running",
             "target_mutation_attempted": False, "files_removed": 0, "files_copied": 0,
             "files_staged": 0,
+            "backup_originals": bool(backup_originals),
+            "check_originals": bool(check_originals),
+            "verify_copies": bool(verify_copies),
+            "file_contents_verified": False,
         }
         package = None
-        originals, replacements, staged, dirty = {}, {}, {}, set()
+        originals, replacements, dirty = {}, {}, set()
         temp_extract_dir = tempfile.mkdtemp(prefix="aps_floppy_file_save_", dir=self.temp_dir)
         try:
             _raise_if_cancelled(cancel_callback)
+            _notify_progress(progress_callback, 0, 0, "Checking floppy...")
             mdel = _require_command("mdel")
             source_listing = read_image_listing(modified_img)
             target_listing = read_image_listing(drive_path)
@@ -12379,20 +12416,32 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     raise FloppyImageError("The target floppy directory changed during saving.")
                 return entries
 
-            def verify(expected, cancel=None):
+            def verify(expected, cancel=None, action=None, content_keys=None):
+                if action:
+                    _notify_progress(progress_callback, 0, 0, action)
                 actual = listing_now()
                 if set(actual) != set(expected):
                     raise FloppyImageError("Floppy verification failed: the file list changed.")
-                for key, entry in actual.items():
+                entries = actual.items()
+                if action:
+                    entries = _floppy_progress_files(entries, action, progress_callback)
+                for key, entry in entries:
                     _raise_if_cancelled(cancel)
-                    if entry.size != expected[key]["size"] or fingerprint(entry, drive_path, cancel) != expected[key]["sha256"]:
+                    check_contents = content_keys is None or key in content_keys
+                    if entry.size != expected[key]["size"] or (
+                        check_contents and fingerprint(entry, drive_path, cancel) != expected[key]["sha256"]
+                    ):
                         raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
                 check_identity()
 
-            def remove(name, cancel=None, expected_hash=None):
-                if expected_hash is not None:
+            def remove(name, cancel=None, expected_hash=None, expected_size=None):
+                if expected_hash is not None or expected_size is not None:
                     current = listing_now().get(dos_filename_key(_normalize_image_path(name)))
-                    if current is None or fingerprint(current, drive_path, cancel) != expected_hash:
+                    if current is None or (
+                        expected_size is not None and current.size != expected_size
+                    ) or (
+                        expected_hash is not None and fingerprint(current, drive_path, cancel) != expected_hash
+                    ):
                         raise FloppyImageError(f"The contents of {name} changed; deletion was stopped.")
                 check_identity()
                 self._run_mtools([mdel, "-i", drive_path, mtools_path(name)],
@@ -12406,35 +12455,45 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             diagnostics["stage"] = "prepare_recovery"
             package = floppy_save_recovery.SaveRecoveryPackage(drive_path, modified_img)
             diagnostics["recovery_directory"] = str(package.directory)
-            # Every original and replacement is durable on the host before any
-            # deletion. Retain unchanged files too, so recovery has a complete set.
-            for key, entry in sorted(target.items()):
-                _raise_if_cancelled(cancel_callback)
-                diagnostics["file"] = entry.path
-                path = extract(entry, drive_path, cancel_callback)
-                originals[key] = package.retain("originals", entry.path, path)
-                if not _files_have_same_content(path, originals[key]):
-                    raise FloppyImageError(f"The recovery backup did not verify: {entry.path}")
-                package.manifest["originals"][entry.path].update(
-                    attributes=entry.attributes, modified_time=entry.modified_time,
-                )
-            expected_originals = {key: package.manifest["originals"][entry.path] for key, entry in target.items()}
+            expected_originals = {key: {"size": entry.size} for key, entry in target.items()}
+            # A backup reads each original once. Content checks can also be
+            # requested without retaining backups. With both disabled, keep
+            # only directory metadata and do not read original payloads.
+            if backup_originals or check_originals:
+                action = "Backing up files..." if backup_originals else "Checking original files..."
+                _notify_progress(progress_callback, 0, 0, action)
+                for key, entry in _floppy_progress_files(sorted(target.items()), action, progress_callback):
+                    _raise_if_cancelled(cancel_callback)
+                    diagnostics["file"] = entry.path
+                    path = extract(entry, drive_path, cancel_callback)
+                    if backup_originals:
+                        originals[key] = package.retain("originals", entry.path, path)
+                        if not _files_have_same_content(path, originals[key]):
+                            raise FloppyImageError(f"The recovery backup did not verify: {entry.path}")
+                        package.manifest["originals"][entry.path].update(
+                            attributes=entry.attributes, modified_time=entry.modified_time,
+                        )
+                        expected_originals[key] = package.manifest["originals"][entry.path]
+                    else:
+                        expected_originals[key]["sha256"] = floppy_save_recovery.digest(path)
+                    os.remove(path)
             intended = {}
             diagnostics["stage"] = "prepare_replacements"
-            for key, entry in sorted(source.items()):
+            for key, entry in _floppy_progress_files(
+                sorted(source.items()), "Preparing files...", progress_callback,
+            ):
                 _raise_if_cancelled(cancel_callback)
                 path = extract(entry, modified_img, cancel_callback)
                 saved = package.retain("replacements", entry.path, path)
                 if not _files_have_same_content(path, saved):
                     raise FloppyImageError(f"The prepared recovery file did not verify: {entry.path}")
                 intended[key] = package.manifest["replacements"][entry.path]
-                if (key not in originals or intended[key]["sha256"] != expected_originals[key]["sha256"]
+                if (intended[key]["sha256"] != expected_originals.get(key, {}).get("sha256")
                         or _must_refresh_floppy_sync_entry(entry)):
                     replacements[key] = saved
-                else:
-                    _notify_progress(progress_callback, len(intended), max(1, len(source)),
-                                     f"Keeping unchanged {entry.path} on floppy...")
-            verify(expected_originals, cancel_callback)
+            verify(expected_originals, cancel_callback,
+                   action="Checking original files..." if check_originals else None,
+                   content_keys=set(expected_originals) if check_originals else set())
             needed = sum(allocated_size(source[key].size, target_listing.cluster_size) for key in replacements)
             affected = (set(target) - set(source)) | (set(target) & set(replacements))
             available = target_listing.free_space + sum(
@@ -12442,102 +12501,84 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             )
             if needed > available:
                 raise FloppyImageError("The prepared files do not fit on this floppy; no files were changed.")
-            free_slots = 0
-            geometry = _geometry_from_boot_sector(boot)
-            if geometry is not None:
-                with open(drive_path, "rb") as handle:
-                    handle.seek(geometry.root_offset)
-                    directory = handle.read(geometry.root_size)
-                if len(directory) == geometry.root_size:
-                    for index in range(geometry.root_entries):
-                        first = directory[index * 32]
-                        if first == 0:
-                            free_slots += geometry.root_entries - index
-                            break
-                        free_slots += first == 0xE5
-            stage_on_disk = needed <= target_listing.free_space and len(replacements) <= free_slots
-            mren = _require_command("mren") if stage_on_disk and replacements else None
-            diagnostics.update(staging_method="floppy" if stage_on_disk else "host_recovery",
-                               staging_bytes_required=needed, free_bytes=target_listing.free_space)
+            # All backups and prepared replacements stay on the host. Only
+            # the final file set must fit; never allocate temporary floppy
+            # copies alongside originals, even when the disk has free space.
+            diagnostics.update(staging_method="host_recovery",
+                               preparation_bytes_required=needed, free_bytes=target_listing.free_space)
             package.checkpoint(status="ready", expected=intended, diagnostics=dict(diagnostics))
 
-            # Full media uses the durable host copies. Where space permits,
-            # additionally stage/read back every replacement before publication.
-            for key, saved in sorted(replacements.items()) if stage_on_disk else ():
+            for key, entry in _floppy_progress_files(
+                ((key, target[key]) for key in sorted(affected)), "Removing old files...", progress_callback,
+            ):
                 _raise_if_cancelled(cancel_callback)
-                name = "APS" + uuid.uuid4().hex[:5].upper() + ".TMP"
-                while name in source or name in target or name in staged:
-                    name = "APS" + uuid.uuid4().hex[:5].upper() + ".TMP"
-                staged[name] = key
-                diagnostics.update(stage="stage_file", file=source[key].path)
-                package.before("stage", name)
-                diagnostics["target_mutation_attempted"] = True
-                copy(saved, name, cancel_callback)
-                actual = listing_now()
-                if name not in actual or fingerprint(actual[name], drive_path, cancel_callback) != intended[key]["sha256"]:
-                    raise FloppyImageError(f"Staged floppy file verification failed: {source[key].path}")
-                diagnostics["files_staged"] += 1
-                package.after()
-
-            verify(dict(expected_originals, **{name: intended[key] for name, key in staged.items()}), cancel_callback)
-            for key in sorted(affected):
-                _raise_if_cancelled(cancel_callback)
-                entry = target[key]
                 diagnostics.update(stage="remove_file", file=entry.path)
-                _notify_progress(progress_callback, len(dirty), max(1, len(affected) + len(replacements)),
-                                 f"Removing old {entry.path} from floppy...")
                 _raise_if_cancelled(cancel_callback)
                 package.before("delete", entry.path)
                 dirty.add(key)
                 diagnostics["target_mutation_attempted"] = True
-                remove(entry.path, cancel_callback, expected_originals[key]["sha256"])
+                remove(entry.path, cancel_callback,
+                       expected_originals[key].get("sha256") if check_originals else None,
+                       expected_size=expected_originals[key]["size"])
                 diagnostics["files_removed"] += 1
                 package.after()
 
             # Catalogs describe the completed song set and are published last.
             order = sorted(replacements, key=lambda key: (is_eseq_directory_path(source[key].path), key))
-            for index, key in enumerate(order):
+            for copy_index, (key, entry) in enumerate(_floppy_progress_files(
+                ((key, source[key]) for key in order),
+                "Copying files to floppy...", progress_callback,
+            ), start=1):
                 _raise_if_cancelled(cancel_callback)
-                entry = source[key]
                 diagnostics.update(stage="publish_file", file=entry.path)
-                _notify_progress(progress_callback, index, max(1, len(order)), f"Copying {entry.path} to floppy...")
                 _raise_if_cancelled(cancel_callback)
                 package.before("replace", entry.path)
                 dirty.add(key)
                 diagnostics["target_mutation_attempted"] = True
-                if stage_on_disk:
-                    name = next(name for name, candidate in staged.items() if candidate == key)
-                    check_identity()
-                    self._run_mtools([mren, "-i", drive_path, mtools_path(name), mtools_path(entry.path)],
-                                     f"Could not publish {entry.path} on the floppy", cancel_callback=cancel_callback)
-                    del staged[name]
-                else:
-                    copy(replacements[key], entry.path, cancel_callback)
+                copy(replacements[key], entry.path, cancel_callback)
                 actual = listing_now()
-                if key not in actual or fingerprint(actual[key], drive_path, cancel_callback) != intended[key]["sha256"]:
+                if key not in actual or actual[key].size != intended[key]["size"]:
                     raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
+                if verify_copies:
+                    _notify_progress(
+                        progress_callback, copy_index - 1, len(order),
+                        f"Verifying copied files...\nFile {copy_index} of {len(order)}: {entry.path}",
+                    )
+                    if fingerprint(actual[key], drive_path, cancel_callback) != intended[key]["sha256"]:
+                        raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
                 diagnostics["files_copied"] += 1
                 package.after()
             _raise_if_cancelled(cancel_callback)
-            diagnostics["stage"] = "verify_file_contents"
-            verify(intended, cancel_callback)
-            diagnostics.update(status="contents_verified", file_contents_verified=True)
+            diagnostics["stage"] = "verify_file_contents" if verify_copies else "check_file_listing"
+            verify(intended, cancel_callback,
+                   action="Verifying saved files..." if verify_copies else None,
+                   content_keys=None if verify_copies else set())
+            diagnostics.update(status="contents_verified" if verify_copies else "files_saved",
+                               file_contents_verified=bool(verify_copies))
             diagnostics.pop("file", None)
-            package.checkpoint(status="contents_verified", diagnostics=dict(diagnostics))
+            package.checkpoint(status=diagnostics["status"], diagnostics=dict(diagnostics))
             # Existing enclosing-save finalizer retains the package through
             # optional readback/session update, including on POSIX.
             self._pending_windows_save_recovery = package
-            self.last_write_verification = {"confidence": "contents_verified", "hardware_tested": False}
+            self.last_write_verification = {
+                "confidence": "contents_verified" if verify_copies else "written", "hardware_tested": False,
+            }
         except Exception as exc:
             diagnostics.update(status="cancelled" if isinstance(exc, FloppyOperationCancelled) else "failed",
                                error=_disk_io_error_details(exc))
-            if package is not None and diagnostics["target_mutation_attempted"]:
+            if package is not None and diagnostics["target_mutation_attempted"] and not backup_originals:
+                diagnostics["restoration"] = {
+                    "status": "unavailable", "restored": [],
+                    "error": {"message": "Original-file backups were disabled; automatic restoration is unavailable."},
+                }
+            elif package is not None and diagnostics["target_mutation_attempted"]:
+                _notify_progress(progress_callback, 0, 0, "Restoring original files...")
                 restoration = diagnostics["restoration"] = {"status": "checking", "restored": []}
                 try:
                     # Ignore cancellation only for safe restoration. Refuse to
                     # delete any bytes we cannot identify as ours or originals.
                     actual = listing_now()
-                    if set(actual) - (set(target) | set(dirty) | set(staged)):
+                    if set(actual) - (set(target) | set(dirty)):
                         raise FloppyImageError("Unrecognized files appeared; automatic restoration was stopped.")
                     observed = {}
                     for key, entry in actual.items():
@@ -12546,8 +12587,6 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                             allowed.append(expected_originals[key]["sha256"])
                         if key in dirty and key in intended:
                             allowed.append(intended[key]["sha256"])
-                        if key in staged:
-                            allowed.append(intended[staged[key]]["sha256"])
                         observed[key] = fingerprint(entry, drive_path)
                         if observed[key] not in allowed:
                             raise FloppyImageError(f"Unrecognized contents for {entry.path}; automatic restoration was stopped.")
@@ -12557,8 +12596,6 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         if floppy_save_recovery.digest(originals[key]) != expected_originals[key]["sha256"]:
                             raise FloppyImageError("The host recovery backup changed; automatic restoration was stopped.")
                     check_identity()
-                    for name in sorted(set(staged) & set(actual)):
-                        remove(actual[name].path, expected_hash=observed[name])
                     for key in sorted(dirty & set(actual)):
                         remove(actual[key].path, expected_hash=observed[key])
                     for key in sorted(dirty & set(target), key=lambda key: (is_eseq_directory_path(target[key].path), key)):
@@ -12570,7 +12607,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         if key not in restored or fingerprint(restored[key], drive_path) != expected_originals[key]["sha256"]:
                             raise FloppyImageError(f"Restored floppy file did not verify: {target[key].path}")
                         restoration["restored"].append(target[key].path)
-                    verify(expected_originals)
+                    verify(expected_originals, action="Restoring original files...")
                     restoration["status"] = "complete"
                 except Exception as restore_error:
                     restoration.update(status="incomplete", error=_disk_io_error_details(restore_error))
@@ -12584,6 +12621,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 except OSError as journal_error:
                     diagnostics["journal_error"] = str(journal_error)
                 message = f"{exc}\n\nFloppy save recovery files are retained at: {package.directory}"
+                if not backup_originals and diagnostics["target_mutation_attempted"]:
+                    message += "\nOriginal-file backups were disabled; original files cannot be restored automatically."
                 error = FloppyOperationCancelled(message) if isinstance(exc, FloppyOperationCancelled) else FloppyImageError(message)
                 error.diagnostics = dict(diagnostics)
                 raise error from exc
@@ -12779,6 +12818,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         progress_callback=None,
         cancel_callback=None,
         verify_after_write=False,
+        backup_originals=True,
+        check_originals=True,
+        verify_copies=True,
     ):
         FloppyImageSession._assert_source_unchanged(self)
         self.last_floppy_save_diagnostics = {}
@@ -12801,13 +12843,16 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         try:
             reports = ()
             if self.source_kind == "floppy_usb":
-                _notify_progress(progress_callback, 4, 5, f"Saving files to floppy {self.source_path}...")
+                _notify_progress(progress_callback, 0, 0, "Checking floppy...")
                 self.last_write_verification = {"confidence": "partial_or_uncertain", "hardware_tested": False}
                 self._sync_modified_image_files_to_floppy_drive(
                     modified_img,
                     self.source_path,
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
+                    backup_originals=backup_originals,
+                    check_originals=check_originals,
+                    verify_copies=verify_copies,
                 )
             elif self.source_kind == "floppy_gw":
                 drive_name = self.gw_source.drive if self.gw_source is not None else "A"
@@ -12854,7 +12899,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 )
                 self._source_fingerprint = saved_fingerprint
             if self.source_kind.startswith("floppy"):
-                self.last_write_verification = {"confidence": "written", "hardware_tested": False}
+                if self.last_write_verification.get("confidence") != "contents_verified":
+                    self.last_write_verification = {"confidence": "written", "hardware_tested": False}
                 if verify_after_write:
                     target = self.gw_source if self.source_kind == "floppy_gw" else (
                         self.drive_info or FloppyDriveInfo(self.source_path, self.disk_format.size_bytes)
@@ -12868,6 +12914,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 _raise_if_cancelled(cancel_callback)
             if self.source_kind.startswith("floppy"):
                 self.last_floppy_save_diagnostics["stage"] = "update_session"
+                if self.source_kind == "floppy_usb":
+                    _notify_progress(progress_callback, 0, 0, "Finishing floppy save...")
             os.replace(modified_img, self.working_img_path)
             self._extracted_files.clear()
             self.repair_changed = False
@@ -12919,6 +12967,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         verify_after_write=False,
         progress_callback=None,
         cancel_callback=None,
+        backup_originals=True,
+        check_originals=True,
+        verify_copies=True,
     ):
         self.last_floppy_save_diagnostics = {}
         self.last_write_verification = {"confidence": "not_written", "hardware_tested": False}
@@ -12944,13 +12995,16 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 if not isinstance(target, FloppyDriveInfo):
                     raise FloppyImageError("Invalid floppy drive selection.")
                 if file_level:
-                    _notify_progress(progress_callback, 4, 5, f"Saving files to floppy {target.path}...")
+                    _notify_progress(progress_callback, 0, 0, "Checking floppy...")
                     self.last_write_verification = {"confidence": "partial_or_uncertain", "hardware_tested": False}
                     self._sync_modified_image_files_to_floppy_drive(
                         modified_img,
                         target.path,
                         progress_callback=progress_callback,
                         cancel_callback=cancel_callback,
+                        backup_originals=backup_originals,
+                        check_originals=check_originals,
+                        verify_copies=verify_copies,
                     )
                 else:
                     prepared_size = os.path.getsize(modified_img)
@@ -13003,7 +13057,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 )
             else:
                 raise FloppyImageError("Invalid floppy write target.")
-            if self.last_write_verification.get("confidence") != "flush_unconfirmed":
+            if self.last_write_verification.get("confidence") not in {"flush_unconfirmed", "contents_verified"}:
                 self.last_write_verification = {"confidence": "written", "hardware_tested": False}
             if verify_after_write:
                 self.last_floppy_save_diagnostics["stage"] = "readback"

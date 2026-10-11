@@ -2,6 +2,19 @@
 
 _LANGUAGES = ("es", "fr", "de", "it", "pt-BR", "bg", "nl", "pl", "ja", "ko", "zh-Hans")
 _ROWS = {
+    "Imported files: {source}. {count} file(s).": (
+        "Archivos importados: {source}. {count} archivo(s).",
+        "Fichiers importés : {source}. {count} fichier(s).",
+        "Importierte Dateien: {source}. {count} Datei(en).",
+        "File importati: {source}. {count} file.",
+        "Arquivos importados: {source}. {count} arquivo(s).",
+        "Импортирани файлове: {source}. Файлове: {count}.",
+        "Geïmporteerde bestanden: {source}. {count} bestand(en).",
+        "Zaimportowane pliki: {source}. Liczba plików: {count}.",
+        "インポートしたファイル: {source}。{count} 個のファイル。",
+        "가져온 파일: {source}. 파일 {count}개.",
+        "已导入的文件：{source}。共 {count} 个文件。",
+    ),
     "Added {added_count} file(s).": (
         "Se añadieron {added_count} archivos.", "{added_count} fichier(s) ajouté(s).", "{added_count} Datei(en) hinzugefügt.", "Aggiunti {added_count} file.", "{added_count} arquivo(s) adicionado(s).", "Добавени файлове: {added_count}.", "{added_count} bestand(en) toegevoegd.", "Dodano plików: {added_count}.", "{added_count} 個のファイルを追加しました。", "파일 {added_count}개를 추가했습니다.", "已添加 {added_count} 个文件。",
     ),

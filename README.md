@@ -152,7 +152,7 @@ follow its manufacturer's setup instructions.
   preference is respected. Title and order updates are checked in a temporary
   file before replacing their destination.
 - Emulator disk builds reopen their final images and verify delivered file
-  contents. Enable **Settings → Disk Options → Verify Floppy Contents After Writing**
+  contents. Enable **Settings → Floppy Settings → Verify Floppy Contents After Writing**
   for physical readback. These checks verify delivery; test playback on your player too.
 - If your operating system offers to format an old piano disk, cancel that
   prompt and open the disk through APS MIDI Prep Tool instead.

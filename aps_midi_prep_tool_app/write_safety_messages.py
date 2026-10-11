@@ -8,6 +8,9 @@ from .message_catalog import translate_text
 from .write_safety_translations import WRITE_SAFETY_TRANSLATIONS
 
 
+_FILE_PROGRESS_TEMPLATE = "{action}\nFile {index} of {total}: {name}"
+
+
 def _message_patterns():
     for template in WRITE_SAFETY_TRANSLATIONS:
         parts = []
@@ -16,7 +19,12 @@ def _message_patterns():
             parts.append(re.escape(literal))
             if field:
                 fields.append(field)
-                parts.append(r"(\d+)" if field in {"needed", "available"} else r"(.+?)")
+                if field in {"needed", "available", "index", "total"}:
+                    parts.append(r"(\d+)")
+                elif template == _FILE_PROGRESS_TEMPLATE and field == "action":
+                    parts.append(r"([^\n]+)")
+                else:
+                    parts.append(r"(.+?)")
         if fields:
             yield template, fields, re.compile("".join(parts), re.DOTALL)
 
@@ -34,6 +42,10 @@ def localize_write_message(message, language_code=None):
         if match is None:
             continue
         values = dict(zip(fields, match.groups(), strict=True))
+        if template == _FILE_PROGRESS_TEMPLATE:
+            # Only the app-supplied action is another message. The filename can
+            # contain newlines, braces, or text identical to a catalog entry.
+            values["action"] = localize_write_message(values["action"], language_code)
         if "error" in values:
             values["error"] = localize_write_message(values["error"], language_code)
         return translate_text(template, language_code, **values)

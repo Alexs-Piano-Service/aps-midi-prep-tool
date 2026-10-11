@@ -8889,6 +8889,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     SETTING_ESEQ_TO_MIDI_PRESERVE_VOLUME = "eseq_to_midi_preserve_volume_controls"
     DEFAULT_LONG_MIDI_FILENAMES = True
     SETTING_ALLOW_FLOPPY_SAVE = "allow_floppy_save"
+    SETTING_FLOPPY_BACKUP_ORIGINALS = "floppy_backup_originals"
+    SETTING_FLOPPY_CHECK_ORIGINALS = "floppy_check_originals"
+    SETTING_FLOPPY_VERIFY_COPIES = "floppy_verify_copies"
     SETTING_CONFIRM_IMAGE_SAVE = "confirm_image_save"
     SETTING_AUTO_WRITE_PROTECT_ON_LOAD = "auto_write_protect_on_load"
     SETTING_FORMAT_DISKLAVIER_SCREEN = "format_disklavier_screen"
@@ -9378,7 +9381,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         store_backups = self.settings.value(self.SETTING_STORE_BACKUPS, True, type=bool)
         self.backup_checkbox = QCheckBox("Back up before saving")
         self.backup_checkbox.setChecked(store_backups)
-        self._set_static_tooltip(self.backup_checkbox, 'Before overwriting, back up images beside the image and individual files into a backup folder.')
+        self._set_static_tooltip(self.backup_checkbox, 'Back up local files and disk images before overwriting them. Floppy backups are controlled separately under Settings > Floppy Settings.')
         self.backup_checkbox.toggled.connect(self.toggle_store_backups)
         options_grid.addWidget(self.backup_checkbox, 2, 0, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
@@ -9645,7 +9648,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.fileBackUpBeforeSavingAction = QAction(self._lt("Back Up Before Saving"), self)
         self.fileBackUpBeforeSavingAction.setCheckable(True)
         self.fileBackUpBeforeSavingAction.setChecked(self.backup_checkbox.isChecked())
-        self._set_static_tooltip(self.fileBackUpBeforeSavingAction, 'Before overwriting, back up images beside the image and individual files into a backup folder.')
+        self._set_static_tooltip(self.fileBackUpBeforeSavingAction, 'Back up local files and disk images before overwriting them. Floppy backups are controlled separately under Settings > Floppy Settings.')
         self.fileBackUpBeforeSavingAction.toggled.connect(self.backup_checkbox.setChecked)
 
         self.fileQuitAction = QAction(self._lt("Quit"), self)
@@ -9703,7 +9706,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.verifyFloppyWriteAction = QAction(self._lt("Verify Floppy Contents After Writing"), self)
         self.verifyFloppyWriteAction.setCheckable(True)
         self.verifyFloppyWriteAction.setChecked(self.settings.value("verify_floppy_after_write", False, type=bool))
-        self.verifyFloppyWriteAction.setToolTip(self._lt("Read the floppy again and compare every file with the prepared image. This adds time."))
+        self._set_static_tooltip(self.verifyFloppyWriteAction, "After writing a full disk image, read the floppy again and compare every file with the prepared image. This adds time.")
         self.verifyFloppyWriteAction.toggled.connect(lambda enabled: self.settings.setValue("verify_floppy_after_write", enabled))
         self.diskMenu.addSeparator()
 
@@ -9903,8 +9906,36 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.settingsMenu.addAction(self.preparationAction)
         self.settingsMenu.addAction(self.viewFormatDisklavierScreenAction)
         self.settingsMenu.addMenu(self.fileSaveOptionsMenu)
-        self.settingsDiskOptionsMenu = self.settingsMenu.addMenu(self._lt("Disk Options"))
+        self.settingsDiskOptionsMenu = self.settingsMenu.addMenu(self._lt("Floppy Settings"))
         self.settingsDiskOptionsMenu.addAction(self.fileAutoWriteProtectAction)
+        self.settingsDiskOptionsMenu.addSeparator()
+        for action_name, label, setting_key, default, tooltip in (
+            (
+                "floppyBackupOriginalsAction", "Back Up Floppy Files Before Saving",
+                self.SETTING_FLOPPY_BACKUP_ORIGINALS, True,
+                "Back up original floppy files on this computer before saving, without using floppy space. This adds time. When off, APS cannot restore overwritten or deleted files after a failed save.",
+            ),
+            (
+                "floppyCheckOriginalsAction", "Check Original Floppy Files Before Saving",
+                self.SETTING_FLOPPY_CHECK_ORIGINALS, False,
+                "Read original floppy files again before replacing them to detect changes during saving. This adds time.",
+            ),
+            (
+                "floppyVerifyCopiesAction", "Verify Files Copied to Floppy",
+                self.SETTING_FLOPPY_VERIFY_COPIES, False,
+                "Read copied files back from the floppy and compare them with the prepared files. This adds time.",
+            ),
+        ):
+            action = QAction(self._lt(label), self)
+            action.setCheckable(True)
+            action.setChecked(self.settings.value(setting_key, default, type=bool))
+            self._set_static_tooltip(action, tooltip)
+            action.toggled.connect(
+                lambda enabled, key=setting_key: self.settings.setValue(key, enabled)
+            )
+            setattr(self, action_name, action)
+            self.settingsDiskOptionsMenu.addAction(action)
+        self.settingsDiskOptionsMenu.addSeparator()
         self.settingsDiskOptionsMenu.addAction(self.verifyFloppyWriteAction)
         self.settingsMenu.addSeparator()
         self.appearanceMenu = self.settingsMenu.addMenu(self._t("menu.appearance"))
@@ -10475,6 +10506,18 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             profile, settings.value(SETTING_MEDIUM, "") if settings is not None else ""
         )
 
+    def _preparation_uses_file_output(self):
+        medium = MidiTitleWindow._preparation_medium(self)
+        return medium.key not in FLOPPY_MEDIA and medium.key != "custom"
+
+    def _is_file_output_import(self):
+        # Keep the source session for staged edits, Undo, and capture exports,
+        # while treating its contents as imported files for this destination.
+        return (
+            getattr(self, "image_session", None) is not None
+            and MidiTitleWindow._preparation_uses_file_output(self)
+        )
+
     def _preparation_requires_dos83_filenames(self):
         return proposed_settings(
             MidiTitleWindow._preparation_profile(self),
@@ -10997,6 +11040,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.settings.setValue(SETTING_PROFILE, profile.key)
             self.settings.setValue(SETTING_MEDIUM, "custom")
             self._refresh_preparation_ui()
+            refresh_catalog = getattr(
+                self, "_refresh_pianodir_row" if getattr(self, "image_session", None)
+                else "_refresh_regular_pianodir_row", None,
+            )
+            if callable(refresh_catalog):
+                refresh_catalog()
             refresh_actions = getattr(self, "_update_menu_actions", None)
             if callable(refresh_actions):
                 refresh_actions()
@@ -11028,6 +11077,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         prepare = getattr(self, "_prepare_for_destination", None)
         if callable(prepare):
             prepare()
+        if not profile.song_format:
+            refresh_catalog = getattr(
+                self, "_refresh_pianodir_row" if getattr(self, "image_session", None)
+                else "_refresh_regular_pianodir_row", None,
+            )
+            if callable(refresh_catalog):
+                refresh_catalog()
         refresh_actions = getattr(self, "_update_menu_actions", None)
         if callable(refresh_actions):
             refresh_actions()
@@ -13160,7 +13216,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         for menu_name, text in (
             ("editMenu", "&Edit"),
             ("fileSaveOptionsMenu", "Save Options"),
-            ("settingsDiskOptionsMenu", "Disk Options"),
+            ("settingsDiskOptionsMenu", "Floppy Settings"),
             ("diskMenu", "&Disk"),
             ("utilitiesConvertMenu", "Convert"),
         ):
@@ -13250,7 +13306,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         delete_source = (
             ("Cancel this pending addition." if source_path in self.pendingImageAdditions
              else "Remove this file from the image on Save.")
-            if image_mode else "Remove this file from the list."
+            if image_mode and not MidiTitleWindow._is_file_output_import(self)
+            else "Remove this file from the list."
         )
         for column, source in ((0, delete_source), (2, "Copy filename to clipboard.")):
             item = self.table.item(row, column)
@@ -13291,6 +13348,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             ("fileQuitAction", "Quit", "Q"),
             ("savePartialCaptureAction", "Save Partial Capture...", "P"),
             ("verifyFloppyWriteAction", "Verify Floppy Contents After Writing", "V"),
+            ("floppyBackupOriginalsAction", "Back Up Floppy Files Before Saving", "B"),
+            ("floppyCheckOriginalsAction", "Check Original Floppy Files Before Saving", "C"),
+            ("floppyVerifyCopiesAction", "Verify Files Copied to Floppy", "F"),
             ("fileSaveAsZipAction", "Save As ZIP...", "Z"),
             ("fileCreateAlbumSubfolderAction", "Create Album Subfolder for Folder Exports", "A"),
             ("fileCreateImageAlbumSubfolderAction", "Create Album Subfolder for Save As Image", "I"),
@@ -13521,6 +13581,19 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self._set_progress_dialog_message(dialog, initial_message)
         return dialog
 
+    def _prepare_floppy_file_progress_dialog(self, dialog):
+        dialog._aps_floppy_file_progress = True
+        self._stabilize_progress_dialog_width(dialog)
+        label = dialog._aps_stable_progress_label
+        label.setTextFormat(Qt.PlainText)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        label.setMinimumHeight(QFontMetrics(label.font()).lineSpacing() * 2)
+        dialog.findChild(QProgressBar).setFormat(self._lt("This step: %p%"))
+        dialog.setAutoReset(False)
+        dialog.setAutoClose(False)
+        dialog.setRange(0, 0)
+        return dialog
+
     def _set_progress_dialog_message(self, dialog, message):
         full_message = localize_write_message(
             self._lt(str(message or "")),
@@ -13531,13 +13604,19 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             dialog.setLabelText(full_message)
             return
         available_width = max(160, dialog.width() - self._scaled_int(64, minimum=48))
-        display_message = QFontMetrics(label.font()).elidedText(
-            full_message,
-            Qt.ElideMiddle,
-            available_width,
-        )
+        metrics = QFontMetrics(label.font())
+        if getattr(dialog, "_aps_floppy_file_progress", False):
+            display_message = "\n".join(
+                metrics.elidedText(line, Qt.ElideMiddle, available_width)
+                for line in full_message.split("\n")
+            )
+        else:
+            display_message = metrics.elidedText(full_message, Qt.ElideMiddle, available_width)
         dialog.setLabelText(display_message)
-        label.setToolTip(full_message if display_message != full_message else "")
+        tooltip = full_message if display_message != full_message else ""
+        if tooltip and getattr(dialog, "_aps_floppy_file_progress", False):
+            tooltip = "<qt>" + html.escape(tooltip).replace("\n", "<br>") + "</qt>"
+        label.setToolTip(tooltip)
 
     def _show_centered_progress_dialog(self, dialog):
         if dialog is None:
@@ -13582,6 +13661,20 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     "Windows rejected the directory listing for this floppy. "
                     "Save To Floppy needs Windows file access, even when reading a disk image succeeds."
                 )
+            restoration = diagnostics.get("restoration") or {}
+            saving_files = operation == "save_files" or file_level
+            if saving_files and changed and diagnostics.get("backup_originals") is False:
+                guidance += "\n\n" + self._lt(
+                    "Original-file backups were disabled; original files cannot be restored automatically."
+                )
+            elif saving_files and restoration.get("status") in {"incomplete", "unavailable"}:
+                guidance += "\n\n" + self._lt(
+                    "APS could not finish restoring the floppy after the save stopped."
+                )
+                restore_error = restoration.get("error") or {}
+                restore_detail = str(restore_error.get("message") or "").strip()
+                if restore_detail:
+                    guidance += "\n\n" + self._lt("Recovery error: {error}", error=self._lt(restore_detail))
             if diagnostics.get("recovery_directory"):
                 guidance += "\n\n" + self._lt(
                     "Recovery copy: {folder}", folder=diagnostics["recovery_directory"],
@@ -13821,6 +13914,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         QTimer.singleShot(0, self._save_image_and_apply_to_floppy)
 
     def _save_image_and_apply_to_floppy(self):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return
         if self._disk_worker_busy():
             return
         output_paths = self.save_as_image(for_floppy=True)
@@ -13877,6 +13972,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if dialog.maximum() != total:
                 dialog.setRange(0, total)
             dialog.setValue(max(0, min(step, total)))
+        elif getattr(dialog, "_aps_floppy_file_progress", False):
+            dialog.setRange(0, 0)
         else:
             if dialog.maximum() <= dialog.minimum():
                 dialog.setRange(0, 1)
@@ -17416,7 +17513,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 self,
                 "Stopping Disk Work",
                 "APS is stopping the current disk operation. Please wait for it to finish, "
-                "then close APS again. Windows may need a little time to release the drive.\n\n"
+                "then close APS again. The operating system may need a little time to release the drive.\n\n"
                 "Temporary working files will be cleaned up after disk work has stopped.",
             )
             return
@@ -17820,7 +17917,21 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if action is not None and action.isChecked() == hidden:
             action.setChecked(not hidden)
 
+    def _floppy_file_save_options(self):
+        """Return the independent, persisted checks for file-level floppy saves."""
+        settings = getattr(self, "settings", None)
+        return {
+            option: (settings.value(key, default, type=bool) if settings is not None else default)
+            for option, key, default in (
+                ("backup_originals", MidiTitleWindow.SETTING_FLOPPY_BACKUP_ORIGINALS, True),
+                ("check_originals", MidiTitleWindow.SETTING_FLOPPY_CHECK_ORIGINALS, False),
+                ("verify_copies", MidiTitleWindow.SETTING_FLOPPY_VERIFY_COPIES, False),
+            )
+        }
+
     def _original_write_setting_key(self):
+        if MidiTitleWindow._is_file_output_import(self):
+            return None
         if self.is_floppy_mode():
             return self.SETTING_ALLOW_FLOPPY_SAVE
         if self.is_image_mode():
@@ -17828,6 +17939,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return None
 
     def _original_write_is_allowed(self):
+        if MidiTitleWindow._is_file_output_import(self):
+            return False
         setting_key = self._original_write_setting_key()
         if setting_key is None:
             return True
@@ -18565,7 +18678,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return self.image_session is not None
 
     def is_floppy_mode(self):
-        return self.image_session is not None and self.image_session.source_kind.startswith("floppy")
+        return (
+            self.image_session is not None
+            and self.image_session.source_kind.startswith("floppy")
+            and not MidiTitleWindow._preparation_uses_file_output(self)
+        )
 
     def _is_compat_warning_locked(self):
         return self.is_local_eseq_mode() or (self.is_image_mode() and self.imageEseqMode)
@@ -18620,8 +18737,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
 
     def _update_floppy_save_option_ui(self):
+        file_output_import = MidiTitleWindow._is_file_output_import(self)
         is_floppy = self.is_floppy_mode()
-        is_image = self.is_image_mode() and not is_floppy
+        is_image = self.is_image_mode() and not is_floppy and not file_output_import
         show_original_write_toggle = is_floppy or is_image
         if hasattr(self, "writeProtectToggle"):
             self.writeProtectToggle.setVisible(show_original_write_toggle)
@@ -18689,7 +18807,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.saveAsImageButton.setToolTip(self._lt("Save the current image session as a separate image file."))
         else:
             self.saveButton.setEnabled(True)
-            if MidiTitleWindow._zip_import_source(self):
+            if file_output_import or MidiTitleWindow._zip_import_source(self):
                 self.saveButton.setToolTip(self._lt("Save copies with current titles and filenames to a selected destination folder."))
             else:
                 self.saveButton.setToolTip(self._lt("Write pending file changes to the currently listed files."))
@@ -18715,10 +18833,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _confirm_discard_image_changes(self):
         if not self.is_image_mode() or not self._has_pending_image_changes():
             return True
+        file_output_import = MidiTitleWindow._is_file_output_import(self)
         reply = QMessageBox.question(
             self,
-            "Discard Image Changes",
-            "Leave Image Mode and discard pending image changes?",
+            self._lt("Discard Pending Changes") if file_output_import else "Discard Image Changes",
+            self._lt("Discard pending file changes?") if file_output_import else "Leave Image Mode and discard pending image changes?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -18957,11 +19076,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.fileClearListAction.setStatusTip(self.clearButton.toolTip())
 
         if hasattr(self, "fileSaveToFloppyAction"):
-            enabled = self.choose_button.isEnabled() and (
+            file_output = MidiTitleWindow._preparation_uses_file_output(self)
+            enabled = not file_output and self.choose_button.isEnabled() and (
                 self.is_image_mode() or (sys.platform == "win32" and bool(self._regular_file_count()))
             )
             self.fileSaveToFloppyAction.setEnabled(enabled)
             self.fileSaveToFloppyAction.setToolTip(
+                self._lt("This destination saves files to a folder instead of a floppy disk.")
+                if file_output else
                 "Save the current listed files directly to a formatted floppy drive."
                 if enabled else
                 "Add one or more files first."
@@ -18971,9 +19093,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.fileSaveToFloppyAction.setStatusTip(self.fileSaveToFloppyAction.toolTip())
 
         if hasattr(self, "fileWriteImageToFloppyAction"):
-            enabled = self.choose_button.isEnabled() and self.is_image_mode()
+            file_output = MidiTitleWindow._preparation_uses_file_output(self)
+            enabled = not file_output and self.choose_button.isEnabled() and self.is_image_mode()
             self.fileWriteImageToFloppyAction.setEnabled(enabled)
             self.fileWriteImageToFloppyAction.setToolTip(
+                self._lt("This destination saves files to a folder instead of a floppy disk.")
+                if file_output else
                 "Write the current image to a physical floppy disk."
                 if enabled else
                 "Open or create an image before writing it to a physical floppy disk."
@@ -19213,8 +19338,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.savePartialCaptureAction.setEnabled(
                 open_enabled and bool(capture_path) and os.path.isfile(capture_path)
             )
-        if hasattr(self, "verifyFloppyWriteAction"):
-            self.verifyFloppyWriteAction.setEnabled(open_enabled)
+        for action_name in (
+            "verifyFloppyWriteAction", "floppyBackupOriginalsAction",
+            "floppyCheckOriginalsAction", "floppyVerifyCopiesAction",
+        ):
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setEnabled(open_enabled)
         self._refresh_menu_mnemonics()
 
     def _set_loaded_image_pianodir_metadata(self, metadata=None):
@@ -19677,6 +19807,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return self._eseq_mode_label(self.imageEseqVariant) if self.imageEseqMode else "MIDI"
 
     def _disk_mode_banner_headline(self):
+        if MidiTitleWindow._is_file_output_import(self):
+            return self._lt("Imported files")
         if self.image_session is None:
             return "Image Mode"
         return self._lt("{mode} ({content})", mode=self._lt(self.image_session.mode_name), content=self._disk_content_label())
@@ -19741,7 +19873,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _regular_export_rows(self):
         rows = self._regular_file_rows()
-        if not self.is_local_eseq_mode():
+        if not self.is_local_eseq_mode() or MidiTitleWindow._preparation_uses_file_output(self):
             return rows
         return [row for row in rows
                 if self._listed_file_title_mode(self.table.item(row, 1).text()) == "eseq"]
@@ -19905,7 +20037,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         else:
             filename_item.setText(display_filename)
 
-        if export_filename:
+        if MidiTitleWindow._is_file_output_import(self):
+            filename_item.setToolTip(self._lt("Double-click to rename this file."))
+        elif export_filename:
             filename_item.setToolTip(
                 self._lt('Save As folder filename: {export_filename}\nDisk/image filename: {disk_filename}\n\nDouble-click to rename the file inside the disk/image.', export_filename=export_filename, disk_filename=disk_filename)
             )
@@ -20604,7 +20738,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             info.get("title_mode") == "eseq"
             for info in self.listedFileInfo.values()
         )
-        self.regularEseqMode = self.regularHasPianodir or has_eseq_rows or MidiTitleWindow._preparation_profile(self).song_format == "eseq"
+        self.regularEseqMode = (
+            self.regularHasPianodir and not MidiTitleWindow._preparation_uses_file_output(self)
+        ) or has_eseq_rows or MidiTitleWindow._preparation_profile(self).song_format == "eseq"
         if not self.regularEseqMode:
             self.pendingGeneratePianodir = False
             self.regularEseqVariant = ESEQ_VARIANT_DISKLAVIER
@@ -20660,7 +20796,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self._refresh_regular_eseq_mode()
         row = self._find_pianodir_row()
 
-        if not self.regularEseqMode:
+        if not self.regularEseqMode or MidiTitleWindow._preparation_uses_file_output(self):
             if row >= 0:
                 self.table.removeRow(row)
             if not self.is_image_mode():
@@ -21777,7 +21913,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             source_path = path_item.text()
             if self._is_special_pianodir_path(source_path) or source_path in self.pendingImageDeletes:
                 continue
-            if self.imageEseqMode:
+            if self.imageEseqMode and not MidiTitleWindow._preparation_uses_file_output(self):
                 if self._image_path_title_mode(source_path) != "eseq":
                     continue
                 host_path = self._pending_or_extracted_image_path(source_path)
@@ -21834,7 +21970,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         )
                     )
             output_paths.append(pianodir_path)
-        elif self.imageHasPianodir and not self.pendingDeletePianodir:
+        elif (self.imageHasPianodir and not self.pendingDeletePianodir
+              and not MidiTitleWindow._preparation_uses_file_output(self)):
             existing_pianodir = self._existing_image_pianodir_host_path()
             if existing_pianodir and os.path.isfile(existing_pianodir):
                 pianodir_path = os.path.join(dest_dir, self._eseq_directory_filename(self.imageEseqVariant))
@@ -21894,7 +22031,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 output_paths.append(self._write_regular_pianodir(base_dir=export_dir, path_remap=output_path_map))
             except Exception as exc:
                 errors.append(f"Could not write {self._eseq_directory_filename(self.regularEseqVariant)}: {exc}")
-        elif not errors and self.is_local_eseq_mode() and self.regularHasPianodir:
+        elif (not errors and self.is_local_eseq_mode() and self.regularHasPianodir
+              and not MidiTitleWindow._preparation_uses_file_output(self)):
             existing_pianodir = self._existing_regular_pianodir_path()
             if existing_pianodir and os.path.isfile(existing_pianodir):
                 copied_pianodir = os.path.join(export_dir, self._eseq_directory_filename(self.regularEseqVariant))
@@ -22083,23 +22221,32 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _apply_image_mode_ui(self):
         self._apply_compact_button_labels()
+        file_output_import = MidiTitleWindow._is_file_output_import(self)
         mode_name = self.image_session.mode_name if self.image_session is not None else "Image Mode"
         mode_banner = self._disk_mode_banner_headline()
         self._set_table_headers(["X", "ImagePath", "📋", "Filename", "Title", "Long", "Type"])
         self.table.horizontalHeaderItem(3).setToolTip(
+            self._lt("Double-click to rename this file.") if file_output_import else
             self._lt('Filename inside the disk/image. A different Save As export name is shown when one is staged.')
         )
         self.choose_button.setText(self._lt("Open MIDI Folder"))
-        self.choose_button.setToolTip(self._lt('Leave {mode_name} and select a folder to scan for .mid and .midi files.', mode_name=self._lt(mode_name)))
+        self.choose_button.setToolTip(
+            self._lt("Select a folder to scan for .mid and .midi files.") if file_output_import else
+            self._lt('Leave {mode_name} and select a folder to scan for .mid and .midi files.', mode_name=self._lt(mode_name))
+        )
         self.open_image_button.setEnabled(True)
         self.open_image_button.setText(self._lt("Open Image"))
-        self.open_image_button.setToolTip(self._lt("Open another floppy image file for editing in Image Mode."))
+        self.open_image_button.setToolTip(
+            self._lt("Open Image") if file_output_import else
+            self._lt("Open another floppy image file for editing in Image Mode.")
+        )
         self.read_floppy_button.setEnabled(True)
         self.read_floppy_button.setText(self._lt("Read Floppy"))
         self.read_floppy_button.setToolTip(
             self._lt("Read another floppy from a floppy drive or a Greaseweazle-connected drive.")
         )
         self.table.setToolTip(
+            self._lt("Drop MIDI, E-SEQ, or disk image files here. Click a Title cell to edit.") if file_output_import else
             self._lt('{mode_banner}: edit titles, rename files, remove rows to delete files on Save, or drop files to add them.', mode_banner=mode_banner)
         )
         self._set_rename_all_enabled(False, "Add files before using Rename 8.3.")
@@ -22107,7 +22254,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.convertEseqToMidiButton.setEnabled(True)
         self.convertMidiToEseqButton.setEnabled(True)
         self.table.setColumnHidden(6, False)
-        if self.image_session is not None and self.image_session.source_kind.startswith("floppy"):
+        if file_output_import:
+            self.clearButton.setToolTip(self._lt("Remove all files from the current list."))
+        elif self.image_session is not None and self.image_session.source_kind.startswith("floppy"):
             self.clearButton.setToolTip(self._lt("Leave Floppy Mode and clear the current floppy list."))
         else:
             self.saveButton.setToolTip(
@@ -22123,6 +22272,26 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.saveAsImageButton.setText(self._lt("Save As Image"))
         self.saveAsImageButton.setToolTip(self._lt('Save the current {mode_name} as a separate image file.', mode_name=self._lt(mode_name)))
         self._set_mode_banner(mode_banner, self.image_session.source_name if self.image_session is not None else "")
+        was_sorting = self.table.isSortingEnabled()
+        was_blocked = self.table.blockSignals(True)
+        self.table.setSortingEnabled(False)
+        try:
+            for row in range(self.table.rowCount()):
+                path_item = self.table.item(row, 1)
+                if path_item is None or self._is_special_pianodir_row(row):
+                    continue
+                delete_item = self.table.item(row, 0)
+                if delete_item is not None:
+                    delete_tooltip = (
+                        "Remove this file from the list." if file_output_import else
+                        "Cancel this pending addition." if path_item.text() in self.pendingImageAdditions else
+                        "Remove this file from the image on Save."
+                    )
+                    delete_item.setToolTip(self._lt(delete_tooltip))
+                self._refresh_image_filename_display(row)
+        finally:
+            self.table.setSortingEnabled(was_sorting)
+            self.table.blockSignals(was_blocked)
         self._update_compat_warning_ui()
         self._update_floppy_save_option_ui()
         self._update_image_pianodir_metadata_ui()
@@ -22134,6 +22303,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _image_mode_summary(self):
         if self.image_session is None:
             return ""
+        if MidiTitleWindow._is_file_output_import(self):
+            return self._lt(
+                "Imported files: {source}. {count} file(s).",
+                source=self.image_session.source_name,
+                count=sum(
+                    self.table.item(row, 1) is not None and not self._is_special_pianodir_row(row)
+                    for row in range(self.table.rowCount())
+                ),
+            )
         listing = self.image_session.list_entries()
         return self._lt(
             "{mode}: {source} ({format}, {size}). {count} file(s), {free} free.",
@@ -22301,6 +22479,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _update_image_eseq_mode(self):
         self.imageEseqMode = (
             self.imageHasPianodir and not self.pendingDeletePianodir
+            and not MidiTitleWindow._preparation_uses_file_output(self)
         ) or MidiTitleWindow._preparation_profile(self).song_format == "eseq"
         if self.imageEseqMode:
             return
@@ -22320,6 +22499,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _sync_pianodir_requirement(self):
         self._update_image_eseq_mode()
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            self.pendingGeneratePianodir = False
+            self.pendingDeletePianodir = self.imageHasPianodir
+            return
         if self.imageEseqMode:
             self.pendingDeletePianodir = False
             return
@@ -22377,7 +22560,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _refresh_pianodir_row(self):
         self._sync_pianodir_requirement()
-        should_show = (self.imageHasPianodir and not self.pendingDeletePianodir) or self.imageEseqMode
+        should_show = not MidiTitleWindow._preparation_uses_file_output(self) and (
+            (self.imageHasPianodir and not self.pendingDeletePianodir) or self.imageEseqMode
+        )
         row = self._find_pianodir_row()
 
         if not should_show:
@@ -24377,6 +24562,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @zip_import_operation
     def save_to_floppy(self):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
         if self.image_session is None:
@@ -24431,6 +24618,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
 
     def _save_regular_files_to_floppy(self):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return
         if self._disk_worker_busy():
             QMessageBox.information(self, "Busy", "Please wait for floppy processing to finish.")
             return
@@ -24470,6 +24659,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 temporary.cleanup()
 
     def write_image_to_floppy(self, *, verify_after_write=None):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return
         if self.image_session is None:
             QMessageBox.information(self, "No Image", "Open or create an image before writing to a floppy disk.")
             return
@@ -24513,6 +24704,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _start_write_image_to_floppy_worker(self, target_kind, target, target_name, operations, *, file_level=False,
                                           session=None, temporary_directory=None, verify_after_write=None):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return
         self._reset_gw_sector_report_dedupe()
         if file_level:
             progress_text = "Saving files to floppy..."
@@ -24524,8 +24717,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         progress_dialog.setWindowTitle(progress_title)
         self._prepare_progress_dialog(progress_dialog)
         progress_dialog.setAutoClose(False)
-        self._apply_stage_progress(progress_dialog, 0, 5, progress_text)
+        if file_level:
+            self._prepare_floppy_file_progress_dialog(progress_dialog)
+        self._apply_stage_progress(progress_dialog, 0, 0 if file_level else 5, progress_text)
 
+        operations = dict(operations)
+        if file_level:
+            operations.update(MidiTitleWindow._floppy_file_save_options(self))
         worker = DiskSessionWriteTargetWorker(
             session or self.image_session,
             target_kind,
@@ -24533,8 +24731,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             operations,
             parent=self,
             file_level=file_level,
-            verify_after_write=(self.verifyFloppyWriteAction.isChecked()
-                                if verify_after_write is None else verify_after_write),
+            verify_after_write=(not file_level and (
+                self.verifyFloppyWriteAction.isChecked()
+                if verify_after_write is None else verify_after_write
+            )),
             temporary_directory=temporary_directory,
         )
         worker.progressChanged.connect(
@@ -24543,9 +24743,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             )
         )
         progress_dialog.canceled.connect(worker.cancel)
-        progress_dialog.canceled.connect(
-            lambda dialog=progress_dialog: dialog.setLabelText(self._lt("Cancelling..."))
-        )
+        if file_level:
+            progress_dialog.canceled.connect(
+                lambda dialog=progress_dialog: self._set_progress_dialog_message(dialog, self._lt("Cancelling..."))
+            )
+        else:
+            progress_dialog.canceled.connect(
+                lambda dialog=progress_dialog: dialog.setLabelText(self._lt("Cancelling..."))
+            )
         worker.writeFinished.connect(
             lambda target_name=target_name, file_level=file_level: self._on_write_image_to_floppy_success(
                 target_name,
@@ -24716,7 +24921,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._schedule_destination_preparation()
 
     def _offer_save_greaseweazle_capture(self):
-        if not self.is_floppy_mode() or self.image_session.source_kind != "floppy_gw":
+        if self.image_session is None or self.image_session.source_kind != "floppy_gw":
             return
         capture_path = getattr(self.image_session, "capture_path", None)
         capture_ext = (getattr(self.image_session, "capture_ext", "") or "").lower()
@@ -25762,6 +25967,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         delete_item.setTextAlignment(Qt.AlignCenter)
         delete_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         delete_item.setToolTip(
+            self._lt("Remove this file from the list.")
+            if MidiTitleWindow._is_file_output_import(self)
+            else
             self._lt("Cancel this pending addition.")
             if is_pending_addition
             else self._lt("Remove this file from the image on Save.")
@@ -25780,7 +25988,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         filename_item = QTableWidgetItem(filename)
         filename_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        filename_item.setToolTip(self._lt('Double-click to rename this file inside the image.'))
+        filename_item.setToolTip(
+            self._lt("Double-click to rename this file.") if MidiTitleWindow._is_file_output_import(self) else
+            self._lt('Double-click to rename this file inside the image.')
+        )
         self.table.setItem(row, 3, filename_item)
 
         title_mode = self._image_path_title_mode(image_path)
@@ -26234,10 +26445,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if self.is_image_mode():
             if not self._confirm_discard_image_changes():
                 return
+            file_output_import = MidiTitleWindow._is_file_output_import(self)
             self._clear_regular_list_state()
             self._reset_image_state()
             self._apply_midi_mode_ui()
-            self.status_label.setText(self._lt('Image Mode closed.'))
+            self.status_label.setText(self._lt("List cleared." if file_output_import else "Image Mode closed."))
             self._refresh_regular_pianodir_row()
             return
         if self.table.rowCount() == 0:
@@ -28971,6 +29183,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
 
     def _ensure_pianodir_generation_for_save(self):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return True
         if self.is_image_mode():
             eseq_mode = self.imageEseqMode
             has_pianodir = self.imageHasPianodir
@@ -29055,6 +29269,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return False
 
     def _should_generate_pianodir(self, *, for_export=False):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return False
         if self._pianodir_missing_or_empty() and self._pianodir_can_be_generated_from_current_rows():
             return True
         if self.is_local_eseq_mode():
@@ -29073,6 +29289,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
 
     def _confirm_floppy_write(self):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return False
         if self.image_session is None or not self.image_session.source_kind.startswith("floppy"):
             return True
         if self.image_session.source_kind == "floppy_usb":
@@ -29172,7 +29390,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             title_kind = "E-SEQ title" if title_mode == "eseq" else "MIDI title"
         shown_title = self._display_title_text(new_title, title_mode=title_mode, fallback_title=filename, edited=True)
         self.status_label.setText(
-            self._lt("Pending image change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}", title_kind=self._lt(title_kind), filename=filename, shown_title=shown_title, warning=warning)
+            self._lt(
+                "Pending change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}"
+                if MidiTitleWindow._is_file_output_import(self) else
+                "Pending image change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}",
+                title_kind=self._lt(title_kind), filename=filename, shown_title=shown_title, warning=warning,
+            )
         )
 
         if self.table.selectionModel() is not None:
@@ -29249,17 +29472,42 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         directory = os.path.dirname(self.pendingImageRenames.get(source_path, source_path)).replace("\\", "/")
         target_path = self._join_image_path(directory, new_name)
         current_target = self.pendingImageRenames.get(source_path, source_path)
+        file_output_rename = (
+            MidiTitleWindow._is_file_output_import(self)
+            and not getattr(self, "_preparing_destination", False)
+        )
+        if file_output_rename:
+            current_target = self._image_folder_export_path(source_path, current_target)
         if target_path == current_target:
             return False
 
-        if dos_filename_key(target_path) in self._active_image_paths(exclude_row=row):
+        used_paths = self._active_image_paths(exclude_row=row)
+        if file_output_rename:
+            # Staged additions use their internal paths as mapping keys. Keep
+            # those reserved as well as the names used by folder exports.
+            for other_row in range(self.table.rowCount()):
+                if other_row == row or self._is_special_pianodir_row(other_row):
+                    continue
+                other_item = self.table.item(other_row, 1)
+                if other_item is None:
+                    continue
+                other_source = other_item.text()
+                if source_path in self.pendingImageAdditions:
+                    used_paths.add(dos_filename_key(other_source))
+                used_paths.add(dos_filename_key(self._image_folder_export_path(
+                    other_source, self._final_image_path(other_source),
+                )))
+        if dos_filename_key(target_path) in used_paths:
             QMessageBox.warning(
                 self,
                 self._lt("Name Already Exists"),
+                f"{self._lt('Name Already Exists')}: {new_name}" if file_output_rename else
                 self._lt("'{filename}' already exists in this image folder.", filename=new_name),
             )
             return False
 
+        if file_output_rename:
+            self.pendingImageExportFilenames.pop(source_path, None)
         if source_path in self.pendingImageAdditions:
             host_path = self.pendingImageAdditions.pop(source_path)
             self.pendingImageAdditions[target_path] = host_path
@@ -29280,6 +29528,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             else:
                 self.pendingImageRenames[source_path] = target_path
             self.status_label.setText(
+                self._lt("Pending filename change: '{filename}' will become '{new_name}' on Save. Save As writes a renamed copy instead.", filename=os.path.basename(source_path), new_name=new_name)
+                if file_output_rename else
                 self._lt("Pending image rename:\n'{filename}' will become '{new_name}' on save.", filename=os.path.basename(source_path), new_name=new_name)
             )
 
@@ -29305,13 +29555,17 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
 
         source_path = path_item.text()
-        current_name = os.path.basename(self._final_image_path(source_path))
+        current_path = self._final_image_path(source_path)
+        if MidiTitleWindow._is_file_output_import(self):
+            current_path = self._image_folder_export_path(source_path, current_path)
+        current_name = os.path.basename(current_path)
         force_dos83 = self._is_eseq_candidate(
             self._final_image_path(source_path),
             is_midi=self._image_path_is_midi(source_path),
         )
         new_name, ok = self._prompt_for_image_filename(
             current_name,
+            dialog_title="Rename File" if MidiTitleWindow._is_file_output_import(self) else "Rename Image File",
             force_dos83=force_dos83,
         )
         if not ok:
@@ -29363,7 +29617,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
 
         container_label = "floppy disk" if self.is_floppy_mode() else "image"
-        confirmed = self._confirm_with_optional_skip(
+        file_output_import = MidiTitleWindow._is_file_output_import(self)
+        confirmed = file_output_import or self._confirm_with_optional_skip(
             setting_key=self.SETTING_SKIP_IMAGE_REMOVE_WARNING,
             title=self._lt("Remove File"),
             message=self._lt(
@@ -29382,6 +29637,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.pendingImageExportFilenames.pop(image_path, None)
         self.table.removeRow(row)
         self.status_label.setText(
+            self._lt("File removed from the list.") if file_output_import else
             self._lt("Pending removal: '{filename}' will be deleted from the {container_label} on Save, or omitted from exported files on Save As.", filename=filename, container_label=self._lt(container_label))
         )
         self._refresh_pianodir_row()
@@ -29503,7 +29759,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 self.pendingImageDeletes.discard(source_path)
             self.pendingImageTitleEdits.pop(source_path, None)
 
-            if self._pending_image_space_remaining() < 0:
+            if (not MidiTitleWindow._is_file_output_import(self)
+                    and self._pending_image_space_remaining() < 0):
                 raise FloppyImageError("not enough free space in image")
 
             size = os.path.getsize(staged_host_path)
@@ -29626,7 +29883,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         else:
             previous_addition = self.pendingImageAdditions.get(target_path)
             pending_extra[target_path] = staged_host_path
-            if self._pending_image_space_remaining(pending_extra) < 0:
+            if (not MidiTitleWindow._is_file_output_import(self)
+                    and self._pending_image_space_remaining(pending_extra) < 0):
                 pending_extra.pop(target_path, None)
                 try:
                     os.remove(staged_host_path)
@@ -29864,7 +30122,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _refresh_disk_usage_bars(self):
         if not hasattr(self, "diskUsageBarsWidget"):
             return
-        show_bars = self.is_image_mode()
+        show_bars = self.is_image_mode() and not MidiTitleWindow._is_file_output_import(self)
         self.diskUsageBarsWidget.setVisible(show_bars)
         if not show_bars or self.image_session is None:
             self.diskUsageBar.set_fraction(0.0)
@@ -30002,7 +30260,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 continue
 
             pending_extra[target_path] = staged_host_path
-            if self._pending_image_space_remaining(pending_extra) < 0:
+            if (not MidiTitleWindow._is_file_output_import(self)
+                    and self._pending_image_space_remaining(pending_extra) < 0):
                 pending_extra.pop(target_path, None)
                 try:
                     os.remove(staged_host_path)
@@ -30024,7 +30283,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 is_midi=is_midi,
             )
             eseq_limit = self._active_eseq_file_limit()
-            if would_be_eseq_mode and (self._image_song_file_count() + 1) > eseq_limit:
+            if (not MidiTitleWindow._is_file_output_import(self) and would_be_eseq_mode
+                    and (self._image_song_file_count() + 1) > eseq_limit):
                 pending_extra.pop(target_path, None)
                 self.imageFileInfo.pop(target_path, None)
                 try:
@@ -30069,7 +30329,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         status_parts = []
         if added:
-            status_parts.append(self._lt('Queued {count} file(s) to add to the image.', count=len(added)))
+            status_parts.append(
+                self._image_mode_summary() if MidiTitleWindow._is_file_output_import(self)
+                else self._lt('Queued {count} file(s) to add to the image.', count=len(added))
+            )
         if replaced:
             status_parts.append(self._lt('Queued {count} file(s) to replace matching filenames.', count=len(replaced)))
         if pianodir_loaded:
@@ -30082,8 +30345,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             status_parts.append(self._lt('Skipped {count} file(s).', count=len(skipped)))
         if drop_cancelled:
             status_parts.append(self._lt('Drop cancelled.'))
-        remaining = self._pending_image_space_remaining()
-        status_parts.append(self._lt('Estimated free space after pending additions: {size}.', size=display_bytes(max(0, remaining))))
+        if not MidiTitleWindow._is_file_output_import(self):
+            remaining = self._pending_image_space_remaining()
+            status_parts.append(self._lt('Estimated free space after pending additions: {size}.', size=display_bytes(max(0, remaining))))
         self.status_label.setText("\n".join(status_parts))
 
         if skipped:
@@ -30453,6 +30717,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
+        if MidiTitleWindow._is_file_output_import(self):
+            self.save_as_changes()
+            return
         if not MidiTitleWindow._validate_pending_image_titles(self):
             return
         if MidiTitleWindow._zip_source_for_path(self, getattr(self.image_session, "source_path", "")):
@@ -30598,6 +30865,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 )
 
     def _start_floppy_commit_worker(self, operations, progress_text):
+        if MidiTitleWindow._preparation_uses_file_output(self):
+            return
         if self.image_session is None:
             return
         if self._disk_worker_busy():
@@ -30609,10 +30878,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         progress_dialog.setWindowTitle("Saving Floppy")
         self._prepare_progress_dialog(progress_dialog)
         progress_dialog.setAutoClose(False)
-        self._apply_stage_progress(progress_dialog, 0, 5, progress_text)
+        file_level = self.image_session.source_kind == "floppy_usb"
+        if file_level:
+            self._prepare_floppy_file_progress_dialog(progress_dialog)
+        self._apply_stage_progress(progress_dialog, 0, 0 if file_level else 5, progress_text)
 
         operations = dict(operations)
-        operations["verify_after_write"] = self.verifyFloppyWriteAction.isChecked()
+        if file_level:
+            operations.update(MidiTitleWindow._floppy_file_save_options(self))
+        operations["verify_after_write"] = not file_level and self.verifyFloppyWriteAction.isChecked()
         worker = DiskSessionCommitWorker(self.image_session, operations, parent=self)
         worker.progressChanged.connect(
             lambda step, total, message, dialog=progress_dialog: self._apply_stage_progress(
@@ -30620,9 +30894,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             )
         )
         progress_dialog.canceled.connect(worker.cancel)
-        progress_dialog.canceled.connect(
-            lambda dialog=progress_dialog: dialog.setLabelText(self._lt("Cancelling..."))
-        )
+        if file_level:
+            progress_dialog.canceled.connect(
+                lambda dialog=progress_dialog: self._set_progress_dialog_message(dialog, self._lt("Cancelling..."))
+            )
+        else:
+            progress_dialog.canceled.connect(
+                lambda dialog=progress_dialog: dialog.setLabelText(self._lt("Cancelling..."))
+            )
         worker.commitFinished.connect(self._on_floppy_commit_success)
         worker.commitFailed.connect(self._on_floppy_commit_failure)
         worker.operationCancelled.connect(self._on_floppy_commit_cancelled)
@@ -32052,7 +32331,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         "title_mode": "",
                     }
                 )
-        elif self.is_local_eseq_mode() and self.regularHasPianodir:
+        elif (self.is_local_eseq_mode() and self.regularHasPianodir
+              and not MidiTitleWindow._preparation_uses_file_output(self)):
             existing_pianodir = self._existing_regular_pianodir_path()
             if existing_pianodir and os.path.isfile(existing_pianodir):
                 directory_name = self._eseq_directory_filename(self.regularEseqVariant)
@@ -32527,9 +32807,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if self.is_image_mode():
             if self.image_session is None:
                 return
-            if self.imageEseqMode and not self._ensure_eseq_file_limit(
-                len(self._image_eseq_rows()),
-                action_text="Exporting this E-SEQ floppy set to a ZIP archive",
+            if (
+                self.imageEseqMode and not MidiTitleWindow._preparation_uses_file_output(self)
+                and not self._ensure_eseq_file_limit(
+                    len(self._image_eseq_rows()),
+                    action_text="Exporting this E-SEQ floppy set to a ZIP archive",
+                )
             ):
                 return
             if not self._ensure_pianodir_generation_for_save():
@@ -32549,9 +32832,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     self._lt("Add one or more files first."),
                 )
                 return
-            if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
-                len(self._regular_eseq_rows()),
-                action_text="Exporting this E-SEQ set to a ZIP archive",
+            if (
+                self.is_local_eseq_mode() and not MidiTitleWindow._preparation_uses_file_output(self)
+                and not self._ensure_eseq_file_limit(
+                    len(self._regular_eseq_rows()),
+                    action_text="Exporting this E-SEQ set to a ZIP archive",
+                )
             ):
                 return
             if self.is_local_eseq_mode() and not self._ensure_pianodir_generation_for_save():
@@ -32661,7 +32947,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if self._tag_sidecars_enabled():
             paths.extend(self._tag_sidecar_path_for_output(path) for path in tuple(paths)
                          if not is_pianodir_path(path))
-        if self.is_local_eseq_mode() and (
+        if self.is_local_eseq_mode() and not MidiTitleWindow._preparation_uses_file_output(self) and (
             self._should_generate_pianodir(for_export=True) or self.regularHasPianodir
         ):
             paths.append(os.path.join(export_dir, self._eseq_directory_filename(self.regularEseqVariant)))
@@ -32787,9 +33073,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if not MidiTitleWindow._ensure_preparation_ready(self):
             return
         if self.is_image_mode():
-            if self.imageEseqMode and not self._ensure_eseq_file_limit(
-                len(self._image_eseq_rows()),
-                action_text="Exporting this E-SEQ floppy set to a folder",
+            if (
+                self.imageEseqMode and not MidiTitleWindow._preparation_uses_file_output(self)
+                and not self._ensure_eseq_file_limit(
+                    len(self._image_eseq_rows()),
+                    action_text="Exporting this E-SEQ floppy set to a folder",
+                )
             ):
                 return
             if not self._ensure_pianodir_generation_for_save():
@@ -32872,9 +33161,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
         if not dest_dir:
             return
-        if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
-            len(self._regular_eseq_rows()),
-            action_text="Exporting this E-SEQ set to a folder",
+        if (
+            self.is_local_eseq_mode() and not MidiTitleWindow._preparation_uses_file_output(self)
+            and not self._ensure_eseq_file_limit(
+                len(self._regular_eseq_rows()),
+                action_text="Exporting this E-SEQ set to a folder",
+            )
         ):
             return
         if self.is_local_eseq_mode() and not self._ensure_pianodir_generation_for_save():
@@ -32955,7 +33247,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 output_paths.append(self._write_regular_pianodir(base_dir=export_dir, path_remap=output_path_map))
             except Exception as exc:
                 errors.append(f"Could not write {self._eseq_directory_filename(self.regularEseqVariant)}: {exc}")
-        elif not errors and self.is_local_eseq_mode() and self.regularHasPianodir:
+        elif (not errors and self.is_local_eseq_mode() and self.regularHasPianodir
+              and not MidiTitleWindow._preparation_uses_file_output(self)):
             existing_pianodir = self._existing_regular_pianodir_path()
             if existing_pianodir and os.path.isfile(existing_pianodir):
                 copied_pianodir = os.path.join(export_dir, self._eseq_directory_filename(self.regularEseqVariant))

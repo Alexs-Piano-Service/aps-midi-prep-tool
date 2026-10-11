@@ -66,7 +66,7 @@ def test_language_switch_refreshes_fixed_and_song_tooltips_without_editing_data(
     expected = lambda source, **fields: translate_text(source, language, **fields)
     assert window.statusClearButton.toolTip() == expected("Clear status message.")
     assert window.backup_checkbox.toolTip() == expected(
-        "Before overwriting, back up images beside the image and individual files into a backup folder."
+        "Back up local files and disk images before overwriting them. Floppy backups are controlled separately under Settings > Floppy Settings."
     )
     assert window.fileImageFloppyAction.toolTip() == expected(
         "Copy a physical floppy to an image file without opening or scanning its contents."

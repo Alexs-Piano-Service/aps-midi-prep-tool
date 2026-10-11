@@ -38,6 +38,8 @@ def test_close_cancels_disk_work_and_retains_resources_until_finished(tmp_path, 
         assert getattr(window, worker_name) is worker
         assert messages[0][0] == "Stopping Disk Work"
         assert "close APS again" in messages[0][1]
+        assert "The operating system may need a little time to release the drive." in messages[0][1]
+        assert "Windows" not in messages[0][1]
 
         # The normal finished slot releases the worker after its process exits.
         setattr(window, worker_name, None)
