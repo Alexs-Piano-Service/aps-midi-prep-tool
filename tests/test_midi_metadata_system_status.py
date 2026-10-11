@@ -2,11 +2,18 @@
 
 import pytest
 
-from aps_midi_prep_tool_app.midi_metadata import MidiTitleFormatError, write_midi_title_to_path
+from aps_midi_prep_tool_app.midi_metadata import (
+    MidiTitleFormatError,
+    read_first_title_from_midi,
+    write_midi_title_to_path,
+)
 
 
 _TITLE = b"\x00\xff\x03\x03Old"
 _END = b"\x00\xff\x2f\x00"
+_TEXT = b"\x00\xff\x01\x01X"
+_NOTE = b"\x00\x90\x3c\x40"
+_RUNNING_NOTE = b"\x00\x3e\x40"
 _WIRE_STATUSES = [
     (0xF1, b"\x00"), (0xF2, b"\x00\x00"), (0xF3, b"\x00"),
     (0xF4, b""), (0xF5, b""), (0xF6, b""), (0xF8, b""),
@@ -74,3 +81,58 @@ def test_title_edit_preserves_system_status_bytes_inside_length_delimited_payloa
 
     assert source.read_bytes() == source_bytes
     assert destination.read_bytes() == _midi(b"\x00\xff\x03\x07Renamed" + event + _END)
+
+
+def test_title_read_rejects_running_status_after_meta_event(tmp_path):
+    source = tmp_path / "source.mid"
+    source.write_bytes(_midi(_NOTE + _TEXT + _RUNNING_NOTE + _TITLE + _END))
+
+    with pytest.raises(ValueError, match="Invalid running status"):
+        read_first_title_from_midi(source)
+
+
+@pytest.mark.parametrize("track", [
+    _NOTE + _TEXT + _RUNNING_NOTE + _TITLE + _END,
+    _TITLE + _NOTE + _TEXT + _RUNNING_NOTE + _END,
+    _NOTE + _TITLE + _RUNNING_NOTE + _END,
+], ids=["text-before-title", "text-after-title", "track-name"])
+@pytest.mark.parametrize("destination_kind", ["new", "existing", "in_place"])
+def test_title_edit_rejects_running_status_after_meta_without_changing_files(
+    tmp_path, track, destination_kind,
+):
+    source_bytes = _midi(track)
+    source = tmp_path / "source.mid"
+    source.write_bytes(source_bytes)
+    destination = source if destination_kind == "in_place" else tmp_path / "destination.mid"
+    if destination_kind == "existing":
+        destination.write_bytes(b"existing output")
+
+    with pytest.raises(MidiTitleFormatError, match="Invalid running status"):
+        write_midi_title_to_path(source, "Renamed", destination)
+
+    assert source.read_bytes() == source_bytes
+    if destination_kind == "new":
+        assert not destination.exists()
+    elif destination_kind == "existing":
+        assert destination.read_bytes() == b"existing output"
+    assert not list(tmp_path.glob(".aps_write_*"))
+
+
+@pytest.mark.parametrize("meta_event", [_TEXT, _TITLE], ids=["text", "track-name"])
+def test_title_edit_accepts_explicit_status_and_subsequent_running_status_after_meta(
+    tmp_path, meta_event,
+):
+    track = _NOTE + meta_event + _NOTE + _RUNNING_NOTE
+    if meta_event != _TITLE:
+        track += _TITLE
+    track += _END
+    source_bytes = _midi(track)
+    source = tmp_path / "source.mid"
+    source.write_bytes(source_bytes)
+    destination = tmp_path / "destination.mid"
+
+    write_midi_title_to_path(source, "Renamed", destination)
+
+    assert source.read_bytes() == source_bytes
+    assert destination.read_bytes() == _midi(track.replace(_TITLE, b"\x00\xff\x03\x07Renamed"))
+    assert read_first_title_from_midi(destination) == "Renamed"

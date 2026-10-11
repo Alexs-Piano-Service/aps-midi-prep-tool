@@ -27,6 +27,13 @@ INVALID_EVENTS = [
     pytest.param(b"\x00\x93\x3c\x80", id="explicit-channel"),
     pytest.param(b"\x00\x93\x3c\x40\x00\x3e\xff", id="running-status"),
 ]
+META_EVENTS = [
+    pytest.param(b"\xff\x01\x01X", id="text"),
+    pytest.param(b"\xff\x03\x01X", id="track-name"),
+    pytest.param(b"\xff\x51\x03\x07\xa1\x20", id="tempo"),
+    pytest.param(b"\xff\x7f\x00", id="empty-sequencer-specific"),
+    pytest.param(b"\xff\x70\x01X", id="unknown"),
+]
 
 
 def _midi(events):
@@ -165,4 +172,71 @@ def test_invalid_type0_conversion_preserves_source_and_destination(tmp_path, eve
         assert destination.read_bytes() == b"existing destination"
     assert {path.name for path in tmp_path.iterdir()} == (
         {"source.mid", "converted.mid"} if existing else {"source.mid"}
+    )
+
+
+@pytest.mark.parametrize("meta", META_EVENTS)
+def test_meta_events_cancel_running_status(meta):
+    track = b"\x00\x90\x3c\x40\x00" + meta + b"\x00\x3e\x40" + END_OF_TRACK
+
+    with pytest.raises(ValueError, match="Invalid running status in track data"):
+        _parse_track_events(track)
+
+
+@pytest.mark.parametrize("meta", META_EVENTS)
+def test_explicit_channel_status_after_meta_reestablishes_running_status(meta):
+    track = (b"\x00\x90\x3c\x40\x01" + meta
+             + b"\x02\x91\x3e\x40\x03\x40\x40" + END_OF_TRACK)
+
+    events, end_tick = _parse_track_events(track)
+
+    assert events == [
+        (0, 0, b"\x90\x3c\x40"), (1, 1, meta),
+        (3, 2, b"\x91\x3e\x40"), (6, 3, b"\x91\x40\x40"),
+    ]
+    assert end_tick == 6
+
+
+@pytest.mark.parametrize("events,error", [
+    pytest.param(
+        b"\x00\xff\x2f\x01\x00\x00\x90\x3c\x40\x60\x80\x3c\x00",
+        "End of Track meta event must have zero length",
+        id="nonzero-end-of-track-length",
+    ),
+    pytest.param(
+        b"\x00\x90\x3c\x40\x00\xff\x01\x01X\x00\x3e\x40\x60\x80\x3e\x00",
+        "Invalid running status in track data",
+        id="running-status-after-meta",
+    ),
+])
+@pytest.mark.parametrize("destination_kind", ["new", "existing", "in_place"])
+@pytest.mark.parametrize("convert", [
+    pytest.param(convert_midi_file_to_type0_path, id="type0"),
+    pytest.param(convert_midi_file_to_eseq_path, id="eseq-default"),
+    pytest.param(
+        lambda source, dest: convert_midi_file_to_eseq_path(source, dest, timing_policy="preserve"),
+        id="eseq-preserve",
+    ),
+    pytest.param(merge_midi_channels_to_channel0_path, id="channel-merge"),
+])
+def test_invalid_meta_events_cannot_publish_a_conversion(
+    tmp_path, events, error, destination_kind, convert,
+):
+    source = tmp_path / "source.mid"
+    original = _midi(events)
+    source.write_bytes(original)
+    destination = source if destination_kind == "in_place" else tmp_path / "converted.song"
+    if destination_kind == "existing":
+        destination.write_bytes(b"existing destination")
+
+    with pytest.raises(ValueError, match=error):
+        convert(source, destination)
+
+    assert source.read_bytes() == original
+    if destination_kind == "new":
+        assert not destination.exists()
+    elif destination_kind == "existing":
+        assert destination.read_bytes() == b"existing destination"
+    assert set(tmp_path.iterdir()) == (
+        {source, destination} if destination_kind == "existing" else {source}
     )

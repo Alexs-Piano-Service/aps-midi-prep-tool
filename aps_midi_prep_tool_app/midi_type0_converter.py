@@ -98,6 +98,7 @@ def _parse_track_events(track_data):
             status = running_status
 
         if status == 0xFF:
+            running_status = None
             if not status_from_stream:
                 raise ValueError("Meta events cannot use running status.")
             if pos >= end:
@@ -113,6 +114,8 @@ def _parse_track_events(track_data):
                 raise ValueError("Meta event exceeds track bounds.")
 
             if meta_type == 0x2F:
+                if meta_len != 0:
+                    raise ValueError("End of Track meta event must have zero length.")
                 # The declared track end is a boundary, even if its chunk
                 # contains trailing padding or another recoverable fragment.
                 # Preserve its delta while leaving later bytes out of music.

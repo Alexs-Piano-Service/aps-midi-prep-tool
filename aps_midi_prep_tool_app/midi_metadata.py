@@ -186,6 +186,7 @@ def _find_first_track_name_event(track_data, *, validate_remainder=False):
         if status == 0xFF:
             if not status_from_stream:
                 raise ValueError("Meta events cannot use running status.")
+            running_status = None
             if pos >= track_end:
                 raise ValueError("Unexpected end of meta event.")
 

@@ -62,10 +62,11 @@ def test_every_static_music_parser_diagnostic_has_a_translation():
     (_parse_track_events, b"\x00\x90\x3c"),
     (_parse_track_events, b"\x00\xf5"),
     (_parse_track_events, b"\x81"),
+    (_parse_track_events, b"\x00\xff\x2f\x01\x00\x00\x90\x3c\x40"),
     (parse_eseq_bytes, b"short"),
     (parse_eseq_bytes, b"\x00" * 160),
     (parse_eseq_bytes, _eseq_with_invalid_channel_data()),
-), ids=("short-midi", "unknown-midi-format", "short-note", "unknown-status", "short-vlq", "short-eseq", "missing-eseq-signature", "invalid-eseq-channel-data"))
+), ids=("short-midi", "unknown-midi-format", "short-note", "unknown-status", "short-vlq", "nonzero-end-of-track-length", "short-eseq", "missing-eseq-signature", "invalid-eseq-channel-data"))
 def test_real_parser_failures_translate_and_preserve_path_context(language, parse, data):
     with pytest.raises(ValueError) as caught:
         parse(data)
