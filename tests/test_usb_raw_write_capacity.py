@@ -115,18 +115,25 @@ def file_level_save(tmp_path, monkeypatch, request):
         session.cleanup()
 
 
-@pytest.mark.parametrize("verify", [False, True])
-def test_file_level_hd_source_fits_dd_target_without_changing_geometry(file_level_save, verify):
+@pytest.mark.parametrize("verify_copies", [False, True])
+def test_file_level_hd_source_fits_dd_target_without_changing_geometry(file_level_save, monkeypatch, verify_copies):
     session, source, destination, target, payload = file_level_save
     before = source.read_bytes()
+    monkeypatch.setattr(
+        image, "_verify_physical_floppy_contents",
+        lambda *_a, **_k: pytest.fail("File-level copy verification must not use full-image readback"),
+    )
 
-    session.write_to_floppy_target("floppy_usb", target, file_level=True, verify_after_write=verify)
+    session.write_to_floppy_target(
+        "floppy_usb", target, file_level=True, verify_after_write=False, verify_copies=verify_copies,
+    )
 
     assert destination.stat().st_size == 737_280
     assert image._geometry_from_boot_sector(destination.read_bytes()[:512]).total_size == 737_280
     assert image._read_fat12_file_bytes(destination, "SONG.MID") == payload
     assert source.read_bytes() == before
-    assert session.last_write_verification["confidence"] == ("contents_verified" if verify else "written")
+    assert session.last_floppy_save_diagnostics["file_contents_verified"] is verify_copies
+    assert session.last_write_verification["confidence"] == ("contents_verified" if verify_copies else "written")
 
 
 def test_file_level_save_stops_before_writing_if_target_media_changes(file_level_save, monkeypatch):
