@@ -16270,6 +16270,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
         if details.get("type") != "greaseweazle_conversion":
             self._on_disk_load_failure(message)
+            if (self.pendingDiskRecoveryRequest is not None
+                    and (details.get("read_diagnostics") or {}).get("failure_scope") == "local_working_copy"):
+                self.pendingDiskRecoveryRequest["failure_scope"] = "local_working_copy"
             return
         self.pendingGwConversionDetails = details
 
@@ -16497,26 +16500,31 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @zip_import_operation
     def _offer_disk_recovery(self, request):
-        if request.get("load_kind") == "floppy_usb":
-            timing_note = self._lt(
-                "USB recovery shows progress and normally stops after about five minutes. "
-                "A disk read already in progress may take longer."
-            )
+        if request.get("failure_scope") == "local_working_copy":
+            # A local storage failure does not justify a second, slower read
+            # of the media. Keep the existing session and its pending edits.
+            reply = QMessageBox.No
         else:
-            timing_note = self._lt("Recovery may take a long time.")
-        message = self._lt(
-            "The disk or image could not be read.\n\n{timing}\n\n"
-            "Recovery works on a copy. Physical floppies must first be copied to a full disk image. "
-            "The app looks for MIDI, E-SEQ and PIANODIR data; names, order, titles and parts of damaged songs may be missing.\n\n"
-            "Try recovery?", timing=timing_note,
-        )
-        reply = QMessageBox.question(
-            self,
-            "Try Disk Recovery?",
-            message,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
+            if request.get("load_kind") == "floppy_usb":
+                timing_note = self._lt(
+                    "USB recovery shows progress and normally stops after about five minutes. "
+                    "A disk read already in progress may take longer."
+                )
+            else:
+                timing_note = self._lt("Recovery may take a long time.")
+            message = self._lt(
+                "The disk or image could not be read.\n\n{timing}\n\n"
+                "Recovery works on a copy. Physical floppies must first be copied to a full disk image. "
+                "The app looks for MIDI, E-SEQ and PIANODIR data; names, order, titles and parts of damaged songs may be missing.\n\n"
+                "Try recovery?", timing=timing_note,
+            )
+            reply = QMessageBox.question(
+                self,
+                "Try Disk Recovery?",
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
         if reply != QMessageBox.Yes:
             self._show_operation_error(
                 request.get("failure_title", self.diskLoadFailureTitle),

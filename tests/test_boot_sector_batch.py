@@ -295,12 +295,17 @@ def test_batch_reports_incomplete_scan_separately_from_image_results(tmp_path, m
     source, data, geometry = song_image(tmp_path)
     source.write_bytes(protect(data, geometry, "blank"))
     blocked = str(tmp_path if unreadable_root else tmp_path / "unreadable")
+    real_walk = os.walk
 
-    def walk(path, *, onerror):
-        assert str(path) == str(tmp_path)
+    def walk(path, *args, **kwargs):
+        # Windows temporary-directory cleanup also calls os.walk, with
+        # topdown=False. Only inject the scan failure for this batch's root.
+        if Path(path) != tmp_path:
+            yield from real_walk(path, *args, **kwargs)
+            return
         if not unreadable_root:
             yield str(tmp_path), ["unreadable"], [source.name]
-        onerror(PermissionError(13, "Access denied", blocked))
+        kwargs["onerror"](PermissionError(13, "Access denied", blocked))
 
     monkeypatch.setattr(repair.os, "walk", walk)
     batch = repair.repair_boot_sector_batch(tmp_path, directory=True, recursive=True)

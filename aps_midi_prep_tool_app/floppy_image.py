@@ -53,6 +53,7 @@ from .midi_metadata import (
 )
 from .additional_formats import electone_mdr_to_midi, pianodisc_system3
 from .subprocess_utils import WindowsProcessTreeWaiter, windows_subprocess_kwargs
+from .helpers.atomic_file import publish_new_file
 from . import floppy_save_recovery, windows_write_guard
 
 
@@ -63,6 +64,27 @@ class FloppyImageError(Exception):
         super().__init__(message)
         if winerror is not None:
             self.winerror = int(winerror)
+
+
+class FloppyWorkingCopyError(FloppyImageError):
+    """Acquired bytes could not be saved locally; rereading sectors cannot fix it."""
+
+    def __init__(self, output_path, error):
+        directory = os.path.dirname(os.path.abspath(output_path))
+        directory_exists = os.path.isdir(directory)
+        self.working_copy_details = {
+            "output_path": os.fspath(output_path),
+            "directory_exists": directory_exists,
+            "error": _read_failure_record(error),
+        }
+        reason = (
+            "The local temporary working folder is no longer available."
+            if not directory_exists else "The local working image could not be saved."
+        )
+        super().__init__(
+            f"{reason} Check the computer's temporary storage and try Read Floppy again. "
+            f"The floppy was not changed by this read.\n\nDetails: {error}"
+        )
 
 
 class AmbiguousDosFilenameError(FloppyImageError):
@@ -1285,9 +1307,15 @@ def _unsupported_image_type_message(output_ext, *, for_output=False):
     return f"Unsupported image type '{label}'. The app cannot {action} that format. {_supported_image_type_hint()}"
 
 
-def _notify_progress(progress_callback, step, total, message):
+def _notify_progress(progress_callback, step, total, message, *, allow_cancel=True):
     if progress_callback is not None:
-        progress_callback(step, total, message)
+        try:
+            progress_callback(step, total, message)
+        except FloppyOperationCancelled:
+            # Completion notices must not interrupt bookkeeping after the
+            # physical write and any requested verification have succeeded.
+            if allow_cancel:
+                raise
 
 
 def _floppy_progress_files(items, action, progress_callback, *, display_names=None):
@@ -1999,7 +2027,7 @@ def _create_blank_fat12_image_from_layout(output_path, layout, volume_label):
         handle.write(payload)
 
 
-def _write_image_direct(source_img, output_path, output_ext, disk_format):
+def _write_image_direct(source_img, output_path, output_ext, disk_format, *, verify_contents=False):
     output_ext = output_ext.lower().lstrip(".")
     if output_ext in RAW_IMAGE_EXTENSIONS:
         shutil.copy2(source_img, output_path)
@@ -2007,6 +2035,8 @@ def _write_image_direct(source_img, output_path, output_ext, disk_format):
     if output_ext not in SUPPORTED_IMAGE_EXTENSIONS:
         raise FloppyImageError(_unsupported_image_type_message(output_ext, for_output=True))
     output = _gw_convert(source_img, output_path, disk_format.key)
+    if verify_contents:
+        verify_image_payloads(output_path, source_img, disk_format)
     return _gw_sector_report(
         "convert",
         _parse_gw_sector_map(output, disk_format),
@@ -2112,7 +2142,7 @@ def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_fo
             raise FloppyImageError(f"Files were written, but readback verification failed: {exc}") from exc
 
 
-def _finish_temp_output(temp_path, output_path, *, before_replace=None):
+def _finish_temp_output(temp_path, output_path, *, before_replace=None, replace_existing=True):
     temp_mode = stat.S_IMODE(os.stat(temp_path).st_mode)
     readonly_windows_stage = os.name == "nt" and not temp_mode & stat.S_IWUSR
     # Windows needs a writable descriptor to sync. copy2 may have inherited
@@ -2127,6 +2157,12 @@ def _finish_temp_output(temp_path, output_path, *, before_replace=None):
             os.chmod(temp_path, temp_mode)
     if before_replace is not None:
         before_replace(output_path)
+    if not replace_existing:
+        # Numbered filenames were not selected for replacement. Exclusive
+        # publication also protects files created after destination validation.
+        # The caller owns cleanup of the stage retained by publish_new_file.
+        publish_new_file(temp_path, output_path)
+        return output_path
     try:
         os.replace(temp_path, output_path)
     except OSError as exc:
@@ -2422,6 +2458,7 @@ def create_floppy_images_from_files(
     total_files = len(file_specs)
     temp_dir = tempfile.mkdtemp(prefix="aps_new_floppy_image_")
     raw_images = []
+    staged_outputs = []
     current_img = None
     current_count = 0
 
@@ -2505,6 +2542,21 @@ def create_floppy_images_from_files(
             for final_path in output_paths:
                 validate_output_path(final_path)
 
+        collision_message = (
+            "Image output already exists: {}. Choose a different output name or folder."
+        )
+
+        def validate_destination(path):
+            if validate_output_path is not None:
+                validate_output_path(path)
+            if total_images > 1 and os.path.lexists(path):
+                raise FloppyImageError(collision_message.format(path))
+
+        # Check the complete generated list before preparing or publishing any
+        # outputs, including directories and dangling symlinks.
+        for final_path in output_paths:
+            validate_destination(final_path)
+
         for index, (raw_img, final_path) in enumerate(zip(raw_images, output_paths), start=1):
             _notify_progress(
                 progress_callback,
@@ -2516,22 +2568,38 @@ def create_floppy_images_from_files(
             temp_output = _capture_temp_output_path(
                 final_path, suffix=f".{output_ext.lower().lstrip('.')}",
             )
+            staged_outputs.append((temp_output, final_path, None))
+            report = _write_image_direct(
+                raw_img, temp_output, output_ext, disk_format, verify_contents=True,
+            )
+            staged_outputs[-1] = (temp_output, final_path, report)
+
+        # A corrupt later conversion must not leave an earlier disk published.
+        # Recheck every destination after conversion, then publish exclusively
+        # for split sets to close the race with another writer.
+        for final_path in output_paths:
+            validate_destination(final_path)
+        for temp_output, final_path, report in staged_outputs:
             try:
-                if validate_output_path is not None:
-                    validate_output_path(final_path)
-                report = _write_image_direct(raw_img, temp_output, output_ext, disk_format)
-                _finish_temp_output(temp_output, final_path, before_replace=validate_output_path)
-                if report is not None and sector_report_callback is not None:
-                    sector_report_callback(report)
-            finally:
-                if os.path.exists(temp_output):
-                    os.remove(temp_output)
+                _finish_temp_output(
+                    temp_output, final_path, before_replace=validate_destination,
+                    replace_existing=total_images == 1,
+                )
+            except FileExistsError as exc:
+                raise FloppyImageError(collision_message.format(final_path)) from exc
+            if report is not None and sector_report_callback is not None:
+                sector_report_callback(report)
 
             written_paths.append(final_path)
 
         return written_paths
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        try:
+            for temp_output, _final_path, _report in staged_outputs:
+                if os.path.exists(temp_output):
+                    os.remove(temp_output)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _disk_format_key(disk_format):
@@ -4322,7 +4390,7 @@ def capture_logical_floppy_image(
             listing = read_image_listing(stage)
             diagnostics.update(repair_note=repair.note,
                                boot_sector_reconstructed=repair.boot_sector_repaired)
-        except (FloppyOperationCancelled, _FloppyReadStalled):
+        except (FloppyOperationCancelled, _FloppyReadStalled, FloppyWorkingCopyError):
             raise
         except FloppyImageError as exc:
             diagnostics["fast_read_failure"] = str(exc)
@@ -8129,11 +8197,20 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                     "A bounded full-disk recovery is required to search for missing songs.",
                     fallback_allowed=True,
                 )
-            with open(output_path, "wb") as handle:
-                handle.write(image)
+            try:
+                with open(output_path, "wb") as handle:
+                    handle.write(image)
+            except OSError as exc:
+                failure = FloppyWorkingCopyError(output_path, exc)
+                if diagnostics is not None:
+                    diagnostics.update(
+                        failure_scope="local_working_copy", stage="saving_working_image",
+                        working_copy=failure.working_copy_details,
+                    )
+                raise failure from exc
             _raise_if_cancelled(cancel_callback)
             return repair_result
-        except FloppyOperationCancelled:
+        except (FloppyOperationCancelled, FloppyWorkingCopyError):
             raise
         except FastFloppyReadError:
             raise
@@ -9599,6 +9676,101 @@ def _finalize_recovery_diagnostics(diagnostics):
     return diagnostics
 
 
+def _posix_floppy_root_directory(drive_path, cancel_callback=None):
+    """Read allocation slots without reading file data or unused root sectors."""
+    fd = os.open(drive_path, os.O_RDONLY)
+    try:
+        boot = _read_device_exact(fd, 0, 512, "boot sector", cancel_callback=cancel_callback)
+        geometry = _geometry_from_boot_sector(boot)
+        if geometry is None or geometry.root_size > 64 * 1024:
+            raise FloppyImageError("Could not determine the floppy root-directory capacity; no files were changed.")
+        directory, _, _ = _read_floppy_directory_sectors(
+            fd, [(geometry.root_offset, geometry.root_size)],
+            sector_size=geometry.bytes_per_sector, label="floppy root directory",
+            cancel_callback=cancel_callback,
+        )
+        return directory[:geometry.root_entries * 32]
+    finally:
+        os.close(fd)
+
+
+def _mtools_filename_root_slots(name):
+    # mtools can store uniform case separately for each 8.3 component. Mixed
+    # case and long names need UTF-16 LFN records in addition to the short name.
+    # It also emits LFN records for apostrophes, even in valid DOS short names.
+    if (" " not in name and "'" not in name
+            and _oem_short_name_bytes(name.upper()) is not None
+            and all(part in (part.upper(), part.lower()) for part in name.split("."))):
+        return 1
+    return 1 + (len(name.encode("utf-16-le")) + 25) // 26
+
+
+def _check_posix_floppy_root_capacity(
+    drive_path, affected, replacement_paths, diagnostics, cancel_callback=None,
+):
+    directory = _posix_floppy_root_directory(drive_path, cancel_callback=cancel_callback)
+    free = [False] * (len(directory) // 32)
+    for index in range(len(free)):
+        first = directory[index * 32]
+        if first == 0:
+            free[index:] = [True] * (len(free) - index)
+            break
+        free[index] = first == 0xE5
+    free_entries = sum(free)
+
+    # Labels, folders and orphaned LFN records remain occupied. Only reclaim
+    # LFN records whose checksum/name identify a file we are about to delete.
+    reclaimed = set()
+    for entry in _iter_fat_directory_entries(directory):
+        if entry["attr"] & 0x18 or dos_filename_key(entry["name"]) not in affected:
+            continue
+        last = entry["offset"] // 32
+        first = last
+        while first > 0:
+            previous = directory[(first - 1) * 32:first * 32]
+            if previous[0] in (0, 0xE5) or previous[11] != 0x0F:
+                break
+            first -= 1
+            if previous[0] & 0x40:
+                break
+        lfn = [directory[index * 32:(index + 1) * 32] for index in range(first, last)]
+        if not lfn or _decode_fat_lfn_entries(lfn, entry["short_name_bytes"]) != entry["name"]:
+            first = last
+        for index in range(first, last + 1):
+            free[index] = True
+            reclaimed.add(index)
+
+    requirements = [_mtools_filename_root_slots(path) for path in replacement_paths]
+    available = sum(free)
+    required = sum(requirements)
+    diagnostics["root_directory_check"] = {
+        "status": "complete", "free_entries": free_entries,
+        "reclaimed_entries": len(reclaimed), "available_entries": available,
+        "required_entries": required,
+    }
+    if required > available:
+        raise FloppyImageError(
+            f"Saving these files needs {required} root-directory entries; only {available} are available after replacing old files. "
+            "No files were changed."
+        )
+
+    # mcopy needs an adjacent run for each long filename and does not compact
+    # occupied entries. Use the same first-fit and publication order as mcopy.
+    for count in requirements:
+        _raise_if_cancelled(cancel_callback)
+        run = 0
+        for index, is_free in enumerate(free):
+            run = run + 1 if is_free else 0
+            if run == count:
+                free[index + 1 - count:index + 1] = [False] * count
+                break
+        else:
+            raise FloppyImageError(
+                "The floppy does not have enough contiguous root-directory entries for these filenames. "
+                "No files were changed."
+            )
+
+
 def _windows_free_root_directory_entries(drive_path, cancel_callback=None):
     """Count actual FAT12 slots, including deleted slots and excluding LFN/labels."""
     with _WindowsRecoveryVolumeHandle(drive_path, write=False) as volume:
@@ -9627,9 +9799,9 @@ def _finish_windows_save_recovery(session, status):
     diagnostics.update(status=status, recovery_directory=str(package.directory))
     try:
         if status == "complete":
-            package.complete(diagnostics)
+            package.complete(diagnostics, allow_cancel=False)
         else:
-            package.checkpoint(status=status, diagnostics=dict(diagnostics))
+            package.checkpoint(status=status, diagnostics=dict(diagnostics), allow_cancel=False)
     except OSError as exc:
         diagnostics["journal_error"] = str(exc)
     session._pending_windows_save_recovery = None
@@ -9658,7 +9830,9 @@ class _WindowsFileSaveMixin:
         try:
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 0, 0, "Preparing files...")
-            package = floppy_save_recovery.SaveRecoveryPackage(drive_path, modified_img)
+            package = floppy_save_recovery.SaveRecoveryPackage(
+                drive_path, modified_img, check_cancel=lambda: _raise_if_cancelled(cancel_callback),
+            )
             diagnostics["recovery_directory"] = str(package.directory)
             self._sync_windows_drive_files(
                 modified_img, drive_path, diagnostics, package, cleanup,
@@ -9666,15 +9840,16 @@ class _WindowsFileSaveMixin:
                 backup_originals=backup_originals, check_originals=check_originals,
                 verify_copies=verify_copies,
             )
-            _notify_progress(progress_callback, 0, 0, "Finishing floppy save...")
+            _notify_progress(progress_callback, 0, 0, "Finishing floppy save...", allow_cancel=False)
             diagnostics.update(status="complete" if verify_copies else "files_saved", stage="complete")
             diagnostics.pop("file", None)
             if finalize_recovery:
-                package.complete(diagnostics)
+                package.complete(diagnostics, allow_cancel=False)
             else:
                 package.checkpoint(
                     status="contents_verified" if verify_copies else "files_saved",
                     diagnostics=dict(diagnostics),
+                    allow_cancel=False,
                 )
                 self._pending_windows_save_recovery = package
         except Exception as exc:
@@ -9700,7 +9875,8 @@ class _WindowsFileSaveMixin:
             if package is not None:
                 self._restore_windows_drive_attributes(diagnostics, package, cleanup)
                 try:
-                    package.checkpoint(status=diagnostics["status"], diagnostics=dict(diagnostics))
+                    package.checkpoint(status=diagnostics["status"], diagnostics=dict(diagnostics),
+                                       allow_cancel=False)
                 except OSError as journal_error:
                     diagnostics["journal_error"] = str(journal_error)
             raise
@@ -10214,7 +10390,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 read_image_listing(working_img)
             except FloppyOperationCancelled:
                 raise
-            except _FloppyReadStalled:
+            except (_FloppyReadStalled, FloppyWorkingCopyError):
                 raise
             except FastFloppyReadError as fast_exc:
                 acquisition["first_error"] = _read_failure_record(fast_exc)
@@ -10261,8 +10437,11 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     # source stays read-only while its songs become MIDI files.
                     _notify_progress(progress_callback, 90, 100, "Decoding PianoDisc System 3 songs...")
                     _raise_if_cancelled(cancel_callback)
-                    with open(source_copy, "wb") as handle:
-                        handle.write(raw_data)
+                    try:
+                        with open(source_copy, "wb") as handle:
+                            handle.write(raw_data)
+                    except OSError as exc:
+                        raise FloppyWorkingCopyError(source_copy, exc) from exc
                     session = cls._from_pianodisc_system3_image(
                         drive_info.path, "img", temp_dir, source_copy,
                         source_kind="floppy_usb", source_name=drive_info.display_name,
@@ -10275,7 +10454,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     session.read_diagnostics = acquisition
                     return session
                 _notify_progress(progress_callback, 75, 100, "Creating working copy...")
-                repair_result = prepare_yamaha_bytes(raw_data, working_img)
+                try:
+                    repair_result = prepare_yamaha_bytes(raw_data, working_img)
+                except OSError as exc:
+                    raise FloppyWorkingCopyError(working_img, exc) from exc
                 repair_result = YamahaRepairResult(
                     repair_result.note + f" Fast floppy file-level read was unavailable: {fast_exc}",
                     repair_result.changed,
@@ -10309,6 +10491,11 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             session.read_diagnostics = acquisition
             return session
         except Exception as exc:
+            if isinstance(exc, FloppyWorkingCopyError):
+                acquisition.update(
+                    failure_scope="local_working_copy", stage="saving_working_image",
+                    working_copy=exc.working_copy_details,
+                )
             failure_details = dict(getattr(exc, "read_diagnostics", {}) or {})
             if "raw_fallback" in acquisition:
                 acquisition["raw_fallback"].update(failure_details)
@@ -10368,7 +10555,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 )
                 detected_format = _disk_format_for_image(working_img)
                 read_image_listing(working_img)
-            except FloppyOperationCancelled:
+            except (FloppyOperationCancelled, FloppyWorkingCopyError):
                 raise
             except Exception:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -10430,7 +10617,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             else:
                 session.repair_note = "Existing IBM FAT format reused; floppy contents were cleared."
             return session
-        except FloppyOperationCancelled:
+        except (FloppyOperationCancelled, FloppyWorkingCopyError):
             if session is not None:
                 session.cleanup()
             raise
@@ -12473,7 +12660,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                                         f"Could not copy {name} to the floppy", cancel_callback=cancel)
 
             diagnostics["stage"] = "prepare_recovery"
-            package = floppy_save_recovery.SaveRecoveryPackage(drive_path, modified_img)
+            package = floppy_save_recovery.SaveRecoveryPackage(
+                drive_path, modified_img, check_cancel=lambda: _raise_if_cancelled(cancel_callback),
+            )
             diagnostics["recovery_directory"] = str(package.directory)
             expected_originals = {key: {"size": entry.size} for key, entry in target.items()}
             # A backup reads each original once. Content checks can also be
@@ -12528,6 +12717,15 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             )
             if needed > available:
                 raise FloppyImageError("The prepared files do not fit on this floppy; no files were changed.")
+            # Catalogs describe the completed song set and are published last.
+            order = sorted(replacements, key=lambda key: (is_eseq_directory_path(source[key].path), key))
+            diagnostics["stage"] = "check_final_directory_space"
+            _notify_progress(progress_callback, 0, 0, "Checking floppy...")
+            check_identity()
+            _check_posix_floppy_root_capacity(
+                drive_path, affected, [source[key].path for key in order], diagnostics,
+                cancel_callback=cancel_callback,
+            )
             # All backups and prepared replacements stay on the host. Only
             # the final file set must fit; never allocate temporary floppy
             # copies alongside originals, even when the disk has free space.
@@ -12550,8 +12748,6 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 diagnostics["files_removed"] += 1
                 package.after()
 
-            # Catalogs describe the completed song set and are published last.
-            order = sorted(replacements, key=lambda key: (is_eseq_directory_path(source[key].path), key))
             for copy_index, (key, entry) in enumerate(_floppy_progress_files(
                 ((key, source[key]) for key in order),
                 "Copying files to floppy...", progress_callback,
@@ -12652,7 +12848,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             }
             if package is not None:
                 try:
-                    package.checkpoint(status=diagnostics["status"], diagnostics=dict(diagnostics))
+                    package.checkpoint(status=diagnostics["status"], diagnostics=dict(diagnostics),
+                                       allow_cancel=False)
                 except OSError as journal_error:
                     diagnostics["journal_error"] = str(journal_error)
                 message = f"{exc}\n\nFloppy save recovery files are retained at: {package.directory}"
@@ -12950,7 +13147,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             if self.source_kind.startswith("floppy"):
                 self.last_floppy_save_diagnostics["stage"] = "update_session"
                 if self.source_kind == "floppy_usb":
-                    _notify_progress(progress_callback, 0, 0, "Finishing floppy save...")
+                    _notify_progress(progress_callback, 0, 0, "Finishing floppy save...", allow_cancel=False)
             os.replace(modified_img, self.working_img_path)
             self._extracted_files.clear()
             self.repair_changed = False
@@ -13100,7 +13297,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     modified_img, target_kind, target, self.disk_format,
                     progress_callback=progress_callback, cancel_callback=cancel_callback,
                 )
-            _notify_progress(progress_callback, 5, 5, "Floppy write complete.")
+            _notify_progress(progress_callback, 5, 5, "Floppy write complete.", allow_cancel=False)
             self.latest_gw_sector_reports = reports
             self.last_floppy_save_diagnostics.update(stage="complete", status="complete")
             _finish_windows_save_recovery(self, "complete")

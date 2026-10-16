@@ -1,9 +1,12 @@
 import os
 import struct
+import threading
+import weakref
 from dataclasses import dataclass, field
 from fractions import Fraction
 
 from .eseq_header import analyze_eseq_playback_flags
+from .helpers.atomic_file import atomic_write_bytes
 from .smf import parse_smf_header
 
 from .midi_type0_converter import (
@@ -64,6 +67,8 @@ _ESEQ_PADDING_BYTE = 0xF6
 _ESEQ_TIMING_META_PREFIX = "APS-ESEQ-TIMING"
 _ESEQ_HEADER_META_PREFIX = "APS-ESEQ-HEADER"
 ESEQ_TO_MIDI_CONVERSION_TEXT = "Converted from E-SEQ by APS MIDI Prep Tool"
+_DESTINATION_WRITE_LOCKS = weakref.WeakValueDictionary()
+_DESTINATION_WRITE_LOCKS_GUARD = threading.Lock()
 _LEGACY_ESEQ_TEMPLATE = bytes(
     [
         0xFE,
@@ -1735,14 +1740,17 @@ def convert_midi_bytes_to_eseq_bytes(
 
 
 def _write_destination_bytes(dest_path, payload):
-    temp_path = f"{dest_path}.aps_eseq_{os.getpid()}.tmp"
-    try:
-        with open(temp_path, "wb") as handle:
-            handle.write(payload)
-        os.replace(temp_path, dest_path)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    dest_path = os.path.realpath(os.fsdecode(dest_path))
+    destination_key = os.path.normcase(dest_path)
+    with _DESTINATION_WRITE_LOCKS_GUARD:
+        destination_lock = _DESTINATION_WRITE_LOCKS.get(destination_key)
+        if destination_lock is None:
+            destination_lock = threading.Lock()
+            _DESTINATION_WRITE_LOCKS[destination_key] = destination_lock
+    # Keep a strong reference while waiting and writing. Unused destination
+    # locks disappear from the weak registry after the last writer finishes.
+    with destination_lock:
+        atomic_write_bytes(dest_path, payload)
 
 
 def convert_eseq_file_to_midi_path(

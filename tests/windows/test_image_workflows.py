@@ -7,7 +7,11 @@ import sys
 import pytest
 
 from aps_midi_prep_tool_app import floppy_image as image
-from aps_midi_prep_tool_app.emulator_image_builder import discover_song_files, sanitize_image_set_name
+from aps_midi_prep_tool_app.emulator_image_builder import (
+    build_emulator_disk_images,
+    discover_song_files,
+    sanitize_image_set_name,
+)
 from aps_midi_prep_tool_app.eseq_converter import convert_midi_bytes_to_eseq_bytes
 from aps_midi_prep_tool_app.eseq_pianodir import PIANODIR_COUNT_OFFSET
 from aps_midi_prep_tool_app.midi_metadata import extract_eseq_title_from_file
@@ -45,6 +49,29 @@ def make_image(tmp_path, files, extension="img"):
     assert image.create_floppy_images_from_files(specs, str(output), extension, FORMAT) == [str(output)]
     assert all((source / name).read_bytes() == data for name, data in files.items())
     return output
+
+
+@pytest.mark.parametrize("image_extension", ["img", "hfe"], indirect=True)
+@pytest.mark.parametrize("format_key", ["ibm.720", "ibm.1440"])
+def test_emulator_builder_publishes_and_replaces_verified_images(
+    tmp_path, image_extension, format_key,
+):
+    source = tmp_path / "Original QA songs"
+    source.mkdir()
+    output = tmp_path / "Delivery"
+    song = source / "QATEST.MID"
+
+    for title in ("Original QA phrase", "Updated QA phrase"):
+        song.write_bytes(midi_bytes(title))
+        result = build_emulator_disk_images(
+            source, output, disk_format=image.DISK_FORMAT_BY_KEY[format_key],
+            output_ext=image_extension, output_content="midi", overwrite_existing=True,
+        )
+
+        assert len(result.output_paths) == 1
+        with opened(result.output_paths[0]) as session:
+            assert session.disk_format.key == format_key
+            assert list(contents(session).values()) == [song.read_bytes()]
 
 
 @pytest.mark.parametrize("image_extension", ["img", "hfe"], indirect=True)

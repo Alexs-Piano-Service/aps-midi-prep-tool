@@ -82,6 +82,78 @@ def test_hfe_verification_decodes_delivered_container(tmp_path, prepared_image, 
     assert conversions == [(delivered, disk_format.key)]
 
 
+@pytest.mark.parametrize("image_count, corrupt_image", [(1, None), (1, 1), (2, None), (2, 1), (2, 2)])
+def test_packed_hfe_images_are_verified_before_any_publication(
+    tmp_path, monkeypatch, image_count, corrupt_image,
+):
+    disk_format = floppy_image.DISK_FORMAT_BY_KEY["ibm.720"]
+    specs = []
+    original_songs = {}
+    for index in range(1, image_count + 1):
+        song = tmp_path / f"SONG{index}.MID"
+        # Two songs must use different disks, exercising actual FAT packing.
+        payload = b"original song payload" + bytes([index]) * (400 * 1024)
+        song.write_bytes(payload)
+        specs.append((str(song), song.name))
+        original_songs[song] = payload
+
+    output_dir = tmp_path / "delivery"
+    output_dir.mkdir()
+    destination = output_dir / "Collection.hfe"
+    previous = b"previous good delivery"
+    destination.write_bytes(previous)
+    expected_paths = [destination] if image_count == 1 else [
+        output_dir / f"Collection_{index:02d}.hfe" for index in range(1, image_count + 1)
+    ]
+    prepared_images = {}
+    conversions = []
+
+    def convert(source, output, format_key, **kwargs):
+        assert format_key == disk_format.key
+        # Every conversion and readback must precede publishing any output.
+        assert list(output_dir.glob("Collection*")) == [destination]
+        assert destination.read_bytes() == previous
+        if Path(output).suffix == ".hfe":
+            image_index = len(prepared_images) + 1
+            prepared_images[str(output)] = (image_index, Path(source).read_bytes())
+            Path(output).write_bytes(f"converted image {image_index}".encode())
+            conversions.append(("encode", image_index))
+        else:
+            image_index, prepared = prepared_images[str(source)]
+            Path(output).write_bytes(prepared)
+            if image_index == corrupt_image:
+                _damage_song(output)
+            conversions.append(("decode", image_index))
+        return ""
+
+    monkeypatch.setattr(floppy_image, "_gw_convert", convert)
+
+    if corrupt_image is None:
+        written_paths = floppy_image.create_floppy_images_from_files(
+            specs, destination, "hfe", disk_format,
+        )
+        assert written_paths == [str(path) for path in expected_paths]
+        for index, path in enumerate(expected_paths, start=1):
+            assert path.read_bytes() == f"converted image {index}".encode()
+        if image_count > 1:
+            assert destination.read_bytes() == previous
+        assert set(output_dir.iterdir()) == set(expected_paths) | {destination}
+    else:
+        with pytest.raises(floppy_image.FloppyImageError, match=f"contents differ for SONG{corrupt_image}.MID"):
+            floppy_image.create_floppy_images_from_files(specs, destination, "hfe", disk_format)
+        assert destination.read_bytes() == previous
+        assert list(output_dir.iterdir()) == [destination]
+
+    completed_images = corrupt_image or image_count
+    assert conversions == [
+        (operation, index)
+        for index in range(1, completed_images + 1)
+        for operation in ("encode", "decode")
+    ]
+    for song, payload in original_songs.items():
+        assert song.read_bytes() == payload
+
+
 @pytest.mark.parametrize("result", ["intact", "altered_song", "decode_failure", "cancelled", "cancelled_after_verification"])
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("operation", ["save_as", "commit"])

@@ -1,10 +1,12 @@
 """Batch publication protects sources, existing outputs, and recovery data."""
 
+import hashlib
 import json
 import os
 import shutil
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +17,136 @@ def _file(directory, name, contents):
     path = directory / name
     path.write_bytes(contents)
     return path
+
+
+def _stat_with(info, **changes):
+    values = {name: getattr(info, name) for name in (
+        "st_mode", "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns",
+    )}
+    return SimpleNamespace(**(values | changes))
+
+
+def _mock_stat_queries(monkeypatch, **queries):
+    # Keep the simulated Windows metadata local to this module; pytest and
+    # temporary-directory cleanup must retain their real os functions.
+    monkeypatch.setattr(file_batch, "os", SimpleNamespace(**(vars(os) | queries)))
+
+
+def test_hash_accepts_stable_windows_path_and_handle_ctime_difference(tmp_path, monkeypatch):
+    path = _file(tmp_path, "staged.img", b"unchanged image")
+    before = path.stat()
+    _mock_stat_queries(
+        monkeypatch,
+        fstat=lambda fd: _stat_with(os.fstat(fd), st_ctime_ns=before.st_ctime_ns - 1),
+    )
+
+    digest, identity = file_batch._checked_file_hash(path)
+
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert identity == (before.st_dev, before.st_ino, before.st_size,
+                        before.st_mtime_ns, before.st_ctime_ns)
+
+
+@pytest.mark.parametrize("query", ["lstat", "fstat"])
+def test_hash_rejects_ctime_changes_within_each_query_type(tmp_path, monkeypatch, query):
+    path = _file(tmp_path, "staged.img", b"unchanged image")
+    calls = 0
+
+    def changing_stat(value):
+        nonlocal calls
+        calls += 1
+        info = getattr(os, query)(value)
+        return _stat_with(info, st_ctime_ns=info.st_ctime_ns + calls)
+
+    _mock_stat_queries(monkeypatch, **{query: changing_stat})
+    with pytest.raises(OSError, match="changed while being checked"):
+        file_batch._checked_file_hash(path)
+    assert calls == 2
+
+
+@pytest.mark.parametrize("field", ["st_dev", "st_ino", "st_size", "st_mtime_ns"])
+def test_hash_rejects_different_path_and_handle_identity(tmp_path, monkeypatch, field):
+    path = _file(tmp_path, "staged.img", b"unchanged image")
+
+    def different_file(fd):
+        info = os.fstat(fd)
+        return _stat_with(info, **{field: getattr(info, field) + 1})
+
+    _mock_stat_queries(monkeypatch, fstat=different_file)
+    with pytest.raises(OSError, match="changed while being checked"):
+        file_batch._checked_file_hash(path)
+
+
+def test_hash_rejects_same_size_edit_during_read(tmp_path, monkeypatch):
+    path = _file(tmp_path, "staged.img", b"original")
+    before = path.stat()
+    calls = 0
+
+    def edit_before_final_handle_check(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            path.write_bytes(b"modified")
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        return os.fstat(fd)
+
+    _mock_stat_queries(monkeypatch, fstat=edit_before_final_handle_check)
+    with pytest.raises(OSError, match="changed while being checked"):
+        file_batch._checked_file_hash(path)
+    assert path.read_bytes() == b"modified"
+
+
+@pytest.mark.parametrize("when", ["before_open", "after_read"])
+def test_hash_rejects_replacement_with_same_bytes_and_mtime(tmp_path, monkeypatch, when):
+    path = _file(tmp_path, "staged.img", b"same contents")
+    replacement = _file(tmp_path, "replacement.img", path.read_bytes())
+    before = path.stat()
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    calls = 0
+
+    def replace_at_path_check(value):
+        nonlocal calls
+        calls += 1
+        if when == "after_read" and calls == 2:
+            os.replace(replacement, path)
+        info = os.lstat(value)
+        if when == "before_open" and calls == 1:
+            os.replace(replacement, path)
+        return info
+
+    _mock_stat_queries(monkeypatch, lstat=replace_at_path_check)
+    with pytest.raises(OSError, match="changed while being checked"):
+        file_batch._checked_file_hash(path)
+    assert path.read_bytes() == b"same contents"
+
+
+@pytest.mark.parametrize("when", ["before_check", "after_read"])
+def test_hash_rejects_symlinks(tmp_path, monkeypatch, when):
+    target = _file(tmp_path, "actual.img", b"same contents")
+    path = tmp_path / "staged.img"
+    try:
+        path.symlink_to(target)
+    except OSError:
+        pytest.skip("Symbolic links are unavailable")
+    if when == "after_read":
+        path.unlink()
+        path.write_bytes(target.read_bytes())
+        calls = 0
+
+        def replace_with_symlink(value):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                path.unlink()
+                path.symlink_to(target)
+            return os.lstat(value)
+
+        _mock_stat_queries(monkeypatch, lstat=replace_with_symlink)
+
+    expected = "not a regular file" if when == "before_check" else "changed while being checked"
+    with pytest.raises((ValueError, OSError), match=expected):
+        file_batch._checked_file_hash(path)
+    assert target.read_bytes() == b"same contents"
 
 
 @pytest.fixture

@@ -300,6 +300,178 @@ def _package(session):
     return directory, json.loads((directory / "manifest.json").read_text())
 
 
+@pytest.mark.parametrize("stage", ["original_backup", "before_mutation"])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_manifest_access_denial_never_bypasses_required_recovery_checkpoint(
+    save_session, mounted_drive, monkeypatch, stage, persistent,
+):
+    from aps_midi_prep_tool_app import rename_recovery as storage
+
+    replace = storage._atomic_replace
+    remove = floppy_image.os.remove
+    denied, waits = [], []
+
+    def publish(staged, destination):
+        manifest = json.loads(staged.read_bytes())
+        selected = (manifest["status"] == "preparing" and bool(manifest["originals"])) if stage == "original_backup" else (
+            manifest["status"] == "writing" and manifest["actions"][-1]["operation"] == "delete"
+            and manifest["actions"][-1]["status"] == "started"
+        )
+        if selected and (persistent or not denied):
+            denied.append(True)
+            assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+            assert not (mounted_drive / "SONG.FIL").exists()
+            raise _windows_error(5)
+        replace(staged, destination)
+
+    def remove_with_checkpoint(path):
+        if Path(path) == mounted_drive / "OLD.MID":
+            _, manifest = _package(save_session)
+            assert manifest["actions"][-1] == {"operation": "delete", "file": "OLD.MID", "status": "started"}
+            assert manifest["originals"]["OLD.MID"]["sha256"] == hashlib.sha256(b"original song").hexdigest()
+        remove(path)
+
+    monkeypatch.setattr(storage, "_atomic_replace", publish)
+    monkeypatch.setattr(storage.time, "sleep", waits.append)
+    monkeypatch.setattr(floppy_image.os, "remove", remove_with_checkpoint)
+    if persistent:
+        with pytest.raises(OSError) as caught:
+            save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+        assert caught.value.winerror == 5
+        assert 2 <= len(denied) <= 21
+        assert sum(waits) <= 1.01
+        assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+        assert not (mounted_drive / "SONG.FIL").exists()
+        assert save_session.last_floppy_save_diagnostics["target_mutation_attempted"] is False
+        assert save_session.last_write_verification["confidence"] == "not_written"
+        directory, manifest = _package(save_session)
+        assert manifest["status"] == "failed"
+        assert (directory / manifest["originals"]["OLD.MID"]["file"]).read_bytes() == b"original song"
+    else:
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+        assert len(denied) == 1
+        assert not (mounted_drive / "OLD.MID").exists()
+        assert (mounted_drive / "SONG.FIL").read_bytes() == b"new song"
+        assert _package(save_session)[1]["status"] == "complete"
+
+
+def test_manifest_retry_cancellation_records_cancelled_state_without_mutating_floppy(
+    save_session, mounted_drive, monkeypatch,
+):
+    from aps_midi_prep_tool_app import rename_recovery as storage
+
+    replace = storage._atomic_replace
+    denied, waits = [], []
+
+    def publish(staged, destination):
+        status = json.loads(staged.read_bytes())["status"]
+        if status == "writing" or (status == "cancelled" and status not in denied):
+            denied.append(status)
+            raise _windows_error(32)
+        replace(staged, destination)
+
+    monkeypatch.setattr(storage, "_atomic_replace", publish)
+    monkeypatch.setattr(storage.time, "sleep", waits.append)
+    with pytest.raises(floppy_image.FloppyOperationCancelled):
+        save_session._sync_modified_image_files_to_windows_drive(
+            "prepared.img", "A:", cancel_callback=lambda: bool(waits),
+        )
+    assert denied == ["writing", "cancelled"]
+    assert len(waits) == 2  # Cancellation cannot suppress the final recovery status.
+    assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+    assert not (mounted_drive / "SONG.FIL").exists()
+    _, manifest = _package(save_session)
+    assert manifest["status"] == "cancelled"
+    assert manifest["diagnostics"]["target_mutation_attempted"] is False
+    assert manifest["diagnostics"]["files_removed"] == manifest["diagnostics"]["files_copied"] == 0
+
+
+@pytest.mark.parametrize("failure_checkpoint_denied", [False, True])
+def test_manifest_failure_after_deletion_stops_before_copying_and_retains_recovery(
+    save_session, mounted_drive, monkeypatch, failure_checkpoint_denied,
+):
+    from aps_midi_prep_tool_app import rename_recovery as storage
+
+    replace = storage._atomic_replace
+    denied, waits = [], []
+
+    def publish(staged, destination):
+        manifest = json.loads(staged.read_bytes())
+        deletion_complete = (
+            manifest["status"] == "writing"
+            and manifest["actions"][-1] == {"operation": "delete", "file": "OLD.MID", "status": "complete"}
+        )
+        if deletion_complete or (failure_checkpoint_denied and manifest["status"] == "failed"):
+            denied.append(manifest["status"])
+            assert not (mounted_drive / "OLD.MID").exists()
+            assert not (mounted_drive / "SONG.FIL").exists()
+            raise _windows_error(5)
+        replace(staged, destination)
+
+    monkeypatch.setattr(storage, "_atomic_replace", publish)
+    monkeypatch.setattr(storage.time, "sleep", waits.append)
+    monkeypatch.setattr(floppy_image, "_copy_prepared_floppy_file", lambda *a, **kw:
+                        pytest.fail("A failed journal checkpoint must stop further copying"))
+    with pytest.raises(OSError) as caught:
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert caught.value.winerror == 5
+    assert sum(waits) <= (2.01 if failure_checkpoint_denied else 1.01)
+    diagnostics = save_session.last_floppy_save_diagnostics
+    assert diagnostics["status"] == "failed"
+    assert diagnostics["target_mutation_attempted"] is True
+    assert diagnostics["files_removed"] == 1
+    assert diagnostics["files_copied"] == 0
+    assert save_session.last_write_verification["confidence"] == "partial_or_uncertain"
+    directory, manifest = _package(save_session)
+    assert (directory / manifest["originals"]["OLD.MID"]["file"]).read_bytes() == b"original song"
+    assert (directory / manifest["replacements"]["SONG.FIL"]["file"]).read_bytes() == b"new song"
+    if failure_checkpoint_denied:
+        assert diagnostics["journal_error"]
+        assert manifest["status"] == "writing"
+        assert manifest["actions"][-1]["status"] == "started"
+        staged = json.loads((directory / "manifest.json.new").read_bytes())
+        assert staged["status"] == "failed"
+        assert staged["actions"][-1]["status"] == "complete"
+    else:
+        assert "journal_error" not in diagnostics
+        assert manifest["status"] == "failed"
+        assert manifest["actions"][-1]["status"] == "complete"
+
+
+def test_transient_backup_manifest_failure_still_rejects_stale_floppy_contents(
+    save_session, mounted_drive, monkeypatch,
+):
+    from aps_midi_prep_tool_app import rename_recovery as storage
+
+    changed = b"external song"
+    assert len(changed) == len(save_session.originals["OLD.MID"])
+    (mounted_drive / "OLD.MID").write_bytes(changed)
+    replace = storage._atomic_replace
+    denied = []
+
+    def publish(staged, destination):
+        manifest = json.loads(staged.read_bytes())
+        if manifest["originals"] and not denied:
+            denied.append(True)
+            raise _windows_error(5)
+        replace(staged, destination)
+
+    monkeypatch.setattr(storage, "_atomic_replace", publish)
+    monkeypatch.setattr(storage.time, "sleep", lambda _: None)
+    with pytest.raises(floppy_image.FloppyImageError, match="contents changed since it was opened"):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert len(denied) == 1
+    assert (mounted_drive / "OLD.MID").read_bytes() == changed
+    assert not (mounted_drive / "SONG.FIL").exists()
+    diagnostics = save_session.last_floppy_save_diagnostics
+    assert diagnostics["target_mutation_attempted"] is False
+    assert diagnostics["files_removed"] == diagnostics["files_copied"] == 0
+    directory, manifest = _package(save_session)
+    assert manifest["status"] == "failed"
+    assert manifest["actions"] == []
+    assert (directory / manifest["originals"]["OLD.MID"]["file"]).read_bytes() == changed
+
+
 @pytest.mark.parametrize("failed_copy", [1, 3])
 def test_failed_copy_retains_every_original_and_durable_replacement_locally(save_session, mounted_drive, failed_copy, monkeypatch):
     save_session.prepared = {f"SONG{i}.MID": bytes([i]) * 40 for i in range(3)}

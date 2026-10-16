@@ -8,10 +8,19 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 
 # Kept separate from the MIDI move primitive, so a failed move cannot also corrupt
 # the journal describing it. Tests fault these operations independently.
 _atomic_replace = os.replace
+
+# Local Windows scanners and open handles can briefly deny replacement. Error 5
+# is ambiguous (including permanent ACL/read-only failures), so retries never
+# relax access checks or remove the old manifest. Only a successful replacement
+# establishes that the failure was transient. Keep the total wait to one second.
+_MANIFEST_REPLACE_RETRIES = 20
+_MANIFEST_REPLACE_RETRY_DELAY = 0.05
+_MANIFEST_REPLACE_RETRY_ERRORS = {5, 32, 33}
 
 
 def recovery_root():
@@ -50,7 +59,13 @@ def sync_file(path):
         os.fsync(handle.fileno())
 
 
-def write_manifest(directory, manifest):
+def write_manifest(directory, manifest, *, check_cancel=None):
+    """Flush and atomically publish a journal; a failed checkpoint stays fatal.
+
+    ``check_cancel`` may raise the caller's cancellation exception while waiting
+    for Windows replacement retries. The old journal and flushed staged journal
+    remain available when publication fails or the wait is cancelled.
+    """
     directory = Path(directory)
     staged = directory / "manifest.json.new"
     with open(staged, "w", encoding="utf-8") as handle:
@@ -58,7 +73,19 @@ def write_manifest(directory, manifest):
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
-    _atomic_replace(staged, directory / "manifest.json")
+    for attempt in range(_MANIFEST_REPLACE_RETRIES + 1):
+        try:
+            _atomic_replace(staged, directory / "manifest.json")
+            break
+        except OSError as exc:
+            if (getattr(exc, "winerror", None) not in _MANIFEST_REPLACE_RETRY_ERRORS
+                    or attempt == _MANIFEST_REPLACE_RETRIES):
+                raise
+            if check_cancel is not None:
+                check_cancel()
+            time.sleep(_MANIFEST_REPLACE_RETRY_DELAY)
+            if check_cancel is not None:
+                check_cancel()
     sync_directory(directory)
 
 

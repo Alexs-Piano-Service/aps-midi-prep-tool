@@ -42,6 +42,12 @@ def test_single_floppy_overflow_leaves_existing_outputs_unchanged_and_default_st
             export(allow_split=False)
         assert {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file() and path.suffix != ".ini"} == before
 
+        with pytest.raises(floppy_image.FloppyImageError, match="already exists"):
+            export()
+        assert {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file() and path.suffix != ".ini"} == before
+        for name in ("prepared_01.img", "prepared_02.img"):
+            (tmp_path / name).unlink()
+
         outputs = export()
         assert [Path(path).name for path in outputs] == ["prepared_01.img", "prepared_02.img"]
         delivered = {}

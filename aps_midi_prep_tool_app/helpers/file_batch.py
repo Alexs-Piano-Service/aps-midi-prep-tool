@@ -62,13 +62,20 @@ def _checked_file_hash(path):
                              info.st_mtime_ns, info.st_ctime_ns)
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
-        if identity(os.fstat(handle.fileno())) != identity(before):
+        opened = os.fstat(handle.fileno())
+        # Windows path and handle queries can report different ctime values
+        # for the same unchanged file. Match the file and its contents across
+        # queries, then keep the complete timestamp checks within each query
+        # type so a change during hashing still fails.
+        if (not stat.S_ISREG(opened.st_mode) or
+                identity(opened)[:-1] != identity(before)[:-1]):
             raise OSError(f"Destination changed while being checked: {path}")
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-        if identity(os.fstat(handle.fileno())) != identity(before):
+        if identity(os.fstat(handle.fileno())) != identity(opened):
             raise OSError(f"Destination changed while being checked: {path}")
-    if identity(os.lstat(path)) != identity(before):
+    after = os.lstat(path)
+    if not stat.S_ISREG(after.st_mode) or identity(after) != identity(before):
         raise OSError(f"Destination changed while being checked: {path}")
     return digest.hexdigest(), identity(before)
 

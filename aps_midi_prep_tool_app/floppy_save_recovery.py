@@ -84,7 +84,8 @@ def prune_completed_packages():
 
 
 class SaveRecoveryPackage:
-    def __init__(self, drive, prepared_image=None):
+    def __init__(self, drive, prepared_image=None, *, check_cancel=None):
+        self.check_cancel = check_cancel
         prune_completed_packages()
         root = recovery_root()
         missing = []
@@ -112,13 +113,15 @@ class SaveRecoveryPackage:
             self.manifest["prepared_sha256"] = digest(self.directory / "prepared.img")
         self.checkpoint()
 
-    def checkpoint(self, **fields):
+    def checkpoint(self, *, allow_cancel=True, **fields):
         self.manifest.update(fields)
-        write_manifest(self.directory, self.manifest)
+        write_manifest(self.directory, self.manifest,
+                       check_cancel=self.check_cancel if allow_cancel else None)
 
-    def complete(self, diagnostics):
+    def complete(self, diagnostics, *, allow_cancel=True):
         self.checkpoint(status="complete", diagnostics=dict(diagnostics),
-                        completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+                        completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        allow_cancel=allow_cancel)
         prune_completed_packages()
 
     def retain(self, category, name, source):

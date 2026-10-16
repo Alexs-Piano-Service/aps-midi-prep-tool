@@ -129,6 +129,24 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Split image exports reject existing numbered destinations, including the
+  loaded source image, and protect files created during export. Every generated
+  HFE image is reopened and its file contents verified before any disk is
+  published.
+- Concurrent E-SEQ conversions to the same destination use independent
+  temporary files and serialize publication so each export writes its own song.
+- Linux file-level floppy saves check FAT12 root-directory capacity before
+  deleting or copying files, including reserved entries, reclaimed slots, and
+  contiguous slots needed by long filenames, with or without original backups.
+- Windows emulator IMG/HFE builds accept unchanged staged files when path and
+  handle queries report different creation/change timestamps, while retaining
+  checks for replaced files, symlinks, and changes during verification.
+- Recovery journals briefly retry Windows access/sharing failures during atomic
+  replacement, with cancellation while waiting. Persistent failures still stop
+  floppy saves before the next disk mutation; recovery files remain available.
+- Read Floppy reports local working-image storage failures separately from bad
+  disk sectors, retains their diagnostics, and allows a fresh read without
+  discarding an existing session's edits.
 - Ordinary USB floppy reads retain boot-probe, fast-read, and raw-fallback
   diagnostics in bug reports, including numeric Windows errors and read ranges.
 - Fast floppy opening reads only sectors containing file bytes and active
