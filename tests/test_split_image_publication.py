@@ -80,16 +80,16 @@ def test_numbered_destination_must_be_absent_even_without_a_regular_file(tmp_pat
     assert not list(tmp_path.glob(".aps_capture_*"))
 
 
-@pytest.mark.parametrize("supports_links", [False, True])
-def test_destination_appearing_at_publication_is_never_overwritten(tmp_path, songs, monkeypatch, supports_links):
+@pytest.mark.parametrize("link_error", [None, errno.EOPNOTSUPP, errno.EXDEV])
+def test_destination_appearing_at_publication_is_never_overwritten(tmp_path, songs, monkeypatch, link_error):
     collision = tmp_path / "Collection_01.img"
     link = image.os.link
 
     def competing_link(staged, destination):
         assert Path(destination) == collision
         collision.write_bytes(b"Created by another export just before publication")
-        if not supports_links:
-            raise OSError(errno.EOPNOTSUPP, "Filesystem does not support hard links")
+        if link_error is not None:
+            raise OSError(link_error, "Cannot link to destination filesystem")
         return link(staged, destination)
 
     monkeypatch.setattr(image.os, "link", competing_link)

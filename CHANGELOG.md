@@ -132,9 +132,14 @@ with release sections grouped by version and date.
 - Split image exports reject existing numbered destinations, including the
   loaded source image, and protect files created during export. Every generated
   HFE image is reopened and its file contents verified before any disk is
-  published.
+  published. Split images are staged in the temporary workspace so FAT/exFAT
+  USB destinations need space for the delivered set without an extra staged
+  copy of every disk.
 - Concurrent E-SEQ conversions to the same destination use independent
   temporary files and serialize publication so each export writes its own song.
+- File-level saves to image files on Windows can check directory capacity
+  without a POSIX-only read API, preserving binary data and reading only the
+  required metadata sectors.
 - Linux file-level floppy saves check FAT12 root-directory capacity before
   deleting or copying files, including reserved entries, reclaimed slots, and
   contiguous slots needed by long filenames, with or without original backups.

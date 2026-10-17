@@ -2565,8 +2565,15 @@ def create_floppy_images_from_files(
                 f"Writing image {index} of {total_images}...",
             )
 
+            # Keep split stages in the private workspace. FAT/exFAT must copy
+            # them during exclusive publication; destination-side stages would
+            # consume space for both the prepared set and its delivered copies.
+            staging_path = (
+                os.path.join(temp_dir, os.path.basename(final_path))
+                if total_images > 1 else final_path
+            )
             temp_output = _capture_temp_output_path(
-                final_path, suffix=f".{output_ext.lower().lstrip('.')}",
+                staging_path, suffix=f".{output_ext.lower().lstrip('.')}",
             )
             staged_outputs.append((temp_output, final_path, None))
             report = _write_image_direct(
@@ -9676,22 +9683,33 @@ def _finalize_recovery_diagnostics(diagnostics):
     return diagnostics
 
 
+class _FileReadDevice:
+    """Positioned reads on a private, unbuffered binary file handle."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def read_at(self, offset, size, _label):
+        self.handle.seek(offset)
+        return self.handle.read(size)
+
+
 def _posix_floppy_root_directory(drive_path, cancel_callback=None):
     """Read allocation slots without reading file data or unused root sectors."""
-    fd = os.open(drive_path, os.O_RDONLY)
-    try:
-        boot = _read_device_exact(fd, 0, 512, "boot sector", cancel_callback=cancel_callback)
+    with open(drive_path, "rb", buffering=0) as handle:
+        # Image files also use the mtools save path on Windows, which has no
+        # pread. A private, unbuffered binary handle makes seek/read safe here.
+        device = handle.fileno() if callable(getattr(os, "pread", None)) else _FileReadDevice(handle)
+        boot = _read_device_exact(device, 0, 512, "boot sector", cancel_callback=cancel_callback)
         geometry = _geometry_from_boot_sector(boot)
         if geometry is None or geometry.root_size > 64 * 1024:
             raise FloppyImageError("Could not determine the floppy root-directory capacity; no files were changed.")
         directory, _, _ = _read_floppy_directory_sectors(
-            fd, [(geometry.root_offset, geometry.root_size)],
+            device, [(geometry.root_offset, geometry.root_size)],
             sector_size=geometry.bytes_per_sector, label="floppy root directory",
             cancel_callback=cancel_callback,
         )
         return directory[:geometry.root_entries * 32]
-    finally:
-        os.close(fd)
 
 
 def _mtools_filename_root_slots(name):

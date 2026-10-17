@@ -83,7 +83,10 @@ def test_equal_smaller_and_unknown_capacity_raw_writes_retain_existing_behavior(
     assert not modified.exists()
 
 
-@pytest.fixture(params=[False, True], ids=["native-stat", "stat-without-rdev"])
+@pytest.fixture(
+    params=[(False, False), (True, False), (False, True), (True, True)],
+    ids=["native-stat", "stat-without-rdev", "without-pread", "without-pread-or-rdev"],
+)
 def file_level_save(tmp_path, monkeypatch, request):
     monkeypatch.setenv("APS_FLOPPY_SAVE_RECOVERY_DIR", str(tmp_path / "recovery"))
     source = tmp_path / "source-hd.img"
@@ -96,18 +99,24 @@ def file_level_save(tmp_path, monkeypatch, request):
     image._copy_host_file_into_image(source, song, "SONG.MID")
     target = image.FloppyDriveInfo(str(destination), 737_280)
     monkeypatch.setattr(image, "_write_block_device", lambda *_a, **_k: pytest.fail("File-level save must not use raw writing"))
-    if request.param:
+    without_rdev, without_pread = request.param
+    os_api = dict(vars(image.os))
+    if without_rdev:
         fstat = image.os.fstat
 
-        def without_rdev(descriptor):
+        def stat_without_rdev(descriptor):
             info = fstat(descriptor)
             return SimpleNamespace(**{
                 name: getattr(info, name) for name in dir(info)
                 if name.startswith("st_") and name != "st_rdev"
             })
 
-        # Exercise Windows stat fields on Linux too, without changing global os.
-        monkeypatch.setattr(image, "os", SimpleNamespace(**{**vars(image.os), "fstat": without_rdev}))
+        os_api["fstat"] = stat_without_rdev
+    if without_pread:
+        os_api.pop("pread", None)
+    if without_rdev or without_pread:
+        # Exercise Windows APIs/stat fields on Linux without changing global os.
+        monkeypatch.setattr(image, "os", SimpleNamespace(**os_api))
     session = image.FloppyImageSession.load(source)
     try:
         yield session, source, destination, target, payload
