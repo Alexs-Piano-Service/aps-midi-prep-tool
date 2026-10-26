@@ -54,7 +54,7 @@ from .midi_metadata import (
 from .additional_formats import electone_mdr_to_midi, pianodisc_system3
 from .subprocess_utils import WindowsProcessTreeWaiter, windows_subprocess_kwargs
 from .helpers.atomic_file import publish_new_file
-from . import floppy_save_recovery, windows_write_guard
+from . import floppy_save_recovery, windows_fat_directory, windows_write_guard
 
 
 class FloppyImageError(Exception):
@@ -2142,7 +2142,10 @@ def _verify_physical_floppy_contents(prepared_path, target_kind, target, disk_fo
             raise FloppyImageError(f"Files were written, but readback verification failed: {exc}") from exc
 
 
-def _finish_temp_output(temp_path, output_path, *, before_replace=None, replace_existing=True):
+def _finish_temp_output(
+    temp_path, output_path, *, before_replace=None, replace_existing=True,
+    check_cancel=None, published_callback=None,
+):
     temp_mode = stat.S_IMODE(os.stat(temp_path).st_mode)
     readonly_windows_stage = os.name == "nt" and not temp_mode & stat.S_IWUSR
     # Windows needs a writable descriptor to sync. copy2 may have inherited
@@ -2161,8 +2164,13 @@ def _finish_temp_output(temp_path, output_path, *, before_replace=None, replace_
         # Numbered filenames were not selected for replacement. Exclusive
         # publication also protects files created after destination validation.
         # The caller owns cleanup of the stage retained by publish_new_file.
-        publish_new_file(temp_path, output_path)
+        publish_new_file(
+            temp_path, output_path, check_cancel=check_cancel,
+            published_callback=published_callback,
+        )
         return output_path
+    if check_cancel is not None:
+        check_cancel()
     try:
         os.replace(temp_path, output_path)
     except OSError as exc:
@@ -2445,6 +2453,7 @@ def create_floppy_images_from_files(
     sector_report_callback=None,
     allow_split=True,
     validate_output_path=None,
+    cancel_callback=None,
 ):
     if not file_specs:
         raise FloppyImageError("There are no files to save into an image. Add MIDI or E-SEQ files first.")
@@ -2459,10 +2468,12 @@ def create_floppy_images_from_files(
     temp_dir = tempfile.mkdtemp(prefix="aps_new_floppy_image_")
     raw_images = []
     staged_outputs = []
+    published_outputs = []
     current_img = None
     current_count = 0
 
     def start_new_image(image_number):
+        _raise_if_cancelled(cancel_callback)
         raw_path = os.path.join(temp_dir, f"part_{image_number:03d}.img")
         _notify_progress(
             progress_callback,
@@ -2476,6 +2487,7 @@ def create_floppy_images_from_files(
         current_img = start_new_image(1)
 
         for index, spec in enumerate(file_specs, start=1):
+            _raise_if_cancelled(cancel_callback)
             if isinstance(spec, dict):
                 host_path = spec["host_path"]
                 image_path = spec["image_path"]
@@ -2492,7 +2504,7 @@ def create_floppy_images_from_files(
             )
 
             try:
-                _copy_host_file_into_image(current_img, host_path, image_path)
+                _copy_host_file_into_image(current_img, host_path, image_path, cancel_callback=cancel_callback)
                 current_count += 1
                 continue
             except FloppyImageError as exc:
@@ -2516,7 +2528,7 @@ def create_floppy_images_from_files(
             current_count = 0
 
             try:
-                _copy_host_file_into_image(current_img, host_path, image_path)
+                _copy_host_file_into_image(current_img, host_path, image_path, cancel_callback=cancel_callback)
                 current_count = 1
             except FloppyImageError as exc:
                 if _is_image_capacity_error(exc):
@@ -2558,6 +2570,7 @@ def create_floppy_images_from_files(
             validate_destination(final_path)
 
         for index, (raw_img, final_path) in enumerate(zip(raw_images, output_paths), start=1):
+            _raise_if_cancelled(cancel_callback)
             _notify_progress(
                 progress_callback,
                 index,
@@ -2587,10 +2600,13 @@ def create_floppy_images_from_files(
         for final_path in output_paths:
             validate_destination(final_path)
         for temp_output, final_path, report in staged_outputs:
+            _raise_if_cancelled(cancel_callback)
             try:
                 _finish_temp_output(
                     temp_output, final_path, before_replace=validate_destination,
                     replace_existing=total_images == 1,
+                    check_cancel=lambda: _raise_if_cancelled(cancel_callback),
+                    published_callback=published_outputs.append,
                 )
             except FileExistsError as exc:
                 raise FloppyImageError(collision_message.format(final_path)) from exc
@@ -2600,6 +2616,30 @@ def create_floppy_images_from_files(
             written_paths.append(final_path)
 
         return written_paths
+    except BaseException as exc:
+        # Roll back the set before discarding its private stages. Receipts
+        # come from exclusive creation, not from inspecting a path afterward.
+        # Ignore cancellation during cleanup so the entire set is considered.
+        retained = list(getattr(exc, "retained_paths", ()))
+        cleanup_errors = []
+        for publication in reversed(published_outputs):
+            try:
+                publication.remove_if_unchanged()
+            except OSError as cleanup_error:
+                retained.append(publication.destination)
+                cleanup_errors.append(f"{publication.destination}: {cleanup_error}")
+        if retained:
+            error = FloppyImageError(
+                f"The image export failed: {exc}\n\n"
+                "The numbered image set is incomplete. These output paths could not be safely cleaned up:\n"
+                + "\n".join(retained)
+                + "\n\nReconnect the destination if needed and review these files before retrying, "
+                "or choose a different output name or folder. Changed or unverified files were kept."
+            )
+            error.retained_paths = tuple(retained)
+            error.rollback_errors = tuple(cleanup_errors)
+            raise error from exc
+        raise
     finally:
         try:
             for temp_output, _final_path, _report in staged_outputs:
@@ -9789,23 +9829,117 @@ def _check_posix_floppy_root_capacity(
             )
 
 
-def _windows_free_root_directory_entries(drive_path, cancel_callback=None):
-    """Count actual FAT12 slots, including deleted slots and excluding LFN/labels."""
-    with _WindowsRecoveryVolumeHandle(drive_path, write=False) as volume:
-        boot = _read_device_exact(volume, 0, 512, "boot sector", cancel_callback=cancel_callback)
-        geometry = _geometry_from_boot_sector(boot)
-        if geometry is None or geometry.root_size > 64 * 1024:
-            raise FloppyImageError("Could not determine the floppy root-directory capacity.")
-        directory = _read_device_exact(volume, geometry.root_offset, geometry.root_size,
-                                       "root directory", cancel_callback=cancel_callback)
-    free = 0
-    for index in range(geometry.root_entries):
-        first = directory[index * 32]
-        if first == 0:
-            return free + geometry.root_entries - index
-        if first == 0xE5:
-            free += 1
-    return free
+def _windows_root_directory_info(drive_path, cancel_callback=None):
+    """Query mounted FAT metadata through an ordinary directory handle."""
+    root = _windows_filesystem_root(drive_path)
+    if not root:
+        raise FloppyImageError(f"Invalid Windows floppy drive path: {drive_path}")
+    try:
+        return windows_fat_directory.query_root_directory(
+            root, _windows_ctypes(),
+            cancel_callback=lambda: _raise_if_cancelled(cancel_callback),
+        )
+    except ValueError as exc:
+        raise FloppyImageError(f"Invalid floppy root-directory metadata: {exc}") from exc
+
+
+def _windows_filename_root_slots(name):
+    # FastFAT stores per-component ASCII case in the short entry. Unlike
+    # mtools, apostrophes need no LFN; non-ASCII names may need one regardless
+    # of whether our local OEM codec can represent them.
+    if name.isascii() and _minimum_existing_root_slots(name) == 1:
+        return 1
+    return 1 + (len(name.encode("utf-16-le")) + 25) // 26
+
+
+def _minimum_existing_root_slots(name):
+    """Lower bound when the filesystem cannot report the stored LFN records."""
+    # The target's OEM code page need not be cp850. A name we cannot encode
+    # locally can still be a single short entry on (for example) Japanese FAT.
+    if not name.isascii():
+        return 1
+    if (" " not in name and _oem_short_name_bytes(name.upper()) is not None
+            and all(part in (part.upper(), part.lower()) for part in name.split("."))):
+        return 1
+    return 1 + (len(name.encode("utf-16-le")) + 25) // 26
+
+
+def _check_windows_floppy_root_capacity(
+    drive_path, target, affected, replacement_paths, diagnostics, cancel_callback=None,
+):
+    requirements = [_windows_filename_root_slots(path) for path in replacement_paths]
+    try:
+        info = _windows_root_directory_info(drive_path, cancel_callback=cancel_callback)
+    except FloppyOperationCancelled:
+        raise
+    except (OSError, FloppyImageError) as exc:
+        # A driver may not implement the metadata queries. Reclaimed slots
+        # alone can still prove that a no-growth save fits; never assume any
+        # unreported free space, or require elevation to read the raw volume.
+        reclaimed = sum(_minimum_existing_root_slots(target[key].path) for key in affected)
+        required = sum(requirements)
+        # Only recreate existing names. A new short name may resolve to an
+        # unknown alias or restore an older LFN from Windows' tunnel cache.
+        proven = required <= reclaimed and all(
+            dos_filename_key(path) in affected for path in replacement_paths
+        )
+        diagnostics["root_directory_check"] = {
+            "status": "reclaimed_only" if proven else "unavailable",
+            "error": _disk_io_error_details(exc), "free_entries": 0,
+            "reclaimed_entries": reclaimed, "available_entries": reclaimed,
+            "required_entries": required,
+        }
+        if not proven:
+            raise FloppyImageError(
+                "Windows could not verify the floppy root-directory capacity for these filenames. "
+                "No files were changed."
+            ) from exc
+        return
+
+    entries = {dos_filename_key(entry["name"]): entry for entry in info["entries"]}
+    if len(entries) != len(info["entries"]) or any(
+        key not in entries or entries[key]["attributes"] & 0x18 for key in affected
+    ):
+        raise FloppyImageError("The floppy root-directory contents changed during save preparation. No files were changed.")
+    aliases = {dos_filename_key(entry["short_name"]): key
+               for key, entry in entries.items() if entry["short_name"]}
+    destination_keys = {dos_filename_key(path) for path in replacement_paths}
+    for index, path in enumerate(replacement_paths):
+        alias_owner = aliases.get(dos_filename_key(path))
+        if alias_owner is not None:
+            if (alias_owner not in affected
+                    or alias_owner in destination_keys and alias_owner != dos_filename_key(path)):
+                raise FloppyImageError(
+                    f"The destination filename {path} is a short alias for another floppy file. No files were changed."
+                )
+            # Recreating a deleted alias can restore its long name through
+            # Windows filename tunneling. Budget the original LFN as well.
+            requirements[index] = max(requirements[index], entries[alias_owner]["slots"])
+
+    occupied = sum(entry["slots"] for entry in entries.values())
+    if occupied > info["root_entries"]:
+        raise FloppyImageError("Invalid floppy root-directory capacity information. No files were changed.")
+    # Directory enumeration omits the volume label. Reserve its slot even for
+    # a blank label; a valid FAT volume can contain one. A fully occupied,
+    # label-free root can still reuse its existing slots.
+    free = max(0, info["root_entries"] - occupied - 1)
+    reclaimed = sum(entries[key]["slots"] for key in affected)
+    available = free + reclaimed
+    required = sum(requirements)
+    diagnostics["root_directory_check"] = {
+        "status": "complete", "method": "windows_filesystem_metadata",
+        "total_entries": info["root_entries"], "reserved_label_entries": 1,
+        "free_entries": free, "reclaimed_entries": reclaimed,
+        "available_entries": available, "required_entries": required,
+    }
+    if required > available:
+        raise FloppyImageError(
+            f"Saving these files needs {required} root-directory entries; only {available} are available after replacing old files. "
+            "No files were changed."
+        )
+    # Do not apply mtools' contiguous-run rejection here. FastFAT compacts
+    # the fixed FAT12/16 root when necessary, reclaiming orphan LFN records.
+    # Its compaction limit is larger than the root sizes accepted by our query.
 
 
 def _finish_windows_save_recovery(session, status):
@@ -10075,26 +10209,11 @@ class _WindowsFileSaveMixin:
             )
         diagnostics["stage"] = "check_final_directory_space"
         _notify_progress(progress_callback, 0, 0, "Checking floppy...")
-        try:
-            free_entries = _windows_free_root_directory_entries(drive_path, cancel_callback=cancel_callback)
-        except FloppyOperationCancelled:
-            raise
-        except (OSError, FloppyImageError) as exc:
-            # Some filesystem-only drives deny raw reads. Do not require admin
-            # access for a file save; preserve the limitation in the diagnostics.
-            diagnostics["root_directory_check"] = {"status": "unavailable", "error": _disk_io_error_details(exc)}
-        else:
-            available_entries = free_entries + len(affected)
-            diagnostics["root_directory_check"] = {
-                "status": "complete", "free_entries": free_entries,
-                "reclaimed_entries": len(affected), "available_entries": available_entries,
-                "required_entries": len(replacements),
-            }
-            if len(replacements) > available_entries:
-                raise FloppyImageError(
-                    f"Saving these files needs {len(replacements)} root-directory entries; only {available_entries} are available after replacing old files. "
-                    "No files were changed."
-                )
+        _check_windows_floppy_root_capacity(
+            drive_path, target, affected,
+            [target[key].path if key in target else source[key].path for key in replacements],
+            diagnostics, cancel_callback=cancel_callback,
+        )
         package.checkpoint(status="ready", expected=intended)
 
         def check_identity():
@@ -13015,6 +13134,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 sector_report_callback=reports.append,
                 allow_split=allow_split,
                 validate_output_path=lambda path: FloppyImageSession._assert_export_destination_unchanged(self, path),
+                cancel_callback=cancel_callback,
             )
             self.latest_gw_sector_reports = _gw_sector_reports(*reports)
             return output_paths

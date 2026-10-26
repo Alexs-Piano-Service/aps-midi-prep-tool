@@ -78,6 +78,23 @@ workflow. It does not automatically switch to a whole-disk write.
 Other Windows errors still stop the operation. This compatibility fallback needs
 validation with the affected Windows drive and disk.
 
+The FAT root directory has a separate limit from free file-data space. APS reads
+that limit and the stored long-filename allocations through an ordinary Windows
+directory handle, without raw-volume access or an administrator prompt. The
+`root_directory_check` diagnostic records required, free, and reclaimed entries.
+It reserves one entry for a volume label, including a blank label; on an unlabeled
+disk this can leave one directory entry unused. Existing entries can still be
+reused when the directory is full.
+
+Windows can compact a fragmented FAT12/16 root directory, so APS does not reject
+a save just because the free entries are separated. If the filesystem metadata
+query is unavailable, APS allows same-name replacements and deletions only when
+the affected files demonstrably provide enough directory entries. Otherwise it stops before changing file
+attributes or deleting originals. This check assumes a valid FAT directory;
+it is not a filesystem-repair or hardware-write test. It does not reserve entries:
+another writer or Windows restoring a long name cached from an earlier deletion
+can change the allocation needed at copy time. Keep recovery backups enabled.
+
 Bug reports include a `floppy_save` diagnostic block with the save stage,
 both capacity-query results and Windows error codes, whether a change to the
 target was attempted, and the numbers of files successfully removed and copied.

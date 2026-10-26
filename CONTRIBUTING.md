@@ -17,6 +17,16 @@ Thanks for helping improve APS MIDI Prep Tool.
   or preservation context. Do not imply endorsement or affiliation with their
   owners.
 
+## Scope of the 0.9.x branch
+
+The 0.9.x branch is exclusively for bug fixes, reliability improvements,
+regression coverage, and polish of existing workflows. Do not add major
+features on this branch. The aim is to prepare for a stable 1.0 release;
+there is no scheduled 1.0 release date.
+
+Version 0.9.0 is currently unreleased development. A version bump or successful
+build does not mark it ready for release.
+
 ## Development Setup
 
 ```bash
@@ -118,17 +128,20 @@ records the EXE hash and results. This is still a hosted runner, so clean Window
 repository's Azure configuration and is skipped for other repositories and PRs.
 
 `packaging/release.json` declares the version, publication status/date, and exact
-required package filenames. During development, README and the consolidated
-changelog identify 0.8.9 as unreleased; AppStream identifies a dated development
-snapshot. Before tagging, set the actual release date and `status: ready`, change
-the README to `Current version`, date the changelog entry, and set AppStream's
+required package filenames. Version 0.8.9 is published; its history and published
+tag remain unchanged. This checkout is version 0.9.0 with `status: unreleased`,
+no publication date, and a dated AppStream development snapshot. The v0.9.0
+commands below describe a future release and must wait for acceptance. Before
+tagging, set the actual
+UTC release date and `status: ready`, change the README to `Current version`,
+date the changelog entry, and set AppStream's
 matching stable release date. Do this in one commit, push it, and wait for both
 CI jobs. The tagging helper rejects version/tag mismatches and unreleased or
 inconsistent metadata in addition to missing, failed, or skipped CI:
 
 ```bash
-python scripts/tag_release.py v0.8.9 --repo OWNER/REPOSITORY
-git push RELEASE_REMOTE v0.8.9
+python scripts/tag_release.py v0.9.0 --repo OWNER/REPOSITORY
+git push RELEASE_REMOTE v0.9.0
 ```
 
 The helper creates a local annotated tag and records its CI URL. It does not
@@ -138,17 +151,20 @@ to the workflow. Use `GH_TOKEN` or `GITHUB_TOKEN` for private Actions access.
 Prepare a **draft** and publish after every intended package is uploaded and
 accepted. The Windows workflow no longer runs on `release: published`; a manual
 run's optional `release_tag` stages its EXE and test kit in a draft. It does not
-produce the installer, portable ZIP, or Linux AppImage: build/stage those too,
-or deliberately revise the required package list before tagging. Already
-accepted build artifacts can be staged directly without rebuilding:
+produce the installer, portable ZIP, or Linux AppImage: build/stage whichever
+packages the next release's manifest requires, and reconcile their exact names
+before tagging. Already accepted build artifacts can be staged directly without
+rebuilding:
 
 ```bash
-python scripts/release_assets.py stage v0.8.9 --repo OWNER/REPOSITORY --files dist/PACKAGE
-python scripts/release_assets.py publish v0.8.9 --repo OWNER/REPOSITORY --acceptance dist/release-acceptance.json
+python scripts/release_assets.py stage v0.9.0 --repo OWNER/REPOSITORY --files dist/PACKAGE
+python scripts/release_assets.py publish v0.9.0 --repo OWNER/REPOSITORY --acceptance dist/release-acceptance.json
 ```
 
-Publication checks the exact remote tag and CI commit, every declared asset,
-and clean-machine acceptance tied to each uploaded package's SHA-256.
+Future releases must use this gated `publish` command; do not bypass it with
+direct GitHub UI/API publication. Publication checks the exact remote tag and CI
+commit, every declared asset, and clean-machine acceptance tied to each uploaded
+package's SHA-256.
 See [release evidence](docs/release-process.md) for the record format and
 [Windows acceptance](docs/windows-test-plan.md) for the actual tests.
 Both staging and the legacy signing workflow refuse to modify a published

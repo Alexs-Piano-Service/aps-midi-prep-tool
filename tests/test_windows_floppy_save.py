@@ -24,6 +24,19 @@ def _fail(code):
     return fail
 
 
+def _mounted_root_info(root, root_entries=112):
+    entries = []
+    for index, path in enumerate(sorted(root.iterdir())):
+        slots = floppy_image._windows_filename_root_slots(path.name)
+        entries.append({
+            "name": path.name,
+            "short_name": f"F{index:07}.MID" if slots > 1 else "",
+            "attributes": 0x10 if path.is_dir() else 0x20,
+            "slots": slots,
+        })
+    return {"root_entries": root_entries, "entries": entries}
+
+
 @pytest.mark.parametrize("requested,expected", [(0, 0x80), (0x01, 0x01), (0x27, 0x27), (0xA7, 0x27)])
 def test_windows_attribute_api_normalizes_normal_flag_and_verifies_readback(monkeypatch, requested, expected):
     values = {"attributes": 0x20}
@@ -126,7 +139,7 @@ def mounted_drive(tmp_path, monkeypatch):
     monkeypatch.setattr(floppy_image, "_windows_volume_identity", lambda _: {"serial": 123, "filesystem": "FAT"})
     monkeypatch.setattr(floppy_image, "_windows_file_attributes", lambda _: 0x20)
     monkeypatch.setattr(floppy_image, "_set_windows_file_attributes", lambda *a: None)
-    monkeypatch.setattr(floppy_image, "_windows_free_root_directory_entries", lambda *a, **kw: 112)
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info", lambda *a, **kw: _mounted_root_info(root))
     real_listing = floppy_image.read_image_listing
     monkeypatch.setattr(floppy_image, "read_image_listing", lambda path, **kwargs:
         floppy_image._read_windows_filesystem_drive_listing(path, **kwargs) if path == "A:"
@@ -921,7 +934,8 @@ def test_failed_copy_does_not_advance_file_progress(save_session, monkeypatch, f
 @pytest.mark.parametrize("free_entries", [0, 1, 2, 3])
 def test_save_preflights_final_root_slots_separately_from_clusters(save_session, mounted_drive, monkeypatch, free_entries):
     save_session.prepared = {f"SONG{i}.MID": bytes([i]) for i in range(3)}
-    monkeypatch.setattr(floppy_image, "_windows_free_root_directory_entries", lambda *a, **kw: free_entries)
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info",
+                        lambda *a, **kw: _mounted_root_info(mounted_drive, free_entries + 2))
     if free_entries + 1 < 3:
         with pytest.raises(floppy_image.FloppyImageError, match="root-directory entries"):
             save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
@@ -932,36 +946,272 @@ def test_save_preflights_final_root_slots_separately_from_clusters(save_session,
         assert not list(mounted_drive.glob("APS*.TMP"))
 
 
-def test_unavailable_root_slot_query_does_not_require_raw_access(save_session, monkeypatch):
-    monkeypatch.setattr(floppy_image, "_windows_free_root_directory_entries", _fail(5))
+def test_root_capacity_query_does_not_require_raw_access(save_session, monkeypatch):
+    monkeypatch.setattr(floppy_image, "_WindowsRecoveryVolumeHandle",
+                        lambda *a, **kw: pytest.fail("File saving must not request raw-volume access"))
     save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
-    assert save_session.last_floppy_save_diagnostics["root_directory_check"]["status"] == "unavailable"
+    assert save_session.last_floppy_save_diagnostics["root_directory_check"]["status"] == "complete"
 
 
-@pytest.mark.parametrize("has_end_marker", [False, True])
-def test_root_slot_count_includes_labels_long_names_and_deleted_entries(tmp_path, monkeypatch, has_end_marker):
-    path = tmp_path / "test.img"
-    disk_format = next(item for item in floppy_image.DISK_FORMATS if item.key == "ibm.720")
-    floppy_image.create_blank_floppy_image(path, disk_format)
-    data = bytearray(path.read_bytes())
+@pytest.mark.parametrize("backup", [False, True])
+@pytest.mark.parametrize("name", ["SECOND.MID", "A long song title.mid"])
+def test_unavailable_root_capacity_rejects_growth_before_mutation(
+    save_session, mounted_drive, monkeypatch, backup, name,
+):
+    save_session.prepared[name] = b"extra song"
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info", _fail(5))
+    with pytest.raises(floppy_image.FloppyImageError, match="root-directory"):
+        save_session._sync_modified_image_files_to_windows_drive(
+            "prepared.img", "A:", backup_originals=backup,
+        )
+    assert {path.name: path.read_bytes() for path in mounted_drive.iterdir()} == {"OLD.MID": b"original song"}
+    diagnostics = save_session.last_floppy_save_diagnostics
+    assert diagnostics["target_mutation_attempted"] is False
+    assert diagnostics["files_removed"] == diagnostics["files_copied"] == 0
+
+
+def test_unavailable_root_capacity_allows_same_name_replacement(save_session, mounted_drive, monkeypatch):
+    save_session.prepared = {"OLD.MID": b"replacement"}
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info", _fail(5))
+    save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert {path.name: path.read_bytes() for path in mounted_drive.iterdir()} == {"OLD.MID": b"replacement"}
+
+
+def test_unavailable_root_capacity_rejects_new_short_name_with_unknown_tunnel_cache(
+    save_session, mounted_drive, monkeypatch,
+):
+    save_session.prepared = {"NEW.MID": b"replacement"}
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info", _fail(5))
+    with pytest.raises(floppy_image.FloppyImageError, match="root-directory"):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+    assert not save_session.last_floppy_save_diagnostics["target_mutation_attempted"]
+
+
+@pytest.mark.parametrize("original,first", [("一.MID", "FIRST.MID"), ("A long song title.mid", "ALONGS~1.MID")])
+def test_unavailable_metadata_does_not_assume_oem_or_tunneled_slots(
+    save_session, mounted_drive, monkeypatch, original, first,
+):
+    (mounted_drive / "OLD.MID").rename(mounted_drive / original)
+    save_session.originals = {original: b"original song"}
+    save_session.prepared = {first: b"first", "SECOND.MID": b"second"}
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info", _fail(5))
+    with pytest.raises(floppy_image.FloppyImageError, match="root-directory"):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert {path.name: path.read_bytes() for path in mounted_drive.iterdir()} == {original: b"original song"}
+    assert not save_session.last_floppy_save_diagnostics["target_mutation_attempted"]
+
+
+def _image_root_info(path):
+    """Adapt a real FAT12 directory to the metadata Windows exposes."""
+    data = path.read_bytes()
     geometry = floppy_image._geometry_from_boot_sector(data[:512])
-    for index in range(geometry.root_entries):
-        data[geometry.root_offset + index * 32] = 65
-    data[geometry.root_offset + 11] = 0x08  # volume label occupies one slot
-    data[geometry.root_offset + 32 + 11] = 0x0F  # long-name slot is also occupied
-    data[geometry.root_offset + 64] = 0xE5
-    if has_end_marker:
-        data[geometry.root_offset + 96] = 0
-    class Volume:
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def read_at(self, offset, size, label):
-            return data[offset:offset + size]
-    monkeypatch.setattr(floppy_image, "_WindowsRecoveryVolumeHandle", lambda *a, **kw: Volume())
-    expected = 1 + geometry.root_entries - 3 if has_end_marker else 1
-    assert floppy_image._windows_free_root_directory_entries("A:") == expected
+    directory = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
+    entries = []
+    for entry in floppy_image._iter_fat_directory_entries(directory):
+        if entry["attr"] & 0x08:
+            continue
+        offset = entry["offset"]
+        first = offset
+        while first >= 32 and directory[first - 32 + 11] == 0x0F:
+            first -= 32
+        lfn = [directory[index:index + 32] for index in range(first, offset, 32)]
+        long_name = floppy_image._decode_fat_lfn_entries(lfn, entry["short_name_bytes"])
+        entries.append({
+            "name": entry["name"],
+            "short_name": entry["short_name"] if long_name else "",
+            "attributes": entry["attr"],
+            "slots": 1 + (len(long_name.encode("utf-16-le")) + 25) // 26 if long_name else 1,
+        })
+    return {"root_entries": geometry.root_entries, "entries": entries}
+
+
+def _delete_image_files(path, *names):
+    floppy_image._run_command(
+        [floppy_image._require_command("mdel"), "-i", str(path),
+         *(floppy_image.mtools_path(name) for name in names)],
+        "Could not prepare root-capacity fixture",
+    )
+
+
+def _add_image_file(path, tmp_path, name, payload):
+    source = tmp_path / "replacement.bin"
+    source.write_bytes(payload)
+    floppy_image._copy_host_file_into_image(path, source, name)
+
+
+@pytest.fixture
+def full_windows_root(mounted_drive, tmp_path, monkeypatch):
+    """The native metadata and mounted files describe the same full 720K root."""
+    baseline, prepared = tmp_path / "baseline.img", tmp_path / "prepared.img"
+    originals = {"OLD.MID": b"original song", **{f"KEEP{index:03}.MID": b"" for index in range(110)}}
+    for name, payload in originals.items():
+        (mounted_drive / name).write_bytes(payload)
+    for path, format_key in ((baseline, "ibm.720"), (prepared, "ibm.1440")):
+        floppy_image.create_blank_floppy_image(path, floppy_image.DISK_FORMAT_BY_KEY[format_key])
+        floppy_image._run_command(
+            [floppy_image._require_command("mcopy"), "-i", str(path),
+             *(str(mounted_drive / name) for name in originals), "::/"],
+            "Could not populate root-capacity fixture",
+        )
+    metadata = _image_root_info(baseline)
+    assert metadata["root_entries"] == 112
+    assert sum(entry["slots"] for entry in metadata["entries"]) == 111
+    session = object.__new__(floppy_image.FloppyImageSession)
+    session.temp_dir, session.working_img_path = str(tmp_path), str(baseline)
+    session.source_kind, session.source_path = "floppy_usb", "A:"
+    monkeypatch.setattr(floppy_image, "read_image_listing", lambda path, **kw:
+                        floppy_image._read_windows_filesystem_drive_listing(path, **kw) if path == "A:"
+                        else floppy_image._read_fat12_image_listing(path))
+    monkeypatch.setattr(floppy_image, "_windows_drive_file_path", lambda root, name: str(Path(root) / name))
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info", lambda *a, **kw: _image_root_info(baseline))
+    monkeypatch.setattr(floppy_image, "_WindowsRecoveryVolumeHandle",
+                        lambda *a, **kw: pytest.fail("Capacity checks must not read the raw floppy"))
+    return session, baseline, prepared
+
+
+@pytest.mark.parametrize("backup", [False, True])
+def test_full_fat12_root_rejects_three_slot_replacement_before_mutation(
+    full_windows_root, mounted_drive, tmp_path, monkeypatch, backup,
+):
+    session, _baseline, prepared = full_windows_root
+    _delete_image_files(prepared, "OLD.MID")
+    _add_image_file(prepared, tmp_path, "A long song title.mid", b"replacement")
+    monkeypatch.setattr(floppy_image, "_windows_file_attributes",
+                        lambda path: 0x27 if Path(path).name == "OLD.MID" else 0x20)
+    monkeypatch.setattr(floppy_image, "_set_windows_file_attributes",
+                        lambda *a, **kw: pytest.fail("Directory preflight must precede attribute changes"))
+    originals = {path.name: path.read_bytes() for path in mounted_drive.iterdir()}
+    with pytest.raises(floppy_image.FloppyImageError, match="root-directory entries"):
+        session._sync_modified_image_files_to_windows_drive(str(prepared), "A:", backup_originals=backup)
+    assert {path.name: path.read_bytes() for path in mounted_drive.iterdir()} == originals
+    diagnostics = session.last_floppy_save_diagnostics
+    assert diagnostics["target_mutation_attempted"] is False
+    assert diagnostics["files_removed"] == diagnostics["files_copied"] == 0
+    assert diagnostics["root_directory_check"]["required_entries"] == 3
+    assert diagnostics["root_directory_check"]["available_entries"] == 1
+
+
+def test_windows_allows_fragmented_root_slots_that_fastfat_can_compact(full_windows_root, mounted_drive, tmp_path):
+    session, baseline, prepared = full_windows_root
+    for path in (baseline, prepared):
+        _delete_image_files(path, "KEEP020.MID", "KEEP050.MID")
+    for name in ("KEEP020.MID", "KEEP050.MID"):
+        (mounted_drive / name).unlink()
+    _delete_image_files(prepared, "OLD.MID")
+    _add_image_file(prepared, tmp_path, "A long song title.mid", b"replacement")
+    data = baseline.read_bytes()
+    geometry = floppy_image._geometry_from_boot_sector(data[:512])
+    directory = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
+    deleted = [index for index in range(geometry.root_entries) if directory[index * 32] == 0xE5]
+    assert len(deleted) == 2 and deleted[1] - deleted[0] > 1
+    session._sync_modified_image_files_to_windows_drive(str(prepared), "A:")
+    assert (mounted_drive / "A long song title.mid").read_bytes() == b"replacement"
+    assert not (mounted_drive / "OLD.MID").exists()
+    check = session.last_floppy_save_diagnostics["root_directory_check"]
+    assert check["free_entries"] == 2
+    assert check["required_entries"] == check["available_entries"] == 3
+
+
+@pytest.mark.parametrize("backup", [False, True])
+@pytest.mark.parametrize("replace_long_name", [False, True])
+def test_windows_reclaims_all_long_filename_slots(full_windows_root, mounted_drive, tmp_path, backup, replace_long_name):
+    session, baseline, prepared = full_windows_root
+    name = "A long song title.mid"
+    removed = ("OLD.MID", "KEEP000.MID", "KEEP001.MID")
+    _delete_image_files(baseline, *removed)
+    _add_image_file(baseline, tmp_path, name, b"original long song")
+    for original in removed:
+        (mounted_drive / original).unlink()
+    (mounted_drive / name).write_bytes(b"original long song")
+    if replace_long_name:
+        _delete_image_files(prepared, *removed)
+        _add_image_file(prepared, tmp_path, name, b"replacement")
+    assert sum(entry["slots"] for entry in _image_root_info(baseline)["entries"]) == 111
+    session._sync_modified_image_files_to_windows_drive(str(prepared), "A:", backup_originals=backup)
+    check = session.last_floppy_save_diagnostics["root_directory_check"]
+    assert check["free_entries"] == 0
+    assert check["reclaimed_entries"] == check["required_entries"] == check["available_entries"] == 3
+    if replace_long_name:
+        assert (mounted_drive / name).read_bytes() == b"replacement"
+    else:
+        assert not (mounted_drive / name).exists()
+        assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+
+
+def test_windows_reclaims_redundant_lfn_for_short_name(full_windows_root, mounted_drive, tmp_path):
+    session, baseline, prepared = full_windows_root
+    _delete_image_files(baseline, "OLD.MID", "KEEP000.MID")
+    _add_image_file(baseline, tmp_path, "Old.mid", b"original song")
+    data = bytearray(baseline.read_bytes())
+    geometry = floppy_image._geometry_from_boot_sector(data[:512])
+    directory = data[geometry.root_offset:geometry.root_offset + geometry.root_size]
+    entry = next(entry for entry in floppy_image._iter_fat_directory_entries(directory) if entry["name"] == "Old.mid")
+    lfn_offset = geometry.root_offset + entry["offset"] - 32
+    assert data[lfn_offset + 11] == 0x0F
+    # Foreign writers can retain LFN records even when the visible spelling is
+    # already uppercase 8.3. Windows still reports the associated short alias.
+    name = "OLD.MID".encode("utf-16-le") + b"\x00\x00" + b"\xff\xff" * 5
+    for start, end, part in ((1, 11, name[:10]), (14, 26, name[10:22]), (28, 32, name[22:26])):
+        data[lfn_offset + start:lfn_offset + end] = part
+    baseline.write_bytes(data)
+    (mounted_drive / "KEEP000.MID").unlink()
+    metadata = next(entry for entry in _image_root_info(baseline)["entries"] if entry["name"] == "OLD.MID")
+    assert metadata["short_name"] == "OLD.MID" and metadata["slots"] == 2
+    _delete_image_files(prepared, "OLD.MID", "KEEP000.MID")
+    for name in ("FIRST.MID", "SECOND.MID"):
+        _add_image_file(prepared, tmp_path, name, b"replacement")
+    session._sync_modified_image_files_to_windows_drive(str(prepared), "A:")
+    check = session.last_floppy_save_diagnostics["root_directory_check"]
+    assert check["free_entries"] == 0
+    assert check["reclaimed_entries"] == check["required_entries"] == 2
+    assert (mounted_drive / "FIRST.MID").read_bytes() == (mounted_drive / "SECOND.MID").read_bytes() == b"replacement"
+
+
+def test_capacity_counts_hidden_folders(mounted_drive, tmp_path, monkeypatch):
+    (mounted_drive / "Hidden Folder").mkdir()
+    monkeypatch.setattr(floppy_image, "_windows_drive_file_path", lambda root, name: str(Path(root) / name))
+    metadata = _mounted_root_info(mounted_drive, 3)
+    metadata["entries"][0]["attributes"] = 0x12
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info", lambda *a, **kw: metadata)
+    job = _prepared_save(tmp_path, {"NEW.MID": b"new song"})
+    with pytest.raises(floppy_image.FloppyImageError, match="root-directory entries"):
+        job.write_to_floppy_target("floppy_usb", "A:")
+    assert list(mounted_drive.iterdir()) == [mounted_drive / "Hidden Folder"]
+    assert not job.last_floppy_save_diagnostics["target_mutation_attempted"]
+
+
+def test_capacity_rejects_unapproved_existing_short_alias(mounted_drive, tmp_path, monkeypatch):
+    original = mounted_drive / "A long song title.mid"
+    original.write_bytes(b"original song")
+    monkeypatch.setattr(floppy_image, "_windows_drive_file_path", lambda root, name: str(Path(root) / name))
+    job = _prepared_save(tmp_path, {"F0000000.MID": b"replacement"})
+    with pytest.raises(floppy_image.FloppyImageError, match="short alias"):
+        job.write_to_floppy_target("floppy_usb", "A:")
+    assert list(mounted_drive.iterdir()) == [original]
+    assert original.read_bytes() == b"original song"
+    assert not job.last_floppy_save_diagnostics["target_mutation_attempted"]
+
+
+def test_capacity_uses_actual_destination_case(save_session, mounted_drive, monkeypatch):
+    save_session.prepared = {"Old.mid": b"replacement"}
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info",
+                        lambda *a, **kw: _mounted_root_info(mounted_drive, 2))
+    save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert (mounted_drive / "OLD.MID").read_bytes() == b"replacement"
+    assert save_session.last_floppy_save_diagnostics["root_directory_check"]["required_entries"] == 1
+
+
+@pytest.mark.parametrize("name,required", [("é.mid", 2), ("😀" * 5 + ".mid", 3), ("Song.mid", 2)])
+def test_windows_unicode_and_mixed_case_need_additional_slots(save_session, mounted_drive, monkeypatch, name, required):
+    save_session.prepared = {name: b"replacement"}
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info",
+                        lambda *a, **kw: _mounted_root_info(mounted_drive, 2))
+    with pytest.raises(floppy_image.FloppyImageError, match="root-directory entries"):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+    assert save_session.last_floppy_save_diagnostics["root_directory_check"]["required_entries"] == required
+    assert not save_session.last_floppy_save_diagnostics["target_mutation_attempted"]
 
 
 @pytest.mark.parametrize("outcome", ["complete", "failed", "cancelled"])
@@ -1192,7 +1442,8 @@ def test_full_floppy_reuses_original_allocation_and_directory_slot_without_disk_
     direct = mode == "direct_same_name"
     job = _prepared_save(tmp_path, save_session.prepared, ["OLD.MID"]) if direct else save_session
     monkeypatch.setattr(floppy_image.shutil, "disk_usage", lambda _: SimpleNamespace(free=0))
-    monkeypatch.setattr(floppy_image, "_windows_free_root_directory_entries", lambda *a, **kw: 0)
+    monkeypatch.setattr(floppy_image, "_windows_root_directory_info",
+                        lambda *a, **kw: _mounted_root_info(mounted_drive, 2))
     copy = floppy_image._copy_prepared_floppy_file
     destinations = []
 

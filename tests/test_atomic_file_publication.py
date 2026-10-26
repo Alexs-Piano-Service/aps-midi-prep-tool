@@ -114,3 +114,125 @@ def test_non_filesystem_errors_do_not_create_destination(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="Permission denied"):
         atomic_file.publish_new_file(staged, destination)
     assert not destination.exists()
+
+
+def test_copy_rollback_uses_timestamp_finalized_when_writer_closes(
+    tmp_path, unsupported_links, monkeypatch,
+):
+    staged, destination = tmp_path / "staged.img", tmp_path / "output.img"
+    staged.write_bytes(b"prepared output")
+    finalized = []
+
+    class DelayedTimestampWriter:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            before_close = os.fstat(self.handle.fileno())
+            result = self.handle.__exit__(*args)
+            # Windows filesystems need not finalize last-write time until
+            # the last writing handle closes. Simulate that on every OS.
+            final_mtime = before_close.st_mtime_ns + 4_000_000_000
+            os.utime(destination, ns=(before_close.st_atime_ns, final_mtime))
+            finalized.append(destination.stat().st_mtime_ns)
+            return result
+
+    def open_file(path, mode="r", *args, **kwargs):
+        handle = builtins.open(path, mode, *args, **kwargs)
+        return DelayedTimestampWriter(handle) if mode == "xb" else handle
+
+    monkeypatch.setattr(atomic_file, "open", open_file, raising=False)
+    publications = []
+
+    atomic_file.publish_new_file(staged, destination, published_callback=publications.append)
+
+    assert len(finalized) == len(publications) == 1
+    assert destination.read_bytes() == b"prepared output"
+    publications[0].remove_if_unchanged()
+    assert not destination.exists()
+    assert staged.read_bytes() == b"prepared output"
+
+
+@pytest.mark.parametrize("recreate_parent", [False, True], ids=["missing-parent", "replaced-parent"])
+def test_rollback_does_not_claim_missing_output_cleaned_when_parent_disappears(
+    tmp_path, unsupported_links, recreate_parent,
+):
+    staged = tmp_path / "staged.img"
+    staged.write_bytes(b"prepared output")
+    parent, disconnected = tmp_path / "removable", tmp_path / "disconnected"
+    parent.mkdir()
+    destination = parent / "output.img"
+    publications = []
+    atomic_file.publish_new_file(staged, destination, published_callback=publications.append)
+
+    # Model the original volume becoming inaccessible through its old path.
+    parent.rename(disconnected)
+    if recreate_parent:
+        parent.mkdir()
+        (parent / "unrelated.txt").write_bytes(b"another directory")
+
+    with pytest.raises(OSError):
+        publications[0].remove_if_unchanged()
+
+    assert (disconnected / destination.name).read_bytes() == b"prepared output"
+    assert staged.read_bytes() == b"prepared output"
+    if recreate_parent:
+        assert (parent / "unrelated.txt").read_bytes() == b"another directory"
+
+
+@pytest.mark.parametrize("recreate_parent", [False, True], ids=["missing-parent", "replaced-parent"])
+def test_partial_copy_reports_retained_output_when_parent_disappears(
+    tmp_path, unsupported_links, monkeypatch, recreate_parent,
+):
+    staged = tmp_path / "staged.img"
+    staged.write_bytes(b"prepared output")
+    parent, disconnected = tmp_path / "removable", tmp_path / "disconnected"
+    parent.mkdir()
+    destination = parent / "output.img"
+
+    class DisconnectingWriter:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def __enter__(self):
+            return self
+
+        def write(self, data):
+            self.handle.write(data[:3])
+            self.handle.flush()
+            raise OSError(errno.ENOSPC, "No space left")
+
+        def __exit__(self, *args):
+            result = self.handle.__exit__(*args)
+            # Closing first also permits this simulation on Windows.
+            parent.rename(disconnected)
+            if recreate_parent:
+                parent.mkdir()
+                (parent / "unrelated.txt").write_bytes(b"another directory")
+            return result
+
+    def open_file(path, mode="r", *args, **kwargs):
+        handle = builtins.open(path, mode, *args, **kwargs)
+        return DisconnectingWriter(handle) if mode == "xb" else handle
+
+    monkeypatch.setattr(atomic_file, "open", open_file, raising=False)
+
+    with pytest.raises(atomic_file.FilePublicationCleanupError) as caught:
+        atomic_file.publish_new_file(staged, destination)
+
+    assert caught.value.retained_paths == (str(destination),)
+    assert caught.value.original_exception.errno == errno.ENOSPC
+    assert caught.value.__cause__ is caught.value.original_exception
+    assert (disconnected / destination.name).read_bytes() == b"pre"
+    assert staged.read_bytes() == b"prepared output"
+    if recreate_parent:
+        assert (parent / "unrelated.txt").read_bytes() == b"another directory"

@@ -5,7 +5,24 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [0.8.9] - Unreleased
+## [0.9.0] - Unreleased
+
+### Changed
+
+- Begin the 0.9.x development branch for bug fixes, reliability, and polish
+  toward a stable 1.0 release. This branch excludes major feature additions;
+  no 1.0 release date is scheduled.
+
+### Fixed
+
+- Windows floppy saves check FAT root-directory capacity through ordinary
+  filesystem metadata without requiring raw-volume access. The preflight counts
+  long filenames and reclaimed entries, allows Windows directory compaction,
+  and restricts saves to safe same-name replacements or deletions when metadata
+  queries are unavailable. Insufficient capacity stops the save before changing
+  file attributes or deleting originals.
+
+## [0.8.9] - 2026-10-19
 
 ### Added
 

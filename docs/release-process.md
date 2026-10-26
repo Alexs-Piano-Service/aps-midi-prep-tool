@@ -3,8 +3,14 @@
 Keep `packaging/release.json` consistent with the application version, README,
 changelog, and AppStream metadata. `unreleased` has no publication date;
 `development_date` dates only the AppStream development snapshot. On release
-day, use `ready`, set `date` to the actual release date, and update the matching
+day, use `ready`, set `date` to the actual UTC release date, and update the matching
 documentation. The tagging helper and packaging workflow check this identity.
+
+The current checkout is **0.9.0, unreleased development**. The 0.9.x branch is
+reserved for bug fixes, reliability, and polish of existing workflows, with no
+major feature additions, in preparation for a stable 1.0 release. No 1.0 release
+date is scheduled. The example release commands and acceptance record below
+describe a future release; they do not mark 0.9.0 ready for publication.
 
 Before tagging, remove the README's planned-changes wording as well as changing
 its version label; the metadata check rejects a released README that still calls
@@ -12,33 +18,43 @@ its changes planned. After publication, update the version badge, latest-version
 text, release date, and release-notes link on the
 [download page](https://www.alexanderpeppe.com/aps-midi-prep-tool/) together.
 Check them against the published GitHub release, then advance this checkout to
-the next unreleased patch version with a new changelog section. Do not move an
+the next development version with a new unreleased changelog section. Do not move an
 already published tag to repair its documentation.
 
-The September 19, 2026 audit found the download page still showing v0.8.2 and
-September 9 while GitHub's latest release was
-[v0.8.3, published September 18](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/tag/v0.8.3).
-The website is maintained separately from this repository; its current release
-labels need to say **v0.8.3** and **September 18, 2026**. The pending fixes here
-are **0.8.9 development**, not an update to the existing v0.8.3 packages.
+[v0.8.9](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/tag/v0.8.9)
+was published on October 19, 2026 at 00:07:29 UTC. Its current three assets are:
 
-The 0.8.9 package list requires the signed standalone `APSMIDIPrepTool.exe`,
-Windows installer, portable ZIP, Linux AppImage, and Windows test kit. Their
-exact filenames are in the metadata. The standalone EXE is the Windows
-self-update payload and must be present even when the installer and ZIP exist.
-Keep that exact standalone filename for v0.8.7 clients: their installed updater
-does not recognize `APS.MIDI.Prep.Tool.exe`. The new updater accepting both names
-does not change the old executable's selection logic. Upload only one accepted
-standalone name, since multiple candidates are rejected as ambiguous.
-The signed Windows workflow produces a standalone EXE and test kit. It does
-not produce the other required packages. Build and upload them before release,
-or explicitly change the declared package set in the validated release commit.
+- `APS-MIDI-Prep-Tool-Setup-0.8.9.exe` — Windows installer.
+- `APSMIDIPrepTool.exe` — standalone Windows executable.
+- `APSMidiPrepTool-0.8.9-x86_64.AppImage` — Linux AppImage.
+
+The historical 0.8.9 changelog and AppStream entries retain its publication date.
+The published tag retains its original source, including the stale development
+metadata; do not move it or republish v0.8.9 to apply this correction. This
+reconciliation does not retroactively establish clean-machine acceptance or
+make the original tagged revision pass the release gate. A portable ZIP and
+Windows test kit were not published and are not required v0.8.9 release assets.
+
+For future releases, decide the package set and filenames in the validated
+release commit before tagging. The standalone EXE is the Windows self-update
+payload and must be present even when an installer or ZIP is offered. Preserve
+`APSMIDIPrepTool.exe` when supporting v0.8.7 clients whose installed updater does
+not recognize `APS.MIDI.Prep.Tool.exe`; the newer updater accepting both names
+does not change old clients. Upload only one accepted standalone name, since
+multiple candidates are rejected as ambiguous. Filename compatibility does not
+replace the native old-client update acceptance checks below.
+
+The signed Windows workflow produces `APSMIDIPrepTool.exe` and a test kit,
+retains them as CI artifacts, and stages both when a release tag is supplied.
+It does not produce an installer, portable ZIP, or Linux AppImage. Build and
+stage every package declared for the next release. The test kit can be an
+optional upload without being listed as a required release asset.
 An incomplete draft remains private if a build or acceptance test fails.
 
 Use accepted artifacts for the validated commit where available. Test the final
 signed/archived packages; rebuilding or signing after testing changes their
-hashes and requires acceptance again. Run the installer and portable package
-on clean Windows 10 and Windows 11 machines, and the AppImage on clean Linux.
+hashes and requires acceptance again. Run each offered installer or portable
+package on clean Windows 10 and Windows 11 machines, and the AppImage on clean Linux.
 Include the standalone EXE in Windows 10 and Windows 11 acceptance records.
 Follow the complete Windows test plan, including MP3 rendering, and retain its
 results and environment records. For Linux, verify launch, IMG creation and
@@ -96,16 +112,17 @@ Save a release acceptance record outside tracked source (for example,
 record, including the ZIP hash when testing an extracted portable distribution.
 Keep the executable hash in the linked Windows environment record as well.
 Provide one record per package/platform; test kits need no separate acceptance.
-Any extra uploaded EXE, ZIP, or AppImage also needs acceptance.
+Any extra uploaded EXE, ZIP, or AppImage also needs acceptance. This example is
+for a future v0.9.0 release; it is not evidence for the published v0.8.9 assets.
 
 ```json
 {
-  "tag": "v0.8.9",
+  "tag": "v0.9.0",
   "commit": "FULL_VALIDATED_COMMIT_SHA",
   "packages": [
     {
-      "asset": "APSMIDIPrepTool-0.8.9-windows-portable.zip",
-      "sha256": "SHA256_OF_UPLOADED_ZIP",
+      "asset": "APSMIDIPrepTool.exe",
+      "sha256": "SHA256_OF_UPLOADED_EXE",
       "platform": "windows-11",
       "clean_machine": true,
       "tester": "Tester name",
@@ -126,7 +143,8 @@ AppImage. Enter PASS only after performing the checks. The helper validates
 the recorded identity, completeness, and asset digests; it relies on the tester
 for truthful evidence. Retain this record with the release evidence.
 
-Stage packages with `scripts/release_assets.py stage`, then use its explicit
+Future releases must pass the existing gate before publication. Stage packages
+with `scripts/release_assets.py stage`, then publish only through its explicit
 `publish` command as shown in CONTRIBUTING. Staging creates or updates a draft;
 publication refuses missing uploads, incomplete metadata, wrong tag/commit,
 missing CI, or mismatched/absent clean-machine evidence. Existing assets are

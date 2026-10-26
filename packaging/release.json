@@ -1,13 +1,11 @@
 {
-  "version": "0.8.9",
+  "version": "0.9.0",
   "status": "unreleased",
   "date": null,
-  "development_date": "2026-10-01",
+  "development_date": "2026-10-24",
   "required_assets": [
+    "APS-MIDI-Prep-Tool-Setup-0.9.0.exe",
     "APSMIDIPrepTool.exe",
-    "APSMIDIPrepTool-0.8.9-Setup.exe",
-    "APSMIDIPrepTool-0.8.9-windows-portable.zip",
-    "APSMidiPrepTool-0.8.9-x86_64.AppImage",
-    "windows-test-kit.zip"
+    "APSMidiPrepTool-0.9.0-x86_64.AppImage"
   ]
 }

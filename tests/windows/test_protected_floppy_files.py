@@ -22,7 +22,11 @@ def test_file_save_preserves_windows_protection_and_rolls_back_preflight(tmp_pat
     monkeypatch.setattr(image, "_windows_filesystem_root", lambda _: str(root))
     monkeypatch.setattr(image, "_windows_volume_identity", lambda _: volume_identity)
     monkeypatch.setattr(image, "_windows_floppy_disk_space", lambda *_: (1000000, 4096))
-    monkeypatch.setattr(image, "_windows_free_root_directory_entries", lambda *a, **kw: 112)
+    monkeypatch.setattr(image, "_windows_root_directory_info", lambda *a, **kw: {
+        "root_entries": 112,
+        "entries": [{"name": name, "short_name": "", "attributes": attributes[name], "slots": 1}
+                    for name in names],
+    })
     monkeypatch.setenv("APS_FLOPPY_SAVE_RECOVERY_DIR", str(tmp_path / "recovery"))
     try:
         for name in names:
