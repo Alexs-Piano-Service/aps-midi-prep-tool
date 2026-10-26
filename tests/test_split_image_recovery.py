@@ -275,7 +275,9 @@ def test_unverifiable_or_unremovable_first_output_is_kept_and_reported(
     assert set(collection.output_dir.iterdir()) == set(collection.originals) | {first}
     if change == "symlink":
         assert first.is_symlink()
-        assert first.readlink() == symlink_target
+        # Windows readlink() can return an extended-length (\\?\) path.
+        # Check the target's file identity instead of its path spelling.
+        assert first.samefile(symlink_target)
     collection.check_originals()
 
 
