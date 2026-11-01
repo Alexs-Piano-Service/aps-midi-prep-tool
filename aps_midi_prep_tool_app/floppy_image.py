@@ -54,7 +54,7 @@ from .midi_metadata import (
 from .additional_formats import electone_mdr_to_midi, pianodisc_system3
 from .subprocess_utils import WindowsProcessTreeWaiter, windows_subprocess_kwargs
 from .helpers.atomic_file import publish_new_file
-from . import floppy_save_recovery, windows_fat_directory, windows_write_guard
+from . import floppy_save_recovery, windows_fat_directory, windows_media_guard, windows_write_guard
 
 
 class FloppyImageError(Exception):
@@ -1539,6 +1539,26 @@ def _windows_volume_label(root_path):
         return ""
 
 
+def _windows_media_change_guard(drive_path):
+    return windows_media_guard.WindowsMediaGuard(_windows_raw_volume_path(drive_path), _windows_ctypes())
+
+
+def _posix_media_change_guard(drive_path):
+    from .posix_media_guard import PosixMediaGuard
+
+    return PosixMediaGuard(drive_path)
+
+
+def _check_windows_save_media(cleanup):
+    try:
+        cleanup["media_guard"].check()
+    except OSError as exc:
+        raise FloppyImageError(
+            "The target floppy changed during save or Windows could no longer verify the inserted disk. "
+            "Saving stopped."
+        ) from exc
+
+
 def _windows_file_attributes(path):
     ctypes, wintypes, kernel32 = _windows_ctypes()
     kernel32.GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
@@ -2012,8 +2032,9 @@ def _create_blank_fat12_image_from_layout(output_path, layout, volume_label):
     total_size = _layout_total_size(layout)
     payload = bytearray(total_size)
     label_bytes = (volume_label or "NO NAME").encode("ascii", errors="replace")
-    serial_seed = label_bytes + str(layout["label"]).encode("ascii", errors="replace")
-    serial = zlib.crc32(serial_seed) & 0xFFFFFFFF
+    # A new disk needs its own volume ID even when format and label match.
+    # Existing-image edits and recovery retain their original boot sectors.
+    serial = uuid.uuid4().int & 0xFFFFFFFF
     payload[:_YAMAHA_BYTES_PER_SECTOR] = _build_standard_fat12_boot_sector(layout, serial, label_bytes)
 
     fat_signature = bytes([int(layout["media_descriptor"]) & 0xFF, 0xFF, 0xFF])
@@ -7576,19 +7597,30 @@ def _run_mtools_image_command(command_runner, args, message, cancel_callback=Non
         return command_runner(args, message, cancel_callback=cancel_callback)
 
 
-def _copy_prepared_floppy_file(source, destination, cancel_callback=None, *, created_callback=None):
-    """Copy to an exclusively created destination with cancellation checks."""
+def _copy_prepared_floppy_file(
+    source, destination, cancel_callback=None, *, created_callback=None, check_target=None,
+):
+    """Check the inserted media before creation and each unbuffered write."""
+    def check():
+        _raise_if_cancelled(cancel_callback)
+        if check_target is not None:
+            check_target()
+
     _raise_if_cancelled(cancel_callback)
-    with open(source, "rb") as incoming, open(destination, "xb") as outgoing:
-        if created_callback is not None:
-            created_callback()
-        while True:
-            _raise_if_cancelled(cancel_callback)
-            chunk = incoming.read(64 * 1024)
-            if not chunk:
-                break
-            outgoing.write(chunk)
-    _raise_if_cancelled(cancel_callback)
+    with open(source, "rb") as incoming:
+        check()
+        # A failed media check must not flush buffered payloads on close.
+        with open(destination, "xb", buffering=0) as outgoing:
+            if created_callback is not None:
+                created_callback()
+            while True:
+                chunk = incoming.read(64 * 1024)
+                check()
+                if not chunk:
+                    break
+                if outgoing.write(chunk) != len(chunk):
+                    raise OSError("The floppy file was not written completely.")
+    check()
 
 
 def _read_fat12_file_bytes(img_path, image_path):
@@ -9903,17 +9935,16 @@ def _check_windows_floppy_root_capacity(
         raise FloppyImageError("The floppy root-directory contents changed during save preparation. No files were changed.")
     aliases = {dos_filename_key(entry["short_name"]): key
                for key, entry in entries.items() if entry["short_name"]}
-    destination_keys = {dos_filename_key(path) for path in replacement_paths}
     for index, path in enumerate(replacement_paths):
         alias_owner = aliases.get(dos_filename_key(path))
         if alias_owner is not None:
-            if (alias_owner not in affected
-                    or alias_owner in destination_keys and alias_owner != dos_filename_key(path)):
+            # Deleting the owner does not release its name association safely:
+            # Windows can tunnel the old LFN back when its alias is recreated.
+            if alias_owner != dos_filename_key(path):
                 raise FloppyImageError(
                     f"The destination filename {path} is a short alias for another floppy file. No files were changed."
                 )
-            # Recreating a deleted alias can restore its long name through
-            # Windows filename tunneling. Budget the original LFN as well.
+            # Recreating the same visible name may retain redundant LFN slots.
             requirements[index] = max(requirements[index], entries[alias_owner]["slots"])
 
     occupied = sum(entry["slots"] for entry in entries.values())
@@ -10032,6 +10063,10 @@ class _WindowsFileSaveMixin:
                 except OSError as journal_error:
                     diagnostics["journal_error"] = str(journal_error)
             raise
+        finally:
+            guard = cleanup.get("media_guard")
+            if guard is not None:
+                guard.close()
         diagnostics.update(status="complete" if verify_copies else "files_saved", stage="complete")
         diagnostics.pop("file", None)
         self.last_write_verification = {
@@ -10047,6 +10082,7 @@ class _WindowsFileSaveMixin:
         for name, record in list(pending.items()):
             try:
                 root = cleanup["root"]
+                _check_windows_save_media(cleanup)
                 if cleanup.get("identity") is None or _windows_volume_identity(root) != cleanup["identity"]:
                     raise FloppyImageError("The target floppy cannot be identified for attribute restoration.")
                 path = _windows_drive_file_path(root, name)
@@ -10056,8 +10092,11 @@ class _WindowsFileSaveMixin:
                     raise FloppyImageError("The file changed; its attributes were not restored.")
                 if _windows_volume_identity(root) != cleanup["identity"]:
                     raise FloppyImageError("The target floppy changed during attribute restoration.")
-                if _windows_file_attributes(path) != record["attributes"]:
+                attributes = _windows_file_attributes(path)
+                _check_windows_save_media(cleanup)
+                if attributes != record["attributes"]:
                     _set_windows_file_attributes(path, record["attributes"])
+                _check_windows_save_media(cleanup)
                 result["restored"].append(name)
                 del pending[name]
             except Exception as exc:
@@ -10075,10 +10114,23 @@ class _WindowsFileSaveMixin:
         if not root:
             raise FloppyImageError(f"Invalid Windows floppy drive path: {drive_path}")
         cleanup["root"] = root
+        # Let the filesystem mount/verify newly inserted media before taking
+        # the driver counter baseline. No original-file preflight has run yet.
         try:
             cleanup["identity"] = _windows_volume_identity(root)
         except (OSError, FloppyImageError) as exc:
             diagnostics["volume_identity_error"] = _disk_io_error_details(exc)
+        diagnostics["stage"] = "check_media_changes"
+        try:
+            # Volume serials and labels are copied with a disk image. Keep a
+            # device-level change counter from before preflight through error
+            # cleanup, so even an exact clone cannot pass on metadata alone.
+            cleanup["media_guard"] = _windows_media_change_guard(drive_path)
+        except OSError as exc:
+            raise FloppyImageError(
+                "Windows could not monitor floppy media changes. No files were changed. "
+                "Reinsert the disk and try again."
+            ) from exc
         prepared_files = getattr(self, "prepared_files", None)
         direct = prepared_files is not None
         if direct:
@@ -10217,8 +10269,10 @@ class _WindowsFileSaveMixin:
         package.checkpoint(status="ready", expected=intended)
 
         def check_identity():
+            _check_windows_save_media(cleanup)
             if cleanup.get("identity") is not None and _windows_volume_identity(root) != cleanup["identity"]:
                 raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
+            _check_windows_save_media(cleanup)
 
         def check_target():
             action = "Checking original files..." if check_originals else "Checking floppy..."
@@ -10252,14 +10306,14 @@ class _WindowsFileSaveMixin:
                 raise FloppyImageError("The target file attributes changed during save preparation. Saving stopped.")
             if not attributes & 0x01:
                 continue
-            if _windows_volume_identity(root) != cleanup["identity"]:
-                raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
+            check_identity()
             cleanup["attributes_pending"][entry.path] = {
                 "attributes": attributes, "sha256": original_records[key]["sha256"],
                 "size": original_records[key]["size"],
             }
             package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
             package.before("clear_readonly", entry.path)
+            check_identity()
             diagnostics["target_mutation_attempted"] = True
             _set_windows_file_attributes(path, attributes & ~0x01)
             package.after()
@@ -10275,6 +10329,7 @@ class _WindowsFileSaveMixin:
             check_identity()
             diagnostics.update(stage="remove_file", file=entry.path)
             package.before("delete", entry.path)
+            check_identity()
             diagnostics["target_mutation_attempted"] = True
             diagnostics["original_content_mutation_attempted"] = True
             os.remove(_windows_drive_file_path(root, entry.path))
@@ -10295,6 +10350,7 @@ class _WindowsFileSaveMixin:
             destination_name = target[key].path if key in target else entry.path
             destination = _windows_drive_file_path(root, destination_name)
             package.before("replace", entry.path)
+            check_identity()
             diagnostics["target_mutation_attempted"] = True
 
             def file_created():
@@ -10309,13 +10365,15 @@ class _WindowsFileSaveMixin:
                     package.checkpoint(attributes_pending=dict(cleanup["attributes_pending"]))
 
             _copy_prepared_floppy_file(replacements[key], destination,
-                                      cancel_callback=cancel_callback, created_callback=file_created)
+                                      cancel_callback=cancel_callback, created_callback=file_created,
+                                      check_target=lambda: _check_windows_save_media(cleanup))
             check_identity()
             if verify_copies:
                 _notify_progress(
                     progress_callback, diagnostics["files_copied"], len(replacements),
                     f"Verifying copied files...\nFile {diagnostics['files_copied'] + 1} of {len(replacements)}: {entry.path}",
                 )
+            check_identity()
             floppy_save_recovery.sync_file(destination)
             if (os.path.getsize(destination) != entry.size
                     or (verify_copies and floppy_save_recovery.digest(destination) != intended[key]["sha256"])):
@@ -10324,6 +10382,7 @@ class _WindowsFileSaveMixin:
             diagnostics["files_copied"] += 1
             diagnostics["bytes_copied"] += entry.size
             if key in original_attributes:
+                check_identity()
                 _set_windows_file_attributes(destination, original_attributes[key])
                 del cleanup["attributes_pending"][destination_name]
                 package.manifest["attributes_pending"] = dict(cleanup["attributes_pending"])
@@ -10356,6 +10415,7 @@ class _WindowsFileSaveMixin:
                 raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
             if key in original_attributes and _windows_file_attributes(_windows_drive_file_path(root, entry.path)) != original_attributes[key]:
                 raise FloppyImageError(f"Floppy verification failed: file attributes differ for {entry.path}.")
+        check_identity()
         diagnostics["file_contents_verified"] = bool(verify_copies)
         diagnostics["file_contents_verification_scope"] = "prepared_files" if verify_copies else "none"
 
@@ -12686,12 +12746,21 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             "file_contents_verified": False,
         }
         package = None
+        media_guard = None
         originals, replacements, dirty = {}, {}, set()
         temp_extract_dir = tempfile.mkdtemp(prefix="aps_floppy_file_save_", dir=self.temp_dir)
         try:
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 0, 0, "Checking floppy...")
             mdel = _require_command("mdel")
+            try:
+                # Capture the OS media generation before any target preflight.
+                # Device-node IDs and boot bytes cannot distinguish clones.
+                media_guard = _posix_media_change_guard(drive_path)
+            except OSError as exc:
+                raise FloppyImageError(
+                    f"Could not monitor floppy media changes; no files were changed: {exc}"
+                ) from exc
             source_listing = read_image_listing(modified_img)
             target_listing = read_image_listing(drive_path)
             source = {_image_entry_key(entry): entry for entry in source_listing.entries}
@@ -12733,8 +12802,36 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             identity, boot = media_identity()
 
             def check_identity():
-                if media_identity()[0] != identity:
+                try:
+                    media_guard.check()
+                    current_identity = media_identity()[0]
+                    media_guard.check()
+                except OSError as exc:
+                    raise FloppyImageError(
+                        f"The target floppy changed or its media could not be verified; further writes were stopped: {exc}"
+                    ) from exc
+                if current_identity != identity:
                     raise FloppyImageError("The target floppy changed during saving; further writes were stopped.")
+
+            check_identity()
+
+            def guarded_cancel(cancel):
+                def check():
+                    _raise_if_cancelled(cancel)
+                    check_identity()
+                    return False
+                return check
+
+            def run_mutation(args, message, cancel=None, mutation_key=None):
+                check = guarded_cancel(cancel)
+                check()
+                if mutation_key is not None:
+                    dirty.add(mutation_key)
+                    diagnostics["target_mutation_attempted"] = True
+                # The runner checks before spawning, during the command and
+                # after exit. Media errors terminate it just like cancellation.
+                self._run_mtools(args, message, cancel_callback=check)
+                check()
 
             def extract(entry, image_path, cancel=None):
                 path = os.path.join(temp_extract_dir, uuid.uuid4().hex + ".bin")
@@ -12778,7 +12875,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
                 check_identity()
 
-            def remove(name, cancel=None, expected_hash=None, expected_size=None):
+            def remove(name, cancel=None, expected_hash=None, expected_size=None, *, mutation_key=None):
                 if expected_hash is not None or expected_size is not None:
                     current = listing_now().get(dos_filename_key(_normalize_image_path(name)))
                     if current is None or (
@@ -12788,12 +12885,19 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     ):
                         raise FloppyImageError(f"The contents of {name} changed; deletion was stopped.")
                 check_identity()
-                self._run_mtools([mdel, "-i", drive_path, mtools_path(name)],
-                                 f"Could not remove {name} from the floppy", cancel_callback=cancel)
+                run_mutation([mdel, "-i", drive_path, mtools_path(name)],
+                             f"Could not remove {name} from the floppy", cancel, mutation_key)
 
-            def copy(saved, name, cancel=None):
+            def copy(saved, name, cancel=None, *, mutation_key=None):
                 check_identity()
-                _run_mcopy_host_to_image(self._run_mtools, drive_path, saved, name,
+                def publish(args, message, cancel_callback=None):
+                    # Host filename preparation can take time. Recheck the
+                    # directory and medium at the actual publication boundary.
+                    if dos_filename_key(_normalize_image_path(name)) in listing_now():
+                        raise FloppyImageError(f"The destination {name} appeared on the floppy; copying was stopped.")
+                    run_mutation(args, message, cancel_callback, mutation_key)
+
+                _run_mcopy_host_to_image(publish, drive_path, saved, name,
                                         f"Could not copy {name} to the floppy", cancel_callback=cancel)
 
             diagnostics["stage"] = "prepare_recovery"
@@ -12877,11 +12981,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 diagnostics.update(stage="remove_file", file=entry.path)
                 _raise_if_cancelled(cancel_callback)
                 package.before("delete", entry.path)
-                dirty.add(key)
-                diagnostics["target_mutation_attempted"] = True
                 remove(entry.path, cancel_callback,
                        expected_originals[key].get("sha256") if check_originals else None,
-                       expected_size=expected_originals[key]["size"])
+                       expected_size=expected_originals[key]["size"], mutation_key=key)
                 diagnostics["files_removed"] += 1
                 package.after()
 
@@ -12893,9 +12995,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 diagnostics.update(stage="publish_file", file=entry.path)
                 _raise_if_cancelled(cancel_callback)
                 package.before("replace", entry.path)
-                dirty.add(key)
-                diagnostics["target_mutation_attempted"] = True
-                copy(replacements[key], entry.path, cancel_callback)
+                copy(replacements[key], entry.path, cancel_callback, mutation_key=key)
                 actual = listing_now()
                 if key not in actual or actual[key].size != intended[key]["size"]:
                     raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
@@ -12997,7 +13097,11 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 raise error from exc
             raise
         finally:
-            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+            try:
+                if media_guard is not None:
+                    media_guard.close()
+            finally:
+                shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
     def export_to(
         self,

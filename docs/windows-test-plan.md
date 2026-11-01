@@ -64,6 +64,7 @@ the executable's path, hash, signature status, and available commands.
 | 18 | After restarting, repeat create/open/edit IMG, create/open HFE, both conversions, damaged-image recovery, and cancellation. Run `where.exe mformat` (also mcopy, mdir, mdel, mren) outside APS. | All workflows still work; tools are still absent from the machine PATH. |
 | 19 | Select a test song and export MP3 using the built-in piano renderer. Play the exported MP3 in a separate audio player. | Nonempty playable audio with the expected notes; no LAME or development-tool installation required. If the package advertises bundled SoundFonts, repeat with that renderer. |
 | 20 | As a standard user, use a disposable labeled FAT12 floppy with a full root directory and free data clusters. Replace an 8.3 file with a long filename needing three entries; then test a same-name replacement. Repeat with three separated free entries and with a long-name original being replaced. Run with original-file backups both enabled and disabled. | Insufficient directory capacity stops before attributes or files change; same-name replacement succeeds without elevation. Separated free entries and reclaimed LFN entries remain usable. Diagnostics report `method: windows_filesystem_metadata`; retain results from native Windows and the physical drive. Mark N/A with hardware reason if unavailable. |
+| 21 | On a disposable FAT12/16 volume, replace a long-named file with its existing DOS short alias. Repeat after deleting/recreating the fixture to populate Windows' filename-tunneling cache, and with optional backups and content checks disabled. The native regression below automates this case in a temporary directory. | Save rejects the alias before any file or attribute change, even when the long-name owner is scheduled for deletion. Originals remain intact. Replacement using the same visible filename remains supported. |
 
 ## Font and spacing checks
 
@@ -111,6 +112,18 @@ python -m pytest -q tests/windows --windows-require-tools --junitxml=test-result
 python -m pytest -q --ignore=tests/windows
 python -m scripts.build_windows_test_kit --output dist/windows-test-kit
 ```
+
+The native filename-tunneling regression needs a writable folder on a disposable
+FAT12/16 volume. It creates an isolated temporary directory and uses actual FAT
+aliases, attributes, and tunneling behavior. Local image preparation and media
+monitoring are supplied by test fixtures. Run it with:
+
+```powershell
+$env:APS_WINDOWS_FAT_TEST_ROOT = "A:\"
+python -m pytest -q tests/windows/test_alias_tunneling.py
+```
+
+Without `APS_WINDOWS_FAT_TEST_ROOT`, this hardware-dependent test is skipped.
 
 Optionally set `APS_WINDOWS_MTOOLS_DIR` to the directory holding all five EXEs
 and their DLLs, and `APS_WINDOWS_GW_DIR` to an extracted standalone Greaseweazle

@@ -1,6 +1,7 @@
 """Use actual Windows file attributes and replacement on disposable host files."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,11 @@ def test_file_save_preserves_windows_protection_and_rolls_back_preflight(tmp_pat
     volume_identity = image._windows_volume_identity(str(tmp_path.anchor))
     monkeypatch.setattr(image, "_windows_filesystem_root", lambda _: str(root))
     monkeypatch.setattr(image, "_windows_volume_identity", lambda _: volume_identity)
+    # These disposable host files exercise native attributes, not removable
+    # hardware. Media-change counter behavior has separate driver/API tests.
+    monkeypatch.setattr(image, "_windows_media_change_guard", lambda _: SimpleNamespace(
+        check=lambda: None, close=lambda: None,
+    ))
     monkeypatch.setattr(image, "_windows_floppy_disk_space", lambda *_: (1000000, 4096))
     monkeypatch.setattr(image, "_windows_root_directory_info", lambda *a, **kw: {
         "root_entries": 112,

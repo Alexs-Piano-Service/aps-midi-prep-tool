@@ -137,6 +137,9 @@ def mounted_drive(tmp_path, monkeypatch):
     monkeypatch.setattr(floppy_image, "_windows_legacy_disk_space", lambda _: (700000, 1024))
     monkeypatch.setenv("APS_FLOPPY_SAVE_RECOVERY_DIR", str(tmp_path / "recovery"))
     monkeypatch.setattr(floppy_image, "_windows_volume_identity", lambda _: {"serial": 123, "filesystem": "FAT"})
+    monkeypatch.setattr(floppy_image, "_windows_media_change_guard", lambda _: SimpleNamespace(
+        check=lambda: None, close=lambda: None,
+    ))
     monkeypatch.setattr(floppy_image, "_windows_file_attributes", lambda _: 0x20)
     monkeypatch.setattr(floppy_image, "_set_windows_file_attributes", lambda *a: None)
     monkeypatch.setattr(floppy_image, "_windows_root_directory_info", lambda *a, **kw: _mounted_root_info(root))
