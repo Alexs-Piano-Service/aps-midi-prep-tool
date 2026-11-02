@@ -170,7 +170,9 @@ def test_worker_cancellation_preserves_original_files_and_recovery_diagnostics(
     expected_status = "cancelled" if cancel_at == "after_delete" else "failed"
     assert diagnostics["status"] == expected_status
     assert diagnostics["target_mutation_attempted"]
-    assert diagnostics["restoration"] == {"status": "complete", "restored": ["CHANGE.MID"]}
+    assert diagnostics["restoration"] == {
+        "status": "complete", "restored": ["CHANGE.MID"], "unchanged": [],
+    }
     directory, manifest = _manifest(session)
     assert str(directory) in cancellations[0]
     assert "recovery files are retained" in cancellations[0]

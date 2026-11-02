@@ -15,6 +15,10 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Failed or cancelled POSIX floppy saves leave verified, unchanged originals
+  intact during recovery, avoiding unnecessary deletion and rewriting when a
+  command fails before launch. Recovery diagnostics distinguish unchanged files
+  from files restored from backup.
 - Windows floppy saves check FAT root-directory capacity through ordinary
   filesystem metadata without requiring raw-volume access. The preflight counts
   long filenames and reclaimed entries, allows Windows directory compaction,

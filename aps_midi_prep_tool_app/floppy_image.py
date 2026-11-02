@@ -12826,6 +12826,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 check = guarded_cancel(cancel)
                 check()
                 if mutation_key is not None:
+                    # A failed command may have written; recovery checks which
+                    # originals actually need restoring before changing them.
                     dirty.add(mutation_key)
                     diagnostics["target_mutation_attempted"] = True
                 # The runner checks before spawning, during the command and
@@ -13040,7 +13042,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         # That must not interrupt restoration or its verification.
                         pass
 
-                restoration = diagnostics["restoration"] = {"status": "checking", "restored": []}
+                restoration = diagnostics["restoration"] = {
+                    "status": "checking", "restored": [], "unchanged": [],
+                }
                 try:
                     _notify_progress(restoration_progress, 0, 0, "Restoring original files...")
                     # Ignore cancellation only for safe restoration. Refuse to
@@ -13060,13 +13064,22 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                             raise FloppyImageError(f"Unrecognized contents for {entry.path}; automatic restoration was stopped.")
                     if (set(target) - set(dirty)) - set(actual):
                         raise FloppyImageError("An unchanged original disappeared; automatic restoration was stopped.")
-                    for key in dirty & set(target):
+                    # Dirty records attempts, including commands that never
+                    # launched. Leave verified originals on the floppy intact.
+                    unchanged = {
+                        key for key in dirty & set(actual) & set(target)
+                        if actual[key].size == expected_originals[key]["size"]
+                        and observed[key] == expected_originals[key]["sha256"]
+                    }
+                    restoration["unchanged"] = [target[key].path for key in sorted(unchanged)]
+                    needs_restoration = dirty - unchanged
+                    for key in needs_restoration & set(target):
                         if floppy_save_recovery.digest(originals[key]) != expected_originals[key]["sha256"]:
                             raise FloppyImageError("The host recovery backup changed; automatic restoration was stopped.")
                     check_identity()
-                    for key in sorted(dirty & set(actual)):
+                    for key in sorted(needs_restoration & set(actual)):
                         remove(actual[key].path, expected_hash=observed[key])
-                    for key in sorted(dirty & set(target), key=lambda key: (is_eseq_directory_path(target[key].path), key)):
+                    for key in sorted(needs_restoration & set(target), key=lambda key: (is_eseq_directory_path(target[key].path), key)):
                         saved = originals[key]
                         if floppy_save_recovery.digest(saved) != expected_originals[key]["sha256"]:
                             raise FloppyImageError("The host recovery backup changed; automatic restoration was stopped.")

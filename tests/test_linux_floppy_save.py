@@ -184,6 +184,93 @@ def _set_no_free_space(monkeypatch, target):
     monkeypatch.setattr(image, "read_image_listing", listing)
 
 
+@pytest.mark.parametrize("check_originals", [False, True])
+@pytest.mark.parametrize("failure", ["launch_error", "cancel"])
+def test_failure_before_first_delete_preserves_intact_original_without_recovery_writes(
+    floppy_save, monkeypatch, check_originals, failure,
+):
+    session, source, target, _read_file = floppy_save
+    original_disk = Path(target).read_bytes()
+    stopped = threading.Event()
+    popen = image.subprocess.Popen
+    run = session._run_mtools
+    failed_deletions, launched_mutations = [], []
+
+    def fail_launch(args, *rest, **kwargs):
+        command = os.path.basename(os.fspath(args[0]))
+        if command == "mdel" and target in args and failure == "launch_error" and not failed_deletions:
+            failed_deletions.append(args[-1])
+            raise OSError("Injected failure before delete process creation")
+        process = popen(args, *rest, **kwargs)
+        if target in args and (command == "mdel" or command == "mcopy" and args[-1].startswith("::/")):
+            launched_mutations.append((command, args[-1]))
+        return process
+
+    def cancel_before_launch(args, message, **kwargs):
+        if os.path.basename(args[0]) == "mdel" and failure == "cancel" and not failed_deletions:
+            failed_deletions.append(args[-1])
+            stopped.set()
+        return run(args, message, **kwargs)
+
+    monkeypatch.setattr(image.subprocess, "Popen", fail_launch)
+    monkeypatch.setattr(session, "_run_mtools", cancel_before_launch)
+    exception = image.FloppyOperationCancelled if failure == "cancel" else image.FloppyImageError
+    with pytest.raises(exception, match="recovery files are retained"):
+        session._sync_modified_image_files_to_floppy_drive(
+            source, target, cancel_callback=stopped.is_set, check_originals=check_originals,
+        )
+
+    assert failed_deletions == ["::/CHANGE.MID"]
+    assert launched_mutations == []
+    assert Path(target).read_bytes() == original_disk
+    diagnostics = session.last_floppy_save_diagnostics
+    assert diagnostics["target_mutation_attempted"] is True
+    assert diagnostics["files_removed"] == diagnostics["files_copied"] == 0
+    assert diagnostics["restoration"] == {
+        "status": "complete", "restored": [], "unchanged": ["CHANGE.MID"],
+    }
+    assert session.last_write_verification["confidence"] == "partial_or_uncertain"
+    _, manifest = _manifest(session)
+    assert manifest["status"] == ("cancelled" if failure == "cancel" else "failed")
+    assert manifest["diagnostics"] == diagnostics
+    assert manifest["actions"] == [{"operation": "delete", "file": "CHANGE.MID", "status": "started"}]
+
+
+def test_failure_before_second_delete_restores_only_missing_original(two_replacements, monkeypatch):
+    session, source, target, read_file = two_replacements
+    original = {entry.path: read_file(target, entry.path) for entry in image.read_image_listing(target).entries}
+    popen = image.subprocess.Popen
+    failed_deletions, launched_mutations = [], []
+
+    def fail_second_delete(args, *rest, **kwargs):
+        command = os.path.basename(os.fspath(args[0]))
+        if command == "mdel" and target in args and args[-1] == "::/SECOND.MID" and not failed_deletions:
+            failed_deletions.append(args[-1])
+            raise OSError("Injected failure before second delete process creation")
+        process = popen(args, *rest, **kwargs)
+        if target in args and (command == "mdel" or command == "mcopy" and args[-1].startswith("::/")):
+            launched_mutations.append((command, args[-1]))
+        return process
+
+    monkeypatch.setattr(image.subprocess, "Popen", fail_second_delete)
+    with pytest.raises(image.FloppyImageError, match="recovery files are retained"):
+        session._sync_modified_image_files_to_floppy_drive(source, target)
+
+    assert failed_deletions == ["::/SECOND.MID"]
+    assert launched_mutations == [("mdel", "::/CHANGE.MID"), ("mcopy", "::/CHANGE.MID")]
+    assert {entry.path: read_file(target, entry.path) for entry in image.read_image_listing(target).entries} == original
+    diagnostics = session.last_floppy_save_diagnostics
+    assert diagnostics["target_mutation_attempted"] is True
+    assert diagnostics["files_removed"] == 1
+    assert diagnostics["files_copied"] == 0
+    assert diagnostics["restoration"] == {
+        "status": "complete", "restored": ["CHANGE.MID"], "unchanged": ["SECOND.MID"],
+    }
+    _, manifest = _manifest(session)
+    assert manifest["status"] == "failed"
+    assert manifest["diagnostics"] == diagnostics
+
+
 @pytest.mark.parametrize("full_disk", [False, True])
 @pytest.mark.parametrize("stop_after", [1, 2])
 @pytest.mark.parametrize("cancel", [False, True])
