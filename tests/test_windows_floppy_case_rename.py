@@ -1,6 +1,7 @@
 """Filename spelling survives file-level saves from real FAT12 images."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,19 @@ def case_save(mounted_drive, tmp_path, monkeypatch):
     yield prepare
     for session in sessions:
         session.cleanup()
+
+
+def test_windows_listing_distinguishes_prepared_image_from_mounted_drive(case_save, monkeypatch):
+    session, prepared = case_save("SONG.MID", "Song.mid")
+    # Exercise Windows dispatch even on Linux, without changing the process's
+    # os.name (which would also change pathlib and pytest's platform behavior).
+    monkeypatch.setattr(floppy_image, "os", SimpleNamespace(**{
+        **vars(floppy_image.os), "name": "nt",
+    }))
+
+    assert [entry.path for entry in floppy_image.read_image_listing(prepared).entries] == ["Song.mid"]
+    assert [entry.path for entry in floppy_image.read_image_listing(session.working_img_path).entries] == ["SONG.MID"]
+    assert [entry.path for entry in floppy_image.read_image_listing("A:").entries] == ["SONG.MID"]
 
 
 @pytest.mark.parametrize("original,renamed", [

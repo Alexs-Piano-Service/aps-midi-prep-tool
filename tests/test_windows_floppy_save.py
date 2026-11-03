@@ -132,7 +132,14 @@ def test_successful_space_query_still_uses_actual_cluster_size(monkeypatch):
 def mounted_drive(tmp_path, monkeypatch):
     root = tmp_path / "floppy"
     root.mkdir()
-    monkeypatch.setattr(floppy_image, "_windows_filesystem_root", lambda _: str(root))
+    real_filesystem_root = floppy_image._windows_filesystem_root
+
+    def filesystem_root(path):
+        resolved = real_filesystem_root(path)
+        # Image files must still reach the FAT12 reader on native Windows.
+        return str(root) if resolved == "A:\\" else resolved
+
+    monkeypatch.setattr(floppy_image, "_windows_filesystem_root", filesystem_root)
     monkeypatch.setattr(floppy_image.shutil, "disk_usage", lambda _: SimpleNamespace(free=700000))
     monkeypatch.setattr(floppy_image, "_windows_legacy_disk_space", lambda _: (700000, 1024))
     monkeypatch.setenv("APS_FLOPPY_SAVE_RECOVERY_DIR", str(tmp_path / "recovery"))
