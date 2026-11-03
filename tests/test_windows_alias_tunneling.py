@@ -102,7 +102,7 @@ def test_replacing_same_visible_name_preserves_valid_long_name_association(
 
     save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
 
-    assert {path.name: path.read_bytes() for path in mounted_drive.iterdir()} == {name: b"replacement song"}
+    assert {path.name: path.read_bytes() for path in mounted_drive.iterdir()} == {replacement_name: b"replacement song"}
     check = save_session.last_floppy_save_diagnostics["root_directory_check"]
     assert check["free_entries"] == 0
     assert check["reclaimed_entries"] == check["required_entries"] == slots

@@ -10169,7 +10169,9 @@ class _WindowsFileSaveMixin:
         elif same_source:
             baseline_path = self.working_img_path
             baseline = {_image_entry_key(entry): entry for entry in read_image_listing(baseline_path).entries}
-            if set(baseline) != set(target):
+            if (set(baseline) != set(target)
+                    or any(_normalize_image_path(baseline[key].path) != _normalize_image_path(entry.path)
+                           for key, entry in target.items())):
                 raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
         else:
             baseline = {}
@@ -10213,7 +10215,8 @@ class _WindowsFileSaveMixin:
         diagnostics["stage"] = "prepare_replacements"
         _notify_progress(progress_callback, 0, 0, "Preparing files...")
         replacements = {}
-        intended = ({key: {"size": entry.size, "sha256": original_records[key]["sha256"]}
+        intended = ({key: {"path": _normalize_image_path(entry.path),
+                          "size": entry.size, "sha256": original_records[key]["sha256"]}
                      for key, entry in target.items() if not entry.is_directory} if direct else {})
         for key, entry in _floppy_progress_files(source.items(), "Preparing files...", progress_callback):
             _raise_if_cancelled(cancel_callback)
@@ -10227,12 +10230,15 @@ class _WindowsFileSaveMixin:
                 finally:
                     if os.path.exists(extracted):
                         os.remove(extracted)
-            intended[key] = {"size": entry.size, "sha256": floppy_save_recovery.digest(saved)}
+            intended[key] = {"path": _normalize_image_path(entry.path),
+                             "size": entry.size, "sha256": floppy_save_recovery.digest(saved)}
             # Edits to the loaded floppy are measured against its local copy,
             # independently of whether original payloads were read or backed up.
             previous_hash = (baseline_hashes.get(key) if same_source and not direct
                              else original_records.get(key, {}).get("sha256"))
-            if previous_hash != intended[key]["sha256"]:
+            if (previous_hash != intended[key]["sha256"]
+                    or key not in target
+                    or _normalize_image_path(target[key].path) != intended[key]["path"]):
                 replacements[key] = saved
 
         affected = set(replacements) & set(target)
@@ -10263,7 +10269,7 @@ class _WindowsFileSaveMixin:
         _notify_progress(progress_callback, 0, 0, "Checking floppy...")
         _check_windows_floppy_root_capacity(
             drive_path, target, affected,
-            [target[key].path if key in target else source[key].path for key in replacements],
+            [source[key].path for key in replacements],
             diagnostics, cancel_callback=cancel_callback,
         )
         package.checkpoint(status="ready", expected=intended)
@@ -10286,7 +10292,8 @@ class _WindowsFileSaveMixin:
                 target.items(), action, progress_callback,
             ):
                 _raise_if_cancelled(cancel_callback)
-                if actual[key].is_directory != entry.is_directory or actual[key].size != entry.size:
+                if (actual[key].is_directory != entry.is_directory or actual[key].size != entry.size
+                        or _normalize_image_path(actual[key].path) != _normalize_image_path(entry.path)):
                     raise FloppyImageError("The target floppy changed during save preparation. Saving stopped.")
                 if (check_originals and not entry.is_directory
                         and floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != original_records[key]["sha256"]):
@@ -10347,7 +10354,7 @@ class _WindowsFileSaveMixin:
             _raise_if_cancelled(cancel_callback)
             check_identity()
             diagnostics.update(stage="copy_file", file=entry.path)
-            destination_name = target[key].path if key in target else entry.path
+            destination_name = intended[key]["path"]
             destination = _windows_drive_file_path(root, destination_name)
             package.before("replace", entry.path)
             check_identity()
@@ -10368,6 +10375,27 @@ class _WindowsFileSaveMixin:
                                       cancel_callback=cancel_callback, created_callback=file_created,
                                       check_target=lambda: _check_windows_save_media(cleanup))
             check_identity()
+            if key in target and _normalize_image_path(target[key].path) != destination_name:
+                # Recreating an 8.3 name can restore its former LFN through
+                # Windows' tunnel cache. FastFAT supports a direct case rename
+                # while that LFN exists; moving through a temporary name could
+                # tunnel the old LFN again when returning to the final name.
+                matches = [name for name in os.listdir(root) if dos_filename_key(name) == key]
+                if len(matches) != 1:
+                    raise FloppyImageError(f"Copied floppy filename verification failed: {entry.path}")
+                if matches[0] != destination_name:
+                    diagnostics.update(stage="rename_file", file=destination_name)
+                    rename = {"source": matches[0], "destination": destination_name, "status": "started"}
+                    package.manifest["actions"][-1]["filename_rename"] = rename
+                    package.checkpoint()
+                    check_identity()
+                    os.rename(_windows_drive_file_path(root, matches[0]), destination)
+                    check_identity()
+                    matches = [name for name in os.listdir(root) if dos_filename_key(name) == key]
+                    if matches != [destination_name]:
+                        raise FloppyImageError(f"Copied floppy filename verification failed: {entry.path}")
+                    rename["status"] = "complete"
+                    package.checkpoint()
             if verify_copies:
                 _notify_progress(
                     progress_callback, diagnostics["files_copied"], len(replacements),
@@ -10401,7 +10429,8 @@ class _WindowsFileSaveMixin:
         diagnostics["stage"] = "verify_file_contents" if verify_copies else "check_saved_file_sizes"
         for key in expected_directories:
             _raise_if_cancelled(cancel_callback)
-            if not actual[key].is_directory:
+            if (not actual[key].is_directory
+                    or _normalize_image_path(actual[key].path) != _normalize_image_path(target[key].path)):
                 raise FloppyImageError("An unrelated folder changed during floppy saving.")
         for key, entry in _floppy_progress_files(
             ((key, entry) for key, entry in actual.items() if key not in expected_directories),
@@ -10409,6 +10438,8 @@ class _WindowsFileSaveMixin:
         ):
             _raise_if_cancelled(cancel_callback)
             diagnostics["file"] = entry.path
+            if _normalize_image_path(entry.path) != intended[key]["path"]:
+                raise FloppyImageError(f"Floppy verification failed: filename spelling differs for {entry.path}.")
             if (entry.size != intended[key]["size"]
                     or (verify_copies and intended[key]["sha256"] is not None
                         and floppy_save_recovery.digest(_windows_drive_file_path(root, entry.path)) != intended[key]["sha256"])):
@@ -12779,7 +12810,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 baseline = {_image_entry_key(entry): entry
                             for entry in read_image_listing(self.working_img_path).entries}
                 if set(baseline) != set(target) or any(
-                    baseline[key].size != entry.size for key, entry in target.items()
+                    baseline[key].size != entry.size
+                    or _normalize_image_path(baseline[key].path) != _normalize_image_path(entry.path)
+                    for key, entry in target.items()
                 ):
                     raise FloppyImageError("The floppy contents changed since it was opened. Read the target floppy again before saving.")
                 baseline_hashes = {}
@@ -12870,6 +12903,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     entries = _floppy_progress_files(entries, action, progress)
                 for key, entry in entries:
                     _raise_if_cancelled(cancel)
+                    if _normalize_image_path(entry.path) != expected[key]["path"]:
+                        raise FloppyImageError(
+                            f"Floppy verification failed: filename differs for {expected[key]['path']}."
+                        )
                     check_contents = content_keys is None or key in content_keys
                     if entry.size != expected[key]["size"] or (
                         check_contents and fingerprint(entry, drive_path, cancel) != expected[key]["sha256"]
@@ -12880,7 +12917,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             def remove(name, cancel=None, expected_hash=None, expected_size=None, *, mutation_key=None):
                 if expected_hash is not None or expected_size is not None:
                     current = listing_now().get(dos_filename_key(_normalize_image_path(name)))
-                    if current is None or (
+                    if current is None or _normalize_image_path(current.path) != _normalize_image_path(name) or (
                         expected_size is not None and current.size != expected_size
                     ) or (
                         expected_hash is not None and fingerprint(current, drive_path, cancel) != expected_hash
@@ -12907,7 +12944,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 drive_path, modified_img, check_cancel=lambda: _raise_if_cancelled(cancel_callback),
             )
             diagnostics["recovery_directory"] = str(package.directory)
-            expected_originals = {key: {"size": entry.size} for key, entry in target.items()}
+            expected_originals = {
+                key: {"path": _normalize_image_path(entry.path), "size": entry.size}
+                for key, entry in target.items()
+            }
             # A backup reads each original once. Content checks can also be
             # requested without retaining backups. With both disabled, keep
             # only directory metadata and do not read original payloads.
@@ -12925,7 +12965,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         package.manifest["originals"][entry.path].update(
                             attributes=entry.attributes, modified_time=entry.modified_time,
                         )
-                        expected_originals[key] = package.manifest["originals"][entry.path]
+                        expected_originals[key].update(package.manifest["originals"][entry.path])
                     else:
                         expected_originals[key]["sha256"] = floppy_save_recovery.digest(path)
                     os.remove(path)
@@ -12942,12 +12982,18 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 saved = package.retain("replacements", entry.path, path)
                 if not _files_have_same_content(path, saved):
                     raise FloppyImageError(f"The prepared recovery file did not verify: {entry.path}")
-                intended[key] = package.manifest["replacements"][entry.path]
+                intended[key] = {
+                    **package.manifest["replacements"][entry.path],
+                    "path": _normalize_image_path(entry.path),
+                }
                 # Saving back to the loaded floppy must not turn unchanged
                 # files into replacements when optional physical reads are off.
+                # DOS identity ignores case; a new spelling still needs to be
+                # published even when the original and prepared bytes match.
                 previous_hash = (baseline_hashes.get(key) if baseline_hashes is not None
                                  else expected_originals.get(key, {}).get("sha256"))
                 if (intended[key]["sha256"] != previous_hash
+                        or intended[key]["path"] != expected_originals.get(key, {}).get("path")
                         or _must_refresh_floppy_sync_entry(entry)):
                     replacements[key] = saved
             verify(expected_originals, cancel_callback,
@@ -12999,6 +13045,8 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 package.before("replace", entry.path)
                 copy(replacements[key], entry.path, cancel_callback, mutation_key=key)
                 actual = listing_now()
+                if key in actual and _normalize_image_path(actual[key].path) != intended[key]["path"]:
+                    raise FloppyImageError(f"Floppy verification failed: filename differs for {entry.path}.")
                 if key not in actual or actual[key].size != intended[key]["size"]:
                     raise FloppyImageError(f"Floppy verification failed: contents differ for {entry.path}.")
                 if verify_copies:
@@ -13069,6 +13117,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     unchanged = {
                         key for key in dirty & set(actual) & set(target)
                         if actual[key].size == expected_originals[key]["size"]
+                        and _normalize_image_path(actual[key].path) == expected_originals[key]["path"]
                         and observed[key] == expected_originals[key]["sha256"]
                     }
                     restoration["unchanged"] = [target[key].path for key in sorted(unchanged)]
@@ -13085,7 +13134,9 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                             raise FloppyImageError("The host recovery backup changed; automatic restoration was stopped.")
                         copy(saved, target[key].path)
                         restored = listing_now()
-                        if key not in restored or fingerprint(restored[key], drive_path) != expected_originals[key]["sha256"]:
+                        if (key not in restored
+                                or _normalize_image_path(restored[key].path) != expected_originals[key]["path"]
+                                or fingerprint(restored[key], drive_path) != expected_originals[key]["sha256"]):
                             raise FloppyImageError(f"Restored floppy file did not verify: {target[key].path}")
                         restoration["restored"].append(target[key].path)
                     verify(expected_originals, action="Restoring original files...", progress=restoration_progress)

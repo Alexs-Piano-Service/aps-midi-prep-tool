@@ -713,7 +713,7 @@ def test_direct_save_requires_confirmation_for_matching_names(mounted_drive, tmp
     job = _prepared_save(tmp_path, {"SONG.MID": b"replacement"}, ["SONG.MID"] if approved else [])
     if approved:
         job.write_to_floppy_target("floppy_usb", "A:")
-        assert (mounted_drive / "song.mid").read_bytes() == b"replacement"
+        assert {path.name: path.read_bytes() for path in mounted_drive.iterdir()} == {"SONG.MID": b"replacement"}
         directory, manifest = _package(job)
         assert (directory / manifest["originals"]["song.mid"]["file"]).read_bytes() == b"original"
     else:
@@ -1196,13 +1196,15 @@ def test_capacity_rejects_unapproved_existing_short_alias(mounted_drive, tmp_pat
     assert not job.last_floppy_save_diagnostics["target_mutation_attempted"]
 
 
-def test_capacity_uses_actual_destination_case(save_session, mounted_drive, monkeypatch):
+def test_capacity_uses_prepared_destination_case(save_session, mounted_drive, monkeypatch):
     save_session.prepared = {"Old.mid": b"replacement"}
     monkeypatch.setattr(floppy_image, "_windows_root_directory_info",
                         lambda *a, **kw: _mounted_root_info(mounted_drive, 2))
-    save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
-    assert (mounted_drive / "OLD.MID").read_bytes() == b"replacement"
-    assert save_session.last_floppy_save_diagnostics["root_directory_check"]["required_entries"] == 1
+    with pytest.raises(floppy_image.FloppyImageError, match="root-directory entries"):
+        save_session._sync_modified_image_files_to_windows_drive("prepared.img", "A:")
+    assert (mounted_drive / "OLD.MID").read_bytes() == b"original song"
+    assert save_session.last_floppy_save_diagnostics["root_directory_check"]["required_entries"] == 2
+    assert not save_session.last_floppy_save_diagnostics["target_mutation_attempted"]
 
 
 @pytest.mark.parametrize("name,required", [("é.mid", 2), ("😀" * 5 + ".mid", 3), ("Song.mid", 2)])
