@@ -6902,15 +6902,23 @@ def _read_fat_area_best_effort(device, geometry, media_descriptor, cancel_callba
     return b"".join(fat_copies), bad_ranges
 
 
-def _decode_dos_directory_name(raw_name):
+def _decode_dos_directory_name(raw_name, case_flags=0):
     # Use mtools' default DOS code page as a lossless filename identity. ASCII
     # replacement collapses distinct OEM names and cannot be passed back to
     # mren/mdel/mcopy. Display encodings for song titles are handled separately.
     raw_name = bytes(raw_name)
     if raw_name.startswith(b"\x05"):
         raw_name = b"\xe5" + raw_name[1:]
-    stem = raw_name[:8].strip(b" ").decode("cp850")
-    ext = raw_name[8:11].strip(b" ").decode("cp850")
+    stem = raw_name[:8].strip(b" ")
+    ext = raw_name[8:11].strip(b" ")
+    # NT case bits in directory byte 12 apply independently to the two 8.3
+    # components. Like mtools, lowercase ASCII bytes before OEM decoding;
+    # Unicode case conversion could change the identity of a DOS filename.
+    if case_flags & 0x08:
+        stem = stem.lower()
+    if case_flags & 0x10:
+        ext = ext.lower()
+    stem, ext = stem.decode("cp850"), ext.decode("cp850")
     if not stem:
         return ""
     if ext:
@@ -7066,12 +7074,15 @@ def _iter_fat_directory_entries(directory_bytes):
             lfn_entries.append(entry)
             continue
         short_name = _decode_dos_directory_name(entry[:11])
-        name = _decode_fat_lfn_entries(lfn_entries, entry[:11]) or short_name
+        long_name = _decode_fat_lfn_entries(lfn_entries, entry[:11])
+        case_flags = 0 if attr & 0x08 else entry[12]
+        name = long_name or _decode_dos_directory_name(entry[:11], case_flags)
         lfn_entries = []
         if not name or name in {".", ".."}:
             continue
         yield {
             "name": name,
+            "long_name": long_name,
             "short_name": short_name,
             "short_name_bytes": bytes(entry[:11]),
             "offset": pos,
@@ -7547,7 +7558,7 @@ def _ascii_mtools_image_paths(img_path, paths):
                 directory, offsets = _fat12_directory_slots(img_path, parent)
                 entries = list(_iter_fat_directory_entries(directory))
                 entry = _find_fat12_entry(directory, part, original_path=path)
-                if entry is not None and entry["name"] != entry["short_name"]:
+                if entry is not None and entry["long_name"]:
                     # A VFAT name has separate UTF-16 records; this workaround
                     # is for OEM-only directory records.
                     parts.append(part)
