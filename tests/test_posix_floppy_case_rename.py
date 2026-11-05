@@ -3,7 +3,6 @@
 from dataclasses import replace
 import os
 from pathlib import Path
-import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -79,14 +78,7 @@ def case_rename(request, tmp_path, monkeypatch):
     session.source_kind = "floppy_usb"
     session.source_path = target
     try:
-        if original in SHORT_NAME_CASE_FLAGS and prepared in SHORT_NAME_CASE_FLAGS:
-            # Isolate saves of valid case-flag images from mren's case-bit
-            # behavior while preserving the unchanged file payload.
-            source = os.path.join(session.temp_dir, "prepared_case.img")
-            shutil.copyfile(session.working_img_path, source)
-            replace_name_using_case_flags(source, original, prepared, host_file)
-        else:
-            source = session.create_modified_image(renames={original: prepared})
+        source = session.create_modified_image(renames={original: prepared})
         assert_short_name_case_flags(source, prepared)
         assert [entry.path for entry in image.read_image_listing(source).entries] == [prepared]
         assert image._read_fat12_file_bytes(source, prepared) == payload

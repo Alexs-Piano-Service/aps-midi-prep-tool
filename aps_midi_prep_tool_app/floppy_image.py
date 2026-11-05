@@ -7483,6 +7483,41 @@ def _clear_fat12_file_protection(img_path, image_path):
             handle.write(bytes([entry["attr"] & ~0x07]))
 
 
+def _ensure_fat12_renamed_spelling(img_path, image_path, cancel_callback=None):
+    """Verify a renamed entry, repairing short-name case bits in a private image."""
+    parts = _split_image_path_components(image_path)
+    failure = f"Could not rename file in image: the resulting filename differs from {image_path}."
+    if not parts:
+        raise FloppyImageError(failure)
+    _raise_if_cancelled(cancel_callback)
+    parent, name = "/".join(parts[:-1]), parts[-1]
+    directory, offsets = _fat12_directory_slots(img_path, parent)
+    entry = _find_fat12_entry(directory, name, original_path=image_path)
+    if entry is None or entry["attr"] & 0x08:
+        raise FloppyImageError(failure)
+    if entry["name"] == name:
+        return
+    # Some mren versions carry the source's case bits into the renamed entry.
+    # Fix only a spelling representable by those two bits; keep the alias,
+    # payload, allocation, timestamps and protection flags intact.
+    if entry["long_name"]:
+        raise FloppyImageError(failure)
+    flags = next((flags for flags in (0, 0x08, 0x10, 0x18)
+                  if _decode_dos_directory_name(entry["short_name_bytes"], flags) == name), None)
+    if flags is None:
+        raise FloppyImageError(failure)
+    position = entry["offset"]
+    _raise_if_cancelled(cancel_callback)
+    with open(img_path, "r+b") as handle:
+        handle.seek(offsets[position // 32] + 12)
+        handle.write(bytes([(directory[position + 12] & ~0x18) | flags]))
+    _raise_if_cancelled(cancel_callback)
+    directory, _ = _fat12_directory_slots(img_path, parent)
+    corrected = _find_fat12_entry(directory, name, original_path=image_path)
+    if corrected is None or corrected["name"] != name:
+        raise FloppyImageError(failure)
+
+
 def _oem_short_name_bytes(name):
     """Encode only lossless DOS short names; leave long filenames to mtools."""
     try:
@@ -12657,12 +12692,15 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                         f"Could not rename {source_path} in image",
                         cancel_callback=cancel_callback,
                     )
-                    continue
-                _run_mtools_image_command(
-                    self._run_mtools,
-                    [mren, "-i", target_img, mtools_path(source_path), mtools_path(target_path)],
-                    f"Could not rename {source_path} in image",
-                    cancel_callback=cancel_callback,
+                else:
+                    _run_mtools_image_command(
+                        self._run_mtools,
+                        [mren, "-i", target_img, mtools_path(source_path), mtools_path(target_path)],
+                        f"Could not rename {source_path} in image",
+                        cancel_callback=cancel_callback,
+                    )
+                _ensure_fat12_renamed_spelling(
+                    target_img, normalized_target, cancel_callback=cancel_callback,
                 )
 
             for image_path, host_path in sorted(additions.items(), key=lambda item: item[0].lower()):
