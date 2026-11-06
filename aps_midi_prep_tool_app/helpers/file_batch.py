@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 
-from .atomic_file import atomic_write_bytes
+from .atomic_file import FilePublicationCleanupError, atomic_write_bytes
 
 
 class FileBatchWriteError(OSError):
@@ -24,6 +24,18 @@ class FileBatchWriteError(OSError):
 
 
 def _write_recovery_manifest(directory, records, rollback_errors=()):
+    def publication_details(record):
+        receipt = record.get("publication")
+        if receipt is None:
+            return None
+        return {
+            "destination": receipt.destination,
+            "identity": receipt.identity,
+            "sha256": receipt.sha256.hex(),
+            "parent_identity": receipt.parent_identity,
+            "ctime_ns": receipt.ctime_ns,
+        }
+
     manifest = {
         "version": 1,
         "files": [
@@ -35,6 +47,7 @@ def _write_recovery_manifest(directory, records, rollback_errors=()):
                 "prepared_file": record.get("prepared_file"),
                 "original_mode": record.get("original_mode"),
                 "published": record.get("published", False),
+                "publication": publication_details(record),
                 "restored": record.get("restored", False),
                 "operation": record.get("operation", "write"),
             }
@@ -97,6 +110,8 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
     requires a SHA-256 entry in ``expected_hashes``. Optional expectations for
     writes protect approval-time contents too; None requires an absent target.
     Checked destinations must be regular files, never symlinks.
+    Rollback restores or removes writes only while their published identity and
+    contents are unchanged. Conflicts keep the current file and recovery data.
     """
     records = []
     published = []
@@ -187,31 +202,48 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
             check_expected(record)
             if record["operation"] == "delete":
                 os.unlink(record["destination"])
+                record["published"] = True
+                published.append(record)
             else:
                 with open(os.path.join(recovery_directory, record["prepared_file"]), "rb") as handle:
                     payload = handle.read()
+
+                def remember_publication(receipt):
+                    record["publication"] = receipt
+                    record["published"] = True
+                    published.append(record)
+
                 atomic_write_bytes(
                     record["resolved_destination"], payload,
                     replace_existing=record["existed"],
+                    published_callback=remember_publication,
                 )
-            record["published"] = True
-            published.append(record)
             if progress_callback is not None:
                 progress_callback(index, len(records), record["destination"])
     except BaseException as exc:
-        rollback_errors = []
+        # An exclusive copy may fail before it yields a publication receipt.
+        # If its own cleanup cannot be verified, keep the recovery package too.
+        rollback_errors = [str(exc)] if isinstance(exc, FilePublicationCleanupError) else []
         for record in reversed(published):
             destination = record["resolved_destination"]
             try:
+                receipt = record.get("publication")
+                if receipt is not None and record["existed"]:
+                    # Do not check a publication at one resolved path while
+                    # restoring a snapshot captured from another path.
+                    receipt.check_unchanged(destination)
+                    destination = receipt.destination
                 if record["existed"]:
                     snapshot = os.path.join(recovery_directory, record["original_file"])
                     with open(snapshot, "rb") as handle:
                         atomic_write_bytes(destination, handle.read(),
-                                           replace_existing=record["operation"] != "delete")
+                                           replace_existing=record["operation"] != "delete",
+                                           before_replace=(receipt.check_unchanged
+                                                           if receipt is not None else None))
                     if record["operation"] == "delete":
                         os.chmod(destination, record["original_mode"])
                 else:
-                    os.unlink(destination)
+                    receipt.remove_if_unchanged()
                 record["restored"] = True
             except BaseException as rollback_error:
                 rollback_errors.append(f"{record['destination']}: {rollback_error}")

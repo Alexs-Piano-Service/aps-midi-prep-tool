@@ -33,12 +33,19 @@ class PublishedFile:
     parent_identity: tuple
     ctime_ns: int | None = None
 
-    def remove_if_unchanged(self):
-        """Remove this publication, or refuse if ownership cannot be verified.
+    def check_unchanged(self, destination=None, *, missing_ok=False):
+        """Verify that this path still contains our unchanged publication.
 
-        A missing file is already cleaned up. A replaced or edited file, a
-        symlink, and a filesystem without usable file IDs are never removed.
+        Replaced or edited files, symlinks, and filesystems without usable file
+        IDs fail closed. A missing file is acceptable only for removal, and
+        only when its original parent directory is still present.
+        An optional resolved destination binds a pending replacement to this
+        exact path, preventing a second symlink resolution from redirecting it.
         """
+        if (destination is not None and
+                os.path.normcase(os.path.abspath(os.fsdecode(destination))) !=
+                os.path.normcase(os.path.abspath(self.destination))):
+            raise OSError("The output path changed; it was kept.")
         _check_parent(self.destination, self.parent_identity)
         try:
             before = os.lstat(self.destination)
@@ -46,7 +53,9 @@ class PublishedFile:
             # ENOENT also occurs when removable media disappears. Only a
             # missing name in the original directory proves cleanup succeeded.
             _check_parent(self.destination, self.parent_identity)
-            return
+            if missing_ok:
+                return False
+            raise OSError("The published output is missing; its original was not restored.") from None
         if (not self.identity[1] or not stat.S_ISREG(before.st_mode)
                 or _file_identity(before) != self.identity
                 or self.ctime_ns is not None and before.st_ctime_ns != self.ctime_ns):
@@ -68,7 +77,13 @@ class PublishedFile:
         if (not stat.S_ISREG(after.st_mode) or _file_identity(after) != self.identity
                 or after.st_ctime_ns != before.st_ctime_ns or digest.digest() != self.sha256):
             raise OSError("The output contents changed; it was kept.")
-        os.unlink(self.destination)
+        _check_parent(self.destination, self.parent_identity)
+        return True
+
+    def remove_if_unchanged(self):
+        """Remove this publication, or refuse if ownership cannot be verified."""
+        if self.check_unchanged(missing_ok=True):
+            os.unlink(self.destination)
 
 
 class FilePublicationCleanupError(OSError):
@@ -220,7 +235,8 @@ def publish_new_file(staged_path, destination, *, check_cancel=None, published_c
             check()
 
 
-def atomic_write_bytes(dest_path, payload, *, validate=None, replace_existing=True):
+def atomic_write_bytes(dest_path, payload, *, validate=None, replace_existing=True,
+                       published_callback=None, before_replace=None):
     """Replace a destination only after its temporary output passes readback checks.
 
     Existing destination permissions and symlinks are preserved, and read-only
@@ -229,8 +245,13 @@ def atomic_write_bytes(dest_path, payload, *, validate=None, replace_existing=Tr
     ``replace_existing=False`` publishes exclusively and never follows a
     destination symlink. Filesystems without hard links use exclusive creation
     and cleanup for new files. Backups remain the caller's responsibility.
+    ``published_callback`` receives a ``PublishedFile`` receipt as soon as the
+    output is published, even if later cleanup fails. ``before_replace``
+    receives the resolved destination and may reject replacement after staging,
+    immediately before publication (for example, during rollback).
     """
     dest_path = (os.path.realpath if replace_existing else os.path.abspath)(os.fsdecode(dest_path))
+    parent_identity = _parent_identity(dest_path) if published_callback is not None else None
     descriptor, temp_path = tempfile.mkstemp(
         prefix=".aps_write_", suffix=".tmp", dir=os.path.dirname(dest_path),
     )
@@ -260,33 +281,31 @@ def atomic_write_bytes(dest_path, payload, *, validate=None, replace_existing=Tr
             write_descriptor = os.open(dest_path, os.O_WRONLY)
             os.close(write_descriptor)
             shutil.copymode(dest_path, temp_path)
+
+        receipt = None
+        if published_callback is not None and (replace_existing or os.name == "nt"):
+            # The staged file becomes the destination inode. Capture it before
+            # publication; inspecting the destination afterwards could adopt a
+            # different process's replacement as our output. Rename can change
+            # ctime, so it is deliberately omitted from this receipt.
+            receipt = PublishedFile(
+                dest_path, _file_identity(os.stat(temp_path)),
+                hashlib.sha256(written).digest(), parent_identity,
+            )
+            _check_parent(dest_path, parent_identity)
+        if before_replace is not None:
+            before_replace(dest_path)
         if replace_existing:
             os.replace(temp_path, dest_path)
+            if published_callback is not None:
+                published_callback(receipt)
         elif os.name == "nt":
             # Windows rename fails if the target already exists.
             os.rename(temp_path, dest_path)
+            if published_callback is not None:
+                published_callback(receipt)
         else:
-            try:
-                os.link(temp_path, dest_path)
-            except OSError as exc:
-                if exc.errno not in {errno.EPERM, errno.EOPNOTSUPP, errno.EXDEV, errno.ENOSYS}:
-                    raise
-                # FAT and some removable filesystems have no hard links. The
-                # payload is already validated; exclusively create a new file.
-                # An interrupted copy can affect only this newly created file.
-                handle = open(dest_path, "xb")
-                try:
-                    with handle:
-                        if handle.write(written) != len(written):
-                            raise OSError("The new output was not written completely.")
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    with open(dest_path, "rb") as handle:
-                        if handle.read() != written:
-                            raise OSError("The new output did not match the prepared data.")
-                except BaseException:
-                    os.unlink(dest_path)
-                    raise
+            publish_new_file(temp_path, dest_path, published_callback=published_callback)
     finally:
         try:
             os.unlink(temp_path)

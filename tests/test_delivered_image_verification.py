@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -251,7 +252,7 @@ def test_save_verifies_converted_payloads_before_replacing_destination(
             assert session.repair_changed is True
 
 
-def test_failed_final_verification_restores_existing_delivery(tmp_path, monkeypatch):
+def test_failed_final_verification_preserves_changed_delivery_and_recovery(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()
     title = b"Delivery Song"
@@ -264,24 +265,49 @@ def test_failed_final_verification_restores_existing_delivery(tmp_path, monkeypa
     output.mkdir()
     previous = output / "DSKA0000.img"
     previous.write_bytes(b"previous customer delivery")
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir()
+    real_mkdtemp = file_batch.tempfile.mkdtemp
+
+    def make_recovery_directory(suffix=None, prefix=None, dir=None):
+        return real_mkdtemp(suffix=suffix, prefix=prefix, dir=dir or recovery_root)
+
+    monkeypatch.setattr(file_batch.tempfile, "mkdtemp", make_recovery_directory)
     real_write = file_batch.atomic_write_bytes
+    delivered = {}
 
     def corrupt_delivery(output_path, prepared_payload, **kwargs):
         real_write(output_path, prepared_payload, **kwargs)
         if title in prepared_payload:
+            delivered["prepared"] = prepared_payload
             payload = bytearray(Path(output_path).read_bytes())
             payload[payload.index(title)] ^= 1
             Path(output_path).write_bytes(payload)
+            delivered["changed"] = bytes(payload)
 
     monkeypatch.setattr(file_batch, "atomic_write_bytes", corrupt_delivery)
 
-    with pytest.raises(floppy_image.FloppyImageError, match="contents differ"):
+    with pytest.raises(floppy_image.FloppyImageError, match="contents differ") as caught:
         emulator_image_builder.build_emulator_disk_images(
             source, output, output_content="midi", output_ext="img", overwrite_existing=True,
         )
 
-    assert previous.read_bytes() == b"previous customer delivery"
+    assert previous.read_bytes() == delivered["changed"]
     assert list(output.iterdir()) == [previous]
+    error = caught.value
+    assert "could not be restored" in str(error)
+    assert len(error.rollback_errors) == 1
+    assert str(previous) in error.rollback_errors[0]
+    recovery = Path(error.recovery_directory)
+    assert str(recovery) in str(error)
+    assert list(recovery_root.iterdir()) == [recovery]
+    manifest = json.loads((recovery / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["rollback_errors"] == error.rollback_errors
+    record = next(item for item in manifest["files"] if item["destination"] == str(previous))
+    assert record["published"] is True
+    assert record["restored"] is False
+    assert (recovery / record["original_file"]).read_bytes() == b"previous customer delivery"
+    assert (recovery / record["prepared_file"]).read_bytes() == delivered["prepared"]
 
 
 @pytest.mark.parametrize("verify", [False, True])

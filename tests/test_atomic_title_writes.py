@@ -278,6 +278,9 @@ def test_exclusive_fallback_cleans_new_output_after_partial_write(tmp_path, monk
         def __init__(self, handle):
             self.handle = handle
 
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
         def __enter__(self):
             return self
 
