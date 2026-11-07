@@ -1807,18 +1807,18 @@ def build_emulator_disk_images(
                 "Emulator image export failed: {error}", language_code, error=str(exc),
             )
             if exc.rollback_errors:
-                message += translate_text(
-                    "\n\nSome output files could not be restored: {files}",
+                message += "\n\n" + translate_text(
+                    "Some output files could not be restored: {files}",
                     language_code, files="\n".join(exc.rollback_errors),
                 )
             if retained_paths:
-                message += translate_text(
-                    "\n\nFiles retained for recovery:\n{files}",
+                message += "\n\n" + translate_text(
+                    "Files retained for recovery:\n{files}",
                     language_code, files="\n".join(retained_paths),
                 )
             if exc.recovery_directory:
-                message += translate_text(
-                    "\n\nRecovery copies and a manifest have been retained in:\n{folder}",
+                message += "\n\n" + translate_text(
+                    "Recovery copies and a manifest have been retained in:\n{folder}",
                     language_code, folder=exc.recovery_directory,
                 )
             error_type = (
