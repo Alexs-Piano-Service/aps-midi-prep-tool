@@ -84,7 +84,7 @@ def test_rollback_refuses_snapshot_for_a_different_publication_path(
     assert record["publication"]["destination"] == str(actual)
 
 
-def test_rollback_refuses_destination_resolved_through_a_transient_symlink(
+def test_rollback_does_not_resolve_destination_through_a_transient_symlink(
     tmp_path, monkeypatch, recovery_root,
 ):
     _require_symlinks(tmp_path)
@@ -122,9 +122,8 @@ def test_rollback_refuses_destination_resolved_through_a_transient_symlink(
         if Path(destination) == second:
             raise OSError("Second publication failed")
         if Path(destination) == first and payload == b"original first":
-            # The first ownership check passed. Resolve restoration through a
-            # temporary alias, then put the valid published inode back before
-            # the final check so only binding the mutation path detects it.
+            # Any further realpath call here could redirect restoration even
+            # if the original publication reappears before the final check.
             resolve_restore = True
         return real_write(destination, payload, **kwargs)
 
@@ -133,12 +132,13 @@ def test_rollback_refuses_destination_resolved_through_a_transient_symlink(
     with pytest.raises(file_batch.FileBatchWriteError) as caught:
         file_batch.publish_file_batch([(staged, first), (staged, second)])
 
-    assert intercepted == [str(victim)]
+    assert intercepted == []
     assert victim.read_bytes() == b"another application's file"
-    assert first.read_bytes() == b"new image"
+    assert first.read_bytes() == b"original first"
     assert not first.is_symlink()
     assert second.read_bytes() == b"original second"
-    _assert_retained_original(caught.value, first)
+    assert not caught.value.rollback_errors
+    assert [Path(path).read_bytes() for path in caught.value.retained_paths] == [b"new image"]
 
 
 def test_partial_publication_cleanup_error_keeps_batch_recovery(
@@ -180,3 +180,68 @@ def test_partial_publication_cleanup_error_keeps_batch_recovery(
     assert second_record["published"] is False
     assert second_record["restored"] is False
     assert (recovery / second_record["prepared_file"]).read_bytes() == b"new image"
+
+
+def test_restore_temp_cleanup_failure_cannot_hide_captured_external_file(
+    tmp_path, monkeypatch, recovery_root,
+):
+    first, second = tmp_path / "first.img", tmp_path / "second.img"
+    staged, external = tmp_path / "prepared.img", tmp_path / "external.img"
+    first.write_bytes(b"original first")
+    second.write_bytes(b"original second")
+    staged.write_bytes(b"new image")
+    external.write_bytes(b"another application's image")
+    external_info = external.stat()
+    real_write = file_batch.atomic_write_bytes
+    rolling_back = False
+    captures = []
+    failed_cleanups = []
+
+    def replace_at_quarantine(source, destination, *args, **kwargs):
+        if rolling_back and Path(source) == first:
+            # The last ownership check passed, but the move captures a newer
+            # file. Its verification failure must report this recovery path.
+            os.replace(external, first)
+            result = os.rename(source, destination, *args, **kwargs)
+            captures.append(Path(destination))
+            return result
+        return os.rename(source, destination, *args, **kwargs)
+
+    def fail_restore_temp_cleanup(path, *args, **kwargs):
+        if rolling_back and Path(path).name.startswith(".aps_write_"):
+            failed_cleanups.append(Path(path))
+            raise PermissionError("Restoration temp cleanup failed")
+        return os.unlink(path, *args, **kwargs)
+
+    def fail_second_publication(destination, payload, **kwargs):
+        nonlocal rolling_back
+        if Path(destination) == second:
+            rolling_back = True
+            raise OSError("Second publication failed")
+        return real_write(destination, payload, **kwargs)
+
+    monkeypatch.setattr(atomic_file, "os", SimpleNamespace(**(vars(os) | {
+        "rename": replace_at_quarantine, "unlink": fail_restore_temp_cleanup,
+    })))
+    monkeypatch.setattr(file_batch, "atomic_write_bytes", fail_second_publication)
+
+    with pytest.raises(file_batch.FileBatchWriteError) as caught:
+        file_batch.publish_file_batch([(staged, first), (staged, second)])
+
+    assert len(captures) == len(failed_cleanups) == 1
+    captured = captures[0]
+    captured_info = captured.stat()
+    assert (captured_info.st_dev, captured_info.st_ino) == (
+        external_info.st_dev, external_info.st_ino,
+    )
+    assert captured.read_bytes() == b"another application's image"
+    assert not first.exists()
+    assert second.read_bytes() == b"original second"
+    error = caught.value
+    assert any("Restoration temp cleanup failed" in issue for issue in error.rollback_errors)
+    assert str(captured) in error.retained_paths
+    record = _assert_retained_original(error, first)
+    assert str(captured) in record["retained_paths"]
+    mapping = json.loads((captured.parent / "recovery.json").read_text(encoding="utf-8"))
+    assert mapping["destination"] == str(first)
+    assert mapping["captured"] == str(captured)

@@ -165,6 +165,20 @@ def recovery_locations(monkeypatch):
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _assert_retained_publications(error, expected_contents):
+    """Rollback retains moved inodes so already-open writers cannot lose data."""
+    retained = [Path(path) for path in error.retained_paths]
+    assert sorted(path.read_bytes() for path in retained) == sorted(expected_contents)
+    recovery = Path(error.recovery_directory)
+    assert recovery.is_dir()
+    manifest = json.loads((recovery / "manifest.json").read_text())
+    assert manifest["rollback_errors"] == error.rollback_errors
+    recorded_paths = {
+        path for record in manifest["files"] for path in record.get("retained_paths", [])
+    }
+    assert recorded_paths == set(error.retained_paths)
+
+
 def test_swapped_prepared_inputs_are_frozen_before_any_destination_changes(tmp_path, recovery_locations):
     first = _file(tmp_path, "first.mid", b"original first")
     second = _file(tmp_path, "second.mid", b"original second")
@@ -218,9 +232,8 @@ def test_later_failure_restores_replacements_removes_created_outputs_and_keeps_b
     assert unrelated.read_bytes() == b"untouched"
     assert [path.read_bytes() for path in backup_paths] == [b"original first", b"original third"]
     assert caught.value.rollback_errors == []
-    assert caught.value.recovery_directory == ""
     assert isinstance(caught.value.original_exception, OSError)
-    assert not any(path.exists() for path in recovery_locations)
+    _assert_retained_publications(caught.value, [b"new 0", b"new 1"])
 
 
 @pytest.mark.parametrize("raised", [False, True])
@@ -293,7 +306,7 @@ def test_new_destination_race_keeps_the_arriving_file_and_rolls_back_previous_ou
     assert late.read_bytes() == b"another program's file"
     assert ("late.mid", False) in publish_flags
     assert caught.value.rollback_errors == []
-    assert not any(path.exists() for path in recovery_locations)
+    _assert_retained_publications(caught.value, [b"new"])
 
 
 def test_publication_preserves_destination_symlink_and_existing_permissions(tmp_path, recovery_locations):
@@ -331,11 +344,11 @@ def test_read_only_later_destination_restores_earlier_write(tmp_path, recovery_l
     try:
         if os.access(protected, os.W_OK):
             pytest.skip("Current privileges can write read-only files")
-        with pytest.raises(file_batch.FileBatchWriteError):
+        with pytest.raises(file_batch.FileBatchWriteError) as caught:
             file_batch.publish_file_batch([(staged, first), (staged, protected)])
         assert first.read_bytes() == b"original first"
         assert protected.read_bytes() == b"original protected"
-        assert not any(path.exists() for path in recovery_locations)
+        _assert_retained_publications(caught.value, [b"new"])
     finally:
         protected.chmod(stat.S_IREAD | stat.S_IWRITE)
 
@@ -380,11 +393,11 @@ def test_progress_failure_also_rolls_back_the_completed_write(tmp_path, recovery
         assert destination.read_bytes() == b"new"
         raise RuntimeError("Progress callback failed")
 
-    with pytest.raises(file_batch.FileBatchWriteError, match="Progress callback failed"):
+    with pytest.raises(file_batch.FileBatchWriteError, match="Progress callback failed") as caught:
         file_batch.publish_file_batch([(staged, destination)], progress_callback=progress)
 
     assert destination.read_bytes() == b"original"
-    assert not any(path.exists() for path in recovery_locations)
+    _assert_retained_publications(caught.value, [b"new"])
 
 
 def test_unreadable_prepared_file_or_directory_target_cannot_publish_anything(tmp_path, recovery_locations):
@@ -433,7 +446,7 @@ def test_batch_retirement_is_restored_after_later_progress_failure(tmp_path, rec
     assert stat.S_IMODE(old.stat().st_mode) == original_mode
     assert current.read_bytes() == b"previous disk"
     assert not caught.value.rollback_errors
-    assert not any(path.exists() for path in recovery_locations)
+    _assert_retained_publications(caught.value, [b"new disk"])
 
 
 def test_retirement_rollback_never_overwrites_new_file_at_retired_name(tmp_path, recovery_locations):

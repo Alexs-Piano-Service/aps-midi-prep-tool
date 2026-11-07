@@ -1800,17 +1800,36 @@ def build_emulator_disk_images(
                 delete_files=existing_paths.retired_paths, expected_hashes=expected_hashes,
             )
         except FileBatchWriteError as exc:
-            if not exc.rollback_errors:
+            retained_paths = tuple(getattr(exc, "retained_paths", ()))
+            if not exc.rollback_errors and not exc.recovery_directory and not retained_paths:
                 raise exc.original_exception from exc
-            error = FloppyImageError(translate_text(
-                "Emulator image export failed: {error}\n\n"
-                "Some output files could not be restored: {files}\n"
-                "Recovery copies and a manifest have been retained in:\n{folder}",
-                language_code, error=str(exc), files="\n".join(exc.rollback_errors),
-                folder=exc.recovery_directory,
-            ))
+            message = translate_text(
+                "Emulator image export failed: {error}", language_code, error=str(exc),
+            )
+            if exc.rollback_errors:
+                message += translate_text(
+                    "\n\nSome output files could not be restored: {files}",
+                    language_code, files="\n".join(exc.rollback_errors),
+                )
+            if retained_paths:
+                message += translate_text(
+                    "\n\nFiles retained for recovery:\n{files}",
+                    language_code, files="\n".join(retained_paths),
+                )
+            if exc.recovery_directory:
+                message += translate_text(
+                    "\n\nRecovery copies and a manifest have been retained in:\n{folder}",
+                    language_code, folder=exc.recovery_directory,
+                )
+            error_type = (
+                FloppyOperationCancelled
+                if isinstance(exc.original_exception, FloppyOperationCancelled) and not exc.rollback_errors
+                else FloppyImageError
+            )
+            error = error_type(message)
             error.rollback_errors = exc.rollback_errors
             error.recovery_directory = exc.recovery_directory
+            error.retained_paths = retained_paths
             raise error from exc
 
         _notify(

@@ -74,6 +74,9 @@ def test_retirement_failure_restores_images_song_list_and_manifest(collection, m
     source, output = collection
     previous = _build(collection, output_ext="hfe", include_song_lists=True)
     before = _contents(output)
+    recovery_root = source.parent / "recovery"
+    recovery_root.mkdir()
+    monkeypatch.setattr(file_batch.tempfile, "tempdir", str(recovery_root))
     real_unlink = file_batch.os.unlink
     deleted = []
 
@@ -85,10 +88,21 @@ def test_retirement_failure_restores_images_song_list_and_manifest(collection, m
         return real_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(file_batch.os, "unlink", fail_later_retirement)
-    with pytest.raises(OSError, match="retirement failed"):
+    with pytest.raises(FloppyImageError, match="retirement failed") as caught:
         _build(collection, overwrite_existing=True)
     assert len(deleted) == 2
-    assert _contents(output) == before
+    error = caught.value
+    assert error.rollback_errors == []
+    assert error.retained_paths
+    assert Path(error.recovery_directory).parent == recovery_root
+    assert str(error.recovery_directory) in str(error)
+    retained_directories = set()
+    for path in map(Path, error.retained_paths):
+        assert path.is_file()
+        assert str(path) in str(error)
+        retained_directories.add(path.parent)
+    assert {path.name: path.read_bytes() for path in output.iterdir() if path.is_file()} == before
+    assert {path for path in output.iterdir() if path.is_dir()} == retained_directories
 
 
 def test_modified_obsolete_file_is_not_retired_even_with_overwrite_approval(collection):

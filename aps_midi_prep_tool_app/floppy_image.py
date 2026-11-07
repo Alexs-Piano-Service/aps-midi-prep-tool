@@ -2642,22 +2642,35 @@ def create_floppy_images_from_files(
         # come from exclusive creation, not from inspecting a path afterward.
         # Ignore cancellation during cleanup so the entire set is considered.
         retained = list(getattr(exc, "retained_paths", ()))
+        recovery_directories = []
         cleanup_errors = []
         for publication in reversed(published_outputs):
             try:
-                publication.remove_if_unchanged()
+                retained.extend(publication.remove_if_unchanged())
             except OSError as cleanup_error:
-                retained.append(publication.destination)
+                retained.extend(getattr(cleanup_error, "retained_paths", ()) or (publication.destination,))
+                if getattr(cleanup_error, "recovery_directory", ""):
+                    recovery_directories.append(cleanup_error.recovery_directory)
                 cleanup_errors.append(f"{publication.destination}: {cleanup_error}")
         if retained:
-            error = FloppyImageError(
+            retained = list(dict.fromkeys(retained))
+            error_type = (
+                FloppyOperationCancelled
+                if isinstance(exc, FloppyOperationCancelled) and not cleanup_errors
+                else FloppyImageError
+            )
+            message = (
                 f"The image export failed: {exc}\n\n"
-                "The numbered image set is incomplete. These output paths could not be safely cleaned up:\n"
+                "The numbered image set is incomplete. Files were retained for recovery at these paths:\n"
                 + "\n".join(retained)
                 + "\n\nReconnect the destination if needed and review these files before retrying, "
                 "or choose a different output name or folder. Changed or unverified files were kept."
             )
+            if cleanup_errors:
+                message += "\n\nCleanup could not be completed:\n" + "\n".join(cleanup_errors)
+            error = error_type(message)
             error.retained_paths = tuple(retained)
+            error.recovery_directories = tuple(dict.fromkeys(recovery_directories))
             error.rollback_errors = tuple(cleanup_errors)
             raise error from exc
         raise
@@ -5477,17 +5490,25 @@ def save_floppy_recovery_capture(diagnostics, output_path):
         try:
             publish_file_batch(((image_temp, output_path), (report_temp, report_path)))
         except FileBatchWriteError as exc:
-            if not exc.rollback_errors:
+            retained_paths = tuple(getattr(exc, "retained_paths", ()))
+            if not exc.rollback_errors and not exc.recovery_directory and not retained_paths:
                 raise exc.original_exception from exc
-            error = FloppyImageError(
-                f"Partial capture export failed: {exc}\n\n"
-                "Some output files could not be restored:\n"
-                + "\n".join(exc.rollback_errors)
-                + "\nRecovery copies and a manifest have been retained in:\n"
-                + exc.recovery_directory
+            message = f"Partial capture export failed: {exc}"
+            if exc.rollback_errors:
+                message += "\n\nSome output files could not be restored:\n" + "\n".join(exc.rollback_errors)
+            if retained_paths:
+                message += "\n\nFiles retained for recovery:\n" + "\n".join(retained_paths)
+            if exc.recovery_directory:
+                message += "\n\nRecovery copies and a manifest have been retained in:\n" + exc.recovery_directory
+            error_type = (
+                FloppyOperationCancelled
+                if isinstance(exc.original_exception, FloppyOperationCancelled) and not exc.rollback_errors
+                else FloppyImageError
             )
+            error = error_type(message)
             error.rollback_errors = exc.rollback_errors
             error.recovery_directory = exc.recovery_directory
+            error.retained_paths = retained_paths
             raise error from exc
     finally:
         for path in (image_temp, report_temp):

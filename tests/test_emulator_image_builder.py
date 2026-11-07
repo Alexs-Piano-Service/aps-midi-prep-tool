@@ -747,6 +747,9 @@ def test_replacement_commit_failure_restores_every_existing_image(
     output = tmp_path / "images"
     source.mkdir()
     output.mkdir()
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir()
+    monkeypatch.setattr(file_batch.tempfile, "tempdir", str(recovery_root))
     for index in range(1, 3):
         (source / f"Song {index}.mid").write_bytes(
             _midi_bytes(f"Song {index}")
@@ -771,7 +774,7 @@ def test_replacement_commit_failure_restores_every_existing_image(
         fail_second_commit,
     )
 
-    with pytest.raises(OSError, match="simulated commit failure"):
+    with pytest.raises(FloppyImageError, match="simulated commit failure") as caught:
         build_emulator_disk_images(
             source,
             output,
@@ -786,6 +789,14 @@ def test_replacement_commit_failure_restores_every_existing_image(
     assert commit_calls == [str(first), str(second), str(first)]
     assert first.read_bytes() == b"first existing image"
     assert second.read_bytes() == b"second existing image"
+    error = caught.value
+    assert error.rollback_errors == []
+    assert error.retained_paths
+    assert Path(error.recovery_directory).parent == recovery_root
+    assert str(error.recovery_directory) in str(error)
+    for path in error.retained_paths:
+        assert Path(path).is_file()
+        assert str(path) in str(error)
 
 
 @pytest.mark.parametrize("failure_phase", ["publication", "verification"])

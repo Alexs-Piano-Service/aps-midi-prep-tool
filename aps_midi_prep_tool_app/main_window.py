@@ -33049,6 +33049,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 guidance += "\n\n" + self._t("save_as.overwrite.restore_failed", folder=exc.recovery_directory)
             else:
                 guidance = self._t("save_as.overwrite.failed") + "\n\n" + guidance
+                if exc.recovery_directory:
+                    guidance += "\n\n" + self._lt(
+                        "Recovery copies and a manifest have been retained in:\n{folder}",
+                        folder=exc.recovery_directory,
+                    )
+            if exc.retained_paths:
+                guidance += "\n\n" + self._lt(
+                    "Files retained for recovery:\n{files}", files="\n".join(exc.retained_paths),
+                )
             self._show_error_list(
                 "Save As Failed", self._lt("Some files could not be saved to {folder}", folder=export_dir),
                 [str(exc), *exc.rollback_errors], guidance=guidance,

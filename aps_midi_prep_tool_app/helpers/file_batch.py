@@ -11,16 +11,17 @@ from .atomic_file import FilePublicationCleanupError, atomic_write_bytes
 
 
 class FileBatchWriteError(OSError):
-    """A batch failed; recovery files remain only when rollback was incomplete."""
+    """A batch failed, with locations of any preserved rollback files."""
 
     def __init__(
         self, message, *, rollback_errors=None, recovery_directory="",
-        original_exception=None,
+        original_exception=None, retained_paths=(),
     ):
         super().__init__(message)
         self.rollback_errors = list(rollback_errors or ())
         self.recovery_directory = str(recovery_directory or "")
         self.original_exception = original_exception
+        self.retained_paths = tuple(retained_paths)
 
 
 def _write_recovery_manifest(directory, records, rollback_errors=()):
@@ -49,6 +50,8 @@ def _write_recovery_manifest(directory, records, rollback_errors=()):
                 "published": record.get("published", False),
                 "publication": publication_details(record),
                 "restored": record.get("restored", False),
+                "retained_paths": record.get("retained_paths", []),
+                "quarantine_directory": record.get("quarantine_directory"),
                 "operation": record.get("operation", "write"),
             }
             for record in records
@@ -110,8 +113,10 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
     requires a SHA-256 entry in ``expected_hashes``. Optional expectations for
     writes protect approval-time contents too; None requires an absent target.
     Checked destinations must be regular files, never symlinks.
-    Rollback restores or removes writes only while their published identity and
-    contents are unchanged. Conflicts keep the current file and recovery data.
+    Rollback moves writes to private quarantine before checking their identity
+    and contents. Captured inodes are retained even on success to preserve
+    writes through existing handles. Originals are restored exclusively;
+    conflicts keep both the competing file and recovery data.
     """
     records = []
     published = []
@@ -224,6 +229,7 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
         # An exclusive copy may fail before it yields a publication receipt.
         # If its own cleanup cannot be verified, keep the recovery package too.
         rollback_errors = [str(exc)] if isinstance(exc, FilePublicationCleanupError) else []
+        retained_paths = list(getattr(exc, "retained_paths", ()))
         for record in reversed(published):
             destination = record["resolved_destination"]
             try:
@@ -235,19 +241,44 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
                     destination = receipt.destination
                 if record["existed"]:
                     snapshot = os.path.join(recovery_directory, record["original_file"])
+
+                    def quarantine_publication(actual_destination):
+                        try:
+                            paths = receipt.quarantine_if_unchanged(actual_destination)
+                        except BaseException as quarantine_error:
+                            # Record capture locations before atomic staging
+                            # cleanup runs; its own error must not hide them.
+                            paths = getattr(quarantine_error, "retained_paths", ())
+                            record["retained_paths"] = list(paths)
+                            record["quarantine_directory"] = getattr(quarantine_error, "recovery_directory", None)
+                            retained_paths.extend(paths)
+                            raise
+                        record["retained_paths"] = list(paths)
+                        record["quarantine_directory"] = os.path.dirname(paths[0]) if paths else None
+                        retained_paths.extend(paths)
+
                     with open(snapshot, "rb") as handle:
                         atomic_write_bytes(destination, handle.read(),
-                                           replace_existing=record["operation"] != "delete",
-                                           before_replace=(receipt.check_unchanged
+                                           replace_existing=False, allow_copy=False,
+                                           mode=record["original_mode"],
+                                           before_replace=(quarantine_publication
                                                            if receipt is not None else None))
-                    if record["operation"] == "delete":
-                        os.chmod(destination, record["original_mode"])
                 else:
-                    receipt.remove_if_unchanged()
+                    paths = receipt.remove_if_unchanged()
+                    record["retained_paths"] = list(paths)
+                    record["quarantine_directory"] = os.path.dirname(paths[0]) if paths else None
+                    retained_paths.extend(paths)
                 record["restored"] = True
             except BaseException as rollback_error:
+                paths = list(getattr(rollback_error, "retained_paths", ()))
+                if getattr(rollback_error, "recovery_directory", None):
+                    record["quarantine_directory"] = rollback_error.recovery_directory
+                if os.path.lexists(destination):
+                    paths.append(destination)
+                record["retained_paths"] = list(dict.fromkeys(record.get("retained_paths", []) + paths))
+                retained_paths.extend(paths)
                 rollback_errors.append(f"{record['destination']}: {rollback_error}")
-        if rollback_errors:
+        if rollback_errors or retained_paths:
             retain_recovery = True
             try:
                 _write_recovery_manifest(recovery_directory, records, rollback_errors)
@@ -256,7 +287,7 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
         raise FileBatchWriteError(
             str(exc), rollback_errors=rollback_errors,
             recovery_directory=recovery_directory if retain_recovery else "",
-            original_exception=exc,
+            original_exception=exc, retained_paths=dict.fromkeys(retained_paths),
         ) from exc
     finally:
         if recovery_directory and not retain_recovery:

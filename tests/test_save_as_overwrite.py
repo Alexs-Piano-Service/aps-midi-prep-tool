@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app.helpers import file_backup
 from aps_midi_prep_tool_app.pending_changes import staged_batch
+from test_file_batch import recovery_locations
 
 
 def _song(title, note):
@@ -325,6 +326,50 @@ def test_commit_failure_restores_published_files_and_retains_pending_state(windo
     assert {path: path.read_bytes() for path in originals} == originals
     assert _pending(w) == pending
     assert Path(w.pendingRegularConversions[str(source)]["temp_path"]).is_file()
+
+
+def test_completed_rollback_reports_recovery_folder_and_retained_paths(
+    window, tmp_path, monkeypatch, recovery_locations,
+):
+    from aps_midi_prep_tool_app.helpers import file_batch
+
+    source, other = _load(window, tmp_path)
+    _stage_title(window, source, monkeypatch)
+    originals = {path: path.read_bytes() for path in (source, other)}
+    pending = _pending(window)
+    questions = _choose_destination(monkeypatch, source.parent, yes=True)
+    atomic_write = file_batch.atomic_write_bytes
+    publish_batch = main_window.publish_file_batch
+    failures = []
+
+    def fail_second(destination, payload, **kwargs):
+        if Path(destination) == other:
+            raise OSError("Injected publication failure")
+        return atomic_write(destination, payload, **kwargs)
+
+    def capture_failure(*args, **kwargs):
+        try:
+            return publish_batch(*args, **kwargs)
+        except file_batch.FileBatchWriteError as error:
+            failures.append(error)
+            raise
+
+    monkeypatch.setattr(file_batch, "atomic_write_bytes", fail_second)
+    monkeypatch.setattr(main_window, "publish_file_batch", capture_failure)
+    window.save_as_changes()
+
+    assert len(questions) == 1 and len(failures) == 1
+    error = failures[0]
+    assert error.rollback_errors == []
+    assert Path(error.recovery_directory).is_dir()
+    assert error.retained_paths
+    assert all(Path(path).is_file() for path in error.retained_paths)
+    assert len(window._test_errors) == 1
+    guidance = window._test_errors[0][1]["guidance"]
+    assert error.recovery_directory in guidance
+    assert all(path in guidance for path in error.retained_paths)
+    assert {path: path.read_bytes() for path in originals} == originals
+    assert _pending(window) == pending
 
 
 def test_overwrite_respects_disabled_backups(window, tmp_path, monkeypatch):

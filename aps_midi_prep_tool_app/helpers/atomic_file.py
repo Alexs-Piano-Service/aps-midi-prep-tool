@@ -2,11 +2,12 @@
 
 import errno
 import hashlib
+import json
 import os
 import shutil
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 def _file_identity(info):
@@ -80,10 +81,69 @@ class PublishedFile:
         _check_parent(self.destination, self.parent_identity)
         return True
 
+    def quarantine_if_unchanged(self, destination=None, *, missing_ok=False):
+        """Detach the current entry without ever discarding its inode.
+
+        The first check avoids disturbing known conflicts. Only the check of
+        the moved entry establishes what the rename actually captured. Keep
+        that entry even on success: an existing writer can still change it
+        through an open handle after any ownership check. Callers must report
+        the returned recovery paths and must not automatically delete them.
+        """
+        if not self.check_unchanged(destination, missing_ok=missing_ok):
+            return ()
+        directory = tempfile.mkdtemp(
+            prefix=".aps_rollback_", dir=os.path.dirname(os.path.abspath(self.destination)),
+        )
+        captured = os.path.join(directory, "captured")
+        moved = False
+        # Write the mapping before moving anything so an interrupted rollback
+        # still leaves the detached file's original location discoverable.
+        try:
+            with open(os.path.join(directory, "recovery.json"), "x", encoding="utf-8") as handle:
+                json.dump({"destination": self.destination, "captured": captured,
+                           "identity": self.identity, "sha256": self.sha256.hex()}, handle)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            _check_parent(self.destination, self.parent_identity)
+            # The fresh private directory has no existing captured entry.
+            # Rename is atomic and stays on the destination's filesystem.
+            os.rename(self.destination, captured)
+            moved = True
+            _check_parent(self.destination, self.parent_identity)
+            # Our rename changes ctime; retain the original identity, size,
+            # mtime and digest and validate the captured entry in its new parent.
+            replace(self, destination=captured, parent_identity=_parent_identity(captured),
+                    ctime_ns=None).check_unchanged()
+        except BaseException as exc:
+            # Do not drop the known recovery path when a disconnect makes
+            # existence queries fail. A rename error can also be ambiguous.
+            retained = (captured,) if moved else (captured, self.destination)
+            raise FileRollbackError(exc, retained, directory) from exc
+        return (captured,)
+
     def remove_if_unchanged(self):
-        """Remove this publication, or refuse if ownership cannot be verified."""
-        if self.check_unchanged(missing_ok=True):
-            os.unlink(self.destination)
+        """Remove the public name and return preserved quarantine paths."""
+        paths = self.quarantine_if_unchanged(missing_ok=True)
+        if paths and os.path.lexists(self.destination):
+            raise FileRollbackError(
+                OSError("Another output appeared during rollback; it was kept."),
+                (*paths, self.destination), os.path.dirname(paths[0]),
+            )
+        return paths
+
+
+class FileRollbackError(OSError):
+    """Rollback stopped without discarding the entry it captured."""
+
+    def __init__(self, error, retained_paths, recovery_directory):
+        self.retained_paths = tuple(retained_paths)
+        self.recovery_directory = recovery_directory
+        self.original_exception = error
+        super().__init__(f"{error}\nRollback recovery files were kept at: "
+                         + ", ".join(self.retained_paths)
+                         + f"\nRecovery information: {recovery_directory}")
 
 
 class FilePublicationCleanupError(OSError):
@@ -97,7 +157,8 @@ class FilePublicationCleanupError(OSError):
         )
 
 
-def publish_new_file(staged_path, destination, *, check_cancel=None, published_callback=None):
+def publish_new_file(staged_path, destination, *, check_cancel=None, published_callback=None,
+                     allow_copy=True):
     """Publish an already-verified file without replacing an existing path.
 
     A hard link publishes atomically where supported. FAT/exFAT and other
@@ -107,6 +168,8 @@ def publish_new_file(staged_path, destination, *, check_cancel=None, published_c
     takes no arguments and may raise the caller's cancellation exception.
     ``published_callback`` receives a ``PublishedFile`` receipt before the
     final cancellation check, allowing a caller to roll back a larger set.
+    ``allow_copy=False`` requires atomic publication and refuses a streaming
+    fallback, which is necessary when restoring files during rollback.
     """
     def check():
         if check_cancel is not None:
@@ -142,6 +205,8 @@ def publish_new_file(staged_path, destination, *, check_cancel=None, published_c
             unsupported.add(errno.EINVAL)
         if exc.errno not in unsupported:
             raise
+        if not allow_copy:
+            raise OSError("Atomic exclusive publication is unavailable; recovery files were kept.") from exc
     else:
         if published_callback is not None:
             published_callback(receipt)
@@ -236,7 +301,7 @@ def publish_new_file(staged_path, destination, *, check_cancel=None, published_c
 
 
 def atomic_write_bytes(dest_path, payload, *, validate=None, replace_existing=True,
-                       published_callback=None, before_replace=None):
+                       published_callback=None, before_replace=None, allow_copy=True, mode=None):
     """Replace a destination only after its temporary output passes readback checks.
 
     Existing destination permissions and symlinks are preserved, and read-only
@@ -247,8 +312,10 @@ def atomic_write_bytes(dest_path, payload, *, validate=None, replace_existing=Tr
     and cleanup for new files. Backups remain the caller's responsibility.
     ``published_callback`` receives a ``PublishedFile`` receipt as soon as the
     output is published, even if later cleanup fails. ``before_replace``
-    receives the resolved destination and may reject replacement after staging,
-    immediately before publication (for example, during rollback).
+    receives the resolved destination after staging and before publication. It
+    is not an atomic ownership guard. Rollback must detach the existing entry
+    there and publish exclusively with ``allow_copy=False``. ``mode`` applies
+    permissions to the private staged file, before it becomes visible.
     """
     dest_path = (os.path.realpath if replace_existing else os.path.abspath)(os.fsdecode(dest_path))
     parent_identity = _parent_identity(dest_path) if published_callback is not None else None
@@ -280,7 +347,10 @@ def atomic_write_bytes(dest_path, payload, *, validate=None, replace_existing=Tr
             # without truncating, honoring ACLs and Windows read-only flags.
             write_descriptor = os.open(dest_path, os.O_WRONLY)
             os.close(write_descriptor)
-            shutil.copymode(dest_path, temp_path)
+            if mode is None:
+                shutil.copymode(dest_path, temp_path)
+        if mode is not None:
+            os.chmod(temp_path, mode)
 
         receipt = None
         if published_callback is not None and (replace_existing or os.name == "nt"):
@@ -305,7 +375,8 @@ def atomic_write_bytes(dest_path, payload, *, validate=None, replace_existing=Tr
             if published_callback is not None:
                 published_callback(receipt)
         else:
-            publish_new_file(temp_path, dest_path, published_callback=published_callback)
+            publish_new_file(temp_path, dest_path, published_callback=published_callback,
+                             allow_copy=allow_copy)
     finally:
         try:
             os.unlink(temp_path)

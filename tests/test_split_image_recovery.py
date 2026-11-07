@@ -1,6 +1,7 @@
 """A failed numbered export can be retried without removing unrelated files."""
 
 import errno
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,10 +62,29 @@ def collection(tmp_path, monkeypatch, request):
         assert list(working_dir.iterdir()) == []
 
     outputs = [output_dir / f"Collection_{index:02d}.{output_ext}" for index in range(1, 4)]
+    recovery_directories = set()
+
+    def check_retained(error, *, uncertain_capture=False):
+        assert error.retained_paths
+        recovery_directories.update(map(Path, getattr(error, "recovery_directories", ())))
+        for path in map(Path, error.retained_paths):
+            assert path.is_file() or (
+                uncertain_capture and path.name == "captured" and path.parent in recovery_directories
+            )
+            assert str(path) in str(error)
+            if path.parent.name.startswith(".aps_rollback_"):
+                recovery_directories.add(path.parent)
+        for directory in recovery_directories:
+            assert str(directory) in str(error)
+            mapping = json.loads((directory / "recovery.json").read_text())
+            assert Path(mapping["destination"]) in outputs
+
+    def check_outputs(expected):
+        assert set(output_dir.iterdir()) == set(expected) | recovery_directories
 
     def check_retry():
         assert export() == [str(path) for path in outputs]
-        assert set(output_dir.iterdir()) == set(originals) | set(outputs)
+        check_outputs(set(originals) | set(outputs))
         for path, (song, payload) in zip(outputs, songs.items()):
             raw = path
             if output_ext == "hfe":
@@ -76,6 +96,7 @@ def collection(tmp_path, monkeypatch, request):
     return SimpleNamespace(
         output_dir=output_dir, outputs=outputs, originals=originals,
         export=export, check_originals=check_originals, check_retry=check_retry,
+        check_retained=check_retained, check_outputs=check_outputs,
     )
 
 
@@ -133,11 +154,12 @@ def test_second_image_enospc_rolls_back_and_allows_clean_retry(collection, hardl
     else:
         monkeypatch.setattr(atomic_file, "open", fail_second_copy, raising=False)
 
-    with pytest.raises(OSError, match="No space"):
+    with pytest.raises(floppy_image.FloppyImageError, match="No space") as caught:
         collection.export()
 
+    collection.check_retained(caught.value)
     assert failures == ["link" if hardlinks else "copy"]
-    assert set(collection.output_dir.iterdir()) == set(collection.originals)
+    collection.check_outputs(collection.originals)
     collection.check_originals()
     fail = False
     collection.check_retry()
@@ -154,11 +176,12 @@ def test_cancel_during_second_publication_rolls_back_and_allows_clean_retry(coll
             return True
         return False
 
-    with pytest.raises(floppy_image.FloppyOperationCancelled):
+    with pytest.raises(floppy_image.FloppyOperationCancelled) as caught:
         collection.export(cancel_callback=cancel)
 
+    collection.check_retained(caught.value)
     assert cancellations == [True]
-    assert set(collection.output_dir.iterdir()) == set(collection.originals)
+    collection.check_outputs(collection.originals)
     collection.check_originals()
     collection.check_retry()
 
@@ -176,11 +199,12 @@ def test_late_second_collision_survives_rollback_of_first_image(collection, hard
 
     monkeypatch.setattr(atomic_file.os, "link", competing_link)
 
-    with pytest.raises(floppy_image.FloppyImageError, match="already exists"):
+    with pytest.raises(floppy_image.FloppyImageError, match="already exists") as caught:
         collection.export()
 
+    collection.check_retained(caught.value)
     assert collision.read_bytes() == concurrent_payload
-    assert set(collection.output_dir.iterdir()) == set(collection.originals) | {collision}
+    collection.check_outputs(set(collection.originals) | {collision})
     collection.check_originals()
 
 
@@ -198,10 +222,12 @@ def test_report_callback_failure_rolls_back_just_published_image(collection, har
 
     monkeypatch.setattr(floppy_image, "_write_image_direct", write_with_report)
 
-    with pytest.raises(RuntimeError, match="Report callback failed"):
+    with pytest.raises(floppy_image.FloppyImageError, match="Report callback failed") as caught:
         collection.export(sector_report_callback=reject_report)
 
-    assert set(collection.output_dir.iterdir()) == set(collection.originals)
+    collection.check_retained(caught.value)
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    collection.check_outputs(collection.originals)
     collection.check_originals()
     collection.check_retry()
 
@@ -212,7 +238,7 @@ def test_unverifiable_or_unremovable_first_output_is_kept_and_reported(
 ):
     first, second, third = collection.outputs
     real_link = atomic_file.os.link
-    real_unlink = atomic_file.os.unlink
+    real_rename = atomic_file.os.rename
     kept_payload = None
     symlink_target = next(path for path in collection.originals if path.name.startswith("Other_"))
 
@@ -253,18 +279,23 @@ def test_unverifiable_or_unremovable_first_output_is_kept_and_reported(
             kept_payload = symlink_target.read_bytes()
         raise OSError(errno.ENOSPC, "No space left while publishing the second image")
 
-    def guarded_unlink(path, *args, **kwargs):
+    def guarded_rename(path, *args, **kwargs):
         if Path(path) == first and isinstance(change, int):
             raise OSError(change, "Destination unavailable during cleanup")
-        return real_unlink(path, *args, **kwargs)
+        return real_rename(path, *args, **kwargs)
 
     monkeypatch.setattr(atomic_file.os, "link", fail_second_link)
-    monkeypatch.setattr(atomic_file.os, "unlink", guarded_unlink)
+    monkeypatch.setattr(atomic_file.os, "rename", guarded_rename)
 
     with pytest.raises(floppy_image.FloppyImageError, match="incomplete") as caught:
         collection.export()
 
-    assert caught.value.retained_paths == (str(first),)
+    collection.check_retained(caught.value, uncertain_capture=isinstance(change, int))
+    if isinstance(change, int):
+        assert len(caught.value.retained_paths) == 2
+        assert str(first) in caught.value.retained_paths
+    else:
+        assert caught.value.retained_paths == (str(first),)
     assert str(first) in str(caught.value)
     assert "No space left while publishing the second image" in str(caught.value)
     assert isinstance(caught.value.__cause__, OSError)
@@ -272,7 +303,7 @@ def test_unverifiable_or_unremovable_first_output_is_kept_and_reported(
     assert first.read_bytes() == kept_payload
     assert not second.exists()
     assert not third.exists()
-    assert set(collection.output_dir.iterdir()) == set(collection.originals) | {first}
+    collection.check_outputs(set(collection.originals) | {first})
     if change == "symlink":
         assert first.is_symlink()
         # Windows readlink() can return an extended-length (\\?\) path.
@@ -325,12 +356,14 @@ def test_failed_cleanup_of_partial_second_copy_reports_that_path(collection, mon
     with pytest.raises(floppy_image.FloppyImageError, match="incomplete") as caught:
         collection.export()
 
-    assert caught.value.retained_paths == (str(second),)
+    collection.check_retained(caught.value)
+    assert str(second) in caught.value.retained_paths
+    assert len(caught.value.retained_paths) == 2
     assert str(second) in str(caught.value)
     assert "No space left while copying the second image" in str(caught.value)
     assert "Destination unavailable during cleanup" in str(caught.value)
     assert not first.exists()
     assert second.stat().st_size == 1024
     assert not third.exists()
-    assert set(collection.output_dir.iterdir()) == set(collection.originals) | {second}
+    collection.check_outputs(set(collection.originals) | {second})
     collection.check_originals()

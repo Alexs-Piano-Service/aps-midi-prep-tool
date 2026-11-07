@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from aps_midi_prep_tool_app.helpers import atomic_file, file_batch
-from test_file_batch import recovery_locations
+from test_file_batch import _assert_retained_publications, recovery_locations
 
 
 def _file(directory, name, contents):
@@ -391,6 +391,5 @@ def test_successful_publication_is_rolled_back_when_temp_cleanup_raises(
     assert second.read_bytes() == b"original second"
     assert progress_calls == []
     assert caught.value.rollback_errors == []
-    assert caught.value.recovery_directory == ""
     assert isinstance(caught.value.original_exception, OSError)
-    assert recovery_locations and not any(path.exists() for path in recovery_locations)
+    _assert_retained_publications(caught.value, [payload])

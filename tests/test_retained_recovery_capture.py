@@ -70,16 +70,36 @@ def _capture_export_paths(tmp_path, existing):
     return source, image, report, diagnostics
 
 
-def _assert_capture_export_unchanged(source, image, report, diagnostics, existing):
+def _assert_capture_export_unchanged(source, image, report, diagnostics, existing, recovery_error=None):
     assert source.read_bytes() == b"new partial capture"
     assert diagnostics == {"partial_capture_path": str(source), "sector_states": [1, 3, 0]}
+    retained_directories = set()
+    if recovery_error is not None:
+        assert recovery_error.rollback_errors == []
+        assert recovery_error.retained_paths
+        for path in map(Path, recovery_error.retained_paths):
+            assert path.read_bytes() == source.read_bytes()
+            assert str(path) in str(recovery_error)
+            retained_directories.add(path.parent)
+        recovery = Path(recovery_error.recovery_directory)
+        assert str(recovery) in str(recovery_error)
+        assert list(source.parent.glob("aps_file_batch_*")) == [recovery]
+        manifest = json.loads((recovery / "manifest.json").read_text())
+        record = next(item for item in manifest["files"] if item["destination"] == str(image))
+        assert record["restored"] is True
+        assert (recovery / record["prepared_file"]).read_bytes() == source.read_bytes()
+        if existing:
+            assert (recovery / record["original_file"]).read_bytes() == b"previous capture"
+    else:
+        assert not list(source.parent.glob("aps_file_batch_*"))
     if existing:
         assert image.read_bytes() == b"previous capture"
         assert report.read_bytes() == b"previous diagnostics"
-        assert set(image.parent.iterdir()) == {image, report}
+        assert set(image.parent.iterdir()) == {image, report} | retained_directories
     else:
-        assert not list(image.parent.iterdir())
-    assert not list(source.parent.glob("aps_file_batch_*"))
+        assert not image.exists()
+        assert not report.exists()
+        assert set(image.parent.iterdir()) == retained_directories
 
 
 def test_report_replacement_failure_restores_existing_capture_pair(tmp_path, monkeypatch):
@@ -95,10 +115,11 @@ def test_report_replacement_failure_restores_existing_capture_pair(tmp_path, mon
 
     monkeypatch.setattr(floppy_image.os, "replace", fail_report_replace)
 
-    with pytest.raises(PermissionError, match="Report replacement failed"):
+    with pytest.raises(floppy_image.FloppyImageError, match="Report replacement failed") as caught:
         floppy_image.save_floppy_recovery_capture(diagnostics, image)
 
-    _assert_capture_export_unchanged(source, image, report, diagnostics, existing=True)
+    _assert_capture_export_unchanged(source, image, report, diagnostics, existing=True,
+                                     recovery_error=caught.value)
 
 
 def test_report_publication_failure_removes_new_capture_image(tmp_path, monkeypatch):
@@ -114,10 +135,11 @@ def test_report_publication_failure_removes_new_capture_image(tmp_path, monkeypa
 
     monkeypatch.setattr(file_batch, "atomic_write_bytes", fail_report_publish)
 
-    with pytest.raises(PermissionError, match="Report publication failed"):
+    with pytest.raises(floppy_image.FloppyImageError, match="Report publication failed") as caught:
         floppy_image.save_floppy_recovery_capture(diagnostics, image)
 
-    _assert_capture_export_unchanged(source, image, report, diagnostics, existing=False)
+    _assert_capture_export_unchanged(source, image, report, diagnostics, existing=False,
+                                     recovery_error=caught.value)
 
 
 @pytest.mark.parametrize("existing", [False, True])
