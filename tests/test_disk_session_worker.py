@@ -61,6 +61,86 @@ def test_emulator_build_worker_forwards_layout_and_scan_options(monkeypatch, dis
     assert finished == [result]
 
 
+@pytest.mark.parametrize("error_type, message, cancel_requested, metadata", [
+    (disk_session_worker.FloppyOperationCancelled, "Export cancelled", False,
+     {"rollback_errors": ["DISK0001.hfe: restoration failed"]}),
+    (RuntimeError, "Restoration failed", True,
+     {"rollback_errors": ["DISK0001.hfe: hard links unavailable"]}),
+    (RuntimeError, "Export cancelled; restoration failed", False,
+     {"rollback_errors": ["DISK0001.hfe: restoration failed"]}),
+    (disk_session_worker.FloppyOperationCancelled, "Export cancelled", False,
+     {"recovery_directory": "/recovery/copies"}),
+    (disk_session_worker.FloppyOperationCancelled, "Export cancelled", False,
+     {"retained_paths": ["/images/quarantine/DISK0001.hfe"]}),
+    (RuntimeError, "Export failed", False,
+     {"rollback_errors": ["DISK0001.hfe: restoration failed"]}),
+    (RuntimeError, "Export failed", False,
+     {"recovery_directory": "/recovery/copies"}),
+])
+def test_emulator_recovery_takes_precedence_over_ordinary_terminal_signals(
+    monkeypatch, error_type, message, cancel_requested, metadata,
+):
+    error = error_type(message)
+    for key, value in metadata.items():
+        setattr(error, key, value)
+
+    def interrupted_build(*_args, **_kwargs):
+        if cancel_requested:
+            worker.cancel()
+        raise error
+
+    monkeypatch.setattr(disk_session_worker, "build_emulator_disk_images", interrupted_build)
+    worker = disk_session_worker.EmulatorImageBuildWorker(
+        "source", "output", prefix="DSKA", starting_number=0,
+        safety_margin_bytes=0, album_title="", disk_format=object(), output_ext="hfe",
+    )
+    recoveries, other_outcomes = [], []
+    worker.buildRecoveryAvailable.connect(recoveries.append)
+    worker.buildFailed.connect(other_outcomes.append)
+    worker.operationCancelled.connect(other_outcomes.append)
+    worker.buildFinished.connect(other_outcomes.append)
+
+    worker.run()
+
+    assert other_outcomes == []
+    recovery, = recoveries
+    assert recovery["message"] == message
+    assert recovery["cancelled"] is (
+        cancel_requested or isinstance(error, disk_session_worker.FloppyOperationCancelled)
+        or "cancelled" in message
+    )
+    assert recovery["rollback_errors"] == tuple(metadata.get("rollback_errors", ()))
+    assert recovery["retained_paths"] == tuple(metadata.get("retained_paths", ()))
+    assert recovery["recovery_directory"] == metadata.get("recovery_directory", "")
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_emulator_without_recovery_keeps_ordinary_failure_or_cancellation(monkeypatch, cancelled):
+    error = (
+        disk_session_worker.FloppyOperationCancelled("Cancelled before publication")
+        if cancelled else RuntimeError("Cannot prepare image")
+    )
+
+    def interrupted_build(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(disk_session_worker, "build_emulator_disk_images", interrupted_build)
+    worker = disk_session_worker.EmulatorImageBuildWorker(
+        "source", "output", prefix="DSKA", starting_number=0,
+        safety_margin_bytes=0, album_title="", disk_format=object(), output_ext="hfe",
+    )
+    failures, cancellations, recoveries = [], [], []
+    worker.buildFailed.connect(failures.append)
+    worker.operationCancelled.connect(cancellations.append)
+    worker.buildRecoveryAvailable.connect(recoveries.append)
+
+    worker.run()
+
+    assert recoveries == []
+    assert cancellations == ([str(error)] if cancelled else [])
+    assert failures == ([] if cancelled else [str(error)])
+
+
 class _RecoveredSession:
     def __init__(self, diagnostics, listing):
         self.recovery_diagnostics = diagnostics

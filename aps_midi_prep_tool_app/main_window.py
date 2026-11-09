@@ -12924,6 +12924,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         worker.previewRequested.connect(self._on_emulator_preview_requested)
         worker.buildFinished.connect(self._on_emulator_image_success)
         worker.buildFailed.connect(self._on_emulator_image_failure)
+        worker.buildRecoveryAvailable.connect(self._on_emulator_image_recovery)
         worker.operationCancelled.connect(self._on_emulator_image_cancelled)
         worker.finished.connect(self._on_emulator_image_finished)
         self.emulatorImageWorker = worker
@@ -13110,6 +13111,75 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             localize_emulator_warning(message, self._language_code()),
             guidance=self._t("emulator.failure.guidance"),
         )
+
+    def _on_emulator_image_recovery(self, recovery):
+        self._close_emulator_image_progress()
+        rollback_errors = recovery["rollback_errors"]
+        if rollback_errors:
+            summary = self._lt(
+                "Emulator image creation stopped. Some output files could not be restored."
+            )
+            guidance = self._lt(
+                "The output folder may contain an incomplete image set. Use the recovery copies "
+                "and manifest to restore the affected files before using the images. "
+                "Keep the recovery files until restoration is complete."
+            )
+            event = "Emulator image creation stopped with incomplete restoration"
+        else:
+            summary = self._lt(
+                "Emulator image creation cancelled. The original output state was restored, "
+                "but recovery files were retained."
+                if recovery["cancelled"] else
+                "Emulator image creation failed. The original output state was restored, "
+                "but recovery files were retained."
+            )
+            guidance = self._lt(
+                "No restoration is needed. Close any programs using these files, then inspect "
+                "the restored output and retained files. Keep any changes you need before "
+                "deleting the retained files and recovery folder."
+            )
+            event = (
+                "Emulator image creation cancelled with recovery files retained"
+                if recovery["cancelled"] else
+                "Emulator image creation failed with recovery files retained"
+            )
+
+        details = [guidance]
+        if rollback_errors:
+            details.append(self._lt(
+                "Some output files could not be restored: {files}",
+                files="\n".join(rollback_errors),
+            ))
+        if recovery["recovery_directory"]:
+            details.append(self._lt(
+                "Recovery copies and a manifest have been retained in:\n{folder}",
+                folder=recovery["recovery_directory"],
+            ))
+        if recovery["retained_paths"]:
+            details.append(self._lt(
+                "Files retained for recovery:\n{files}",
+                files="\n".join(recovery["retained_paths"]),
+            ))
+        self.status_label.setText(summary)
+        self._log_warning_event(
+            "Utilities", event,
+            source=self.emulatorImageContext.get("source_directory", ""),
+            output=self.emulatorImageContext.get("output_directory", ""),
+            **recovery,
+        )
+        message = QMessageBox(self)
+        apply_window_icon(message)
+        message.setWindowTitle(self._lt("Emulator Image Recovery"))
+        message.setIcon(
+            QMessageBox.Warning if rollback_errors or not recovery["cancelled"]
+            else QMessageBox.Information
+        )
+        message.setTextFormat(Qt.PlainText)
+        message.setText(summary)
+        message.setInformativeText("\n\n".join(details))
+        message.setDetailedText(localize_emulator_warning(recovery["message"], self._language_code()))
+        message.setStandardButtons(QMessageBox.Ok)
+        self._exec_child_dialog(message)
 
     def _on_emulator_image_cancelled(self, _message):
         self._close_emulator_image_progress()
@@ -32362,10 +32432,19 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _materialize_export_context_files(self, file_specs, output_path):
         base_path = os.path.splitext(output_path)[0]
-        context_dir = f"{base_path}_files"
-        if os.path.isdir(context_dir):
-            shutil.rmtree(context_dir, ignore_errors=True)
-        os.makedirs(context_dir, exist_ok=True)
+        context_base = f"{base_path}_files"
+        context_dir = context_base
+        suffix = 2
+        while True:
+            try:
+                # Claim a new directory atomically. Existing directories,
+                # files, and symlinks (including dangling links) are never
+                # reused or removed, even when another export creates one.
+                os.mkdir(context_dir)
+                break
+            except FileExistsError:
+                context_dir = f"{context_base}_{suffix}"
+                suffix += 1
 
         context_paths = []
         for spec in file_specs:

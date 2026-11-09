@@ -15,6 +15,12 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Split-image exports create a new companion source directory when the usual
+  name is occupied, preserving existing directories, edited export files, and
+  symlink targets.
+- Cancelled emulator image exports show recovery paths and cleanup guidance
+  when rollback retains files. Incomplete restoration always shows a warning
+  identifying affected files and recovery copies, even after cancellation.
 - Failed or cancelled POSIX floppy saves leave verified, unchanged originals
   intact during recovery, avoiding unnecessary deletion and rewriting when a
   command fails before launch. Recovery diagnostics distinguish unchanged files

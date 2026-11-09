@@ -268,6 +268,7 @@ class BulkExtractionWorker(_CancellableDiskWorker):
 class EmulatorImageBuildWorker(_CancellableDiskWorker):
     buildFinished = Signal(object)
     buildFailed = Signal(str)
+    buildRecoveryAvailable = Signal(object)
     overwriteRequested = Signal(object)
     previewRequested = Signal(object)
     CANCELLED_MESSAGE = "Emulator image creation cancelled."
@@ -378,10 +379,24 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
             )
             self._raise_if_cancelled()
             self.buildFinished.emit(result)
-        except FloppyOperationCancelled as exc:
-            self._emit_cancelled(exc)
         except Exception as exc:
-            if self._should_treat_as_cancelled(exc):
+            rollback_errors = tuple(getattr(exc, "rollback_errors", ()) or ())
+            recovery_directory = getattr(exc, "recovery_directory", "") or ""
+            retained_paths = tuple(getattr(exc, "retained_paths", ()) or ())
+            cancelled = self._should_treat_as_cancelled(exc)
+            # Recovery must take precedence over cancellation, including when
+            # the builder raises FloppyOperationCancelled after a safe rollback.
+            # Send a snapshot so the GUI keeps the paths after worker cleanup.
+            if rollback_errors or recovery_directory or retained_paths:
+                self.buildRecoveryAvailable.emit({
+                    "cancelled": cancelled,
+                    "message": str(exc),
+                    "rollback_errors": rollback_errors,
+                    "recovery_directory": recovery_directory,
+                    "retained_paths": retained_paths,
+                })
+                return
+            if cancelled:
                 self._emit_cancelled(exc)
                 return
             self.buildFailed.emit(str(exc))
