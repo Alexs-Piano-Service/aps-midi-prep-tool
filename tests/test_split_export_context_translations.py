@@ -2,6 +2,7 @@
 
 import errno
 import os
+from pathlib import PurePosixPath, PureWindowsPath
 from string import Formatter
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -64,17 +65,25 @@ def test_split_export_companion_warning_preserves_literal_paths_and_error(langua
 
 @pytest.mark.parametrize("language", LANGUAGES)
 @pytest.mark.parametrize("cleanup_state", ["removed", "retained"])
+@pytest.mark.parametrize("export_root", [
+    pytest.param(PurePosixPath("/exports"), id="posix"),
+    pytest.param(PureWindowsPath("C:/Exports"), id="windows"),
+])
 def test_split_export_warning_dialog_shows_all_literal_paths_despite_hidden_completion(
-    window, tmp_path, monkeypatch, language, cleanup_state,
+    window, monkeypatch, language, cleanup_state, export_root,
 ):
     window.currentLanguage = language
     window.settings.setValue(window.SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG, True)
     paths = [
-        str(tmp_path / f"Concert {{paths}} <piano & duet>_{number:02d}.img")
+        str(export_root / f"Concert {{paths}} <piano & duet>_{number:02d}.img")
         for number in range(1, 13)
     ]
-    folder = str(tmp_path / "Concert {path} <piano & duet>_files")
-    exc = OSError(errno.ENOSPC, "No space left on device", folder + "/Song {error} <A & B>.mid")
+    companion_folder = export_root / "Concert {path} <piano & duet>_files"
+    folder = str(companion_folder)
+    exc = OSError(
+        errno.ENOSPC, "No space left on device",
+        str(companion_folder / "Song {error} <A & B>.mid"),
+    )
     if cleanup_state == "removed":
         exc.export_context_removed_directory = folder
         expected_cleanup = translate_text(WARNING_MESSAGES[3], language, path=folder)
@@ -96,7 +105,9 @@ def test_split_export_warning_dialog_shows_all_literal_paths_despite_hidden_comp
         assert all(path in message for path in paths)
         assert translate_text(WARNING_MESSAGES[2], language) in message
         assert localize_write_message(str(exc), language) in message
-        assert exc.filename in message
+        # OSError formats its filename with repr(), escaping Windows
+        # backslashes. The separately listed output paths above stay literal.
+        assert repr(exc.filename) in message
         assert expected_cleanup in message
         assert translate_text(WARNING_MESSAGES[5], language) in message
         return QMessageBox.Ok
