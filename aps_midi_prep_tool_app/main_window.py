@@ -13,6 +13,7 @@ import re
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
@@ -13881,11 +13882,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             text = text[:marker_index].rstrip()
         return text
 
-    def _show_reportable_error_message(self, icon, title, message, *, offer_report=True, extra_action=None):
+    def _show_reportable_error_message(
+        self, icon, title, message, *, offer_report=True, extra_action=None, plain_text=False,
+    ):
         box = QMessageBox(self)
         apply_window_icon(box)
         box.setIcon(icon)
         box.setWindowTitle(self._lt(title))
+        if plain_text:
+            box.setTextFormat(Qt.PlainText)
         box.setText(message)
         ok_button = box.addButton(QMessageBox.Ok)
         report_button = None
@@ -32447,11 +32452,69 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 suffix += 1
 
         context_paths = []
-        for spec in file_specs:
-            dest_path = os.path.join(context_dir, os.path.basename(spec["image_path"]))
-            shutil.copy2(spec["host_path"], dest_path)
-            context_paths.append(dest_path)
+        context_identity = None
+        try:
+            context_identity = os.lstat(context_dir)
+            for spec in file_specs:
+                dest_path = os.path.join(context_dir, os.path.basename(spec["image_path"]))
+                shutil.copy2(spec["host_path"], dest_path)
+                context_paths.append(dest_path)
+        except Exception as exc:
+            # Only this invocation's successfully claimed directory is ours to
+            # remove. Include any partial file left by the failing copy2 call.
+            try:
+                current_identity = os.lstat(context_dir)
+                if (context_identity is None or not context_identity.st_ino
+                        or not stat.S_ISDIR(current_identity.st_mode)
+                        or not os.path.samestat(context_identity, current_identity)):
+                    raise OSError(self._lt("The companion folder changed during export; it was kept."))
+                shutil.rmtree(context_dir)
+            except OSError as cleanup_error:
+                exc.export_context_retained_directory = context_dir
+                exc.export_context_cleanup_error = cleanup_error
+            else:
+                exc.export_context_removed_directory = context_dir
+            raise
         return context_dir, context_paths
+
+    def _show_export_context_failure(self, output_paths, exc):
+        summary = self._lt("Images Created with Companion Warning")
+        parts = [
+            self._lt(
+                "Created {count} images successfully:\n{paths}",
+                count=len(output_paths), paths="\n".join(output_paths),
+            ),
+            self._lt(
+                "The companion files could not be copied. Your current files and pending changes are still loaded."
+            ),
+            f"{self._t('error.details_label')}: "
+            + localize_write_message(str(exc), self._language_code()),
+        ]
+        removed_dir = getattr(exc, "export_context_removed_directory", "")
+        retained_dir = getattr(exc, "export_context_retained_directory", "")
+        if removed_dir:
+            parts.append(self._lt("The incomplete companion folder was removed: {path}", path=removed_dir))
+        if retained_dir:
+            parts.append(self._lt(
+                "The incomplete companion folder could not be removed: {path}\n{error}",
+                path=retained_dir,
+                error=localize_write_message(str(exc.export_context_cleanup_error), self._language_code()),
+            ))
+        parts.append(self._lt(
+            "Use the completed images listed above. To save the prepared files separately, use Save As and choose a folder with enough free space. To export images again, choose a different output name or folder."
+        ))
+        self.status_label.setText(summary)
+        self._log_warning_event(
+            "Image", "Images created; companion copy failed",
+            outputs=tuple(output_paths), detail=str(exc),
+            removed_directory=removed_dir, retained_directory=retained_dir,
+            cleanup_error=str(getattr(exc, "export_context_cleanup_error", "")),
+        )
+        # Unlike the normal completion notice, this warning must always appear.
+        # Plain text preserves paths containing characters such as '<' and '&'.
+        self._show_reportable_error_message(
+            QMessageBox.Warning, summary, "\n\n".join(parts), plain_text=True,
+        )
 
     @zip_import_operation
     def save_as_image(self, *, for_floppy=False):
@@ -32545,8 +32608,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 return tuple(output_paths)
 
             progressDialog.close()
-            _, context_paths = self._materialize_export_context_files(file_specs, output_path)
             self._remember_save_as_location(selected_output_path)
+            try:
+                _, context_paths = self._materialize_export_context_files(file_specs, output_path)
+            except Exception as exc:
+                # The complete image set is already published. Keep the loaded
+                # sources and edits intact so Save As can recover prepared files
+                # elsewhere without rebuilding or overwriting those images.
+                self._show_export_context_failure(output_paths, exc)
+                return tuple(output_paths)
             self._load_regular_files(
                 context_paths,
                 (

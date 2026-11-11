@@ -463,13 +463,22 @@ def build_pianodir_bytes(track_entries, metadata=None, *, catalog_number="", dis
     if len(track_entries) > PIANODIR_MAX_TRACKS:
         raise ValueError(f"Yamaha E-SEQ supports at most {PIANODIR_MAX_TRACKS} files per set.")
 
+    records = [_build_track_entry(track_entry) for track_entry in track_entries]
+    metadata_block = build_pianodir_metadata_bytes(
+        metadata,
+        catalog_number=catalog_number,
+        disk_title=disk_title,
+    )
+    return _assemble_pianodir_records(records, metadata_block)
+
+
+def _assemble_pianodir_records(records, metadata_block):
     output = bytearray(PIANODIR_TARGET_FILE_SIZE)
     output[0:len(PIANODIR_HEADER)] = PIANODIR_HEADER
     total_duration = 0
     secondary_aggregate = 0
 
-    for slot, track_entry in enumerate(track_entries):
-        track_bytes = _build_track_entry(track_entry)
+    for slot, track_bytes in enumerate(records):
         offset = len(PIANODIR_HEADER) + slot * PIANODIR_TRACK_SIZE
         output[offset:offset + PIANODIR_TRACK_SIZE] = track_bytes
         total_duration = (
@@ -486,11 +495,6 @@ def build_pianodir_bytes(track_entries, metadata=None, *, catalog_number="", dis
             "little",
         )
 
-    metadata_block = build_pianodir_metadata_bytes(
-        metadata,
-        catalog_number=catalog_number,
-        disk_title=disk_title,
-    )
     output[
         PIANODIR_DISK_METADATA_OFFSET:PIANODIR_DISK_METADATA_OFFSET + PIANODIR_DISK_METADATA_SIZE
     ] = metadata_block
@@ -499,7 +503,7 @@ def build_pianodir_bytes(track_entries, metadata=None, *, catalog_number="", dis
         secondary_aggregate,
         0xFFFF,
     ).to_bytes(2, "little")
-    output[PIANODIR_COUNT_OFFSET:PIANODIR_COUNT_OFFSET + 2] = (len(track_entries) + 1).to_bytes(2, "little")
+    output[PIANODIR_COUNT_OFFSET:PIANODIR_COUNT_OFFSET + 2] = (len(records) + 1).to_bytes(2, "little")
     return bytes(output)
 
 
@@ -592,18 +596,136 @@ def build_music_dir_bytes(track_entries):
     if len(track_entries) > CLAVINOVA_MUSICDIR_MAX_TRACKS:
         raise ValueError(f"Clavinova E-SEQ supports at most {CLAVINOVA_MUSICDIR_MAX_TRACKS} files per set.")
 
-    used_len = CLAVINOVA_MUSICDIR_HEADER_SIZE + len(track_entries) * CLAVINOVA_MUSICDIR_RECORD_SIZE
+    return _assemble_musicdir_records([_build_musicdir_record(entry) for entry in track_entries])
+
+
+def _assemble_musicdir_records(records, header=None):
+    used_len = CLAVINOVA_MUSICDIR_HEADER_SIZE + len(records) * CLAVINOVA_MUSICDIR_RECORD_SIZE
     output = bytearray(used_len)
-    output[0:3] = b"\xFE\x00\x00"
+    if header is not None:
+        output[:CLAVINOVA_MUSICDIR_HEADER_SIZE] = header
+    else:
+        output[0:3] = b"\xFE\x00\x00"
+        output[7:15] = b"MUSICDIR"
+        output[0x50] = 0x0B
     output[3:7] = used_len.to_bytes(4, "little")
-    output[7:15] = b"MUSICDIR"
-    output[0x50] = 0x0B
-    output[0x51] = len(track_entries)
+    output[0x51] = len(records)
     output[0x60:0xA0] = b"\xFF" * CLAVINOVA_MUSICDIR_MAX_TRACKS
 
-    for slot, track_entry in enumerate(track_entries):
+    for slot, record in enumerate(records):
         output[0x60 + slot] = slot
         offset = CLAVINOVA_MUSICDIR_HEADER_SIZE + slot * CLAVINOVA_MUSICDIR_RECORD_SIZE
-        output[offset:offset + CLAVINOVA_MUSICDIR_RECORD_SIZE] = _build_musicdir_record(track_entry)
+        output[offset:offset + CLAVINOVA_MUSICDIR_RECORD_SIZE] = record
 
     return bytes(output)
+
+
+def _pianodir_subset_template(data):
+    if not data.startswith(PIANODIR_HEADER):
+        raise ValueError("File is not a valid PIANODIR.FIL.")
+    if len(data) == len(PIANODIR_HEADER):
+        return [], bytes(PIANODIR_DISK_METADATA_SIZE)
+    if len(data) < PIANODIR_COUNT_OFFSET + 2:
+        raise ValueError("PIANODIR.FIL is too small to contain its track count and disk metadata.")
+    count = int.from_bytes(data[PIANODIR_COUNT_OFFSET:PIANODIR_COUNT_OFFSET + 2], "little") - 1
+    if not 0 <= count <= PIANODIR_MAX_TRACKS:
+        raise ValueError("PIANODIR.FIL has an invalid track count.")
+    records = [
+        data[len(PIANODIR_HEADER) + slot * PIANODIR_TRACK_SIZE:
+             len(PIANODIR_HEADER) + (slot + 1) * PIANODIR_TRACK_SIZE]
+        for slot in range(count)
+    ]
+    metadata = data[PIANODIR_DISK_METADATA_OFFSET:
+                    PIANODIR_DISK_METADATA_OFFSET + PIANODIR_DISK_METADATA_SIZE]
+    return records, metadata
+
+
+def _musicdir_subset_template(data):
+    if (len(data) < CLAVINOVA_MUSICDIR_HEADER_SIZE
+            or data[:3] != b"\xFE\x00\x00" or data[7:15] != b"MUSICDIR"):
+        raise ValueError("File is not a valid Clavinova MUSIC.DIR.")
+    used_len = int.from_bytes(data[3:7], "little")
+    records_size = used_len - CLAVINOVA_MUSICDIR_HEADER_SIZE
+    if (not CLAVINOVA_MUSICDIR_HEADER_SIZE <= used_len <= len(data)
+            or records_size % CLAVINOVA_MUSICDIR_RECORD_SIZE):
+        raise ValueError("MUSIC.DIR has an invalid used length.")
+    count = records_size // CLAVINOVA_MUSICDIR_RECORD_SIZE
+    slots = data[0x51]
+    if count > CLAVINOVA_MUSICDIR_MAX_TRACKS or slots > CLAVINOVA_MUSICDIR_MAX_TRACKS:
+        raise ValueError("MUSIC.DIR has an invalid track count.")
+    records = []
+    for slot in range(slots):
+        index = data[0x60 + slot]
+        if index == 0xFF:
+            continue
+        if index >= count:
+            raise ValueError("MUSIC.DIR has a track index outside its records.")
+        start = CLAVINOVA_MUSICDIR_HEADER_SIZE + index * CLAVINOVA_MUSICDIR_RECORD_SIZE
+        records.append(data[start:start + CLAVINOVA_MUSICDIR_RECORD_SIZE])
+    return records, data[:CLAVINOVA_MUSICDIR_HEADER_SIZE]
+
+
+def _catalog_filename_key(raw_name):
+    if len(raw_name) != 11 or not raw_name[:8].rstrip(b" \x00"):
+        raise ValueError("E-SEQ directory has an invalid track filename.")
+    filename = decode_dos83_name(raw_name)
+    if any(character in filename for character in ("\x00", "/", "\\")):
+        raise ValueError("E-SEQ directory has an invalid track filename.")
+    return dos_filename_key(filename)
+
+
+def build_eseq_directory_subset(directory_name, template_bytes, track_entries):
+    """Keep catalog metadata/order while limiting references to one image's songs.
+
+    Supplied short names are the destination FAT names. Matching template records
+    retain all other bytes; songs absent from the template use their staged file
+    headers. Reject malformed templates rather than publishing a partial catalog.
+    """
+    data = bytes(template_bytes)
+    track_entries = list(track_entries)
+    if is_pianodir_path(directory_name):
+        template_records, metadata = _pianodir_subset_template(data)
+        max_tracks = PIANODIR_MAX_TRACKS
+        build_record = _build_track_entry
+        assemble = _assemble_pianodir_records
+        uppercase = False
+    elif is_musicdir_path(directory_name):
+        template_records, metadata = _musicdir_subset_template(data)
+        max_tracks = CLAVINOVA_MUSICDIR_MAX_TRACKS
+        build_record = _build_musicdir_record
+        assemble = _assemble_musicdir_records
+        uppercase = True
+    else:
+        raise ValueError(f"Unknown E-SEQ directory: {directory_name}")
+    if len(track_entries) > max_tracks:
+        raise ValueError(f"{directory_name} supports at most {max_tracks} files per set.")
+
+    template_keys = [_catalog_filename_key(record[:11]) for record in template_records]
+    if len(set(template_keys)) != len(template_keys):
+        raise ValueError(f"{directory_name} contains duplicate track filenames.")
+
+    short_names = []
+    actual_by_name = {}
+    for index, entry in enumerate(track_entries):
+        short_name = bytes(entry.short_name_bytes or build_dos83_name_bytes(entry.image_path, uppercase=uppercase))
+        short_names.append(short_name)
+        keys = {_catalog_filename_key(short_name), dos_filename_key(os.path.basename(entry.image_path))}
+        for key in keys:
+            if key in actual_by_name:
+                raise ValueError(f"{directory_name} has ambiguous destination track filenames.")
+            actual_by_name[key] = index
+
+    records = []
+    selected = set()
+    for key, record in zip(template_keys, template_records):
+        index = actual_by_name.get(key)
+        if index is None:
+            continue
+        if index in selected:
+            raise ValueError(f"{directory_name} contains multiple records for one destination track.")
+        records.append(short_names[index] + record[11:])
+        selected.add(index)
+    for index, entry in enumerate(track_entries):
+        if index not in selected:
+            records.append(build_record(entry))
+    return assemble(records, metadata)

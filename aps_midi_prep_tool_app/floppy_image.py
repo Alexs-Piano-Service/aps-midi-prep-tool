@@ -24,21 +24,27 @@ from .eseq_pianodir import (
     ESEQ_VARIANT_CLAVINOVA,
     ESEQ_VARIANT_DISKLAVIER,
     ESEQ_ORDER_KEY_SIZE,
+    CLAVINOVA_MUSICDIR_MAX_TRACKS,
     MUSICDIR_FILENAME,
+    PIANODIR_COUNT_OFFSET,
     PIANODIR_FILENAME,
     PIANODIR_HEADER,
+    PIANODIR_MAX_TRACKS,
     PIANODIR_TARGET_FILE_SIZE,
     PIANODIR_TRACK_SIZE,
     PIANODIR_TRACK_SOURCE_START,
     PIANODIR_TRACK_SOURCE_END,
     PianodirTrackEntry,
+    build_eseq_directory_subset,
     build_music_dir_bytes,
     build_pianodir_bytes,
     build_eseq_order_key_from_path,
     dos_filename_key,
+    decode_dos83_name,
     is_clavinova_mda_file,
     is_eseq_directory_path,
     is_pianodir_path,
+    parse_music_dir,
     read_eseq_order_key_from_file,
     update_eseq_order_key,
 )
@@ -2463,6 +2469,162 @@ def _is_image_capacity_error(exc):
     return "disk full" in message or "no directory slots" in message
 
 
+def _eseq_catalog_references(name, payload):
+    if name == MUSICDIR_FILENAME:
+        return [entry["filename"] for entry in parse_music_dir(payload)]
+    count = int.from_bytes(payload[PIANODIR_COUNT_OFFSET:PIANODIR_COUNT_OFFSET + 2], "little") - 1
+    return [decode_dos83_name(payload[offset:offset + 11]) for offset in (
+        len(PIANODIR_HEADER) + index * PIANODIR_TRACK_SIZE for index in range(count)
+    )]
+
+
+def _pack_split_eseq_images(
+    file_specs, temp_dir, disk_format, *, volume_label, progress_callback=None,
+    cancel_callback=None,
+):
+    """Repartition a split set with space for each disk's own E-SEQ catalogs.
+
+    Run only after ordinary packing establishes that a split is necessary, so
+    an unsplit export still preserves supplied catalog bytes exactly.
+    """
+    templates = {}
+    files = []
+    variants = {
+        PIANODIR_FILENAME: (ESEQ_VARIANT_DISKLAVIER, PIANODIR_MAX_TRACKS),
+        MUSICDIR_FILENAME: (ESEQ_VARIANT_CLAVINOVA, CLAVINOVA_MUSICDIR_MAX_TRACKS),
+    }
+    for spec in file_specs:
+        if isinstance(spec, dict):
+            host_path, image_path = spec["host_path"], spec["image_path"]
+            display_name = spec.get("display_name") or os.path.basename(image_path)
+        else:
+            host_path, image_path = spec[:2]
+            display_name = spec[2] if len(spec) > 2 else os.path.basename(image_path)
+        image_path = _normalize_image_path(image_path)
+        name = dos_filename_key(image_path)
+        if name in variants:
+            with open(host_path, "rb") as handle:
+                templates[name] = handle.read()
+        else:
+            files.append((host_path, image_path, display_name))
+    if not templates:
+        return None
+
+    def build_catalog(name, tracks):
+        try:
+            return build_eseq_directory_subset(name, templates[name], tracks)
+        except ValueError as exc:
+            raise FloppyImageError(f"Could not prepare {name} for a split export: {exc}") from exc
+
+    # Validate even catalogs whose songs occur only on a later disk. Nothing
+    # from this set is converted or published until every disk is complete.
+    for name in templates:
+        build_catalog(name, [])
+    items = []
+    for host_path, image_path, display_name in files:
+        _raise_if_cancelled(cancel_callback)
+        catalog = next((name for name in templates
+                        if _host_file_matches_eseq_variant(host_path, variants[name][0])), None)
+        items.append((host_path, image_path, display_name, os.path.getsize(host_path), catalog))
+    for name in templates:
+        if not any(item[4] == name for item in items):
+            raise FloppyImageError(f"Cannot split {name}: no matching E-SEQ songs were supplied.")
+        order = {dos_filename_key(path): index for index, path in enumerate(
+            _eseq_catalog_references(name, templates[name])
+        )}
+        ordered = iter(sorted(
+            (item for item in items if item[4] == name),
+            key=lambda item: order.get(dos_filename_key(item[1]), len(order)),
+        ))
+        # FAT directory order can differ from playback order. Keep playback
+        # sequential across disks, leaving unrelated file positions intact.
+        items = [next(ordered) if item[4] == name else item for item in items]
+
+    def start_image(number):
+        _raise_if_cancelled(cancel_callback)
+        raw_path = os.path.join(temp_dir, f"catalog_part_{number:03d}.img")
+        return create_blank_floppy_image(
+            raw_path, disk_format, volume_label=volume_label, cancel_callback=cancel_callback,
+        )
+
+    first_image = start_image(1)
+    blank = read_image_listing(first_image)
+    with open(first_image, "rb") as handle:
+        # create_blank_floppy_image reserves one root slot for its volume label.
+        root_slots = _geometry_from_boot_sector(handle.read(512)).root_entries - 1
+
+    def fitting_catalogs(group):
+        catalogs = {}
+        for name in templates:
+            tracks = [PianodirTrackEntry(item[1], item[0], "")
+                      for item in group if item[4] == name]
+            if len(tracks) > variants[name][1]:
+                return None
+            if tracks:
+                catalogs[name] = build_catalog(name, tracks)
+        used_bytes = sum(allocated_size(item[3], blank.cluster_size) for item in group)
+        used_bytes += sum(allocated_size(len(data), blank.cluster_size) for data in catalogs.values())
+        used_slots = sum(_mtools_filename_root_slots(item[1]) for item in group) + len(catalogs)
+        return catalogs if used_bytes <= blank.free_space and used_slots <= root_slots else None
+
+    groups = []
+    current = []
+    current_catalogs = {}
+    for item in items:
+        _raise_if_cancelled(cancel_callback)
+        catalogs = fitting_catalogs([*current, item])
+        if catalogs is None and current:
+            groups.append((current, current_catalogs))
+            current = []
+            catalogs = fitting_catalogs([item])
+        if catalogs is None:
+            raise FloppyImageError(
+                f"'{item[2]}' is too large to fit on a {disk_format.label} image "
+                "with its E-SEQ directory catalog."
+            )
+        current.append(item)
+        current_catalogs = catalogs
+    if current:
+        groups.append((current, current_catalogs))
+
+    raw_images = []
+    for number, (group, catalogs) in enumerate(groups, start=1):
+        raw_path = first_image if number == 1 else start_image(number)
+        for host_path, image_path, display_name, _size, _catalog in group:
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(
+                progress_callback, number - 1, len(groups),
+                f"Packing {display_name} into image {number}...",
+            )
+            _copy_host_file_into_image(raw_path, host_path, image_path, cancel_callback=cancel_callback)
+        for name, payload in catalogs.items():
+            catalog_path = os.path.join(temp_dir, name)
+            with open(catalog_path, "wb") as handle:
+                handle.write(payload)
+            _copy_host_file_into_image(raw_path, catalog_path, name, cancel_callback=cancel_callback)
+
+        # Container verification compares against this raw disk; also verify
+        # the catalogs themselves before they can become that reference.
+        listing = read_image_listing(raw_path)
+        actual_names = {dos_filename_key(entry.path) for entry in listing.entries}
+        expected_names = {dos_filename_key(item[1]) for item in group} | set(catalogs)
+        if actual_names != expected_names:
+            raise FloppyImageError("Generated image verification failed: packed file names differ.")
+        for name, expected_payload in catalogs.items():
+            _raise_if_cancelled(cancel_callback)
+            payload = _read_fat12_file_bytes(raw_path, name)
+            if payload != expected_payload:
+                raise FloppyImageError(f"Generated image verification failed: packed contents differ for {name}.")
+            references = [dos_filename_key(path) for path in _eseq_catalog_references(name, payload)]
+            songs = [dos_filename_key(item[1]) for item in group if item[4] == name]
+            if references != songs:
+                raise FloppyImageError(
+                    f"Generated image verification failed: {name} song references or order differ from the prepared songs."
+                )
+        raw_images.append(raw_path)
+    return raw_images
+
+
 def create_floppy_images_from_files(
     file_specs,
     output_path,
@@ -2561,6 +2723,14 @@ def create_floppy_images_from_files(
 
         if current_img is not None:
             raw_images.append(current_img)
+
+        if len(raw_images) > 1:
+            catalog_images = _pack_split_eseq_images(
+                file_specs, temp_dir, disk_format, volume_label=volume_label,
+                progress_callback=progress_callback, cancel_callback=cancel_callback,
+            )
+            if catalog_images is not None:
+                raw_images = catalog_images
 
         base_path, _ = os.path.splitext(output_path)
         total_images = len(raw_images)
