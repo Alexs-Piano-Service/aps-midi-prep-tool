@@ -23,6 +23,15 @@ image. In-place capacity accounting includes retained payloads; export accountin
 can exclude them. An existing active catalog also determines the variant when
 an unrelated opposite-variant song is present in the image.
 
+v0.9.0 Save As Image correction: catalog limits apply per image, including
+collections that fit physically on one disk but exceed 60 Disklavier songs or
+64 Clavinova songs. Staging uses a bounded catalog template; the split packer
+reserves catalog storage and root-directory slots on every image and generates
+records for resident songs absent from the template. Unsplit exports preserve
+supplied catalog bytes. The companion source folder retains all prepared songs
+and the bounded template, while each playable image has its own complete
+catalog. Physical-floppy exports still enforce a single disk's limits.
+
 - Folder layout gives each directory's own songs separate disks. Its E-SEQ
   `PIANODIR.FIL` album title defaults to the folder's `PDISK.MNG` title when
   available, otherwise its folder name, while catalog IDs

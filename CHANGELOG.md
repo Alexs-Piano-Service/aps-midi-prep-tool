@@ -15,9 +15,13 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Save As Image splits E-SEQ collections at each disk's catalog limit (60
+  Disklavier songs or 64 Clavinova songs), even when all songs fit in one disk's
+  storage. Each image contains a catalog referencing only its resident songs.
 - Split-image exports create a new companion source directory when the usual
   name is occupied, preserving existing directories, edited export files, and
-  symlink targets.
+  symlink targets. Failed companion copies retain the incomplete directory and
+  report its location, preserving files added or modified by another process.
 - Cancelled emulator image exports show recovery paths and cleanup guidance
   when rollback retains files. Incomplete restoration always shows a warning
   identifying affected files and recovery copies, even after cancellation.

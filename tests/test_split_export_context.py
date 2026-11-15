@@ -232,9 +232,8 @@ def _assert_companion_warning(window, warnings, completions, images, error):
 
 
 @pytest.mark.parametrize("output_ext", ["img", "hfe"])
-@pytest.mark.parametrize("cleanup_fails", [False, True], ids=["removed", "retained"])
 def test_second_companion_copy_enospc_reports_images_preserves_state_and_allows_retry(
-    window, tmp_path, monkeypatch, output_ext, cleanup_fails,
+    window, tmp_path, monkeypatch, output_ext,
 ):
     source, output, originals = _prepare_export(
         window, tmp_path, monkeypatch, output_ext=output_ext,
@@ -272,7 +271,6 @@ def test_second_companion_copy_enospc_reports_images_preserves_state_and_allows_
     images = tuple(output.with_name(f"Concert_{number:02d}.{output_ext}") for number in (1, 2))
     real_copy, real_rmtree = main_window.shutil.copy2, main_window.shutil.rmtree
     copy_error = OSError(errno.ENOSPC, "No space left on destination")
-    cleanup_error = OSError(errno.EIO, "Companion cleanup failed")
     prepared, copies, cleanup_attempts = {}, [], []
     fail = True
 
@@ -290,8 +288,7 @@ def test_second_companion_copy_enospc_reports_images_preserves_state_and_allows_
     def cleanup(directory, *args, **kwargs):
         if Path(directory) == new_context:
             cleanup_attempts.append(Path(directory))
-            if cleanup_fails:
-                raise cleanup_error
+            pytest.fail("Incomplete companion folders must be retained without recursive cleanup")
         return real_rmtree(directory, *args, **kwargs)
 
     monkeypatch.setattr(main_window.shutil, "copy2", copy_with_second_failure)
@@ -300,22 +297,19 @@ def test_second_companion_copy_enospc_reports_images_preserves_state_and_allows_
     result = window.save_as_image()
 
     assert result == tuple(map(str, images))
-    assert len(copies) == 2 and cleanup_attempts == [new_context]
+    assert len(copies) == 2 and cleanup_attempts == []
     assert _pending(window) == pending and not window.is_image_mode()
     assert window.settings.value(window.SETTING_SAVE_AS_LOCATION) == str(output.parent)
     message = _assert_companion_warning(window, warnings, completions, images, copy_error)
-    assert str(new_context) in message
-    if cleanup_fails:
-        assert new_context.is_dir()
-        assert set(new_context.iterdir()) == set(copies)
-        assert copies[0].read_bytes() == prepared[copies[0].name]
-        assert copies[1].read_bytes() == prepared[copies[1].name][:137]
-        assert str(cleanup_error) in message
-        assert copy_error.export_context_retained_directory == str(new_context)
-        assert copy_error.export_context_cleanup_error is cleanup_error
-    else:
-        assert not new_context.exists()
-        assert copy_error.export_context_removed_directory == str(new_context)
+    assert f"The incomplete companion folder was kept for review: {new_context}" in message
+    assert new_context.is_dir()
+    assert set(new_context.iterdir()) == set(copies)
+    assert copies[0].read_bytes() == prepared[copies[0].name]
+    assert copies[1].read_bytes() == prepared[copies[1].name][:137]
+    assert copy_error.export_context_retained_directory == str(new_context)
+    assert not hasattr(copy_error, "export_context_removed_directory")
+    assert not hasattr(copy_error, "export_context_cleanup_error")
+    retained_files = _tree(new_context)
     assert _delivered_files(images, tmp_path) == prepared
     assert _title(prepared["FIRST.MID"]) == "Prepared export title"
     assert prepared["SECOND.MID"] == originals["SECOND.MID"]
@@ -338,6 +332,7 @@ def test_second_companion_copy_enospc_reports_images_preserves_state_and_allows_
         retry.with_name("ConcertRetry_files"),
     }
     assert {path: path.read_bytes() for path in images} == image_bytes
+    assert _tree(new_context) == retained_files and cleanup_attempts == []
     assert _tree(occupied) == earlier_files and _tree(target) == target_files
     assert occupied_file.read_bytes() == b"Keep a file at a suffixed companion path"
     for path, original_link in link_snapshots.items():
@@ -380,7 +375,9 @@ def test_companion_mkdir_failure_reports_completed_images_without_cleanup(
 
     assert result == tuple(map(str, images))
     assert attempted == [context] and not context.exists()
-    _assert_companion_warning(window, warnings, completions, images, error)
+    message = _assert_companion_warning(window, warnings, completions, images, error)
+    assert "kept for review" not in message
+    assert not hasattr(error, "export_context_retained_directory")
     assert _pending(window) == pending and not window.is_image_mode()
     assert _delivered_files(images, tmp_path) == originals
     assert {name: (source / name).read_bytes() for name in originals} == originals
@@ -424,8 +421,10 @@ def test_companion_failure_preserves_replacement_directory_at_claimed_path(
     assert result == tuple(map(str, images))
     assert len(copies) == 2
     message = _assert_companion_warning(window, warnings, completions, images, error)
-    assert str(context) in message and "folder changed during export" in message
+    assert f"The incomplete companion folder was kept for review: {context}" in message
     assert error.export_context_retained_directory == str(context)
+    assert not hasattr(error, "export_context_removed_directory")
+    assert not hasattr(error, "export_context_cleanup_error")
     assert _tree(context) == {"only-copy.txt": b"Preserve this replacement"}
     assert _tree(displaced) == {
         copies[0].name: originals[copies[0].name],
@@ -433,4 +432,51 @@ def test_companion_failure_preserves_replacement_directory_at_claimed_path(
     }
     assert _pending(window) == pending and not window.is_image_mode()
     assert _delivered_files(images, tmp_path) == originals
+    assert {name: (source / name).read_bytes() for name in originals} == originals
+
+
+@pytest.mark.parametrize("external_change", ["addition", "modification"])
+def test_companion_copy_failure_preserves_external_changes_inside_claimed_directory(
+    window, tmp_path, monkeypatch, external_change,
+):
+    source, output, originals = _prepare_export(window, tmp_path, monkeypatch)
+    _stage_title(window, source / "FIRST.MID", monkeypatch, "Prepared export title")
+    pending = _pending(window)
+    warnings, completions = _capture_completion_dialogs(window, monkeypatch)
+    context = output.with_name("Concert_files")
+    images = tuple(output.with_name(f"Concert_{number:02d}.img") for number in (1, 2))
+    error = OSError(errno.ENOSPC, "No space left on destination")
+    real_copy = main_window.shutil.copy2
+    copies, prepared, image_bytes, external_files = [], {}, {}, {}
+
+    def copy_with_external_change(source_path, destination, *args, **kwargs):
+        destination = Path(destination)
+        if destination.parent == context:
+            copies.append(destination)
+            prepared[destination.name] = Path(source_path).read_bytes()
+            if len(copies) == 2:
+                image_bytes.update({image: image.read_bytes() for image in images})
+                destination.write_bytes(prepared[destination.name][:137])
+                external_path = context / "only-copy.txt" if external_change == "addition" else copies[0]
+                external_files[external_path] = b"An external actor's only copy of new work"
+                external_path.write_bytes(external_files[external_path])
+                raise error
+        return real_copy(source_path, destination, *args, **kwargs)
+
+    monkeypatch.setattr(main_window.shutil, "copy2", copy_with_external_change)
+
+    result = window.save_as_image()
+
+    assert result == tuple(map(str, images)) and len(copies) == 2
+    assert all(path.is_file() for path in external_files), "Failure cleanup deleted external work"
+    assert {path: path.read_bytes() for path in external_files} == external_files
+    assert context.is_dir() and copies[1].read_bytes() == prepared[copies[1].name][:137]
+    message = _assert_companion_warning(window, warnings, completions, images, error)
+    assert f"The incomplete companion folder was kept for review: {context}" in message
+    assert error.export_context_retained_directory == str(context)
+    assert not hasattr(error, "export_context_removed_directory")
+    assert not hasattr(error, "export_context_cleanup_error")
+    assert _pending(window) == pending and not window.is_image_mode()
+    assert {image: image.read_bytes() for image in images} == image_bytes
+    assert _delivered_files(images, tmp_path) == prepared
     assert {name: (source / name).read_bytes() for name in originals} == originals

@@ -2480,12 +2480,12 @@ def _eseq_catalog_references(name, payload):
 
 def _pack_split_eseq_images(
     file_specs, temp_dir, disk_format, *, volume_label, progress_callback=None,
-    cancel_callback=None,
+    cancel_callback=None, capacity_split=False, allow_split=True,
 ):
-    """Repartition a split set with space for each disk's own E-SEQ catalogs.
+    """Split for storage or track limits, reserving each disk's E-SEQ catalogs.
 
-    Run only after ordinary packing establishes that a split is necessary, so
-    an unsplit export still preserves supplied catalog bytes exactly.
+    Leave sets that fit on one disk unchanged, preserving supplied catalog
+    bytes exactly when neither storage nor catalog track limits require a split.
     """
     templates = {}
     files = []
@@ -2516,16 +2516,27 @@ def _pack_split_eseq_images(
         except ValueError as exc:
             raise FloppyImageError(f"Could not prepare {name} for a split export: {exc}") from exc
 
-    # Validate even catalogs whose songs occur only on a later disk. Nothing
-    # from this set is converted or published until every disk is complete.
-    for name in templates:
-        build_catalog(name, [])
     items = []
     for host_path, image_path, display_name in files:
         _raise_if_cancelled(cancel_callback)
         catalog = next((name for name in templates
                         if _host_file_matches_eseq_variant(host_path, variants[name][0])), None)
         items.append((host_path, image_path, display_name, os.path.getsize(host_path), catalog))
+    if not capacity_split and all(
+        sum(item[4] == name for item in items) <= variants[name][1]
+        for name in templates
+    ):
+        return None
+    if not allow_split:
+        raise FloppyImageError(
+            "The prepared songs do not fit on one floppy disk. "
+            "Remove songs from the list and try again."
+        )
+
+    # Validate even catalogs whose songs occur only on a later disk. Nothing
+    # from this set is converted or published until every disk is complete.
+    for name in templates:
+        build_catalog(name, [])
     for name in templates:
         if not any(item[4] == name for item in items):
             raise FloppyImageError(f"Cannot split {name}: no matching E-SEQ songs were supplied.")
@@ -2724,13 +2735,13 @@ def create_floppy_images_from_files(
         if current_img is not None:
             raw_images.append(current_img)
 
-        if len(raw_images) > 1:
-            catalog_images = _pack_split_eseq_images(
-                file_specs, temp_dir, disk_format, volume_label=volume_label,
-                progress_callback=progress_callback, cancel_callback=cancel_callback,
-            )
-            if catalog_images is not None:
-                raw_images = catalog_images
+        catalog_images = _pack_split_eseq_images(
+            file_specs, temp_dir, disk_format, volume_label=volume_label,
+            progress_callback=progress_callback, cancel_callback=cancel_callback,
+            capacity_split=len(raw_images) > 1, allow_split=allow_split,
+        )
+        if catalog_images is not None:
+            raw_images = catalog_images
 
         base_path, _ = os.path.splitext(output_path)
         total_images = len(raw_images)

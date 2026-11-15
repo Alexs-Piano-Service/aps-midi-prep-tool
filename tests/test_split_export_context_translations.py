@@ -21,10 +21,8 @@ WARNING_MESSAGES = (
     "Images Created with Companion Warning",
     "Created {count} images successfully:\n{paths}",
     "The companion files could not be copied. Your current files and pending changes are still loaded.",
-    "The incomplete companion folder was removed: {path}",
-    "The incomplete companion folder could not be removed: {path}\n{error}",
+    "The incomplete companion folder was kept for review: {path}",
     "Use the completed images listed above. To save the prepared files separately, use Save As and choose a folder with enough free space. To export images again, choose a different output name or folder.",
-    "The companion folder changed during export; it was kept.",
 )
 LANGUAGES = [entry.code for entry in SUPPORTED_LANGUAGES]
 
@@ -46,31 +44,26 @@ def test_split_export_companion_warning_catalog_is_complete(source):
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
-def test_split_export_companion_warning_preserves_literal_paths_and_error(language):
+def test_split_export_companion_warning_preserves_literal_paths(language):
     paths = "/media/Concert {count} <piano & duet>_01.img\n/media/Concert {paths} <piano & duet>_02.hfe"
     folder = "/media/Concert {path} <piano & duet>_files"
-    error = "[Errno 28] <No space & remaining> on '{error}': " + folder
 
     published = translate_text(WARNING_MESSAGES[1], language, count=2, paths=paths)
     assert "2" in published.split("\n", 1)[0]
     assert published.split("\n", 1)[1] == paths
 
-    removed = translate_text(WARNING_MESSAGES[3], language, path=folder)
-    assert removed.endswith(folder)
-
-    retained = translate_text(WARNING_MESSAGES[4], language, path=folder, error=error)
-    assert retained.split("\n", 1)[0].endswith(folder)
-    assert retained.split("\n", 1)[1] == error
+    retained = translate_text(WARNING_MESSAGES[3], language, path=folder)
+    assert retained.endswith(folder)
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
-@pytest.mark.parametrize("cleanup_state", ["removed", "retained"])
+@pytest.mark.parametrize("directory_claimed", [True, False], ids=["retained", "unclaimed"])
 @pytest.mark.parametrize("export_root", [
     pytest.param(PurePosixPath("/exports"), id="posix"),
     pytest.param(PureWindowsPath("C:/Exports"), id="windows"),
 ])
 def test_split_export_warning_dialog_shows_all_literal_paths_despite_hidden_completion(
-    window, monkeypatch, language, cleanup_state, export_root,
+    window, monkeypatch, language, directory_claimed, export_root,
 ):
     window.currentLanguage = language
     window.settings.setValue(window.SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG, True)
@@ -82,16 +75,11 @@ def test_split_export_warning_dialog_shows_all_literal_paths_despite_hidden_comp
     folder = str(companion_folder)
     exc = OSError(
         errno.ENOSPC, "No space left on device",
-        str(companion_folder / "Song {error} <A & B>.mid"),
+        str(companion_folder / "Song {error} <A & B>.mid") if directory_claimed else folder,
     )
-    if cleanup_state == "removed":
-        exc.export_context_removed_directory = folder
-        expected_cleanup = translate_text(WARNING_MESSAGES[3], language, path=folder)
-    else:
+    if directory_claimed:
         exc.export_context_retained_directory = folder
-        cleanup_error = translate_text(WARNING_MESSAGES[6], language)
-        exc.export_context_cleanup_error = OSError(cleanup_error)
-        expected_cleanup = translate_text(WARNING_MESSAGES[4], language, path=folder, error=cleanup_error)
+    expected_retention = translate_text(WARNING_MESSAGES[3], language, path=folder)
     dialogs = []
 
     def inspect_dialog(box):
@@ -108,8 +96,8 @@ def test_split_export_warning_dialog_shows_all_literal_paths_despite_hidden_comp
         # OSError formats its filename with repr(), escaping Windows
         # backslashes. The separately listed output paths above stay literal.
         assert repr(exc.filename) in message
-        assert expected_cleanup in message
-        assert translate_text(WARNING_MESSAGES[5], language) in message
+        assert (expected_retention in message) is directory_claimed
+        assert translate_text(WARNING_MESSAGES[4], language) in message
         return QMessageBox.Ok
 
     monkeypatch.setattr(window, "_exec_child_dialog", inspect_dialog)

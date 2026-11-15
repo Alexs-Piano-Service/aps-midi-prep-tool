@@ -32330,7 +32330,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         base_path = os.path.splitext(output_path)[0]
         return f"{base_path}.{output_ext}", output_ext, disk_format
 
-    def _stage_files_for_image_export(self, temp_dir, progress_callback=None, *, enforce_dos83=None):
+    def _stage_files_for_image_export(
+        self, temp_dir, progress_callback=None, *, enforce_dos83=None, allow_split=False,
+    ):
         export_rows = MidiTitleWindow._regular_export_rows(self)
         row_count = len(export_rows)
         file_specs = []
@@ -32393,6 +32395,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 if spec.get("title_mode") == "eseq"
             ]
             if track_entries:
+                if allow_split:
+                    # A native catalog describes at most one disk. Use a
+                    # bounded template to retain metadata and playback order;
+                    # the packer builds each disk's catalog from its songs.
+                    track_entries = track_entries[:self._active_eseq_file_limit()]
                 directory_name = self._eseq_directory_filename(self.regularEseqVariant)
                 generated_path = os.path.join(temp_dir, directory_name)
                 with open(generated_path, "wb") as handle:
@@ -32452,28 +32459,16 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 suffix += 1
 
         context_paths = []
-        context_identity = None
         try:
-            context_identity = os.lstat(context_dir)
             for spec in file_specs:
                 dest_path = os.path.join(context_dir, os.path.basename(spec["image_path"]))
                 shutil.copy2(spec["host_path"], dest_path)
                 context_paths.append(dest_path)
         except Exception as exc:
-            # Only this invocation's successfully claimed directory is ours to
-            # remove. Include any partial file left by the failing copy2 call.
-            try:
-                current_identity = os.lstat(context_dir)
-                if (context_identity is None or not context_identity.st_ino
-                        or not stat.S_ISDIR(current_identity.st_mode)
-                        or not os.path.samestat(context_identity, current_identity)):
-                    raise OSError(self._lt("The companion folder changed during export; it was kept."))
-                shutil.rmtree(context_dir)
-            except OSError as cleanup_error:
-                exc.export_context_retained_directory = context_dir
-                exc.export_context_cleanup_error = cleanup_error
-            else:
-                exc.export_context_removed_directory = context_dir
+            # Claiming the directory does not prove ownership of its contents:
+            # another process may have added or edited files during copying.
+            # Retain everything, including a partial copy, for the user to review.
+            exc.export_context_retained_directory = context_dir
             raise
         return context_dir, context_paths
 
@@ -32490,15 +32485,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             f"{self._t('error.details_label')}: "
             + localize_write_message(str(exc), self._language_code()),
         ]
-        removed_dir = getattr(exc, "export_context_removed_directory", "")
         retained_dir = getattr(exc, "export_context_retained_directory", "")
-        if removed_dir:
-            parts.append(self._lt("The incomplete companion folder was removed: {path}", path=removed_dir))
         if retained_dir:
             parts.append(self._lt(
-                "The incomplete companion folder could not be removed: {path}\n{error}",
+                "The incomplete companion folder was kept for review: {path}",
                 path=retained_dir,
-                error=localize_write_message(str(exc.export_context_cleanup_error), self._language_code()),
             ))
         parts.append(self._lt(
             "Use the completed images listed above. To save the prepared files separately, use Save As and choose a folder with enough free space. To export images again, choose a different output name or folder."
@@ -32507,8 +32498,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self._log_warning_event(
             "Image", "Images created; companion copy failed",
             outputs=tuple(output_paths), detail=str(exc),
-            removed_directory=removed_dir, retained_directory=retained_dir,
-            cleanup_error=str(getattr(exc, "export_context_cleanup_error", "")),
+            retained_directory=retained_dir,
         )
         # Unlike the normal completion notice, this warning must always appear.
         # Plain text preserves paths containing characters such as '<' and '&'.
@@ -32530,7 +32520,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if self._regular_file_count() == 0:
             QMessageBox.information(self, "No Files", "Add one or more files first.")
             return
-        if self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
+        if for_floppy and self.is_local_eseq_mode() and not self._ensure_eseq_file_limit(
             len(self._regular_eseq_rows()),
             action_text="Saving this E-SEQ set as an image",
         ):
@@ -32565,7 +32555,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
 
         try:
-            file_specs = self._stage_files_for_image_export(staging_dir, progress_callback=progress_callback)
+            file_specs = self._stage_files_for_image_export(
+                staging_dir, progress_callback=progress_callback, allow_split=not for_floppy,
+            )
             if not file_specs:
                 progressDialog.close()
                 QMessageBox.information(self, "No Files", "No valid files were available to export.")
