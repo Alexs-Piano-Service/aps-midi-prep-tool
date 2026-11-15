@@ -113,6 +113,9 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
     requires a SHA-256 entry in ``expected_hashes``. Optional expectations for
     writes protect approval-time contents too; None requires an absent target.
     Checked destinations must be regular files, never symlinks.
+    Retirement captures each entry in private storage on the same filesystem
+    before checking it again. Only verified captures are deleted, after all
+    publication callbacks finish; conflicts retain the capture for recovery.
     Rollback moves writes to private quarantine before checking their identity
     and contents. Captured inodes are retained even on success to preserve
     writes through existing handles. Originals are restored exclusively;
@@ -169,6 +172,49 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
                 raise OSError(f"Output changed after approval: {destination}")
             record["checked_identity"] = identity
 
+        def check_captured_retirement(record):
+            captured = record["retained_paths"][0]
+            try:
+                actual, identity = _checked_file_hash(captured)
+            except (OSError, ValueError) as exc:
+                raise OSError(f"Retirement ownership conflict; captured file was kept: {captured}") from exc
+            # Rename may change ctime. Device, inode, size, mtime and digest
+            # must still match the file checked before capture.
+            if (not identity[1] or identity[:-1] != record["checked_identity"][:-1]
+                    or actual != expected_hashes[record["destination"]]):
+                raise OSError(f"Retirement ownership conflict; captured file was kept: {captured}")
+
+        def retire(record):
+            destination = record["resolved_destination"]
+            directory = tempfile.mkdtemp(
+                prefix=".aps_retire_", dir=os.path.dirname(destination),
+            )
+            captured = os.path.join(directory, "captured")
+            record["quarantine_directory"] = directory
+            # Keep a discoverable mapping even if the process stops after the
+            # rename, before the batch recovery manifest can be updated.
+            try:
+                with open(os.path.join(directory, "recovery.json"), "x", encoding="utf-8") as handle:
+                    json.dump({"destination": destination, "captured": captured,
+                               "identity": record["checked_identity"],
+                               "sha256": expected_hashes[record["destination"]]}, handle)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                shutil.rmtree(directory, ignore_errors=True)
+                record.pop("quarantine_directory", None)
+                raise
+            # Record both locations before the syscall: a failed rename can
+            # be ambiguous on removable or network storage. Never clean up a
+            # possibly captured entry based only on the syscall's outcome.
+            record["retained_paths"] = [captured, destination]
+            os.rename(destination, captured)
+            record["retained_paths"] = [captured]
+            record["published"] = True
+            published.append(record)
+            check_captured_retirement(record)
+
         recovery_directory = tempfile.mkdtemp(prefix="aps_file_batch_")
         for index, record in enumerate(records):
             check_expected(record)
@@ -206,9 +252,7 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
         for index, record in enumerate(records, start=1):
             check_expected(record)
             if record["operation"] == "delete":
-                os.unlink(record["destination"])
-                record["published"] = True
-                published.append(record)
+                retire(record)
             else:
                 with open(os.path.join(recovery_directory, record["prepared_file"]), "rb") as handle:
                     payload = handle.read()
@@ -225,11 +269,25 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
                 )
             if progress_callback is not None:
                 progress_callback(index, len(records), record["destination"])
+
+        for record in published:
+            if record["operation"] == "delete":
+                # Only private, verified captures may be discarded. A new
+                # occupant of the public destination is never unlinked.
+                check_captured_retirement(record)
+                captured = record["retained_paths"][0]
+                os.unlink(captured)
+                record["retained_paths"] = [record["quarantine_directory"]]
+                os.unlink(os.path.join(record["quarantine_directory"], "recovery.json"))
+                os.rmdir(record["quarantine_directory"])
+                record["retained_paths"] = []
+                record.pop("quarantine_directory", None)
     except BaseException as exc:
         # An exclusive copy may fail before it yields a publication receipt.
         # If its own cleanup cannot be verified, keep the recovery package too.
         rollback_errors = [str(exc)] if isinstance(exc, FilePublicationCleanupError) else []
         retained_paths = list(getattr(exc, "retained_paths", ()))
+        retained_paths.extend(path for record in records for path in record.get("retained_paths", ()))
         for record in reversed(published):
             destination = record["resolved_destination"]
             try:

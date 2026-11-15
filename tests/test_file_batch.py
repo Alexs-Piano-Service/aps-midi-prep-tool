@@ -446,7 +446,7 @@ def test_batch_retirement_is_restored_after_later_progress_failure(tmp_path, rec
     assert stat.S_IMODE(old.stat().st_mode) == original_mode
     assert current.read_bytes() == b"previous disk"
     assert not caught.value.rollback_errors
-    _assert_retained_publications(caught.value, [b"new disk"])
+    _assert_retained_publications(caught.value, [b"new disk", b"original disk"])
 
 
 def test_retirement_rollback_never_overwrites_new_file_at_retired_name(tmp_path, recovery_locations):

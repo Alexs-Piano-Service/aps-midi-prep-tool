@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -81,10 +83,13 @@ def test_retirement_failure_restores_images_song_list_and_manifest(collection, m
     deleted = []
 
     def fail_later_retirement(path, *args, **kwargs):
-        if str(path) in previous.output_paths:
-            deleted.append(str(path))
-            if len(deleted) == 2:
-                raise OSError("retirement failed")
+        captured = Path(path)
+        if captured.name == "captured" and captured.parent.name.startswith(".aps_retire_"):
+            mapping = json.loads((captured.parent / "recovery.json").read_text())
+            if mapping["destination"] in previous.output_paths:
+                deleted.append(mapping["destination"])
+                if len(deleted) == 2:
+                    raise OSError("retirement failed")
         return real_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(file_batch.os, "unlink", fail_later_retirement)
@@ -114,6 +119,41 @@ def test_modified_obsolete_file_is_not_retired_even_with_overwrite_approval(coll
     with pytest.raises(FloppyImageError, match="Cannot retire changed"):
         _build(collection, overwrite_existing=True)
     assert _contents(output) == before
+
+
+def test_rebuild_preserves_replacement_arriving_at_retirement(collection, monkeypatch):
+    source, output = collection
+    previous = _build(collection)
+    before = _contents(output)
+    obsolete = Path(previous.output_paths[-1])
+    (source / "Album 2" / "song.mid").unlink()
+    external = source.parent / "external.img"
+    external.write_bytes(b"another application's image")
+    recovery_root = source.parent / "recovery"
+    recovery_root.mkdir()
+    monkeypatch.setattr(file_batch.tempfile, "tempdir", str(recovery_root))
+    captured_paths = []
+
+    def replace_before_capture(path, destination, *args, **kwargs):
+        if Path(path) == obsolete:
+            os.replace(external, obsolete)
+            captured_paths.append(Path(destination))
+        return os.rename(path, destination, *args, **kwargs)
+
+    monkeypatch.setattr(file_batch, "os", SimpleNamespace(**(vars(os) | {
+        "rename": replace_before_capture,
+    })))
+    with pytest.raises(FloppyImageError, match="ownership conflict") as caught:
+        _build(collection, overwrite_existing=True)
+
+    captured, = captured_paths
+    assert captured.read_bytes() == b"another application's image"
+    error = caught.value
+    assert error.rollback_errors == []
+    assert str(captured) in error.retained_paths
+    assert str(captured) in str(error)
+    assert str(error.recovery_directory) in str(error)
+    assert {path.name: path.read_bytes() for path in output.iterdir() if path.is_file()} == before
 
 
 def test_unrecorded_old_files_are_never_assumed_to_belong_to_the_set(collection):

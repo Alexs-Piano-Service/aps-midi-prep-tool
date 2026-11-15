@@ -2411,12 +2411,16 @@ def _mtools_host_source_path(host_path, image_path):
     if host_path.isascii():
         return host_path, ""
     temp_dir = tempfile.mkdtemp(prefix="aps_mtools_host_")
-    alias_name = _clean_ascii_temp_filename(
-        os.path.basename(_normalize_image_path(image_path)) or os.path.basename(host_path),
-        fallback="FILE",
-    )
-    alias_path = os.path.join(temp_dir, alias_name)
-    shutil.copy2(host_path, alias_path)
+    try:
+        alias_name = _clean_ascii_temp_filename(
+            os.path.basename(_normalize_image_path(image_path)) or os.path.basename(host_path),
+            fallback="FILE",
+        )
+        alias_path = os.path.join(temp_dir, alias_name)
+        shutil.copy2(host_path, alias_path)
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
     return alias_path, temp_dir
 
 
