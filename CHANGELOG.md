@@ -7,6 +7,23 @@ with release sections grouped by version and date.
 
 ## [0.9.0] - Unreleased
 
+### Added
+
+- Smart PianoSoft uses **Preparing for** to select synchronized MIDI/MP3 pairs
+  for ENSPIRE or encoded WAV for Mark IV and external-input playback. The
+  output can be overridden per album; ripping, fingerprint matching, original
+  snapshots, and synchronization reports are retained. Paired exports apply
+  timing corrections to the MIDI and keep clean stereo accompaniment.
+- Smart PianoSoft is available from Utilities and opens automatically for a
+  loaded source containing the actual synchronization fingerprints. Generic
+  catalogs do not trigger it; opening waits for active disk work and dialogs.
+- Mark IV backup optionally decodes recoverable Yamaha-encoded WAV/MP3 into
+  matching MIDI and clean music files in a separate playback folder. ENSPIRE
+  selects this option automatically. Originals and existing native pairs are
+  retained; failed decoding is reported without guessing MIDI data. Both files
+  participate in backup verification. Physical playback timing remains
+  unverified.
+
 ### Changed
 
 - Begin the 0.9.x development branch for bug fixes, reliability, and polish

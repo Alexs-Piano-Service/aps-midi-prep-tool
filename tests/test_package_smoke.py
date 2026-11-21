@@ -51,7 +51,7 @@ def test_real_app_smoke_exercises_ui_img_source_changes_hfe_and_mp3(tmp_path):
     assert (results / "Package test é.img").stat().st_size == 737280
     assert (results / "Restored from HFE.img").stat().st_size == 737280
     assert report["cases"]["mp3"]["renderer"] == "built-in piano"
-    assert report["cases"]["ui"]["smart_pianosoft_utility_hidden"] is True
+    assert report["cases"]["ui"]["smart_pianosoft_utility_available"] is True
     assert "smart_pianosoft" not in report["cases"]
     assert not (results / "Synthetic Smart PianoSoft source").exists()
     source_changes = report["cases"]["image_source_changes"]
@@ -78,7 +78,7 @@ def test_explicit_developer_smoke_adds_retained_smart_pianosoft_case(tmp_path):
     assert completed.returncode == 0, completed.stderr + json.dumps(report, indent=2)
     assert report["status"] == "passed"
     assert set(report["cases"]) == set(package_smoke.CASE_NAMES + package_smoke.OPTIONAL_CASE_NAMES)
-    assert report["cases"]["ui"]["smart_pianosoft_utility_hidden"] is True
+    assert report["cases"]["ui"]["smart_pianosoft_utility_available"] is True
     smart = report["cases"]["smart_pianosoft"]
     assert smart["dialog_shown_and_closed"] is True
     assert smart["loaded_image_list_verified"] is True
@@ -199,11 +199,11 @@ def test_invalid_command_arguments_fail_without_running_checks(monkeypatch):
     ]) == 2
 
 
-def test_release_ui_smoke_rejects_exposing_deferred_utility(tmp_path, monkeypatch, qt_application):
+def test_release_ui_smoke_rejects_missing_smart_pianosoft_utility(tmp_path, monkeypatch, qt_application):
     from aps_midi_prep_tool_app.main_window import MidiTitleWindow
 
-    monkeypatch.setattr(MidiTitleWindow, "ENABLE_SMART_PIANOSOFT_UTILITY", True)
-    with pytest.raises(RuntimeError, match="deferred Smart PianoSoft utility is exposed"):
+    monkeypatch.setattr(MidiTitleWindow, "ENABLE_SMART_PIANOSOFT_UTILITY", False)
+    with pytest.raises(RuntimeError, match="Smart PianoSoft utility is missing"):
         package_smoke._check_ui(tmp_path, {"application": qt_application})
 
 

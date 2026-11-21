@@ -36,7 +36,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mtools libegl1 libopengl0 libpulse0 fluidsynth timgm6mb-soundfont
+          sudo apt-get install -y --no-install-recommends mtools lame libegl1 libopengl0 libpulse0 fluidsynth timgm6mb-soundfont
       - name: Install Windows image tools and MP3 encoder
         if: runner.os == 'Windows'
         id: msys2

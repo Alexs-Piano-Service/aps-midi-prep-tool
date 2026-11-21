@@ -65,7 +65,7 @@ analysis files that are not distributed with the repository.
 ## Development and release maintenance
 
 - [Run from source](../README.md#run-from-source) and [contribute changes](../CONTRIBUTING.md)
-- [Deferred Smart PianoSoft development workflow](playback-and-audio.md#smart-pianosoft-development-deferred) — retained implementation; unavailable in 0.8.9.
+- [Smart PianoSoft synchronization](playback-and-audio.md#smart-pianosoft-synchronized-piano-and-music) — target-based encoded WAV or paired MIDI/MP3 output in the development build.
 - [Release packages and acceptance evidence](release-process.md)
 - [Optional GitHub bug-report forwarding](bug-report-github.md)
 - [Windows release acceptance tests](windows-test-plan.md)

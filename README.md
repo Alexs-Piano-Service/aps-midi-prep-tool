@@ -129,6 +129,13 @@ Use **Utilities → Render Audio...** to create WAV or MP3 copies with a SoundFo
 The [playback and audio guide](docs/playback-and-audio.md) explains preview,
 required tools, and overlapping-note choices when merging piano parts.
 
+In the development build, **Smart PianoSoft...** synchronizes original MIDI
+with its matching CD or ripped WAV. **Preparing for** selects paired MIDI/MP3
+for ENSPIRE USB playback or encoded WAV for Mark IV and compatible external
+input routes. The [Smart PianoSoft guide](docs/playback-and-audio.md#smart-pianosoft-synchronized-piano-and-music)
+explains the output folders and playback checks. Mark IV backup can also
+extract verified MIDI/music pairs from recoverable encoded WAV/MP3 tracks.
+
 [![MIDI notes, channels, tempo, and pedals in File Inspection](docs/images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)](docs/images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)
 
 ## Create disks for a floppy emulator

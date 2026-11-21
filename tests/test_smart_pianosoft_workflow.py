@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 
 from aps_midi_prep_tool_app import smart_pianosoft_media as media
+from aps_midi_prep_tool_app import audio_tools
+from aps_midi_prep_tool_app.disklavier_audio import read_midi_events
 from aps_midi_prep_tool_app.smart_pianosoft_workflow import AlbumBuildError, prepare_album, scan_album
 from test_smart_pianosoft import _psong_bytes, _pdisk_bytes
 from test_smart_pianosoft_sync import _fingerprint_message, _wav, original_phrase
@@ -65,6 +67,36 @@ def test_complete_album_preserves_sources_and_separates_originals_from_encoded_a
         frames = np.frombuffer(encoded.readframes(1000), dtype="<i2").reshape(-1, 2)
     np.testing.assert_array_equal(frames[:, 0], pcm[:1000, 0])
     assert np.any(frames[:, 1] != frames[:, 0])
+
+
+def test_paired_album_reuses_fingerprint_alignment_and_delivers_matching_midi_mp3(tmp_path, album_files):
+    if not audio_tools.find_lame_command():
+        pytest.skip("LAME is unavailable")
+    source, audio, _pcm = album_files
+    original_midi = (source / "01.MID").read_bytes()
+    original_audio = audio.read_bytes()
+    album = _scan(tmp_path, source)
+    folder = prepare_album(album, tmp_path, audio_paths={1: audio}, output_format="midi_mp3")
+    report = json.loads((folder / "manifest.json").read_text())
+    assert report["status"] == "complete"
+    assert report["output_format"] == "midi_mp3"
+    assert not (folder / "Disklavier").exists()
+    track = report["tracks"][0]
+    midi, music = folder / track["prepared_midi"], folder / track["prepared_audio"]
+    assert midi.parent == music.parent == folder / "ENSPIRE"
+    assert midi.stem == music.stem
+    assert midi.suffix == ".mid" and music.suffix == ".mp3"
+    assert music.stat().st_size > 0
+    assert (folder / "MIDI/01.MID").read_bytes() == original_midi
+    assert (folder / "WAV/Paired01.wav").read_bytes() == original_audio
+    assert audio.read_bytes() == original_audio
+    alignment = track["alignment"]
+    events = read_midi_events(midi)
+    assert [data for _, data in events] == [event.data for event in album.tracks[0].metadata.events]
+    preroll = track["preparation"]["audio_preroll_seconds"]
+    np.testing.assert_allclose([seconds for seconds, _ in events],
+                               [event.time_seconds * alignment["time_scale"] + alignment["offset_seconds"] + preroll
+                                for event in album.tracks[0].metadata.events], atol=0.00005)
 
 
 def test_ordinary_cataloged_midi_is_not_mistaken_for_smart_pianosoft(tmp_path, album_files):
@@ -237,7 +269,7 @@ def test_output_on_the_source_block_devices_filesystem_is_rejected_before_writin
     assert device.read_bytes() == b"Never write this source"
 
 
-def test_audio_changed_during_encoding_fails_and_removes_untrusted_encoded_copy(tmp_path, album_files, monkeypatch):
+def test_audio_changed_during_encoding_fails_and_reports_retained_untrusted_copy(tmp_path, album_files, monkeypatch):
     from aps_midi_prep_tool_app import disklavier_audio
 
     source, audio, pcm = album_files
@@ -256,8 +288,61 @@ def test_audio_changed_during_encoding_fails_and_removes_untrusted_encoded_copy(
     folder = error.value.output_directory
     report = json.loads((folder / "manifest.json").read_text())
     assert report["status"] == "failed"
-    assert not list((folder / "Disklavier").iterdir())
+    track = report["tracks"][0]
+    assert track["output_status"] == "unverified"
+    assert len(track["retained_outputs"]) == 1
+    assert (folder / track["retained_outputs"][0]).exists()
+    assert "encoded_sha256" not in track
     assert audio.read_bytes() == original_audio
+
+
+def test_paired_source_failure_preserves_competing_files_at_published_paths(tmp_path, album_files, monkeypatch):
+    from aps_midi_prep_tool_app import paired_audio
+
+    source, audio, pcm = album_files
+    original_audio = audio.read_bytes()
+    monkeypatch.setattr(audio_tools, "find_lame_command", lambda: "test-lame")
+
+    def changed_input(_events, paired_source, stem, **_kwargs):
+        midi_path = Path(str(stem) + ".mid")
+        music_path = Path(str(stem) + ".mp3")
+        midi_path.write_bytes(b"prepared MIDI")
+        music_path.write_bytes(b"prepared MP3")
+        # Another writer replaces one public path and edits the other after
+        # publication. Neither may be deleted when the source check fails.
+        replacement = tmp_path / "replacement.mid"
+        replacement.write_bytes(b"other writer MIDI")
+        replacement.replace(midi_path)
+        music_path.write_bytes(b"other writer music")
+        _wav(paired_source, np.zeros_like(pcm))
+        return {"midi": midi_path.name, "audio": music_path.name}
+
+    monkeypatch.setattr(paired_audio, "export_midi_mp3", changed_input)
+    with pytest.raises(AlbumBuildError, match="retained and are unverified") as error:
+        prepare_album(_scan(tmp_path, source), tmp_path, audio_paths={1: audio}, output_format="midi_mp3")
+    folder = error.value.output_directory
+    report = json.loads((folder / "manifest.json").read_text())
+    assert report["status"] == "failed"
+    track = report["tracks"][0]
+    assert track["output_status"] == "unverified"
+    assert len(track["retained_outputs"]) == 2
+    assert (folder / track["retained_outputs"][0]).read_bytes() == b"other writer MIDI"
+    assert (folder / track["retained_outputs"][1]).read_bytes() == b"other writer music"
+    assert "prepared_midi_sha256" not in track
+    assert "prepared_audio_sha256" not in track
+    assert audio.read_bytes() == original_audio
+
+
+def test_missing_lame_fails_before_creating_album_or_reading_cd(tmp_path, album_files, monkeypatch):
+    source, _audio, _pcm = album_files
+    album = _scan(tmp_path, source)
+    before = set(tmp_path.iterdir())
+    monkeypatch.setattr(audio_tools, "find_lame_command", lambda: "")
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_kw: pytest.fail("CD accessed before LAME preflight"))
+    monkeypatch.setattr(media, "rip_cd_track", lambda *_a, **_kw: pytest.fail("CD ripped before LAME preflight"))
+    with pytest.raises(RuntimeError, match="LAME is required.*before ripping"):
+        prepare_album(album, tmp_path, cd_device="test-cd", output_format="midi_mp3")
+    assert set(tmp_path.iterdir()) == before
 
 
 def test_audio_changed_after_synchronization_is_not_encoded(tmp_path, album_files, monkeypatch):

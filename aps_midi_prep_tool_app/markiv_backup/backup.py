@@ -34,6 +34,8 @@ class BackupResult:
     verified: int
     errors: list[str]
     converted: int = 0
+    decoded: int = 0
+    audio_skipped: int = 0
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -201,7 +203,27 @@ def _conversion_headroom(plan: BackupPlan) -> int:
                and Path(item.source).suffix.lower() != '.pspg')
 
 
-def _validate_target(plan: BackupPlan, target: Path, *, convert_eseq=False) -> Path:
+def _audio_candidates(plan):
+    return [item for item in plan.files
+            if Path(item.source).suffix.lower() in {'.wav', '.mp3'}
+            and item.kind not in {'Metadata', 'PianoSoft package'}
+            and Path(item.source).parts[:2] != ('songs', 'pspg')]
+
+
+def _audio_working_allowance(item):
+    # A 44.1 kHz MP3 can expand greatly at low bitrates. Reserve PCM decoding,
+    # a clean staging WAV, the paired export's PCM copy, and new MIDI/MP3.
+    return max(1024 * 1024, item.size * (144 if Path(item.source).suffix.lower() == '.mp3' else 4))
+
+
+def _audio_headroom(plan):
+    candidates = _audio_candidates(plan)
+    retained_pairs = sum(max(64 * 1024, item.size * (8 if Path(item.source).suffix.lower() == '.mp3' else 1))
+                         for item in candidates)
+    return retained_pairs + max((_audio_working_allowance(item) for item in candidates), default=0)
+
+
+def _validate_target(plan: BackupPlan, target: Path, *, convert_eseq=False, split_audio=False) -> Path:
     source = plan.source.resolve(strict=True)
     target = target.expanduser().resolve()
     if _within(target, source):
@@ -219,7 +241,11 @@ def _validate_target(plan: BackupPlan, target: Path, *, convert_eseq=False) -> P
         # All originals coexist with derivatives until each conversion is
         # verified, including when the user requests MIDI-only output.
         required += _conversion_headroom(plan)
+    if split_audio:
+        required += _audio_headroom(plan)
     if shutil.disk_usage(ancestor).free < required:
+        if split_audio:
+            raise ValueError('Not enough free space for the backup, decoded audio pairs, and temporary PCM files.')
         if convert_eseq:
             raise ValueError('Not enough free space for the backup, MIDI conversions, and manifest.')
         raise ValueError('Not enough free space for the backup and its manifest.')
@@ -302,8 +328,163 @@ def _write_derivative(path: Path, payload: bytes, cancel=None) -> str:
             path.unlink(missing_ok=True)
 
 
+def _audio_pair_root(folder, plan):
+    """Reserve a separate playback tree without colliding with original assets."""
+    existing = {_path_key(Path(item.destination).parts[0]) for item in plan.files}
+    name, number = 'Paired MIDI and MP3', 1
+    while _path_key(name) in existing or os.path.lexists(folder / name):
+        number += 1
+        name = f'Paired MIDI and MP3 ({number})'
+    return Path(name)
+
+
+def _audio_pair_stem(folder, root, original, reserved):
+    source = Path(original)
+    parent = root / source.parent
+    base, stem, number = source.stem, source.stem, 1
+    while any(_path_key(parent / (stem + extension)) in reserved
+              or os.path.lexists(folder / parent / (stem + extension))
+              for extension in ('.mid', '.mp3')):
+        number += 1
+        stem = f'{base} ({number})'
+    for extension in ('.mid', '.mp3'):
+        reserved.add(_path_key(parent / (stem + extension)))
+    return parent / stem
+
+
+def _split_audio_copies(plan, folder, records, manifest, journal, *, cancel=None, progress=None):
+    """Decode verified archival copies; record skipped ordinary audio in place.
+
+    The original file's journaled audio_decode entry describes the outcome;
+    successful pairs have two ordinary derivative records so Verify Backup
+    checks both halves. A failed decode never retires an encoded original.
+    """
+    from ..disklavier_audio_decode import decode_disklavier_audio, NotEncodedAudioError
+    from ..paired_audio import export_midi_mp3
+
+    candidate_sources = {item.source for item in _audio_candidates(plan)}
+    candidates = [(index, item, record) for index, (item, record) in enumerate(zip(plan.files, records))
+                  if item.source in candidate_sources and record['status'] == 'verified']
+    native_pairs = {_path_key(Path(item.source).with_suffix(''))
+                    for item, record in zip(plan.files, records)
+                    if item.kind in {'MIDI', 'E-SEQ'} and record['status'] in {'verified', 'replaced'}}
+    root = _audio_pair_root(folder, plan)
+    reserved = set()
+    decoded = skipped = failed = completed = 0
+    last_emit = 0.0
+
+    def emit(message, force=False):
+        nonlocal last_emit
+        now = time.monotonic()
+        if progress and (force or now - last_emit > 0.1):
+            progress({'event': 'audio_decode', 'message': message, 'completed': completed,
+                      'total': len(candidates), 'decoded': decoded, 'audio_total': len(candidates),
+                      'audio_skipped': skipped})
+            last_emit = now
+
+    for index, item, original_record in candidates:
+        check_cancel(cancel)
+        details = original_record['audio_decode'] = {'status': 'pending'}
+        derivative_indices = []
+        journal.append('files', index, original_record)
+        emit(f'Decoding {item.destination}', force=True)
+        try:
+            if _path_key(Path(item.source).with_suffix('')) in native_pairs:
+                details.update(status='skipped', reason='Existing MIDI/audio companion retained')
+                skipped += 1
+                continue
+            original = _contained(folder, item.destination)
+            if _hash(original, cancel) != original_record['sha256']:
+                raise ValueError('Original backup checksum changed before audio decoding')
+            if shutil.disk_usage(folder).free < _audio_working_allowance(item) + _manifest_allowance(plan):
+                raise ValueError('Not enough free space for audio decoding and temporary PCM files.')
+            with tempfile.TemporaryDirectory(prefix='.decode-', dir=folder) as temporary:
+                music = Path(temporary) / 'music.wav'
+                decoded_audio = decode_disklavier_audio(
+                    original, music, cancel=cancel,
+                    progress=lambda _fraction: emit(f'Decoding {item.destination}'),
+                )
+                check_cancel(cancel)
+                if _hash(original, cancel) != original_record['sha256']:
+                    raise ValueError('Original backup checksum changed during audio decoding')
+                relative_stem = _audio_pair_stem(folder, root, item.destination, reserved)
+                paths = [Path(str(relative_stem) + extension) for extension in ('.mid', '.mp3')]
+                destinations = [_contained(folder, relative.as_posix()) for relative in paths]
+                destinations[0].parent.mkdir(parents=True, exist_ok=True)
+                for relative, kind in zip(paths, ('MIDI', 'MP3')):
+                    derivative = {'source': item.source, 'original': item.destination,
+                                  'destination': relative.as_posix(), 'kind': kind,
+                                  'conversion': 'Yamaha encoded audio to MIDI/MP3', 'status': 'pending'}
+                    derivative_indices.append(len(manifest['derivatives']))
+                    manifest['derivatives'].append(derivative)
+                    journal.append('derivatives', derivative_indices[-1], derivative)
+                result = export_midi_mp3(
+                    decoded_audio.events, music, folder / relative_stem, cancel=cancel,
+                    progress=lambda _fraction: emit(f'Preparing MIDI/MP3 for {item.destination}'),
+                )
+                # Publication verified the pair. Record both hashes before
+                # considering a cancellation so a completed pair stays verifiable.
+                for derivative_index, destination in zip(derivative_indices, destinations):
+                    derivative = manifest['derivatives'][derivative_index]
+                    derivative.update(status='verified', size=destination.stat().st_size,
+                                      sha256=_hash(destination))
+                    journal.append('derivatives', derivative_index, derivative)
+                details.update(status='decoded',
+                               destinations=[path.as_posix() for path in paths],
+                               control_channel=decoded_audio.control_channel,
+                               decode=decoded_audio.report,
+                               export=result, hardware_verified=False)
+                decoded += 1
+        except NotEncodedAudioError as exc:
+            details.update(status='skipped', reason=str(exc))
+            skipped += 1
+        except (CancelledError, InterruptedError) as exc:
+            details['status'] = 'cancelled'
+            if getattr(exc, 'retained_paths', ()) or getattr(exc, 'recovery_directory', ''):
+                details.update(recovery=str(exc),
+                               retained_paths=list(getattr(exc, 'retained_paths', ())),
+                               recovery_directory=getattr(exc, 'recovery_directory', ''))
+                manifest['errors'].append(f'{item.source}: {exc}')
+            for derivative_index in derivative_indices:
+                derivative = manifest['derivatives'][derivative_index]
+                if derivative['status'] != 'verified':
+                    derivative['status'] = 'cancelled'
+                    journal.append('derivatives', derivative_index, derivative)
+            raise CancelledError('Cancelled by user') from None
+        except Exception as exc:
+            interrupted = isinstance(getattr(exc, 'original_exception', None), InterruptedError)
+            if interrupted and not getattr(exc, 'rollback_errors', ()):
+                details.update(status='cancelled', recovery=str(exc),
+                               retained_paths=list(getattr(exc, 'retained_paths', ())),
+                               recovery_directory=getattr(exc, 'recovery_directory', ''))
+                if details['retained_paths'] or details['recovery_directory']:
+                    manifest['errors'].append(f'{item.source}: {exc}')
+                for derivative_index in derivative_indices:
+                    derivative = manifest['derivatives'][derivative_index]
+                    if derivative['status'] != 'verified':
+                        derivative['status'] = 'cancelled'
+                        journal.append('derivatives', derivative_index, derivative)
+                raise CancelledError('Cancelled by user') from None
+            details.update(status='failed', error=str(exc))
+            message = f'{item.source}: Audio decoding failed: {exc}'
+            manifest['errors'].append(message)
+            manifest['conversion_errors'].append(message)
+            failed += 1
+            for derivative_index in derivative_indices:
+                derivative = manifest['derivatives'][derivative_index]
+                if derivative['status'] != 'verified':
+                    derivative.update(status='failed', error=str(exc))
+                    journal.append('derivatives', derivative_index, derivative)
+        finally:
+            completed += 1
+            journal.append('files', index, original_record)
+            emit(f'Decoded {decoded} of {len(candidates)} audio files', force=True)
+    return decoded, skipped, failed
+
+
 def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
-               convert_eseq: bool = False, keep_originals: bool = True) -> BackupResult:
+               convert_eseq: bool = False, keep_originals: bool = True,
+               split_audio: bool = False) -> BackupResult:
     """Create a new uniquely named backup, copying and reading back every file.
 
     Completed files are never overwritten. A manifest and .incomplete marker
@@ -311,11 +492,13 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     Optional E-SEQ conversion runs after every original has been copied, adding
     verified MIDI siblings. If keep_originals is false, a converted E-SEQ copy
     is removed from the backup only after its MIDI and progress are saved.
-    Failed conversions retain their originals. Source files are never changed.
+    Failed conversions retain their originals. Optional audio decoding adds
+    validated same-basename MIDI/MP3 pairs in a separate playback tree. Encoded
+    audio originals are always kept. Source files are never changed.
     """
     check_cancel(cancel)
     keep_originals = not convert_eseq or bool(keep_originals)
-    target = _validate_target(plan, Path(target), convert_eseq=convert_eseq)
+    target = _validate_target(plan, Path(target), convert_eseq=convert_eseq, split_audio=split_audio)
     target.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     folder = Path(tempfile.mkdtemp(prefix=f'MarkIV-Backup-{stamp}-', dir=target))
@@ -328,10 +511,12 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                 'source': str(plan.source), 'status': 'in_progress', 'total_bytes': plan.total_bytes,
                 'albums': [asdict(album) for album in plan.albums], 'warnings': plan.warnings,
                 'files': records, 'errors': list(plan.scan_errors),
-                'options': {'convert_eseq': bool(convert_eseq), 'keep_originals': keep_originals},
+                'options': {'convert_eseq': bool(convert_eseq), 'keep_originals': keep_originals,
+                            'split_audio': bool(split_audio)},
                 'derivatives': [], 'conversion_errors': []}
     errors = manifest['errors']
     copied = verified = bytes_done = converted = conversion_total = 0
+    decoded = audio_skipped = 0
     last_emit = 0.0
 
     def emit(message, event='progress', force=False):
@@ -496,14 +681,26 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                         journal.append('files', original_index, original_record)
                 emit(f'Converted {converted} of {conversion_total} E-SEQ files',
                      event='conversion', force=True)
+        if split_audio:
+            decoded, audio_skipped, audio_failed = _split_audio_copies(
+                plan, folder, records, manifest, journal, cancel=cancel, progress=progress,
+            )
+            if audio_failed:
+                status = 'incomplete'
         check_cancel(cancel)
     except CancelledError:
         status = 'cancelled'
     except Exception as exc:
         status = 'incomplete'
         errors.append(str(exc))
+    # The audio helper can be interrupted after completing earlier pairs.
+    # Recover counts from the journaled per-original outcomes in that case.
+    if split_audio:
+        decoded = sum(record.get('audio_decode', {}).get('status') == 'decoded' for record in records)
+        audio_skipped = sum(record.get('audio_decode', {}).get('status') == 'skipped' for record in records)
     manifest.update(status=status, completed_at=datetime.now(timezone.utc).isoformat(),
-                    copied=copied, verified=verified, converted=converted)
+                    copied=copied, verified=verified, converted=converted,
+                    decoded=decoded, audio_skipped=audio_skipped)
     journal.finish()
     conversion_note = (
         'Optional E-SEQ conversions are additional MIDI files beside the originals.\n'
@@ -514,11 +711,17 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     (folder / 'README.txt').write_text(
         f'{APP_NAME} {__version__}\nCreated by a tool from {COMPANY_NAME}.\n\n'
         f'Status: {status}\nVerified originals: {verified}/{len(records)}\n'
-        f'Converted MIDI copies: {converted}\n\n'
+        f'Converted MIDI copies: {converted}\n'
+        f'Decoded MIDI/MP3 pairs: {decoded}; audio files left unchanged: {audio_skipped}\n\n'
         'Retained original-format files have unchanged contents.\n'
         + conversion_note +
         'manifest.json records original paths, recovered titles, and SHA-256 checksums.\n'
         'Its derivatives list records converted MIDI files separately from originals.\n'
+        'Decoded audio pairs are in Paired MIDI and MP3 (or its numbered variant).\n'
+        'For ENSPIRE USB playback, copy each desired album folder from that tree;\n'
+        'keep the matching .mid and .mp3 filenames together. Audio originals stay in the archive.\n'
+        'The control channel is removed only from successfully decoded music copies.\n'
+        'Hardware timing and MP3 decoder delay handling still require a piano playback check.\n'
         'Replaced original records identify their MIDI replacement.\n'
         '_metadata/original retains available database and catalog source files.\n'
         'PianoSoft packages and presentation assets retain their original contents.\n'
@@ -526,7 +729,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     if status == 'complete':
         (folder / '.incomplete').unlink()
     emit(f'Backup {status}: {verified} files verified', event=status, force=True)
-    return BackupResult(folder, status, copied, verified, errors, converted)
+    return BackupResult(folder, status, copied, verified, errors, converted, decoded, audio_skipped)
 
 
 def verify_backup(folder: Path, progress=None, cancel=None) -> list[str]:

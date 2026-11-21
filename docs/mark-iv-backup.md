@@ -7,6 +7,8 @@ music library into album folders with recovered names. APS reads the source,
 copies the original files, and checks their contents. An optional conversion
 step converts supported legacy E-SEQ songs to MIDI, with an option to keep the
 originals alongside the MIDI files.
+For ENSPIRE delivery, the utility can also decode Yamaha control audio in
+WAV/MP3 files into synchronized MIDI and clean music copies.
 
 The result is a music archive. Restoring a piano and creating a bootable drive
 clone are outside this utility's scope.
@@ -53,7 +55,11 @@ the backup includes the scanned library.
    available when conversion is on and is checked by default. Uncheck it to
    keep only the MIDI version of successfully converted E-SEQ songs in the
    backup. APS remembers this choice too.
-3. Choose **Back up music**. Progress shows the copying, verification, and
+3. Review **Create paired MIDI + MP3 files from encoded WAV/MP3**. It is selected
+   automatically when **Preparing for** is ENSPIRE / DKC-900 and starts off for
+   other targets. You can change it for this backup. This option always keeps
+   the original audio, independently of the E-SEQ retention option.
+4. Choose **Back up music**. Progress shows the copying, verification, and
    optional conversion stages. When it finishes, check the result and any
    **View report...** messages. Use **Open backup folder** to view the files.
 
@@ -72,7 +78,7 @@ always unchanged.
 APS checks each copied original with a SHA-256 checksum, a fingerprint of its
 file contents, and reads back generated MIDI files for the same check.
 `manifest.json` records original and destination paths, recovered metadata,
-checksums, generated MIDI copies, and any errors. `README.txt` summarizes the
+checksums, generated MIDI copies, decoded audio pairs, and any errors. `README.txt` summarizes the
 result.
 
 To check an existing backup:
@@ -82,7 +88,7 @@ To check an existing backup:
 3. Review the result and **View report...** for missing, changed, or incomplete
    files.
 
-Verification checks retained originals and generated MIDI files against the
+Verification checks retained originals and both files of each generated pair against the
 manifest. The source drive is not needed. Checksums confirm file integrity;
 audition converted songs to assess their playback on your player.
 
@@ -142,6 +148,47 @@ coexist until each MIDI copy is verified. APS rechecks space before converting
 each song and before writing its actual MIDI output. If another program fills
 the destination meanwhile, failed conversions retain their verified originals.
 
+Audio decoding also reserves space for the MIDI/MP3 copies and temporary PCM
+audio. MP3 files can expand considerably while decoding. These temporary files
+are removed when each song finishes or stops.
+
+### Optional encoded-audio decoding
+
+With **Create paired MIDI + MP3 files from encoded WAV/MP3** selected, APS
+processes verified backup copies after copying the entire source library. It
+checks both channels for Yamaha's phase-encoded control signal, validates the
+MIDI stream, and writes the other channel as clean music. Swapped channels are
+detected automatically. The recovered music is mono because one channel of
+the encoded original was used for control data.
+
+Successful pairs are saved separately under **Paired MIDI and MP3**, preserving
+the collection and album organization. If that folder name is occupied, APS
+uses a numbered variant. The two files for a song have the same basename, such
+as `01 - Song.mid` and `01 - Song.mp3`. Duplicate names receive the same numbered
+suffix on both files. Copy the desired album folder to an ENSPIRE USB stick,
+keeping each pair together. Keep the full backup separately.
+
+The MIDI and music retain the encoded recording's shared timeline. APS does
+not run Smart PianoSoft fingerprint matching again on an already synchronized
+control track. It does not add a guessed mechanical-delay correction. MIDI
+completion times are recovered from the signal; exact acoustic alignment and
+the piano's MP3 delay handling still require a playback check.
+
+Ordinary audio and existing MIDI/audio companions are kept without decoding.
+Metadata, protected packages, and presentation dependencies are also preserved.
+An unreadable, ambiguous, or damaged control stream is reported without creating
+a guessed performance. Lossy MP3 encoding can destroy control symbols even
+when the music sounds normal, so not every MP3 can be recovered. WAV input must
+be 44.1 kHz, 16-bit stereo PCM; MP3 input must decode to that format. LAME is
+required to decode MP3 and create the clean MP3 output.
+
+The manifest records the detected control channel, decoder measurements,
+timing, and separate checksums for both output files. The result counts decoded
+pairs and skipped audio files. A decode failure marks the overall backup
+incomplete but retains all verified originals and any earlier completed pairs.
+Cancelling removes incomplete public pairs while preserving reported recovery
+copies when needed.
+
 ### Saved progress after interruption
 
 During a backup, durable per-file updates are stored in
@@ -155,3 +202,5 @@ write is ignored.
 
 Source, destination, last backup folder, and the conversion and retention choices can be
 preset for deployments using the [startup configuration](startup-configuration.md).
+The audio-decoding default follows the current **Preparing for** profile each
+time the dialog opens; it is not a remembered global switch.

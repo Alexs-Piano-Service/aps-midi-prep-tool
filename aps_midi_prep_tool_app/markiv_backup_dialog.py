@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .audio_preparation import default_split_audio
 from .icon_utils import apply_window_icon
 from .markiv_backup.backup import run_backup, verify_backup
 from .markiv_backup.devices import resolve_source
@@ -18,6 +19,7 @@ from .markiv_backup.library import CancelledError, check_cancel, scan_library
 from .markiv_backup_diagnostics import localize_backup_diagnostic
 from .markiv_device_discovery import discover_mounted_sources
 from .message_catalog import normalize_language_code, tr, translate_text
+from .preparation_profiles import SETTING_PROFILE, get_preparation_profile
 
 
 SETTING_SOURCE = "markiv_backup_source"
@@ -42,7 +44,7 @@ class MarkIVBackupWorker(QThread):
     cancelled = Signal()
 
     def __init__(self, operation, *, source="", target="", plan=None,
-                 convert_eseq=False, keep_originals=True, parent=None):
+                 convert_eseq=False, keep_originals=True, split_audio=False, parent=None):
         super().__init__(parent)
         self.operation = operation
         self.source = source
@@ -50,6 +52,7 @@ class MarkIVBackupWorker(QThread):
         self.plan = plan
         self.convert_eseq = convert_eseq
         self.keep_originals = keep_originals
+        self.split_audio = split_audio
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -67,7 +70,8 @@ class MarkIVBackupWorker(QThread):
                 result = run_backup(self.plan, Path(self.target),
                                     progress=self.progressChanged.emit, cancel=self._cancel,
                                     convert_eseq=self.convert_eseq,
-                                    keep_originals=self.keep_originals)
+                                    keep_originals=self.keep_originals,
+                                    split_audio=self.split_audio)
             elif self.operation == "verify":
                 result = verify_backup(Path(self.target),
                                        progress=self.progressChanged.emit, cancel=self._cancel)
@@ -142,6 +146,21 @@ class MarkIVBackupDialog(QDialog):
         keep_row.addSpacing(20)
         keep_row.addWidget(self.keep_originals_checkbox)
         layout.addLayout(keep_row)
+
+        profile = get_preparation_profile(settings.value(SETTING_PROFILE, "unsure"))
+        self.split_audio_checkbox = QCheckBox(self._t("markiv.split_audio"))
+        self.split_audio_checkbox.setObjectName("markivBackupSplitAudio")
+        # This is a destination default, not a global preference: changing
+        # Preparing for must take effect the next time the utility opens.
+        self.split_audio_checkbox.setChecked(default_split_audio(profile.key))
+        self.split_audio_checkbox.setToolTip(self._t("markiv.split_audio_tooltip"))
+        layout.addWidget(self.split_audio_checkbox)
+        target_key = ("markiv.audio_target_enabled" if self.split_audio_checkbox.isChecked()
+                      else "markiv.audio_target_disabled")
+        self.audio_target_note = self._label(target_key, target=self.lt(profile.label))
+        layout.addWidget(self.audio_target_note)
+        self.split_audio_note = self._label("markiv.split_audio_note")
+        layout.addWidget(self.split_audio_note)
 
         preview_row = QHBoxLayout()
         self.summary_label = self._label("markiv.ready")
@@ -241,8 +260,8 @@ class MarkIVBackupDialog(QDialog):
     def lt(self, text):
         return translate_text(text, self.language_code)
 
-    def _label(self, key):
-        label = QLabel(self._t(key))
+    def _label(self, key, **kwargs):
+        label = QLabel(self._t(key, **kwargs))
         label.setWordWrap(True)
         label.setTextFormat(Qt.PlainText)
         return label
@@ -374,7 +393,7 @@ class MarkIVBackupDialog(QDialog):
         idle = not self.is_busy
         for widget in (self.source_combo, self.source_browse, self.refresh_button,
                        self.destination_edit, self.destination_browse, self.convert_checkbox,
-                       self.verify_button):
+                       self.split_audio_checkbox, self.verify_button):
             widget.setEnabled(idle)
         self.keep_originals_checkbox.setEnabled(idle and self.convert_checkbox.isChecked())
         self.scan_button.setEnabled(idle and bool(self.source_combo.currentText().strip()))
@@ -429,7 +448,8 @@ class MarkIVBackupDialog(QDialog):
         if self.plan is not None and self.destination_edit.text().strip():
             self._start("backup", plan=self.plan, target=self.destination_edit.text().strip(),
                         convert_eseq=self.convert_checkbox.isChecked(),
-                        keep_originals=self.keep_originals_checkbox.isChecked())
+                        keep_originals=self.keep_originals_checkbox.isChecked(),
+                        split_audio=self.split_audio_checkbox.isChecked())
 
     def verify_existing_backup(self):
         if self.is_busy:
@@ -454,6 +474,11 @@ class MarkIVBackupDialog(QDialog):
             self.status_label.setText(self._t("markiv.converting"))
             completed = progress.get("converted", 0)
             total = progress.get("conversion_total", 0)
+            done, size = completed, total
+        elif progress.get("event") == "audio_decode":
+            self.status_label.setText(self._t("markiv.decoding_audio"))
+            completed = progress.get("completed", progress.get("decoded", 0))
+            total = progress.get("audio_total", 0)
             done, size = completed, total
         else:
             done = progress.get("bytes_done", completed)
@@ -500,7 +525,11 @@ class MarkIVBackupDialog(QDialog):
             self.result_folder = result.folder
             self.result_label.setText(str(result.folder))
             key = {"complete": "complete", "cancelled": "cancelled"}.get(result.status, "incomplete")
-            self.status_label.setText(self._t("markiv." + key, verified=result.verified, converted=result.converted))
+            summary = self._t("markiv." + key, verified=result.verified, converted=result.converted)
+            if self.split_audio_checkbox.isChecked() or result.decoded or result.audio_skipped:
+                summary += " " + self._t("markiv.audio_summary", decoded=result.decoded,
+                                         skipped=result.audio_skipped)
+            self.status_label.setText(summary)
             self._set_report([*self.plan.warnings, *result.errors])
         elif self._operation == "verify":
             self.status_label.setText(self._t(

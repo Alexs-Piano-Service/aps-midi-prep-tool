@@ -93,6 +93,47 @@ def _loaded_source(source):
     )
 
 
+@pytest.mark.parametrize("profile,expected,route", [
+    ("enspire", "midi_mp3", "ENSPIRE USB:"),
+    ("mark_iv", "encoded_wav", "Mark IV:"),
+    ("mark_iii", "encoded_wav", "External-input playback:"),
+    ("e3_850", "encoded_wav", "External-input playback:"),
+    ("unsure", "encoded_wav", "compatible PianoSoft PlusAudio decoder"),
+])
+def test_preparing_for_selects_output_and_explains_playback_route(tmp_path, qt_application, profile, expected, route):
+    settings = QSettings(str(tmp_path / (profile + ".ini")), QSettings.IniFormat)
+    settings.setValue("preparation_profile", profile)
+    # An old manual choice cannot override the current Preparing for target.
+    settings.setValue("sps_output_format", "encoded_wav" if expected == "midi_mp3" else "midi_mp3")
+    instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False)
+    try:
+        assert instance.format_combo.currentData() == expected
+        assert route in instance.format_note.text()
+        assert instance.target_label.text() == instance.profile.label
+        if profile == "enspire":
+            instance.format_combo.setCurrentIndex(instance.format_combo.findData("encoded_wav"))
+            assert "External-input playback:" in instance.format_note.text()
+            assert "Direct ENSPIRE USB playback needs paired MIDI/MP3" in instance.format_note.text()
+    finally:
+        instance.close()
+
+
+def test_selected_output_format_is_passed_to_background_preparation(dialog, source, tmp_path, monkeypatch):
+    _scan(dialog, source)
+    captured = []
+    def prepare(album, destination, **options):
+        captured.append(options)
+        return Path(destination)
+    monkeypatch.setattr(dialogs, "prepare_album", prepare)
+    dialog.output_edit.setText(str(tmp_path))
+    dialog.format_combo.setCurrentIndex(dialog.format_combo.findData("midi_mp3"))
+    dialog.start_preparation()
+    assert not dialog.format_combo.isEnabled()
+    _wait(lambda: not dialog.is_busy)
+    assert captured[0]["output_format"] == "midi_mp3"
+    assert isinstance(captured[0]["cancel"], threading.Event)
+
+
 def test_loaded_list_scans_automatically_before_cd_discovery(source, tmp_path, qt_application, monkeypatch):
     settings = QSettings(str(tmp_path / "loaded.ini"), QSettings.IniFormat)
     settings.setValue("sps_source", str(tmp_path / "stale source.img"))
