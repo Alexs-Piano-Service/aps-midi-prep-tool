@@ -285,6 +285,53 @@ def test_smart_worker_pauses_at_copy_protection_before_continuing(qt_application
     finally:
         worker.cancelled.set()
         worker.wait(2000)
+@pytest.mark.parametrize("profile,expected,route", [
+    ("enspire", "midi_mp3", "ENSPIRE USB:"),
+    ("mark_iv", "encoded_wav", "Mark IV:"),
+    ("mark_iii", "encoded_wav", "External-input playback:"),
+    ("e3_850", "encoded_wav", "External-input playback:"),
+    ("unsure", "encoded_wav", "compatible PianoSoft PlusAudio decoder"),
+])
+def test_preparing_for_selects_output_and_explains_playback_route(tmp_path, qt_application, profile, expected, route):
+    settings = QSettings(str(tmp_path / (profile + ".ini")), QSettings.IniFormat)
+    settings.setValue("preparation_profile", profile)
+    # An old manual choice cannot override the current Preparing for target.
+    settings.setValue("sps_output_format", "encoded_wav" if expected == "midi_mp3" else "midi_mp3")
+    instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False)
+    try:
+        assert instance.format_combo.currentData() == expected
+        assert route in instance.format_note.text()
+        assert instance.text("output_beta") in instance.format_note.toolTip()
+        assert instance.format_note.accessibleDescription() == instance.format_note.toolTip()
+        assert instance.target_label.text() == instance.profile.label
+        if profile == "enspire":
+            instance.format_combo.setCurrentIndex(instance.format_combo.findData("encoded_wav"))
+            assert "External-input playback:" in instance.format_note.text()
+            assert "Direct ENSPIRE USB playback needs paired MIDI/MP3" in instance.format_note.text()
+    finally:
+        instance.close()
+
+
+@pytest.mark.parametrize("random_suffixes", [False, True])
+@pytest.mark.parametrize("output_format", ["encoded_wav", "midi_mp3"])
+def test_selected_output_format_is_passed_to_background_preparation(
+    dialog, source, tmp_path, monkeypatch, random_suffixes, output_format,
+):
+    _scan(dialog, source)
+    captured = []
+    def prepare(album, destination, **options):
+        captured.append(options)
+        return Path(destination)
+    monkeypatch.setattr(dialogs, "prepare_album", prepare)
+    dialog.output_edit.setText(str(tmp_path))
+    dialog.settings.setValue("random_output_suffixes", random_suffixes)
+    dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(output_format))
+    dialog.start_preparation()
+    assert not dialog.format_combo.isEnabled()
+    _wait(lambda: not dialog.is_busy)
+    assert captured[0]["output_format"] == output_format
+    assert captured[0]["random_suffixes"] is random_suffixes
+    assert isinstance(captured[0]["cancel"], threading.Event)
 
 
 def test_loaded_list_scans_automatically_before_cd_discovery(source, tmp_path, qt_application, monkeypatch):
@@ -436,7 +483,7 @@ def test_start_scans_and_runs_cd_pipeline_without_blocking_ui(dialog, source, tm
     dialog.settings.setValue("random_output_suffixes", random_suffixes)
     dialog.cd_combo.setEditText("/dev/test-cd")
     initial_icon = dialog.start_button.icon().pixmap(24, 24).toImage()
-    assert dialog.start_button.text() == dialog.text("start")
+    assert dialog.start_button.text() == dialog.text("start", format="WAV")
     dialog.start_preparation()
     assert dialog.is_busy
     assert not dialog.options.isEnabled()
@@ -455,7 +502,7 @@ def test_start_scans_and_runs_cd_pipeline_without_blocking_ui(dialog, source, tm
     assert calls == ["toc", "rip", "toc"]
     assert dialog.open_button.isEnabled()
     assert dialog.options.isEnabled()
-    assert dialog.start_button.text() == dialog.text("restart")
+    assert dialog.start_button.text() == dialog.text("restart", format="WAV")
     assert dialog.start_button.icon().pixmap(24, 24).toImage() != initial_icon
     first_output = dialog.result_folder
     dialog.start_button.click()
@@ -463,9 +510,9 @@ def test_start_scans_and_runs_cd_pipeline_without_blocking_ui(dialog, source, tm
     assert dialog.result_folder != first_output
     assert json.loads((dialog.result_folder / "manifest.json").read_text())["status"] == "complete"
     assert calls == ["toc", "rip", "toc"] * 2
-    assert dialog.start_button.text() == dialog.text("restart")
+    assert dialog.start_button.text() == dialog.text("restart", format="WAV")
     dialog.invalidate_scan()
-    assert dialog.start_button.text() == dialog.text("start")
+    assert dialog.start_button.text() == dialog.text("start", format="WAV")
     assert dialog.start_button.icon().pixmap(24, 24).toImage() == initial_icon
     assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
 
@@ -646,8 +693,9 @@ def _assert_large_font_layout_fits(instance):
 
 
 @pytest.mark.parametrize("point_size,width,height", [(12, 940, 700), (18, 1180, 874), (18, 1000, 800)])
+@pytest.mark.parametrize("output_format", ["encoded_wav", "midi_mp3"])
 def test_album_layout_uses_table_space_without_scrolling_the_dialog(
-    tmp_path, qt_application, source, point_size, width, height,
+    tmp_path, qt_application, source, point_size, width, height, output_format,
 ):
     original_font = QFont(qt_application.font())
     font = QFont(original_font)
@@ -656,6 +704,7 @@ def test_album_layout_uses_table_space_without_scrolling_the_dialog(
     settings = QSettings(str(tmp_path / "compact-layout.ini"), QSettings.IniFormat)
     instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False,
                                           loaded_source=_loaded_source(source))
+    instance.format_combo.setCurrentIndex(instance.format_combo.findData(output_format))
     instance.resize(width, height)
     instance.show()
     try:
@@ -687,15 +736,29 @@ def test_album_layout_uses_table_space_without_scrolling_the_dialog(
         qt_application.processEvents()
 
 
-def test_start_action_identifies_cd_ripping_and_paired_file_export(dialog):
-    assert dialog.start_button.text() == dialog.text("start_files")
-    assert dialog.start_button.toolTip() == dialog.text("start_files_hint")
+@pytest.mark.parametrize("language", [entry.code for entry in SUPPORTED_LANGUAGES])
+@pytest.mark.parametrize("output_format,label", [("encoded_wav", "WAV"), ("midi_mp3", "MIDI/MP3")])
+def test_start_action_identifies_cd_ripping_and_paired_file_export(dialog, language, output_format, label):
+    dialog.language = language
+    dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(output_format))
+    dialog._update_controls()
+    assert dialog.start_button.text() == dialog.text("start_files", format=label)
+    assert dialog.start_button.toolTip() == dialog.text("start_files_hint", format=label)
+    assert label in dialog.start_button.text()
     dialog.cd_combo.addItem("Audio CD", "/dev/sr0")
     dialog.cd_combo.setCurrentIndex(1)
-    assert dialog.start_button.text() == dialog.text("start")
-    assert dialog.start_button.toolTip() == dialog.text("start_hint")
+    assert dialog.start_button.text() == dialog.text("start", format=label)
+    assert dialog.start_button.toolTip() == dialog.text("start_hint", format=label)
+    dialog._completed_cd_device = "/dev/sr0"
+    dialog._update_controls()
+    assert dialog.start_button.text() == dialog.text("restart", format=label)
     dialog.cd_combo.setCurrentIndex(0)
-    assert dialog.start_button.text() == dialog.text("start_files")
+    assert dialog.start_button.text() == dialog.text("start_files", format=label)
+    opposite = "midi_mp3" if output_format == "encoded_wav" else "encoded_wav"
+    dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(opposite))
+    assert dialog.start_button.text() == dialog.text(
+        "start_files", format="MIDI/MP3" if opposite == "midi_mp3" else "WAV",
+    )
     assert dialog.start_button.isDefault()
 
 

@@ -19,6 +19,8 @@ from .floppy_image import (
 from .icon_utils import apply_window_icon
 from .helpers.output_names import random_output_suffixes_enabled
 from .message_catalog import normalize_language_code, tr, translate_text
+from .audio_preparation import audio_playback_note_key, default_audio_output
+from .preparation_profiles import SETTING_PROFILE, get_preparation_profile
 from .responsive_button_box import ResponsiveDialogButtonBox
 from .smart_pianosoft_workflow import LoadedAlbumSource, scan_album, scan_loaded_album, prepare_album
 from .ui_utils import resize_dialog_to_screen
@@ -29,6 +31,10 @@ class _WrappingLabel(QLabel):
 
     def _fit_text_height(self):
         if self.wordWrap():
+            # Release the previous height before measuring changed text or a
+            # wider layout. QLabel otherwise includes that minimum height.
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
             self.setFixedHeight(max(0, self.heightForWidth(self.width())))
 
     def setText(self, text):
@@ -44,6 +50,27 @@ class _WrappingLabel(QLabel):
         super().changeEvent(event)
         if event.type() in (QEvent.FontChange, QEvent.StyleChange):
             self._fit_text_height()
+
+
+class _WrappingForm(QWidget):
+    """Keep wrapped form rows tall enough inside the scroll area's layout."""
+
+    def _fit_rows(self):
+        layout = self.layout()
+        if layout is not None:
+            height = layout.heightForWidth(self.width())
+            if height >= 0:
+                self.setFixedHeight(height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            self._fit_rows()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._fit_rows()
 
 
 class SmartPianoSoftWorker(QThread):
@@ -120,6 +147,7 @@ class SmartPianoSoftDialog(QDialog):
         )
         self._source_consent_granted = self._loaded_source_consent_granted
         self._discover_after_scan = False
+        self.profile = get_preparation_profile(settings.value(SETTING_PROFILE, "unsure"))
         self.setWindowTitle(self.text("action"))
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         self.setSizeGripEnabled(True)
@@ -136,11 +164,23 @@ class SmartPianoSoftDialog(QDialog):
         description = self._label("description")
         layout.addWidget(description)
 
-        self.options = QWidget()
+        self.options = _WrappingForm()
         form = QFormLayout(self.options)
         form.setContentsMargins(0, 0, 0, 0)
         form.setVerticalSpacing(6)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        self.target_label = _WrappingLabel(translate_text(self.profile.label, self.language))
+        self.target_label.setTextFormat(Qt.PlainText)
+        self.target_label.setWordWrap(True)
+        form.addRow(self._label("preparing_for", wrap=False), self.target_label)
+        self.format_combo = QComboBox()
+        self.format_combo.setObjectName("smartPianoSoftOutputFormat")
+        self.format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.format_combo.setMinimumContentsLength(15)
+        for key in ("encoded_wav", "midi_mp3"):
+            self.format_combo.addItem(self.text("output_" + key), key)
+        self.format_combo.setCurrentIndex(self.format_combo.findData(default_audio_output(self.profile.key)))
+        form.addRow(self._label("output_format", wrap=False), self.format_combo)
         source_text = (self.text("current_list_source", source=loaded_source.label)
                        if loaded_source is not None else str(settings.value("sps_source", "") or ""))
         self.source_edit = QLineEdit(source_text)
@@ -211,7 +251,10 @@ class SmartPianoSoftDialog(QDialog):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().hide()
-        self.table.setMinimumHeight(self.fontMetrics().height() * 6)
+        # Leave room for target/output controls and rip progress at large font
+        # sizes; additional songs remain scrollable inside the table.
+        self.table.setMinimumHeight(self.fontMetrics().height() * 4)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         for column in (1, 2, 3):
@@ -229,10 +272,10 @@ class SmartPianoSoftDialog(QDialog):
             button.setAutoDefault(False)
             self.pairing_buttons.addButton(button, QDialogButtonBox.ActionRole)
         layout.addWidget(self.pairing_buttons)
-        note = self._label("format_note")
-        note.setToolTip(self.text("format_details"))
-        note.setAccessibleDescription(self.text("format_details"))
-        layout.addWidget(note)
+        self.format_note = self._label(audio_playback_note_key(self.profile.key, self.format_combo.currentData()))
+        self.format_combo.currentIndexChanged.connect(self._update_format_note)
+        self._update_format_note()
+        layout.addWidget(self.format_note)
         self.status = self._label("ready")
         self.status.hide()
         layout.addWidget(self.status)
@@ -254,7 +297,7 @@ class SmartPianoSoftDialog(QDialog):
         self.buttons = ResponsiveDialogButtonBox()
         self.open_button = QPushButton(self.text("open"))
         self.open_button.clicked.connect(self.open_output)
-        self.start_button = QPushButton(self.text("start"))
+        self.start_button = QPushButton()
         self.start_button.setObjectName("smartPianoSoftStart")
         self.start_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         start_font = self.start_button.font()
@@ -273,6 +316,7 @@ class SmartPianoSoftDialog(QDialog):
         self.source_edit.textChanged.connect(self.invalidate_scan)
         self.source_edit.textChanged.connect(self.source_edit.setToolTip)
         self.cd_combo.currentTextChanged.connect(self._update_controls)
+        self.format_combo.currentIndexChanged.connect(self._update_controls)
         self.table.itemSelectionChanged.connect(self._update_controls)
         self._update_controls()
         resize_dialog_to_screen(self, width=940, height=700)
@@ -284,6 +328,13 @@ class SmartPianoSoftDialog(QDialog):
 
     def text(self, key, **values):
         return tr("sps." + key, self.language, **values)
+
+    def _update_format_note(self):
+        note = self.text(audio_playback_note_key(self.profile.key, self.format_combo.currentData()))
+        detail = note + "\n\n" + self.text("output_beta")
+        self.format_note.setText(note)
+        self.format_note.setToolTip(detail)
+        self.format_note.setAccessibleDescription(detail)
 
     def _label(self, key, *, wrap=True):
         label_type = _WrappingLabel if wrap else QLabel
@@ -305,11 +356,14 @@ class SmartPianoSoftDialog(QDialog):
         cd_device = self._cd_device()
         cd_selected = bool(cd_device)
         restarting = cd_selected and cd_device == self._completed_cd_device
-        self.start_button.setText(self.text("restart" if restarting else "start" if cd_selected else "start_files"))
+        output_format = "MIDI/MP3" if self.format_combo.currentData() == "midi_mp3" else "WAV"
+        self.start_button.setText(self.text(
+            "restart" if restarting else "start" if cd_selected else "start_files", format=output_format,
+        ))
         self.start_button.setIcon(self.style().standardIcon(
             QStyle.SP_BrowserReload if restarting else QStyle.SP_MediaPlay,
         ))
-        self.start_button.setToolTip(self.text("start_hint" if cd_selected else "start_files_hint"))
+        self.start_button.setToolTip(self.text("start_hint" if cd_selected else "start_files_hint", format=output_format))
         self.start_button.setAccessibleDescription(self.start_button.toolTip())
         self.table.setEnabled(not busy)
         selected = self.table.currentRow() >= 0 and self.album is not None
@@ -523,11 +577,13 @@ class SmartPianoSoftDialog(QDialog):
         self.settings.setValue("sps_output", destination)
         album, audio, cd_device = self.album, dict(self.audio_paths), self._cd_device()
         random_suffixes = random_output_suffixes_enabled(self.settings)
+        output_format = self.format_combo.currentData()
         target = self._new_scan() if album is None else None
         def prepare(cancel, progress):
             snapshot = album or _scan_source(source, target, cancel=cancel, progress=progress)
             output = prepare_album(snapshot, destination, cd_device=cd_device, audio_paths=audio,
-                                   cancel=cancel, progress=progress, random_suffixes=random_suffixes)
+                                   output_format=output_format, cancel=cancel, progress=progress,
+                                   random_suffixes=random_suffixes)
             return snapshot, output
         self._start("prepare", prepare)
 

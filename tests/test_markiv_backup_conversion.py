@@ -401,7 +401,7 @@ def test_midi_only_replaces_converted_copies_and_keeps_other_assets(tmp_path):
                                convert_eseq=True, keep_originals=False)
     assert (result.status, result.verified, result.converted) == ('complete', 4, 1)
     manifest = _manifest(result)
-    assert manifest['options'] == {'convert_eseq': True, 'keep_originals': False}
+    assert manifest['options'] == {'convert_eseq': True, 'keep_originals': False, 'split_audio': False}
     derivative, = manifest['derivatives']
     assert derivative['destination'].endswith('Header title (2).mid')
     for record in manifest['files']:

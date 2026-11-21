@@ -26,6 +26,20 @@ with release sections grouped by version and date.
   filename matching, skipped-record feedback, and staged Save/Undo behavior.
   Dropping catalogs together with their MIDI files applies the metadata
   automatically.
+- Smart PianoSoft uses **Preparing for** to select synchronized MIDI/MP3 pairs
+  for ENSPIRE or encoded WAV for Mark IV and external-input playback. The
+  output can be overridden per album; ripping, fingerprint matching, original
+  snapshots, and synchronization reports are retained. Paired exports apply
+  timing corrections to the MIDI and keep clean stereo accompaniment.
+- Smart PianoSoft opens automatically for a loaded MIDI folder containing
+  validated synchronization fingerprints. Disk reads retain the existing offer
+  after capture-save and recovery dialogs; generic catalogs do not trigger it.
+- Mark IV backup optionally decodes recoverable Yamaha-encoded WAV/MP3 into
+  matching MIDI and clean music files in a separate playback folder. ENSPIRE
+  selects this option automatically. Originals and existing native pairs are
+  retained; failed decoding is reported without guessing MIDI data. Both files
+  participate in backup verification. Physical playback timing remains
+  unverified.
 
 ### Changed
 
@@ -35,12 +49,12 @@ with release sections grouped by version and date.
   enable it. Compact the About dialog around its contents.
 - Compact the Smart PianoSoft dialog with balanced margins, more room for the
   song table, and progress/details shown when needed. The primary action now
-  says **Start CD rip + WAV export** (or **Start WAV export** for paired files).
+  identifies CD ripping versus paired-file export and the selected format.
   Automatic CD pairing no longer appears to require manual audio verification.
 - Restore Smart PianoSoft (Beta) in Utilities and saved keyboard shortcuts.
   Confirmed Smart disks offer to open the CD-ripping and pairing dialog after
-  reading finishes. Each verified MIDI/audio pair exports as one combined
-  Disklavier WAV. Ordinary Yamaha catalogs do not trigger the offer.
+  reading finishes. Verified songs export in the selected playback format.
+  Ordinary Yamaha catalogs do not trigger the offer.
 - Accept USB floppy drives and Greaseweazle in the Smart PianoSoft source
   picker. Greaseweazle sources offer drive, disk format, read revolutions, and
   retry settings before scanning or preparing the album.

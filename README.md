@@ -98,11 +98,11 @@ to stage the conversions required by your piano.
   create the short DOS 8.3 filenames required by older hardware.
 - **Playback compatibility:** optionally merge instruments onto one piano
   channel, adjust pedals, or remove Yamaha XF metadata.
-- **Smart PianoSoft (Beta):** pair a Smart floppy with its companion CD or
-  existing WAV tracks and export one combined Disklavier WAV per song.
-  Recognized Smart disks offer to open the dialog automatically. See
-  [Smart PianoSoft preparation](docs/playback-and-audio.md#smart-pianosoft-beta)
-  for CD-reading requirements and playback limits.
+- **Smart PianoSoft (Beta):** synchronize a Smart floppy with its companion
+  CD or existing WAV tracks. **Preparing for** selects paired MIDI/MP3 for
+  ENSPIRE USB playback or encoded WAV for Mark IV and compatible external
+  inputs. See [Smart PianoSoft preparation](docs/playback-and-audio.md#smart-pianosoft-synchronized-piano-and-music)
+  for output folders, CD-reading requirements, and playback limits.
 
 Review the proposed changes before saving. Conversion reports compare notes,
 duration, channels, pedals, titles, and removed metadata. See
@@ -144,6 +144,9 @@ in normal use.
 Use **Utilities → Render Audio...** to create WAV or MP3 copies with a SoundFont.
 The [playback and audio guide](docs/playback-and-audio.md) explains preview,
 required tools, and overlapping-note choices when merging piano parts.
+
+[Mark IV backup](docs/mark-iv-backup.md) can also extract verified MIDI/music
+pairs from recoverable encoded WAV/MP3 tracks, while retaining the originals.
 
 [![MIDI notes, channels, tempo, and pedals in File Inspection](docs/images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)](docs/images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)
 

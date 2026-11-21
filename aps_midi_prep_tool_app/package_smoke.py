@@ -289,6 +289,8 @@ def _check_smart_pianosoft(directory, state):
     from .smart_pianosoft_dialog import SmartPianoSoftDialog
     from .smart_pianosoft_sync import _envelope
     from .smart_pianosoft_workflow import prepare_album
+    from .audio_tools import decode_mp3
+    from .disklavier_audio_decode import decode_disklavier_audio
     from .disklavier_decoder import decode_disklavier_wav
     from .floppy_image import DISK_FORMAT_BY_KEY, FloppyImageSession, create_floppy_images_from_files
     from .main_window import MidiTitleWindow
@@ -446,6 +448,60 @@ def _check_smart_pianosoft(directory, state):
             recovered.setpos(round(result["encoding"]["audio_preroll_seconds"] * 44100))
             if not np.array_equal(np.frombuffer(recovered.readframes(len(mono)), dtype="<i2"), mono):
                 raise RuntimeError("Decoded accompaniment differs from the encoded music channel.")
+        # The backup receiver and the live WAV player use independent decoding
+        # paths. Exercise both in a frozen package, then exercise the new paired
+        # export through its actual workflow and bundled MP3 helper.
+        backup_music = directory / "Decoded Mark IV package music.wav"
+        backup_decoded = decode_disklavier_audio(encoded_path, backup_music)
+        backup_notes = [(event.data[0] & 0xF0, event.data[1], event.time_seconds)
+                        for event in backup_decoded.events if event.data[0] & 0xF0 in {0x80, 0x90}]
+        if (backup_decoded.control_channel != "right" or len(backup_notes) != 2
+                or [event[:2] for event in backup_notes] != [(0x90, 60), (0x80, 60)]
+                or abs(backup_notes[0][2] - 2.5) > .02
+                or abs(backup_notes[1][2] - 3.5) > .02
+                or _sha256(backup_music) != _sha256(recovered_audio)):
+            raise RuntimeError("The Mark IV audio receiver did not recover the piano/music timeline.")
+
+        paired_output = prepare_album(album, directory, audio_paths={1: audio_path},
+                                      output_format="midi_mp3")
+        paired_manifest = json.loads((paired_output / "manifest.json").read_text(encoding="utf-8"))
+        if (paired_manifest.get("status") != "complete"
+                or paired_manifest.get("output_format") != "midi_mp3"
+                or len(paired_manifest["tracks"]) != 1):
+            raise RuntimeError("Smart PianoSoft paired MIDI/MP3 preparation did not complete.")
+        paired_track = paired_manifest["tracks"][0]
+        paired_midi = paired_output / paired_track["prepared_midi"]
+        paired_music = paired_output / paired_track["prepared_audio"]
+        if (paired_midi.stem != paired_music.stem
+                or _sha256(paired_midi) != paired_track["prepared_midi_sha256"]
+                or _sha256(paired_music) != paired_track["prepared_audio_sha256"]):
+            raise RuntimeError("Smart PianoSoft paired files do not match their manifest.")
+        elapsed = 0.0
+        paired_notes = []
+        for message in mido.MidiFile(paired_midi):
+            elapsed += message.time
+            if message.type in {"note_on", "note_off"}:
+                paired_notes.append((message.type, message.note, elapsed))
+        if (len(paired_notes) != 2
+                or [event[:2] for event in paired_notes] != [("note_on", 60), ("note_off", 60)]
+                or abs(paired_notes[0][2] - 2) > .02
+                or abs(paired_notes[1][2] - 3) > .02):
+            raise RuntimeError("The paired MIDI lost the original piano phrase or timing.")
+        paired_pcm = directory / "Decoded paired package music.wav"
+        decode_mp3(paired_music, paired_pcm)
+        with wave.open(str(paired_pcm), "rb") as decoded_music:
+            if (decoded_music.getnchannels(), decoded_music.getsampwidth(),
+                    decoded_music.getframerate(), decoded_music.getnframes()) != (2, 2, 44100, len(pcm)):
+                raise RuntimeError("The paired MP3 lost the music format or timeline.")
+            decoded_samples = np.frombuffer(decoded_music.readframes(len(pcm)), dtype="<i2").reshape(-1, 2)
+        if not np.any(decoded_samples[:, 0]):
+            raise RuntimeError("The paired MP3 does not contain the original music.")
+        correlation = float(np.corrcoef(mono, decoded_samples[:, 0])[0, 1])
+        if not np.isfinite(correlation) or correlation < .98:
+            raise RuntimeError("The paired MP3 does not contain the original music.")
+        if (_sha256(audio_path) != original_audio
+                or any(_sha256(source / name) != digest for name, digest in originals.items())):
+            raise RuntimeError("Paired MIDI/MP3 preparation changed the source files.")
         if _sha256(offline_image) != original_image:
             raise RuntimeError("Smart PianoSoft preparation changed the original source image.")
         if not dialog.close():
@@ -463,6 +519,9 @@ def _check_smart_pianosoft(directory, state):
                 "originals_preserved": True, "confidence": alignment["confidence"],
                 "encoded_wav": str(encoded_path), "encoded_sha256": _sha256(encoded_path),
                 "decoded_piano_and_accompaniment_verified": True,
+                "mark_iv_audio_decoding_verified": True,
+                "paired_midi_mp3_verified": True,
+                "paired_midi": str(paired_midi), "paired_audio": str(paired_music),
                 "numpy_version": np.__version__, "hardware_verified": False}
     finally:
         if offline_image.exists():

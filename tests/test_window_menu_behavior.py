@@ -108,6 +108,7 @@ def test_main_window_waits_for_decoder_cancellation_before_close(window, monkeyp
 def test_smart_pianosoft_is_available_by_menu_and_saved_shortcut(window, monkeypatch):
     assert window.ENABLE_SMART_PIANOSOFT_UTILITY
     assert window.utilitiesSmartPianoSoftAction in window.utilitiesMenu.actions()
+    assert window.utilitiesSmartPianoSoftAction.isEnabled()
     assert "utilities.smart_pianosoft" in {
         spec["id"] for spec in window._keyboard_shortcut_specs()
     }
@@ -124,6 +125,9 @@ def test_smart_pianosoft_is_available_by_menu_and_saved_shortcut(window, monkeyp
     window._set_disk_load_busy(True)
     window.show_smart_pianosoft_utility()
     assert getattr(window, "smartPianoSoftDialog", None) is None
+    assert not window.utilitiesSmartPianoSoftAction.isEnabled()
+    window._set_disk_load_busy(False)
+    assert window.utilitiesSmartPianoSoftAction.isEnabled()
 
 
 def test_busy_main_menu_disables_session_commands_without_changing_panels(window, tmp_path):

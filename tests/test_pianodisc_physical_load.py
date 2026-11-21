@@ -151,12 +151,16 @@ def test_failed_raw_floppy_capture_never_publishes_pianodisc_session(tmp_path, m
 def test_pianodisc_sniff_does_not_bypass_required_fat_acquisition_failure(tmp_path, monkeypatch):
     drive, payload = _device(tmp_path)
 
-    def required_fat_failure(*_args, **_kwargs):
+    def required_fat_failure(*_args, diagnostics, **_kwargs):
+        # Allocated song reads follow successful FAT layout recognition.
+        diagnostics["layout_probe"] = {"recognized": True}
         raise image.FastFloppyReadError("Unreadable allocated song sector", fallback_allowed=False)
 
     monkeypatch.setattr(image, "_read_floppy_device_fast_image", required_fat_failure)
     monkeypatch.setattr(image, "_read_block_device",
                         lambda *_args, **_kwargs: pytest.fail("Non-recoverable FAT errors must not raw-fallback"))
-    with pytest.raises(image.FloppyImageError, match="could not finish without losing data"):
+    with pytest.raises(image.FloppyImageError, match="could not finish without losing data") as failure:
         image.FloppyImageSession.load_floppy(drive)
+    assert failure.value.read_diagnostics["fast_path"]["layout_probe"]["recognized"] is True
+    assert "raw_fallback" not in failure.value.read_diagnostics
     assert Path(drive.path).read_bytes() == payload

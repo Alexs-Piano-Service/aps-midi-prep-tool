@@ -99,13 +99,17 @@ LAME. The dialog explains missing requirements. Basic piano preview does not
 require FluidSynth, but it is not the SoundFont renderer used by this utility.
 See [optional tools](../README.md#compatibility-and-optional-tools).
 
-## Smart PianoSoft (Beta)
+<a id="smart-pianosoft-beta"></a>
 
-The next version restores **Utilities → Smart PianoSoft (Beta)...**. After
-reading a clearly Smart floppy or floppy image, the app asks whether to rip
-the matching audio CD. Accepting opens the dialog with the loaded song list;
-ripping starts only when you choose **Start CD rip + WAV export**. Declining leaves the
-loaded disk available for editing.
+## Smart PianoSoft: synchronized piano and music
+
+The development build includes **Utilities → Smart PianoSoft (Beta)...**.
+After reading a confirmed Smart floppy or image, APS offers to prepare its
+matching CD once capture-save and recovery dialogs have finished. Accepting
+opens the utility with the loaded song list; declining leaves the disk
+available for editing. Loading an extracted Smart MIDI folder opens the utility
+automatically once active work and dialogs finish. Ripping starts only when
+you choose the start button. Physical-piano playback remains unverified.
 
 When protected Yamaha or confirmed Smart media is detected, a personal-use
 dialog links to the disclaimer. Choose **Agree** to continue reading or
@@ -121,7 +125,23 @@ with commercial audio CDs. It requires
 inside each MIDI. An ordinary PianoSoft solo disk or a MIDI folder with a
 generated catalog does not qualify.
 
-To prepare an album:
+Set **Preparing for...** before opening the utility. The output is selected
+from the current target each time, and can be changed for this album:
+
+| Preparing for | Automatic output | Intended playback route |
+| --- | --- | --- |
+| ENSPIRE / DKC-900 | Paired MIDI + MP3 | Matching filenames together in one USB album folder |
+| Mark IV / PRO | Encoded WAV | Mark IV encoded-audio playback |
+| Mark III | Encoded WAV | External player into the appropriate piano/audio inputs |
+| E3 / DKC-800 / DKC-850 | Encoded WAV | External player into the appropriate piano/audio inputs |
+| Other or unspecified system | Encoded WAV, with an unverified-target note | Confirm that the controller has a compatible decoder |
+
+For external-input playback on ENSPIRE, manually select **Encoded WAV**.
+Direct ENSPIRE USB playback uses the paired-file option. Ordinary playback of
+an encoded WAV can send the control signal to a speaker; choose the route
+shown in the dialog.
+
+### Prepare an album
 
 1. Load the Smart PianoSoft disk with **Read Floppy...** or **Open Image...**,
    then accept the CD offer or open the utility. It automatically uses the loaded songs and their
@@ -135,17 +155,17 @@ To prepare an album:
    Previously extracted
    `01 - Song title.mid` filenames are supported when their original catalog is
    retained.
-2. Select the CD drive and an output folder, then choose **Start CD rip + WAV export**.
-   The app snapshots the chosen source, securely reads the CD, verifies
-   the recording, and creates a new album directory with **one combined WAV
-   per song**. Loaded songs come from the
-   existing session; the physical floppy is not read again. The source media are
-   read-only.
+2. Review **Preparing for** and **Output format**, select the CD drive and an
+   output folder, then start CD ripping and export. APS snapshots the chosen
+   source, securely reads the CD, verifies both synchronization fingerprints,
+   and creates a new album directory with encoded WAVs or synchronized MIDI/MP3
+   pairs. Loaded songs come from the existing session; the physical floppy is
+   not read again. The source media are read-only.
 3. For an existing music file, choose **Scan floppy**, select its MIDI row, and
    choose **Pair WAV...** (or double-click the row). Pair every song and select
    **Use paired WAV files** to work without a CD. The implementation accepts
    stereo, 16-bit, 44.1-kHz PCM WAV files; other audio formats need conversion first.
-   The start button changes to **Start WAV export** when using paired files.
+   The start button identifies the selected export format when using paired files.
 
 Track pairing and audio synchronization run automatically after starting; there
 is no manual “verify by audio” step. The dialog shows the catalog's suggested
@@ -155,7 +175,7 @@ smaller windows or larger fonts can still scroll to keep every control reachable
 During CD ripping, the bar measures audio read across all audio tracks. The label
 shows the actual CD track number, its position in the audio-track list, and
 whether APS is reading, checking the saved WAV or disc, saving, or calculating
-the audio checksum. Matching and WAV encoding have their own progress stages.
+the audio checksum. Matching and playback-file export have their own progress stages.
 
 To use names such as `Smart PianoSoft - BELIEVE - CHER`, turn off
 **Settings → Save Options → Add Random Suffixes to Output Names**. This global
@@ -177,17 +197,28 @@ images/folders, or an already loaded song list with paired WAV files.
 Pre-emphasized CDs are rejected because
 automatic de-emphasis has not yet been implemented.
 
-The result contains:
+### Use the output
 
-- **MIDI:** the loaded song snapshot, with catalogs reflecting its selected songs
-  and titles. For a source chosen directly in the utility, MIDI bytes and MNG
-  catalogs are preserved unchanged. Original files and source media are never
-  modified.
-- **WAV:** unchanged CD PCM or paired WAV files.
-- **Disklavier:** encoded stereo PCM WAVs with music mixed to the left channel
+Each run creates a new album directory containing:
+
+- **MIDI:** the source snapshot and catalogs. These files retain the original
+  performance timing; they are not the synchronized ENSPIRE export.
+- **WAV:** unchanged CD PCM or paired WAV copies.
+- **ENSPIRE**, for paired export: synchronized `.mid` and clean `.mp3` files
+  with identical basenames. Copy this folder to USB as an album, optionally
+  rename the folder, and keep both files for each song together.
+- **Disklavier**, for encoded export: stereo WAVs with mono music on the left
   and Yamaha piano-control data on the right.
-- **manifest.json:** completion status, pairings, source/output hashes,
-  synchronization offsets, speed ratios, and correlation scores.
+- **manifest.json:** completion status, pairing evidence, file hashes, timing
+  offsets, speed ratios, and the selected output format.
+
+For example, `01 - Song.mid` and `01 - Song.mp3` are one paired song. Selecting
+that song through ENSPIRE's **My Songs** uses the associated files. The paired
+MIDI has the computed timing correction written into every musical event,
+including note releases, pedals, controllers, and musical SysEx. A common
+lead-in preserves events that would otherwise occur before the recording
+starts. The clean source's stereo channels are retained. CD synchronization
+and control messages are removed from the playback MIDI.
 
 `PDISK.MNG` supplies the album title; `PSONG.MNG` supplies song identities and
 catalog order. The inspected PDISK catalogs do not provide per-song CD timing
@@ -204,7 +235,14 @@ speed correction; the source MIDI's complete tempo map is retained. Incorrect,
 silent, ambiguous, or unsupported references stop the operation. All pairings
 are verified before encoding begins. Cancellation or a read error leaves an
 explicitly incomplete report and any verified originals available for recovery;
-partially encoded WAVs are not published. Retained WAVs can be paired on a retry.
+partial encoded WAVs or MIDI/MP3 pairs are not published as completed songs.
+Retained WAVs can be paired on a retry; recovery locations are reported if needed.
+
+Paired export requires the packaged or installed LAME encoder and uses tagged
+192 kbps MP3. LAME delay/padding metadata is retained. APS does not add a guessed
+500 ms mechanical shift or a universal MP3-delay correction. The actual
+acoustic result and the piano's handling of MP3 timing metadata still need a
+playback check; the manifest records `hardware_verified: false`.
 
 The encoded files use Yamaha PianoSoft PlusAudio/Y-modulation, intended for
 CD-DA playback or a correctly configured analog MIDI/audio input. Static Mark IV
@@ -216,6 +254,12 @@ the piano's PlusAudio playback path supplies its own mechanical delay handling.
 Physical piano playback, mechanical timing, and other Disklavier generations
 remain future acceptance work; the generated manifest records
 `hardware_verified: false`.
+
+The [APS Smart PianoSoft conversion guide](https://www.alexanderpeppe.com/converting-smart-pianosoft-floppy-disks/)
+demonstrates same-basename MIDI/MP3 playback on ENSPIRE. Yamaha documents
+supported audio/MIDI formats and route-specific delay settings in the
+[ENSPIRE controller manual](https://data.yamaha.com/files/download/other_assets/4/1358314/enspire_controller_st_pro_en_om_f0.pdf).
+These do not establish a universal latency correction for the generated files.
 
 The implementation was checked against the Mark IV sequencer's fingerprint
 filtering and its independent MIDI/audio decoder. Synthetic tests cover the
@@ -251,12 +295,15 @@ For verification:
    each pairing's `offset_seconds`, `time_scale`, and match scores under
    `alignment`. A constant offset fixes a displaced start; a speed ratio fixes
    a difference that accumulates toward the end. An uncertain match stops export.
-2. Open the finished encoded WAV in **Disklavier WAV Player** and listen to
+2. For encoded output, open the finished WAV in **Disklavier WAV Player** and listen to
    **Piano + accompaniment** near the beginning, middle, and end. This checks
    the piano data actually recovered from the exported waveform. The software
    regression suite also compares decoded note times against a known alignment
    across the song; export does not automatically decode every completed file.
-3. To verify a physical Disklavier, record its acoustic piano and accompaniment
+3. For paired output, keep the synchronized `.mid` and `.mp3` together and
+   check the song on the intended controller. Synthetic tests also use real
+   LAME round trips to check music alignment independently of a piano.
+4. To verify a physical Disklavier, record its acoustic piano and accompaniment
    together on one recorder. This checks the additional hardware, speaker, and
    mechanical timing that a software piano cannot establish.
 

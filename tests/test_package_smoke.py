@@ -55,6 +55,8 @@ def test_real_app_smoke_exercises_all_released_workflows(tmp_path):
     assert report["cases"]["ui"]["disklavier_wav_player_available"] is True
     assert report["cases"]["smart_pianosoft"]["originals_preserved"] is True
     assert report["cases"]["smart_pianosoft"]["decoded_piano_and_accompaniment_verified"] is True
+    assert report["cases"]["smart_pianosoft"]["mark_iv_audio_decoding_verified"] is True
+    assert report["cases"]["smart_pianosoft"]["paired_midi_mp3_verified"] is True
     assert (results / "Synthetic Smart PianoSoft source").is_dir()
     source_changes = report["cases"]["image_source_changes"]
     assert source_changes["stale_writes_rejected"] == [
@@ -100,6 +102,10 @@ def test_former_smart_opt_in_remains_compatible(tmp_path):
     assert smart["synthetic_audio_only"] is True
     assert smart["confidence"] > .98
     assert smart["hardware_verified"] is False
+    assert smart["mark_iv_audio_decoding_verified"] is True
+    assert smart["paired_midi_mp3_verified"] is True
+    assert Path(smart["paired_midi"]).is_file()
+    assert Path(smart["paired_audio"]).is_file()
 
 
 def test_source_change_case_preserves_external_edits_and_recovers_pending_edits(tmp_path):
@@ -277,3 +283,30 @@ def test_smart_pianosoft_case_rejects_missing_current_list_integration(tmp_path,
         package_smoke._check_smart_pianosoft(tmp_path, {"application": qt_application})
     assert (tmp_path / "Synthetic Smart PianoSoft.img").is_file()
     assert not (tmp_path / "Synthetic Smart PianoSoft temporarily offline.img").exists()
+
+
+def test_smart_pianosoft_case_requires_paired_mp3_helper(tmp_path, monkeypatch, qt_application):
+    from aps_midi_prep_tool_app import audio_tools
+
+    _require_tools(IMAGE_TOOLS)
+    monkeypatch.setattr(audio_tools, "find_lame_command", lambda: "")
+    with pytest.raises(RuntimeError, match="LAME is required"):
+        package_smoke._check_smart_pianosoft(tmp_path, {"application": qt_application})
+    assert (tmp_path / "Synthetic Smart PianoSoft.img").is_file()
+    assert not (tmp_path / "Synthetic Smart PianoSoft temporarily offline.img").exists()
+
+
+def test_smart_pianosoft_case_rejects_silent_paired_mp3(tmp_path, monkeypatch, qt_application):
+    import wave
+    from aps_midi_prep_tool_app import audio_tools
+
+    _require_tools((*IMAGE_TOOLS, "lame"))
+
+    def decode_silence(_mp3, destination):
+        with wave.open(str(destination), "wb") as audio:
+            audio.setparams((2, 2, 44100, 14 * 44100, "NONE", "not compressed"))
+            audio.writeframes(b"\0" * (14 * 44100 * 4))
+
+    monkeypatch.setattr(audio_tools, "decode_mp3", decode_silence)
+    with pytest.raises(RuntimeError, match="paired MP3 does not contain the original music"):
+        package_smoke._check_smart_pianosoft(tmp_path, {"application": qt_application})

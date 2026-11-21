@@ -352,7 +352,7 @@ def _guard_output_source(source, output_parent, *, source_device=None):
 
 
 def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
-                  cancel=None, progress=None, random_suffixes=True):
+                  output_format="encoded_wav", cancel=None, progress=None, random_suffixes=True):
     """Rip, fingerprint-match and encode an album, retaining truthful completion status.
 
     Explicit per-song audio choices are verified too. Catalog order is only a
@@ -361,10 +361,14 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
     manifest. Only a successful return represents a completed album.
     """
     from .disklavier_audio import encode_disklavier_wav
+    from .audio_tools import find_lame_command
+    from .paired_audio import export_midi_mp3
     from .smart_pianosoft_media import read_cd_toc, rip_cd_track
     from .smart_pianosoft_sync import synchronize
 
     _check_cancel(cancel)
+    if output_format not in {"encoded_wav", "midi_mp3"}:
+        raise ValueError(f"Unsupported Smart PianoSoft output format: {output_format}")
     output_parent = Path(output_parent).expanduser().resolve()
     original = album.original_source.resolve()
     # A Greaseweazle serial port cannot be mounted as an output filesystem.
@@ -379,16 +383,21 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
         raise ValueError("Insert the matching audio CD or pair every MIDI with a WAV file.")
     if not output_parent.is_dir():
         raise ValueError("Select an existing output folder.")
+    if output_format == "midi_mp3" and not find_lame_command():
+        raise RuntimeError("LAME is required to export paired MIDI/MP3 files. Install LAME or use a package that includes it before ripping the CD.")
     # A unique directory also makes concurrent runs and retries non-destructive.
     folder = create_output_directory(
         output_parent, f"Smart PianoSoft - {_safe_title(album.title)}",
         random_suffixes=random_suffixes, separator=" - ",
     )
     report = {"schema": 1, "album": album.title, "status": "incomplete", "beta": True,
-              "hardware_verified": False, "format": "PianoSoft PlusAudio: left music, right piano data",
+              "hardware_verified": False, "output_format": output_format,
+              "format": ("PianoSoft PlusAudio: left music, right piano data" if output_format == "encoded_wav"
+                         else "Synchronized MIDI/MP3 pair: matching names in one folder"),
               "source": str(album.original_source), "tracks": [], "audio": []}
     try:
-        midi_folder, wav_folder, encoded_folder = [folder / name for name in ("MIDI", "WAV", "Disklavier")]
+        delivery_name = "Disklavier" if output_format == "encoded_wav" else "ENSPIRE"
+        midi_folder, wav_folder, encoded_folder = [folder / name for name in ("MIDI", "WAV", delivery_name)]
         for child in (midi_folder, wav_folder, encoded_folder):
             child.mkdir()
         _save_report(folder, report)
@@ -413,7 +422,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
         required_bytes = cd_bytes * 2
         required_bytes += sum(p.stat().st_size for p in audio_paths.values()) * 2
         if shutil.disk_usage(folder).free < required_bytes + 64 * 1024 * 1024:
-            raise ValueError("There is not enough free space for the original and encoded WAV files.")
+            raise ValueError("There is not enough free space for the source audio and prepared music files.")
         ripped_bytes = 0
         for index, track in enumerate(toc):
             _check_cancel(cancel)
@@ -488,23 +497,40 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
                 "audio": f"WAV/{audio.name}", "alignment": asdict(alignment)})
             _save_report(folder, report)
 
-        # All pairings must be verified before any merged file is produced.
+        # All pairings must be verified before any playback file is produced.
         for index, (track, audio, alignment) in enumerate(pairs):
             _check_cancel(cancel)
             if _digest(audio) != audio_hashes[audio]:
                 raise ValueError(f"Audio changed after synchronization: {audio.name}")
-            output = encoded_folder / f"{track.number:02d} - {_safe_title(track.title)}.wav"
+            stem = encoded_folder / f"{track.number:02d} - {_safe_title(track.title)}"
             events = [(event.time_seconds, event.data) for event in track.metadata.events]
-            result = encode_disklavier_wav(
-                events, audio, output, midi_offset_seconds=alignment.offset_seconds,
-                midi_time_scale=alignment.time_scale, cancel=cancel,
-                progress=lambda fraction, title=track.title: _emit(progress, "encode", fraction, 1, title),
-            )
+            options = dict(midi_offset_seconds=alignment.offset_seconds,
+                           midi_time_scale=alignment.time_scale, cancel=cancel,
+                           progress=lambda fraction, title=track.title: _emit(progress, "encode", fraction, 1, title))
+            if output_format == "encoded_wav":
+                output = Path(str(stem) + ".wav")
+                result = encode_disklavier_wav(events, audio, output, **options)
+                outputs = (output,)
+                delivery = {"encoded": f"{delivery_name}/{output.name}",
+                            "encoded_sha256": _digest(output), "encoding": result}
+            else:
+                result = export_midi_mp3(events, audio, stem, **options)
+                midi_output = encoded_folder / result["midi"]
+                music_output = encoded_folder / result["audio"]
+                outputs = (midi_output, music_output)
+                delivery = {"prepared_midi": f"{delivery_name}/{midi_output.name}",
+                            "prepared_midi_sha256": _digest(midi_output),
+                            "prepared_audio": f"{delivery_name}/{music_output.name}",
+                            "prepared_audio_sha256": _digest(music_output), "preparation": result}
             if _digest(audio) != audio_hashes[audio]:
-                output.unlink(missing_ok=True)
-                raise ValueError(f"Audio changed during encoding: {audio.name}")
-            report["tracks"][index].update({"encoded": f"Disklavier/{output.name}",
-                                           "encoded_sha256": _digest(output), "encoding": result})
+                # These are now public paths. Another writer may have changed
+                # or replaced either file since publication; never unlink or
+                # adopt such a file as our own during failure cleanup.
+                retained = [f"{delivery_name}/{output.name}" for output in outputs]
+                report["tracks"][index].update({"output_status": "unverified", "retained_outputs": retained})
+                raise ValueError(f"Audio changed during encoding: {audio.name}. "
+                                 "Prepared files were retained and are unverified: " + ", ".join(retained))
+            report["tracks"][index].update(delivery)
             _save_report(folder, report)
         _check_cancel(cancel)
         for track in album.tracks:
