@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -144,6 +145,109 @@ def test_keep_originals_option_follows_conversion_and_remembers_choice(applicati
         assert not reopened.keep_originals_checkbox.isChecked()
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize("profile,expected", (
+    ("enspire", True), ("mark_iv", False), ("mark_iii", False),
+    ("e3_850", False), ("midi_export", False), ("custom", False),
+    ("pianodisc_prodigy", False), ("unknown-profile", False),
+))
+def test_audio_split_default_follows_target_on_open(application, tmp_path, profile, expected):
+    settings = QSettings(str(tmp_path / "audio-target.ini"), QSettings.IniFormat)
+    settings.setValue("preparation_profile", profile)
+    # A prior global preference must never override a new destination default.
+    settings.setValue("markiv_backup_split_audio", not expected)
+    instance = dialog_module.MarkIVBackupDialog(settings, refresh_on_open=False)
+    try:
+        assert instance.split_audio_checkbox.isChecked() is expected
+        assert instance.split_audio_checkbox.isEnabled()
+        key = "markiv.audio_target_enabled" if expected else "markiv.audio_target_disabled"
+        target = dialog_module.get_preparation_profile(profile)
+        assert instance.audio_target_note.text() == instance._t(key, target=instance.lt(target.label))
+        assert instance.split_audio_note.text() == instance._t("markiv.split_audio_note")
+        assert instance.split_audio_checkbox.toolTip() == instance._t("markiv.split_audio_tooltip")
+    finally:
+        instance.close()
+
+
+def test_audio_split_manual_override_is_separate_from_eseq_and_resets_for_new_target(application, dialog):
+    assert not dialog.split_audio_checkbox.isChecked()
+    dialog.split_audio_checkbox.setChecked(True)
+    dialog.convert_checkbox.setChecked(True)
+    dialog.keep_originals_checkbox.setChecked(False)
+    dialog.convert_checkbox.setChecked(False)
+    assert dialog.split_audio_checkbox.isEnabled()
+    assert dialog.split_audio_checkbox.isChecked()
+    dialog._save_settings()
+    dialog.settings.setValue("preparation_profile", "mark_iv")
+    reopened = dialog_module.MarkIVBackupDialog(dialog.settings, refresh_on_open=False)
+    try:
+        assert not reopened.split_audio_checkbox.isChecked()
+    finally:
+        reopened.close()
+    dialog.settings.setValue("preparation_profile", "enspire")
+    reopened = dialog_module.MarkIVBackupDialog(dialog.settings, refresh_on_open=False)
+    try:
+        assert reopened.split_audio_checkbox.isChecked()
+        assert not reopened.convert_checkbox.isChecked()
+        assert not reopened.keep_originals_checkbox.isChecked()
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("split_audio", (False, True))
+def test_audio_split_option_reaches_backup_worker(application, dialog, volume, tmp_path,
+                                                monkeypatch, split_audio):
+    source, _song, _original = volume
+    dialog.source_combo.setEditText(str(source))
+    dialog.destination_edit.setText(str(tmp_path / "backups"))
+    dialog.start_scan()
+    _wait(application, lambda: not dialog.is_busy)
+    calls = []
+
+    def backup(plan, target, **kwargs):
+        calls.append((plan, target, kwargs))
+        return SimpleNamespace(folder=target, status="complete", copied=1, verified=1,
+                               converted=0, decoded=int(split_audio), audio_skipped=0, errors=[])
+
+    monkeypatch.setattr(dialog_module, "run_backup", backup)
+    dialog.split_audio_checkbox.setChecked(split_audio)
+    dialog.start_backup()
+    _wait(application, lambda: not dialog.is_busy)
+    assert len(calls) == 1
+    plan, target, options = calls[0]
+    assert plan is dialog.plan
+    assert target == tmp_path / "backups"
+    assert options["split_audio"] is split_audio
+    assert options["convert_eseq"] is False
+    assert options["keep_originals"] is True
+    assert dialog.split_audio_checkbox.isEnabled()
+    summary = dialog._t("markiv.audio_summary", decoded=int(split_audio), skipped=0)
+    assert (summary in dialog.status_label.text()) is split_audio
+
+
+def test_audio_decode_progress_counts_attempts_including_skips(application, dialog):
+    dialog._progress({"event": "audio_decode", "completed": 3, "audio_total": 4,
+                      "decoded": 1, "audio_skipped": 2})
+    assert dialog.status_label.text() == dialog._t("markiv.decoding_audio")
+    assert dialog.progress_label.text() == dialog._t("markiv.file_progress", completed=3, total=4)
+    assert dialog.progress_bar.value() == 750
+
+
+@pytest.mark.parametrize("language", [language.code for language in SUPPORTED_LANGUAGES])
+@pytest.mark.parametrize("status", ("complete", "incomplete", "cancelled"))
+def test_audio_split_result_summary_is_localized(application, dialog, tmp_path, language, status):
+    dialog.language_code = language
+    dialog._operation = "backup"
+    dialog.plan = SimpleNamespace(warnings=[])
+    dialog.split_audio_checkbox.setChecked(True)
+    result = SimpleNamespace(folder=tmp_path, status=status, verified=5, converted=1,
+                             decoded=2, audio_skipped=3, errors=[])
+    dialog._succeeded(result)
+    summary = dialog.status_label.text()
+    assert summary == (dialog._t("markiv." + status, verified=5, converted=1) + " "
+                       + dialog._t("markiv.audio_summary", decoded=2, skipped=3))
+    assert "{" not in summary
 
 
 def test_album_selection_shows_matching_files_even_with_duplicate_album_names(
@@ -350,6 +454,7 @@ def test_closing_waits_for_worker_cancellation(application, dialog, volume, monk
         assert not dialog.source_combo.isEnabled()
         assert not dialog.convert_checkbox.isEnabled()
         assert not dialog.keep_originals_checkbox.isEnabled()
+        assert not dialog.split_audio_checkbox.isEnabled()
         assert not dialog.backup_button.isEnabled()
         if close_method == "close":
             dialog.close()

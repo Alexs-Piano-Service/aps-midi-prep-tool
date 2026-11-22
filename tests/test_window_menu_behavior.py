@@ -55,24 +55,22 @@ def test_empty_main_menu_disables_commands_that_need_content(window):
     assert window.utilitiesRepairBootSectorAction.isEnabled()
 
 
-def test_deferred_smart_pianosoft_cannot_be_opened_by_menu_or_saved_shortcut(window, monkeypatch):
-    assert not window.ENABLE_SMART_PIANOSOFT_UTILITY
-    assert not hasattr(window, "utilitiesSmartPianoSoftAction")
-    assert "utilities.smart_pianosoft" not in {
+def test_smart_pianosoft_is_available_in_menu_and_saved_shortcuts(window):
+    assert window.ENABLE_SMART_PIANOSOFT_UTILITY
+    assert window.utilitiesSmartPianoSoftAction in window.utilitiesMenu.actions()
+    assert window.utilitiesSmartPianoSoftAction.isEnabled()
+    assert "utilities.smart_pianosoft" in {
         spec["id"] for spec in window._keyboard_shortcut_specs()
     }
     window.settings.setValue(
         window._shortcut_settings_key("utilities.smart_pianosoft"), "Ctrl+Alt+8",
     )
     window._setup_keyboard_shortcuts()
-    assert "utilities.smart_pianosoft" not in window.keyboardShortcutObjects
-
-    def unexpected_snapshot():
-        pytest.fail("The deferred utility attempted to open the current list")
-
-    monkeypatch.setattr(window, "_smart_pianosoft_loaded_source", unexpected_snapshot)
-    window.show_smart_pianosoft_utility()
-    assert getattr(window, "smartPianoSoftDialog", None) is None
+    assert "utilities.smart_pianosoft" in window.keyboardShortcutObjects
+    window._set_disk_load_busy(True)
+    assert not window.utilitiesSmartPianoSoftAction.isEnabled()
+    window._set_disk_load_busy(False)
+    assert window.utilitiesSmartPianoSoftAction.isEnabled()
 
 
 def test_busy_main_menu_disables_session_commands_without_changing_panels(window, tmp_path):

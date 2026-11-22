@@ -33,157 +33,108 @@ LAME. The dialog explains missing requirements. Basic piano preview does not
 require FluidSynth, but it is not the SoundFont renderer used by this utility.
 See [optional tools](../README.md#compatibility-and-optional-tools).
 
-## Smart PianoSoft development (deferred)
+## Smart PianoSoft: synchronized piano and music
 
-**The Smart PianoSoft synchronization utility is deferred and is not available
-from the menus or shortcuts in version 0.8.9.** Its implementation, tests, and
-research remain in the repository for future development. The workflow below
-describes that retained implementation, not a supported 0.8.9 command.
+The development build includes **Utilities → Smart PianoSoft...**. Loading a
+Smart PianoSoft disk or image opens the utility automatically after the source
+is ready. APS recognizes the actual synchronization fingerprints as well as
+`PSONG.MNG`; an ordinary MIDI folder with a generated catalog does not trigger it.
+This workflow remains a beta and has not been accepted on physical pianos.
 
-The development dialog pairs Yamaha Smart PianoSoft floppies supplied for use
-with commercial audio CDs. It requires
-`PSONG.MNG`, its MIDI files, and the two Yamaha synchronization fingerprints
-inside each MIDI. An ordinary PianoSoft solo disk or a MIDI folder with a
-generated catalog does not qualify.
+Set **Preparing for...** before opening the utility. The output is selected
+from the current target each time, and can be changed for this album:
 
-When the retained dialog is invoked by a development harness:
+| Preparing for | Automatic output | Intended playback route |
+| --- | --- | --- |
+| ENSPIRE / DKC-900 | Paired MIDI + MP3 | Matching filenames together in one USB album folder |
+| Mark IV / PRO | Encoded WAV | Mark IV encoded-audio playback |
+| Mark III | Encoded WAV | External player into the appropriate piano/audio inputs |
+| E3 / DKC-800 / DKC-850 | Encoded WAV | External player into the appropriate piano/audio inputs |
+| Other or unspecified system | Encoded WAV, with an unverified-target note | Confirm that the controller has a compatible decoder |
 
-1. Load the Smart PianoSoft disk with **Read Floppy...** or **Open Image...**,
-   then open the utility. It automatically uses the loaded songs and their
-   catalog track order, song titles, and album title, without reading the
-   physical floppy again. Insert the matching audio CD. To use another source,
-   select **Choose source...** and choose a USB floppy, an IMG/HFE image, or an
-   extracted floppy folder. With no loaded Smart PianoSoft source, leaving the
-   source blank detects a USB floppy. Previously extracted
-   `01 - Song title.mid` filenames are supported when their original catalog is
-   retained.
-2. Select the CD drive and an output folder, then choose **Create album**.
-   The app snapshots the chosen source, securely reads the CD, verifies
-   the recording, and creates a new album directory. Loaded songs come from the
-   existing session; the physical floppy is not read again. The source media are
-   read-only.
-3. For an existing music file, choose **Scan floppy**, select its MIDI row, and
-   choose **Pair WAV...** (or double-click the row). Pair every song and select
-   **Use paired WAV files** to work without a CD. The implementation accepts
-   stereo, 16-bit, 44.1-kHz PCM WAV files; other audio formats need conversion first.
+For external-input playback on ENSPIRE, manually select **Encoded WAV**.
+Direct ENSPIRE USB playback uses the paired-file option. Ordinary playback of
+an encoded WAV can send the control signal to a speaker; choose the route
+shown in the dialog.
 
-When using the current song list, the utility includes its remaining songs and
-staged MIDI and title edits. Sorting the list or removing songs preserves each
-song's original CD track number. The pairing table displays the current
-filenames; the exported MIDI files retain the filenames from the Smart PianoSoft
-catalog so the catalog continues to identify them correctly.
+### Prepare an album
+
+1. Load the original Smart PianoSoft disk with **Read Floppy...** or
+   **Open Image...**. The utility uses the loaded songs, catalog order, song
+   titles, and album title without reading the physical floppy again. You can
+   also open the utility from **Utilities**, or choose another floppy, image,
+   or extracted folder with **Choose source...**.
+2. Review **Preparing for** and **Output format**, insert the matching CD,
+   and choose the CD drive and an output folder.
+3. Choose **Create album**. APS snapshots the selected MIDI, securely reads
+   the CD, checks both audio fingerprints for each song, and calculates the
+   start offset and speed correction before creating playback files.
+4. For previously ripped audio, choose **Scan floppy**, select each song,
+   and choose **Pair WAV...** (or double-click its row). Pair every song and
+   select **Use paired WAV files**. Inputs must be stereo, 16-bit, 44.1 kHz
+   PCM WAV.
+
+The current-list snapshot includes remaining songs and staged MIDI/title edits.
+Sorting or removing rows preserves each song's original catalog track number.
+Previously extracted `01 - Song title.mid` filenames work when the original
+catalog is retained. A source without the two synchronization fingerprints
+cannot be synchronized by this tool.
 
 Physical CD and floppy reading is implemented for Linux. Secure CD reading
-uses `cdparanoia`, which is not bundled in the default 0.8.9 package. Development
-builds can include it with `BUNDLE_CDDA=1`; source tests of CD reading need the
-`cdparanoia` package. The retained Windows implementation can use saved floppy
-images/folders and paired WAV files. Pre-emphasized CDs are rejected because
-automatic de-emphasis has not yet been implemented.
+requires `cdparanoia`; development AppImages can bundle it with `BUNDLE_CDDA=1`.
+On Windows, use saved images/folders and paired WAV files. Pre-emphasized CDs
+are rejected because automatic de-emphasis is not implemented.
 
-The result contains:
+### Use the output
 
-- **MIDI:** the loaded song snapshot, with catalogs reflecting its selected songs
-  and titles. For a source chosen directly in the utility, MIDI bytes and MNG
-  catalogs are preserved unchanged. Original files and source media are never
-  modified.
-- **WAV:** unchanged CD PCM or paired WAV files.
-- **Disklavier:** encoded stereo PCM WAVs with music mixed to the left channel
+Each run creates a new album directory containing:
+
+- **MIDI:** the source snapshot and catalogs. These files retain the original
+  performance timing; they are not the synchronized ENSPIRE export.
+- **WAV:** unchanged CD PCM or paired WAV copies.
+- **ENSPIRE**, for paired export: synchronized `.mid` and clean `.mp3` files
+  with identical basenames. Copy this folder to USB as an album, optionally
+  rename the folder, and keep both files for each song together.
+- **Disklavier**, for encoded export: stereo WAVs with mono music on the left
   and Yamaha piano-control data on the right.
-- **manifest.json:** completion status, pairings, source/output hashes,
-  synchronization offsets, speed ratios, and correlation scores.
+- **manifest.json:** completion status, pairing evidence, file hashes, timing
+  offsets, speed ratios, and the selected output format.
 
-Catalog order is a candidate pairing, not proof of a match. Both beginning and
-ending fingerprints must match. They establish the start offset and playback
-speed correction; the source MIDI's complete tempo map is retained. Incorrect,
-silent, ambiguous, or unsupported references stop the operation. All pairings
-are verified before encoding begins. Cancellation or a read error leaves an
-explicitly incomplete report and any verified originals available for recovery;
-partially encoded WAVs are not published. Retained WAVs can be paired on a retry.
+For example, `01 - Song.mid` and `01 - Song.mp3` are one paired song. Selecting
+that song through ENSPIRE's **My Songs** uses the associated files. The paired
+MIDI has the computed timing correction written into every musical event,
+including note releases, pedals, controllers, and musical SysEx. A common
+lead-in preserves events that would otherwise occur before the recording
+starts. The clean source's stereo channels are retained. CD synchronization
+and control messages are removed from the playback MIDI.
 
-The encoded files use Yamaha PianoSoft PlusAudio/Y-modulation, intended for
-CD-DA playback or a correctly configured analog MIDI/audio input. **Ordinary
-WAV import from USB or a hard disk has not been verified as a piano-control
-playback route.** The right channel contains control data, not listening audio.
-The output gives audio and MIDI a common lead-in for signal acquisition;
-the piano's PlusAudio playback path supplies its own mechanical delay handling.
-Physical piano playback, mechanical timing, and other Disklavier generations
-remain future acceptance work; the generated manifest records
-`hardware_verified: false`.
+Both beginning and ending fingerprints must match. Catalog order and manually
+selected audio are candidate pairings, not proof of a match. Incorrect,
+silent, ambiguous, or unsupported recordings stop preparation. All pairings
+are checked before playback files are generated. Cancellation or failure leaves
+an incomplete report and retained source copies; a partial MIDI/MP3 pair is not
+presented as a completed song. Recovery locations are reported if needed.
 
-The implementation was checked against the Mark IV sequencer's fingerprint
-filtering and its independent MIDI/audio decoder. Synthetic tests cover the
-control alphabet, MIDI messages, offset/drift recovery, and cancellation;
-privately held CD/MIDI material is used only for local validation and is not
-distributed. Yamaha describes fingerprint-based timing correction in
-[US7863513B2](https://patents.google.com/patent/US7863513B2/en), and Y-modulation
-in [US20030061931A1](https://patents.google.com/patent/US20030061931A1/en).
-The [Mark IV advanced manual](https://usa.yamaha.com/files/download/other_assets/3/321663/DKVMK4_B_e_X6398K0_02.pdf)
-describes analog MIDI input and MIDI input delay settings. No Yamaha software
-or commercial music is bundled with this feature.
+Paired export requires the packaged or installed LAME encoder and uses tagged
+192 kbps MP3. LAME delay/padding metadata is retained. APS does not add a guessed
+500 ms mechanical shift or a universal MP3-delay correction. The actual
+acoustic result and the piano's handling of MP3 timing metadata still need a
+playback check; the manifest records `hardware_verified: false`.
 
-## Inspect E-SEQ details
+### Sources and verification
 
-For E-SEQ songs, **File details** includes the original header's startup tempo,
-tempo factors, meter, pedal and channel flags, write protection, and display
-mode. Raw values accompany their meanings, and uncertain fields remain marked
-as uninterpreted. The decoded MIDI preview appears below the source details.
+The [APS Smart PianoSoft conversion guide](https://www.alexanderpeppe.com/converting-smart-pianosoft-floppy-disks/)
+demonstrates same-basename MIDI/MP3 playback on ENSPIRE. Yamaha documents
+supported audio/MIDI formats and route-specific delay settings in the
+[ENSPIRE controller manual](https://data.yamaha.com/files/download/other_assets/4/1358314/enspire_controller_st_pro_en_om_f0.pdf).
+These do not establish a universal latency correction for the generated files.
 
-## Convert tracks or merge piano parts
+The fingerprint implementation was checked against the Mark IV sequencer's
+filtering. Original synthetic tests cover offset and drift recovery, tempo-map
+handling, MIDI messages, channel routing, and cancellation. Real LAME round trips
+check music alignment independently of a physical piano. Private customer music
+is never included in the repository's test fixtures.
 
-File Inspection also has **Convert to Type 0** and **Merge Channels to Piano**
-buttons. Type 0 conversion accepts MIDI; piano merging accepts MIDI and E-SEQ.
-Each stages an edit and refreshes the preview. Type 0 combines tracks
-while keeping channels and instruments; merging routes note parts to MIDI
-channel 1 and selects Acoustic Grand Piano while
-keeping the source format. E-SEQ edits preserve native timing, titles, song order,
-and Yamaha's separate pedal-detail data. These edits use the complete song,
-including hidden or muted preview channels. Use **Save** to write them or
-**Edit → Undo** to revert.
-
-### Choose how overlapping notes are handled
-
-When a piano merge finds overlapping notes on the same key, it asks how to
-handle them. **Smart repair** removes long notes covering multiple shorter
-strikes, keeps the shortest simultaneous note, and trims remaining overlaps.
-**Keep attacks** keeps the longest simultaneous note and trims overlaps at the
-next attack. Both combine duplicate unisons and use exact tick boundaries,
-without moving attacks or resuming discarded tails. **Merge only** keeps the
-existing overlapping-note behavior. Chords on different keys, notes routed to
-different MIDI ports, and notes that only touch do not prompt. Repairs preserve
-each note's MIDI destination, including generated releases. The same choice
-applies when combining instruments as piano during Type 0 conversion.
-
-Smart repair can also remove a legitimate sustained note beneath repeated
-strikes, including its leading and trailing portions. Destination preparation
-does not run overlap repair, even with a remembered Smart preference.
-When an explicit merge stages a repair, **Overlap repair: Smart** or
-**Overlap repair: Keep attacks** stays visible beside the preparation state;
-hover over it to see affected filenames. The indicator clears when the staged
-repair is undone, discarded, or committed with **Save**.
-
-Check **Use this behavior for all future channel merges** to remember the choice
-across files and app restarts. Without that check, each affected song asks again.
-Open **Settings → Overlapping Piano Notes...** any time to change the behavior,
-or uncheck the box and save to restore the prompt for each affected song.
-**Settings → Show Dismissed Messages Again** also restores the prompt for future overlaps.
-
-**Edit → Merge Channels to Piano...** applies the same merge to one song or
-all listed MIDI and E-SEQ songs, including files being edited inside a disk image.
-
-### Advanced: immediate-mute messages when merging
-
-Channel merging and Type 0 piano remapping translate All Notes Off (CC123) and
-the related mode commands (CC124–127) into note releases for their source parts.
-All Sound Off (CC120) instead requires an immediate mute, including sustained
-notes and release tails. APS retains CC120 when no other source part could still
-be sounding. Otherwise, it uses note releases as a lossy approximation and flags
-the removed CC120 in Conversion details; sustain or release tails may continue.
-Because MIDI does not specify a receiver's release duration, a part remains
-potentially sounding after its note-offs until a retained immediate mute or
-recognized system reset. Keep the original channels (including ordinary Type 0
-conversion without piano remapping) when exact source-specific CC120 behavior
-is required. See the [MIDI message definitions](https://midi.org/summary-of-midi-1-0-messages).
-
-[![MIDI notes, channels, tempo, and pedals in File Inspection](images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)](images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)
-
-[All user guides](README.md) · [Review conversion reports](preparation-reliability.md#understand-conversion-reports)
+Yamaha describes fingerprint timing correction in
+[US7863513B2](https://patents.google.com/patent/US7863513B2/en) and Y-modulation in
+[US20030061931A1](https://patents.google.com/patent/US20030061931A1/en).

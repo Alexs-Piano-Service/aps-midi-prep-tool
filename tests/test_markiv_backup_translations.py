@@ -24,6 +24,9 @@ def test_markiv_messages_cover_all_languages_and_preserve_values(language):
         "count": 2,
         "completed": 85,
         "total": 128,
+        "target": "ENSPIRE / DKC-900",
+        "decoded": 14,
+        "skipped": 9,
     }
     for message_id, translations in MARKIV_BACKUP_MESSAGES.items():
         assert set(translations) == expected_languages
@@ -42,6 +45,9 @@ def test_markiv_descriptive_messages_are_translated(language):
     for message_id in (
         "markiv.action", "markiv.description", "markiv.source_note", "markiv.destination_note",
         "markiv.convert", "markiv.conversion_note", "markiv.complete", "markiv.incomplete", "markiv.tooltip",
+        "markiv.split_audio", "markiv.split_audio_tooltip", "markiv.audio_target_enabled",
+        "markiv.audio_target_disabled", "markiv.split_audio_note", "markiv.decoding_audio",
+        "markiv.audio_summary",
     ):
         assert tr(message_id, language) != tr(message_id, "en")
     assert "songs/" in tr("markiv.source_note", language)

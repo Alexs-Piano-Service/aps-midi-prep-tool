@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 
 from .icon_utils import apply_window_icon
 from .message_catalog import normalize_language_code, tr, translate_text
+from .audio_preparation import audio_playback_note_key, default_audio_output
+from .preparation_profiles import SETTING_PROFILE, get_preparation_profile
 from .responsive_button_box import ResponsiveDialogButtonBox
 from .smart_pianosoft_workflow import LoadedAlbumSource, scan_album, scan_loaded_album, prepare_album
 from .ui_utils import resize_dialog_to_screen
@@ -77,6 +79,7 @@ class SmartPianoSoftDialog(QDialog):
         self._loaded_source = loaded_source
         self._using_loaded_source = loaded_source is not None
         self._discover_after_scan = False
+        self.profile = get_preparation_profile(settings.value(SETTING_PROFILE, "unsure"))
         self.setWindowTitle(self.text("action"))
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         self.setSizeGripEnabled(True)
@@ -94,6 +97,18 @@ class SmartPianoSoftDialog(QDialog):
         form = QFormLayout(self.options)
         form.setContentsMargins(0, 0, 0, 0)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        self.target_label = _WrappingLabel(translate_text(self.profile.label, self.language))
+        self.target_label.setTextFormat(Qt.PlainText)
+        self.target_label.setWordWrap(True)
+        form.addRow(self._label("preparing_for"), self.target_label)
+        self.format_combo = QComboBox()
+        self.format_combo.setObjectName("smartPianoSoftOutputFormat")
+        self.format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.format_combo.setMinimumContentsLength(15)
+        for key in ("encoded_wav", "midi_mp3"):
+            self.format_combo.addItem(self.text("output_" + key), key)
+        self.format_combo.setCurrentIndex(self.format_combo.findData(default_audio_output(self.profile.key)))
+        form.addRow(self._label("output_format"), self.format_combo)
         source_text = (self.text("current_list_source", source=loaded_source.label)
                        if loaded_source is not None else str(settings.value("sps_source", "") or ""))
         self.source_edit = QLineEdit(source_text)
@@ -180,8 +195,10 @@ class SmartPianoSoftDialog(QDialog):
             button.setAutoDefault(False)
             self.pairing_buttons.addButton(button, QDialogButtonBox.ActionRole)
         layout.addWidget(self.pairing_buttons)
-        note = self._label("format_note")
-        layout.addWidget(note)
+        self.format_note = self._label(audio_playback_note_key(self.profile.key, self.format_combo.currentData()))
+        self.format_combo.currentIndexChanged.connect(self._update_format_note)
+        self._update_format_note()
+        layout.addWidget(self.format_note)
         self.status = self._label("ready")
         layout.addWidget(self.status)
         self.progress = QProgressBar()
@@ -222,6 +239,10 @@ class SmartPianoSoftDialog(QDialog):
 
     def text(self, key, **values):
         return tr("sps." + key, self.language, **values)
+
+    def _update_format_note(self):
+        self.format_note.setText(self.text(audio_playback_note_key(self.profile.key, self.format_combo.currentData()))
+                                 + "\n\n" + self.text("output_beta"))
 
     def _label(self, key):
         label = _WrappingLabel(self.text(key))
@@ -374,11 +395,12 @@ class SmartPianoSoftDialog(QDialog):
             self.settings.setValue("sps_source", source)
         self.settings.setValue("sps_output", destination)
         album, audio, cd_device = self.album, dict(self.audio_paths), self._cd_device()
+        output_format = self.format_combo.currentData()
         target = self._new_scan() if album is None else None
         def prepare(cancel, progress):
             snapshot = album or _scan_source(source, target, cancel=cancel, progress=progress)
             output = prepare_album(snapshot, destination, cd_device=cd_device, audio_paths=audio,
-                                   cancel=cancel, progress=progress)
+                                   output_format=output_format, cancel=cancel, progress=progress)
             return snapshot, output
         self._start("prepare", prepare)
 

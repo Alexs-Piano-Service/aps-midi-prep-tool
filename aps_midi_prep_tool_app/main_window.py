@@ -2490,23 +2490,9 @@ def _find_fluidsynth_command():
 
 
 def _find_lame_command():
-    env_path = os.environ.get("APS_MIDI_PREP_LAME", "").strip()
-    candidates = [env_path] if env_path else []
-    for root in _resource_roots():
-        candidates.extend(
-            [
-                os.path.join(root, "bin", "lame.exe"),
-                os.path.join(root, "bin", "lame"),
-                os.path.join(root, "lame.exe"),
-                os.path.join(root, "lame"),
-                os.path.join(root, "usr", "bin", "lame.exe"),
-                os.path.join(root, "usr", "bin", "lame"),
-            ]
-        )
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return shutil.which("lame") or shutil.which("lame.exe") or ""
+    from .audio_tools import find_lame_command
+
+    return find_lame_command(_resource_roots())
 
 
 def _find_7zip_command():
@@ -8855,9 +8841,7 @@ class BulkExtractionProgressDialog(QDialog):
 
 
 class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
-    # Deferred from 0.8.9. Keep the implementation available for development,
-    # but do not expose it through menus or persisted keyboard shortcuts.
-    ENABLE_SMART_PIANOSOFT_UTILITY = False
+    ENABLE_SMART_PIANOSOFT_UTILITY = True
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
     TITLE_RAW_ROLE = Qt.UserRole + 1
@@ -11637,6 +11621,50 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 label, original_source, song_catalog, disk_catalog, (), error=str(exc),
                 source_device=source_device,
             )
+
+    def _schedule_smart_pianosoft_from_loaded_media(self):
+        """Offer synchronization once after a visible, successful media load.
+
+        A catalog by itself is insufficient: ordinary MIDI exports may also
+        contain PSONG.MNG. Require actual head and tail fingerprint messages.
+        Deferred callbacks are bound to this window and the loaded session so
+        closing or replacing a source cannot open a stale dialog.
+        """
+        if not self.ENABLE_SMART_PIANOSOFT_UTILITY or not self.isVisible():
+            return
+        generation = getattr(self, '_sps_auto_generation', 0) + 1
+        self._sps_auto_generation = generation
+        session = self.image_session
+        paths = tuple(self.table.item(row, 1).text() for row in self._regular_file_rows())
+
+        def open_when_ready():
+            if (not self.isVisible() or self._sps_auto_generation != generation
+                    or self.image_session is not session
+                    or paths != tuple(self.table.item(row, 1).text() for row in self._regular_file_rows())):
+                return
+            if (self._disk_worker_busy() or not self.choose_button.isEnabled()
+                    or getattr(self, '_destination_preparation_queued', False)
+                    or QApplication.activeModalWidget() is not None):
+                QTimer.singleShot(100, self, open_when_ready)
+                return
+            loaded = self._smart_pianosoft_loaded_source()
+            if loaded is None or loaded.error or not loaded.tracks:
+                return
+            import mido
+
+            for track in loaded.tracks:
+                try:
+                    midi = mido.MidiFile(file=io.BytesIO(track.midi_bytes))
+                    kinds = {message.data[3] for messages in midi.tracks for message in messages
+                             if message.type == 'sysex' and len(message.data) == 266
+                             and tuple(message.data[:3]) == (0x43, 0x71, 0x7B)}
+                except (ValueError, OSError, EOFError):
+                    continue
+                if {0, 2}.issubset(kinds):
+                    self.show_smart_pianosoft_utility()
+                    return
+
+        QTimer.singleShot(0, self, open_when_ready)
 
     def show_smart_pianosoft_utility(self):
         if not self.ENABLE_SMART_PIANOSOFT_UTILITY:
@@ -17607,6 +17635,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             event.ignore()
             markiv_dialog.reject()
             return
+        smart_dialog = getattr(self, "smartPianoSoftDialog", None)
+        if smart_dialog is not None and smart_dialog.is_busy:
+            event.ignore()
+            smart_dialog.reject()
+            return
         if (self.is_image_mode() and not getattr(self, "_self_update_discard_authorized", False)
                 and not self._confirm_discard_image_changes()):
             event.ignore()
@@ -19415,6 +19448,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if hasattr(self, "utilitiesMarkIVBackupAction"):
             self.utilitiesMarkIVBackupAction.setEnabled(self.choose_button.isEnabled())
             self.utilitiesMarkIVBackupAction.setToolTip(self._t("markiv.tooltip"))
+        if hasattr(self, "utilitiesSmartPianoSoftAction"):
+            self.utilitiesSmartPianoSoftAction.setEnabled(open_enabled)
         if hasattr(self, "savePartialCaptureAction"):
             diagnostics = getattr(self, "lastPartialRecoveryDiagnostics", {}) or {}
             capture_path = diagnostics.get("partial_capture_path", "")
@@ -21491,6 +21526,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             )
         if prepare_destination and hasattr(self, "_schedule_destination_preparation"):
             self._schedule_destination_preparation()
+
+        if prepare_destination and hasattr(self, "_schedule_smart_pianosoft_from_loaded_media"):
+            self._schedule_smart_pianosoft_from_loaded_media()
 
     def _refresh_regular_mode_action_state(self):
         if self.is_image_mode():
@@ -25002,6 +25040,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.status_label.setText(status)
         if prepare_destination and hasattr(self, "_schedule_destination_preparation"):
             self._schedule_destination_preparation()
+
+        if prepare_destination and hasattr(self, "_schedule_smart_pianosoft_from_loaded_media"):
+            self._schedule_smart_pianosoft_from_loaded_media()
 
     def _offer_save_greaseweazle_capture(self):
         if self.image_session is None or self.image_session.source_kind != "floppy_gw":

@@ -82,12 +82,11 @@ def _check_ui(directory, state):
 
     window = MidiTitleWindow(settings=settings)
     try:
-        experimental_action = getattr(window, "utilitiesSmartPianoSoftAction", None)
-        if ((experimental_action is not None
-                and experimental_action in window.utilitiesMenu.actions())
-                or any(spec["id"] == "utilities.smart_pianosoft"
-                       for spec in window._keyboard_shortcut_specs())):
-            raise RuntimeError("The deferred Smart PianoSoft utility is exposed in the release UI.")
+        smart_action = getattr(window, "utilitiesSmartPianoSoftAction", None)
+        if (smart_action is None or smart_action not in window.utilitiesMenu.actions()
+                or not any(spec["id"] == "utilities.smart_pianosoft"
+                           for spec in window._keyboard_shortcut_specs())):
+            raise RuntimeError("The Smart PianoSoft utility is missing from the application UI.")
         settings_file = Path(window.settings.fileName()).resolve()
         if not settings_file.is_relative_to(settings_dir.resolve()):
             raise RuntimeError("The package check did not isolate application settings.")
@@ -102,7 +101,7 @@ def _check_ui(directory, state):
             raise RuntimeError("The main application window remained visible after Close.")
         window.settings.sync()
         return {"settings_file": str(settings_file), "window_shown_and_closed": True,
-                "smart_pianosoft_utility_hidden": True}
+                "smart_pianosoft_utility_available": True}
     finally:
         window.deleteLater()
         application.sendPostedEvents(None, QEvent.DeferredDelete)
