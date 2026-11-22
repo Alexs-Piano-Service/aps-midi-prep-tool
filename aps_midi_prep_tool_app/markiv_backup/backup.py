@@ -19,6 +19,7 @@ from . import APP_NAME, COMPANY_NAME, __version__
 from .library import BackupPlan, CancelledError, check_cancel, is_conversion_candidate
 from .paths import is_link
 from ..eseq_converter import convert_eseq_bytes_to_midi_bytes
+from ..helpers.output_names import create_output_directory
 from ..rename_recovery import sync_directory
 
 CHUNK_SIZE = 1024 * 1024
@@ -303,7 +304,8 @@ def _write_derivative(path: Path, payload: bytes, cancel=None) -> str:
 
 
 def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
-               convert_eseq: bool = False, keep_originals: bool = True) -> BackupResult:
+               convert_eseq: bool = False, keep_originals: bool = True,
+               random_suffixes: bool = True) -> BackupResult:
     """Create a new uniquely named backup, copying and reading back every file.
 
     Completed files are never overwritten. A manifest and .incomplete marker
@@ -318,7 +320,8 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     target = _validate_target(plan, Path(target), convert_eseq=convert_eseq)
     target.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    folder = Path(tempfile.mkdtemp(prefix=f'MarkIV-Backup-{stamp}-', dir=target))
+    folder = create_output_directory(target, f'MarkIV-Backup-{stamp}',
+                                     random_suffixes=random_suffixes)
     (folder / '.incomplete').write_text(
         'Backup has not completed. Verify Backup reads manifest.json and any\n'
         'manifest.journal.jsonl to recover saved progress.\n', encoding='utf-8')

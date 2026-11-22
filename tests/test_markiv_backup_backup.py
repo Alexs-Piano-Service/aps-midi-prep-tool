@@ -1,10 +1,12 @@
 # Copyright 2026 Alex's Piano Service LLC.
 # SPDX-License-Identifier: Apache-2.0
 import json
+from datetime import datetime
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from aps_midi_prep_tool_app.markiv_backup.backup import run_backup, verify_backup
 from aps_midi_prep_tool_app.markiv_backup.library import Album, BackupPlan, PlannedFile, safe_name
@@ -33,6 +35,7 @@ class BackupTests(unittest.TestCase):
 
     def test_copy_preserves_bytes_and_verifies_all_formats(self):
         result = run_backup(self.plan, self.target)
+        self.assertRegex(result.folder.name, r'^MarkIV-Backup-\d{8}-\d{6}-[a-z0-9_]{8}$')
         self.assertEqual((result.status, result.verified), ('complete', 4))
         self.assertEqual(verify_backup(result.folder), [])
         for name, value in self.originals.items():
@@ -40,6 +43,24 @@ class BackupTests(unittest.TestCase):
             self.assertEqual((self.source / name).read_bytes(), value)
         second = run_backup(self.plan, self.target)
         self.assertNotEqual(result.folder, second.folder)
+
+    def test_disabling_random_suffixes_numbers_collisions_without_changing_existing_backups(self):
+        with patch('aps_midi_prep_tool_app.markiv_backup.backup.datetime', wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 11, 20, 12, 34, 56)
+            first = run_backup(self.plan, self.target, random_suffixes=False)
+            original_files = {path.relative_to(first.folder): path.read_bytes()
+                              for path in first.folder.rglob('*') if path.is_file()}
+            second = run_backup(self.plan, self.target, random_suffixes=False)
+            third = run_backup(self.plan, self.target, random_suffixes=False)
+
+        self.assertEqual(first.folder.name, 'MarkIV-Backup-20261120-123456')
+        self.assertEqual(second.folder.name, 'MarkIV-Backup-20261120-123456 (2)')
+        self.assertEqual(third.folder.name, 'MarkIV-Backup-20261120-123456 (3)')
+        self.assertEqual(original_files, {path.relative_to(first.folder): path.read_bytes()
+                                         for path in first.folder.rglob('*') if path.is_file()})
+        for result in (first, second, third):
+            self.assertEqual((result.status, result.verified), ('complete', 4))
+            self.assertEqual(verify_backup(result.folder), [])
 
     def test_verify_detects_same_length_corruption(self):
         result = run_backup(self.plan, self.target)

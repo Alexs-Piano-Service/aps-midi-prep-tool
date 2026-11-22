@@ -189,10 +189,21 @@ Every entry in this table accepts an absolute or relative path string.
 | `emulator_image_output` | Build Emulator Disk Set output folder, such as `./Nalbantov`. |
 | `disk_recovery_image_path` | Initial image path in Recover Damaged Image. |
 
-The retained Smart PianoSoft development code also recognizes `sps_source`
-(floppy device, image, or extracted folder) and `sps_output` (output parent
-folder). These path settings do not enable the deferred utility in 0.8.9 and
-are not needed for normal deployments.
+Disklavier WAV Player remembers `disklavier_wav_folder`, the last folder used
+to open an encoded WAV.
+
+Smart PianoSoft remembers `sps_source` (floppy device, image, or extracted
+folder) and `sps_output` (output parent folder). Its Greaseweazle source picker
+shares `greaseweazle_device_path`, `greaseweazle_drive`, `read_floppy_gw_format`,
+`read_floppy_gw_revs`, and `read_floppy_gw_retries` with **Read Floppy**.
+
+The Boolean `yamaha_personal_use_agreed` records **Agree** only when the
+default-checked **Never show this again** option is selected. **Cancel** aborts
+the operation without saving agreement; unchecking the option allows the next
+source to ask again. Saved agreement persists across launches and is excluded
+from **Show Dismissed Messages Again**. The older
+`yamaha_personal_use_notice_shown` setting only recorded that a notice appeared;
+it is not treated as agreement and does not suppress the new dialog.
 
 ### Appearance, interface, and updates
 
@@ -201,6 +212,7 @@ are not needed for normal deployments.
 | `language` | String: `en`, `es`, `fr`, `de`, `it`, `pt-BR`, `bg`, `nl`, `pl`, `ja`, `ko`, `zh-Hans`. |
 | `appearance_mode` | String: `system`, `light`, `dark`. |
 | `font_scale` | String: `large`, `regular`, `small`, `compact`. Large increases text and spacing by 20% over Regular. |
+| `disklavier_wav_balance` | Integer from `0` (piano only) to `100` (accompaniment only). The default `50` plays both equally in Disklavier WAV Player; subsequent slider changes are remembered. |
 | `hide_status` | Boolean: hide the status area. |
 | `hide_quick_panel` | Boolean: hide the quick controls. |
 | `hide_album_metadata` | Boolean: hide album metadata controls. |
@@ -255,6 +267,7 @@ Notes...** lets users change the mode and whether future merges ask again.
 | Setting | Meaning when `true` (all booleans) |
 | --- | --- |
 | `store_backups` | Back up before saving. |
+| `random_output_suffixes` | Add random suffixes to automatically generated output names; defaults to `true`. Turn off for clean names, adding `(2)`, `(3)`, and so on only when a name already exists. Also available under **Settings → Save Options → Add Random Suffixes to Output Names**. |
 | `use_dos83_filenames` | Use DOS 8.3 filenames for new changes; takes precedence over descriptive filenames. |
 | `long_midi_filenames` | Use track number and song title in MIDI export filenames; defaults on unless DOS 8.3 names are required. |
 | `eseq_to_midi_long_filenames` | Legacy per-dialog descriptive filename preference. |

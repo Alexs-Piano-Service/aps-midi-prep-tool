@@ -16,7 +16,6 @@ from pathlib import Path
 import re
 import shutil
 import stat
-import tempfile
 import wave
 
 from .smart_pianosoft import (
@@ -24,6 +23,7 @@ from .smart_pianosoft import (
     update_smart_pianosoft_song_catalog,
 )
 from .dos83_renamer import is_dos83_filename
+from .helpers.output_names import create_output_directory
 
 
 class AlbumBuildError(RuntimeError):
@@ -69,6 +69,7 @@ class AlbumSnapshot:
     original_source: Path
     tracks: tuple[AlbumTrack, ...]
     source_device: int | None = None
+    source_kind: str = "file"
 
 
 def _check_cancel(cancel):
@@ -76,9 +77,34 @@ def _check_cancel(cancel):
         raise InterruptedError("Smart PianoSoft preparation cancelled.")
 
 
-def _emit(progress, phase, completed, total, message):
+def is_smart_pianosoft_source(source):
+    """Require cataloged songs with both CD fingerprints before offering a rip.
+
+    Ordinary Yamaha MIDI albums also use PDISK/PSONG. Their presence or a
+    filename alone is not enough to identify Smart playback.
+    """
+    from .smart_pianosoft_sync import parse_sps_midi
+
+    if not isinstance(source, LoadedAlbumSource) or source.error or not source.tracks:
+        return False
+    try:
+        songs = parse_smart_pianosoft_song_catalog(source.song_catalog)
+        names = {song.filename.casefold() for song in songs}
+        if not names or len(names) != len(songs):
+            return False
+        for track in source.tracks:
+            if track.catalog_filename.casefold() not in names:
+                return False
+            parse_sps_midi(track.midi_bytes)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _emit(progress, phase, completed, total, message, **details):
     if progress is not None:
-        progress({"phase": phase, "completed": completed, "total": total, "message": message})
+        progress({"phase": phase, "completed": completed, "total": total, "message": message,
+                  **details})
 
 
 def _digest(path):
@@ -98,6 +124,7 @@ def scan_album(source, destination, *, cancel=None, progress=None):
     """Snapshot a floppy/folder/image, then require real SPS synchronization data."""
     from .smart_pianosoft_media import read_floppy_source
     from .smart_pianosoft_sync import parse_sps_midi
+    from .floppy_image import FloppyDriveInfo, GreaseweazleFloppySource
 
     _check_cancel(cancel)
     folder = Path(read_floppy_source(
@@ -118,7 +145,17 @@ def scan_album(source, destination, *, cancel=None, progress=None):
     songs = parse_smart_pianosoft_song_catalog(song_catalog.read_bytes())
     if not songs or len(songs) > 99:
         raise ValueError("A Smart PianoSoft album must contain 1–99 cataloged songs.")
-    title = Path(source).stem
+    source_kind = "file"
+    if isinstance(source, GreaseweazleFloppySource):
+        source_path = Path(source.device_path)
+        title = source.display_name
+        source_kind = "floppy_gw"
+    elif isinstance(source, FloppyDriveInfo):
+        source_path = Path(source.path)
+        title = source.display_name
+    else:
+        source_path = Path(source)
+        title = source_path.stem
     if "pdisk.mng" in files:
         title = parse_smart_pianosoft_disk_title(files["pdisk.mng"].read_bytes()) or title
     tracks, used = [], set()
@@ -146,7 +183,7 @@ def scan_album(source, destination, *, cancel=None, progress=None):
         # PSONG alone is also used by ordinary MIDI albums and is insufficient.
         tracks.append(AlbumTrack(song.track_number, name, song.title, path, _digest(path), metadata))
         _emit(progress, "scan", len(tracks), len(songs), song.title or name)
-    return AlbumSnapshot(title, folder, Path(source).absolute(), tuple(tracks))
+    return AlbumSnapshot(title, folder, source_path.absolute(), tuple(tracks), source_kind=source_kind)
 
 
 def scan_loaded_album(source: LoadedAlbumSource, destination, *, cancel=None, progress=None):
@@ -315,7 +352,7 @@ def _guard_output_source(source, output_parent, *, source_device=None):
 
 
 def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
-                  cancel=None, progress=None):
+                  cancel=None, progress=None, random_suffixes=True):
     """Rip, fingerprint-match and encode an album, retaining truthful completion status.
 
     Explicit per-song audio choices are verified too. Catalog order is only a
@@ -330,7 +367,10 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
     _check_cancel(cancel)
     output_parent = Path(output_parent).expanduser().resolve()
     original = album.original_source.resolve()
-    _guard_output_source(original, output_parent, source_device=album.source_device)
+    # A Greaseweazle serial port cannot be mounted as an output filesystem.
+    # Its verified snapshot remains usable after the controller is unplugged.
+    if album.source_kind != "floppy_gw":
+        _guard_output_source(original, output_parent, source_device=album.source_device)
     audio_paths = {int(k): Path(v) for k, v in (audio_paths or {}).items()}
     known_numbers = {track.number for track in album.tracks}
     if set(audio_paths) - known_numbers:
@@ -340,7 +380,10 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
     if not output_parent.is_dir():
         raise ValueError("Select an existing output folder.")
     # A unique directory also makes concurrent runs and retries non-destructive.
-    folder = Path(tempfile.mkdtemp(prefix=f"Smart PianoSoft - {_safe_title(album.title)} - ", dir=output_parent))
+    folder = create_output_directory(
+        output_parent, f"Smart PianoSoft - {_safe_title(album.title)}",
+        random_suffixes=random_suffixes, separator=" - ",
+    )
     report = {"schema": 1, "album": album.title, "status": "incomplete", "beta": True,
               "hardware_verified": False, "format": "PianoSoft PlusAudio: left music, right piano data",
               "source": str(album.original_source), "tracks": [], "audio": []}
@@ -363,21 +406,36 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
                 raise ValueError(f"MIDI copy verification failed: {track.filename}")
 
         audio_candidates, explicit = {}, {}
+        if cd_device:
+            _emit(progress, "rip", 0, 0, "Checking CD track list…")
         toc = read_cd_toc(cd_device, cancel=cancel) if cd_device else ()
-        required_bytes = sum(t.sectors * 2352 for t in toc) * 2
+        cd_bytes = sum(t.sectors * 2352 for t in toc)
+        required_bytes = cd_bytes * 2
         required_bytes += sum(p.stat().st_size for p in audio_paths.values()) * 2
         if shutil.disk_usage(folder).free < required_bytes + 64 * 1024 * 1024:
             raise ValueError("There is not enough free space for the original and encoded WAV files.")
+        ripped_bytes = 0
         for index, track in enumerate(toc):
             _check_cancel(cancel)
             destination = wav_folder / f"CD{track.number:02d}.wav"
-            _emit(progress, "rip", index, len(toc), f"CD track {track.number}")
+            track_bytes = track.sectors * 2352
+
+            def rip_progress(step, total, message, *, track=track, index=index,
+                             offset=ripped_bytes, size=track_bytes):
+                fraction = max(0, min(1, step / total)) if total else 0
+                _emit(progress, "rip", offset + round(size * fraction), cd_bytes, message,
+                      cd_track=track.number, track_index=index + 1, track_count=len(toc))
+
             rip_cd_track(cd_device, track, destination, cancel=cancel,
-                         progress=lambda step, total, message: _emit(progress, "rip", step, total, message))
+                         progress=rip_progress)
+            rip_progress(track_bytes, track_bytes, "Calculating audio checksum…")
             audio_candidates[track.number] = destination
             report["audio"].append({"cd_track": track.number, "file": f"WAV/{destination.name}",
                                     "sha256": _digest(destination), "sectors": track.sectors})
             _save_report(folder, report)
+            ripped_bytes += track_bytes
+        if toc:
+            _emit(progress, "rip", cd_bytes, cd_bytes, "Checking CD track list…")
         if toc and tuple(read_cd_toc(cd_device, cancel=cancel)) != tuple(toc):
             raise ValueError("The audio CD changed while it was being read.")
         for number, source in audio_paths.items():

@@ -104,3 +104,65 @@ def test_real_hfe_capture_round_trip_preserves_non_fat_sectors(tmp_path, monkeyp
     image._gw_convert(output, readback, disk_format.key)
     assert readback.read_bytes() == captured
     assert source.read_bytes() == captured
+
+
+@pytest.mark.parametrize("readback", ["exact", "boot_changed", "unused_sector_changed", "cancelled"])
+def test_session_capture_export_checks_all_sectors_without_requiring_fat(tmp_path, monkeypatch, readback):
+    disk_format = image.DISK_FORMAT_BY_KEY["ibm.720"]
+    # Yamaha's intentionally unreadable boot sector must remain intact when
+    # preserving a capture, even though the editable working copy is repaired.
+    captured = bytes(512) + bytes(range(256)) * ((disk_format.size_bytes - 512) // 256)
+    source = tmp_path / "protected.img"
+    source.write_bytes(captured)
+    output = tmp_path / "capture.hfe"
+    output.write_bytes(b"previous good HFE")
+    session = object.__new__(image.FloppyImageSession)
+    session.disk_format = disk_format
+
+    def convert(source_path, destination, selected_format, **_kwargs):
+        assert selected_format == disk_format.key
+        assert output.read_bytes() == b"previous good HFE"
+        if Path(destination).suffix == ".hfe":
+            assert Path(source_path).read_bytes() == captured
+            Path(destination).write_bytes(b"converted HFE")
+        else:
+            if readback == "cancelled":
+                raise image.FloppyOperationCancelled("Cancelled readback")
+            data = bytearray(captured)
+            if readback == "boot_changed":
+                data[0] ^= 1
+            elif readback == "unused_sector_changed":
+                data[-1] ^= 1
+            Path(destination).write_bytes(data)
+        return ""
+
+    monkeypatch.setattr(image, "_gw_convert", convert)
+    if readback == "exact":
+        session.write_image(source, output, "hfe", verify_entire_image=True)
+        assert output.read_bytes() == b"converted HFE"
+    else:
+        message = "Cancelled readback" if readback == "cancelled" else "sector data differs"
+        with pytest.raises(image.FloppyImageError, match=message):
+            session.write_image(source, output, "hfe", verify_entire_image=True)
+        assert output.read_bytes() == b"previous good HFE"
+    assert source.read_bytes() == captured
+    assert set(tmp_path.iterdir()) == {source, output}
+
+
+def test_real_session_capture_export_preserves_protected_boot(tmp_path):
+    if not image._find_gw():
+        pytest.skip("Greaseweazle is required")
+    disk_format = image.DISK_FORMAT_BY_KEY["ibm.720"]
+    captured = bytes(512) + bytes(range(256)) * ((disk_format.size_bytes - 512) // 256)
+    source = tmp_path / "protected.img"
+    source.write_bytes(captured)
+    output = tmp_path / "capture.hfe"
+    session = object.__new__(image.FloppyImageSession)
+    session.disk_format = disk_format
+
+    session.write_image(source, output, "hfe", verify_entire_image=True)
+
+    readback = tmp_path / "readback.img"
+    image._gw_convert(output, readback, disk_format.key)
+    assert readback.read_bytes() == captured
+    assert source.read_bytes() == captured

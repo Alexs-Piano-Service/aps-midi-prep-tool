@@ -152,6 +152,11 @@ def _schedule(events, offset, scale, cancel):
     for seconds, symbols in prepared:
         completion = round(seconds * SYMBOL_RATE + preroll_symbols)
         first = max(completion - len(symbols), next_symbol)
+        if first * SAMPLES_PER_SYMBOL < CONTROL_LEADER_FRAMES:
+            raise ValueError(
+                "Early MIDI data overlaps the Disklavier control channel's silent lead-in. "
+                "Export stopped to prevent a corrupt WAV."
+            )
         end = first + len(symbols)
         lateness = max(0.0, (end - completion) / SYMBOL_RATE)
         if lateness > MAX_QUEUE_SECONDS:

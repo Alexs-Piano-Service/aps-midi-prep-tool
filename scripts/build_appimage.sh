@@ -70,7 +70,7 @@ BUNDLE_MTOOLS="${BUNDLE_MTOOLS:-1}"
 BUNDLE_7ZIP="${BUNDLE_7ZIP:-1}"
 BUNDLE_GREASEWEAZLE="${BUNDLE_GREASEWEAZLE:-1}"
 BUNDLE_LAME="${BUNDLE_LAME:-1}"
-BUNDLE_CDDA="${BUNDLE_CDDA:-0}"
+BUNDLE_CDDA="${BUNDLE_CDDA:-1}"
 BUNDLE_FLUIDSYNTH="${BUNDLE_FLUIDSYNTH:-0}"
 GREASEWEAZLE_REQUIREMENT="${GREASEWEAZLE_REQUIREMENT:-git+https://github.com/keirf/greaseweazle.git@v1.23}"
 MTOOLS_COMMANDS=(mformat mcopy mdel mren mdir)
@@ -210,7 +210,7 @@ copy_cdparanoia_bundle() {
     reader_path="$(command -v cdparanoia || true)"
     if [[ -z "$reader_path" ]]; then
         echo "cdparanoia is required for Smart PianoSoft audio-CD reading." >&2
-        echo "Install cdparanoia, or keep BUNDLE_CDDA=0 for the release without the experimental utility." >&2
+        echo "Install cdparanoia, or use BUNDLE_CDDA=0 for a development build without CD reading." >&2
         exit 1
     fi
     install -Dm755 "$reader_path" "$APPDIR/usr/bin/cdparanoia"
@@ -422,7 +422,7 @@ import sys
 artifact, report_path, evidence_path = map(Path, sys.argv[1:4])
 report = json.loads(report_path.read_text(encoding="utf-8"))
 identity = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
-required = {"ui", "img", "image_source_changes", "hfe", "mp3"}
+required = {"ui", "img", "image_source_changes", "hfe", "mp3", "smart_pianosoft"}
 if (report.get("status") != "passed" or report.get("frozen") is not True
         or report.get("schema_version") != 1 or report.get("platform") != "linux"
         or report.get("app_version") != sys.argv[4]

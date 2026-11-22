@@ -1,11 +1,37 @@
 import os
 import sys
 
-from PySide6.QtWidgets import QApplication, QFrame, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 from PySide6.QtGui import QPalette, QPixmap
-from PySide6.QtCore import QByteArray, QEvent, QObject, Qt
+from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt
 
 from .logo_assets import embedded_logo_dt, embedded_logo_lt
+
+
+class WrappedProgressLabel(QLabel):
+    """Give QProgressDialog a size hint that includes every wrapped line.
+
+    QProgressDialog lays out its children itself, so wordWrap alone does not
+    reserve the height needed when a short status becomes a detailed error.
+    Widths are Qt logical pixels, including on displays with Windows scaling.
+    """
+
+    def __init__(self, text, dialog):
+        super().__init__(text, dialog)
+        screen = dialog.screen() or QApplication.primaryScreen()
+        available_width = screen.availableGeometry().width() if screen else 800
+        self._wrap_width = max(160, min(600, available_width - 80))
+        self.setTextFormat(Qt.PlainText)
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+    def sizeHint(self):
+        natural_width = max((self.fontMetrics().horizontalAdvance(line) for line in self.text().splitlines()), default=0)
+        width = max(1, min(self._wrap_width, natural_width))
+        return QSize(width, self.heightForWidth(width))
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
 
 def is_dark_theme():

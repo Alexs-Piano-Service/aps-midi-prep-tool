@@ -80,6 +80,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
 )
 
+from .catalog_inspection import CATALOG_NAMES
+
 from .midi_metadata import (
     extract_eseq_title_from_file,
     update_eseq_title_to_path,
@@ -106,6 +108,8 @@ from .eseq_converter import (
 )
 from .dos83_renamer import apply_midi_dos83_plan, build_dos83_filename, validate_midi_dos83_plan
 from .boot_sector_dialog import BootSectorRepairDialog
+from .catalog_actions import CatalogActionsMixin
+from .audio_output_routing import DefaultAudioOutputFollower
 from .emulator_image_builder import sanitize_image_prefix
 from .preparation_profile_dialog import PreparationProfileDialog
 from .emulator_preview_dialog import EmulatorPreviewDialog, localize_emulator_warning
@@ -140,6 +144,7 @@ from .eseq_inspection_report import format_eseq_header_details
 from .bulk_extraction_job import localize_extraction_job_error, read_extraction_job
 from .eseq_converter import CC7_POLICY_PRESERVE, DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
 from .ui_utils import (
+    WrappedProgressLabel,
     center_dialog_on_parent,
     embedded_logo_dt,
     embedded_logo_lt,
@@ -150,6 +155,10 @@ from .ui_utils import (
 )
 from .drop_table_widget import DropTableWidget, zip_import_operation
 from .disk_device_discovery import discover_floppy_devices
+from .disk_activity import (
+    cancel_disk_activity, show_busy_operation, start_disk_activity,
+    stop_disk_activity, update_disk_activity,
+)
 from .disk_session_worker import (
     BulkExtractionWorker,
     DiskImageCaptureWorker,
@@ -170,6 +179,7 @@ from .preview_audio_cache import PreviewAudioCache, file_identity, preview_cache
 from .soundfont_network import open_soundfont_url
 from .helpers.file_batch import FileBatchWriteError, publish_file_batch
 from .helpers.file_backup import copy_file_backup, plan_file_backups, unique_backup_path
+from .helpers.output_names import SETTING_RANDOM_OUTPUT_SUFFIXES, random_output_suffixes_enabled
 from .console_log import ConsoleLogDialog, get_console_log_bus
 from .additional_formats import (
     electone_mdr_to_midi,
@@ -5693,11 +5703,14 @@ class FileInspectionDialog(QDialog):
         title = re.sub(r"\s+", " ", str(item.get("title") or "")).strip()
         return display_name if not title or title == "Untitled" else f"{display_name} - {title}"
 
-    def __init__(self, items, parent=None, initial_row=None, *, edit_callback=None, items_callback=None):
+    def __init__(self, items, parent=None, initial_row=None, *, edit_callback=None,
+                 items_callback=None, catalog_action_callback=None):
         super().__init__(parent)
         self.items = list(items or [])
+        self._external_catalog_items = []
         self._edit_callback = edit_callback
         self._items_callback = items_callback
+        self._catalog_action_callback = catalog_action_callback
         self._inspection_ui_ready = False
         self._editing_file = False
         self._preview_rendering = False
@@ -5749,6 +5762,8 @@ class FileInspectionDialog(QDialog):
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(0.35)
         self.player.setAudioOutput(self.audio_output)
+        self.audio_output_follower = DefaultAudioOutputFollower(self)
+        self.audio_output_follower.add_output(self.audio_output, self.player)
         self.playback_timer = QTimer(self)
         self.playback_timer.setTimerType(Qt.PreciseTimer)
         self.playback_timer.setInterval(16)
@@ -6032,11 +6047,22 @@ class FileInspectionDialog(QDialog):
         details_layout.addWidget(self.details_box)
         right_layout.addWidget(self.details_group, stretch=2)
 
+        from .catalog_inspection_widget import CatalogInspectionWidget
+
+        self.inspection_stack = QStackedWidget()
+        self.midi_inspection_panel = right_panel
+        self.catalog_view = CatalogInspectionWidget(self, language=language)
+        self.catalog_view.applyRequested.connect(self._apply_current_catalog)
+        self.inspection_stack.addWidget(right_panel)
+        self.inspection_stack.addWidget(self.catalog_view)
         splitter.addWidget(self.file_tree)
-        splitter.addWidget(right_panel)
+        splitter.addWidget(self.inspection_stack)
         splitter.setSizes([250, 850])
 
         close_row = QHBoxLayout()
+        self.open_catalog_button = QPushButton(t("Open catalog..."), self)
+        self.open_catalog_button.clicked.connect(self._open_catalog)
+        close_row.addWidget(self.open_catalog_button)
         close_row.addStretch()
         close_button = QPushButton(t("Close"), self)
         close_row.addWidget(close_button)
@@ -6115,6 +6141,42 @@ class FileInspectionDialog(QDialog):
         self.merge_piano_button.setEnabled(enabled and (
             self._source_midi_format in (0, 1, 2) or self._source_is_eseq
         ))
+        catalog_view = getattr(self, "catalog_view", None)
+        if catalog_view is not None:
+            catalog_view.set_apply_enabled(bool(
+                callable(getattr(self, "_catalog_action_callback", None))
+                and not self._inspection_edit_busy()
+                and not getattr(self, "_closing", False)
+                and self._is_catalog_item(self._current_item())
+            ))
+
+    def _apply_current_catalog(self):
+        self._refresh_inspection_edit_buttons()
+        if not self.catalog_view.apply_button.isEnabled():
+            return
+        item = dict(self._current_item())
+        self._editing_file = True
+        self._refresh_inspection_edit_buttons()
+        self.file_tree.setEnabled(False)
+        self.open_catalog_button.setEnabled(False)
+        result = None
+        try:
+            self._stop_playback()
+            result = self._catalog_action_callback(item)
+            message = str(result.get("message", ""))
+        except Exception as exc:
+            from .conversion_review import localize_music_error
+
+            detail = localize_music_error(self.t(str(exc)), self.language)
+            message = self.t("Could not apply this catalog: {error}").format(error=detail)
+        finally:
+            self._editing_file = False
+            self.file_tree.setEnabled(True)
+            self.open_catalog_button.setEnabled(True)
+        if result and result.get("applied"):
+            self._refresh_inspection_items()
+        self.catalog_view.set_apply_status(message)
+        self._refresh_inspection_edit_buttons()
 
     def _set_edit_status(self, message):
         self.edit_status_label.setText(str(message or ""))
@@ -6130,12 +6192,51 @@ class FileInspectionDialog(QDialog):
     def _inspection_item_identity(item):
         return (item.get("session_id"), item.get("source_path") or item.get("path"))
 
+    @staticmethod
+    def _is_catalog_item(item):
+        from .catalog_inspection import CATALOG_NAMES
+
+        return (item.get("kind") == "catalog"
+                or os.path.basename(item.get("path", "")).upper() in CATALOG_NAMES)
+
+    def _open_catalog(self):
+        if self._inspection_edit_busy():
+            return
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self, self.t("Open catalog..."),
+            os.path.dirname(self._current_item().get("path", "")),
+            self.t("Yamaha catalogs (*.mng *.MNG);;All files (*)"),
+        )
+        if not path:
+            return
+        # Opening a catalog is independent of the main file list. Keep it when
+        # that list refreshes, without adding it to render or conversion jobs.
+        item = {"kind": "catalog", "path": path, "source_path": path,
+                "display_name": os.path.basename(path), "label": os.path.basename(path)}
+        identity = self._inspection_item_identity(item)
+        for index in range(self.file_tree.topLevelItemCount()):
+            existing = self.file_tree.topLevelItem(index)
+            if self._inspection_item_identity(existing.data(0, Qt.UserRole)) == identity:
+                self.file_tree.setCurrentItem(existing)
+                self._load_current_file()
+                return
+        self.items.append(item)
+        self._external_catalog_items.append(item)
+        tree_item = QTreeWidgetItem([self._file_list_label(item)])
+        tree_item.setData(0, Qt.UserRole, item)
+        tree_item.setToolTip(0, path)
+        self.file_tree.addTopLevelItem(tree_item)
+        self.file_tree.setCurrentItem(tree_item)
+
     def _refresh_inspection_items(self):
         callback = getattr(self, "_items_callback", None)
         if not callable(callback) or self._inspection_edit_busy() or getattr(self, "_closing", False):
             return
         try:
             items = [dict(item) for item in callback()]
+            identities = {self._inspection_item_identity(item) for item in items}
+            items.extend(item for item in self._external_catalog_items
+                         if self._inspection_item_identity(item) not in identities)
         except Exception as exc:
             self._set_edit_error(exc)
             return
@@ -6665,6 +6766,25 @@ class FileInspectionDialog(QDialog):
         item = self._current_item()
         path = item.get("path", "")
         label = item.get("label", os.path.basename(path))
+        catalog_mode = self._is_catalog_item(item) or not item
+        stack = getattr(self, "inspection_stack", None)
+        if stack is not None:
+            stack.setCurrentWidget(self.catalog_view if catalog_mode else self.midi_inspection_panel)
+        if catalog_mode:
+            self.current_midi_bytes = b""
+            self.all_notes = self.current_notes = self.visible_notes = []
+            self.all_pedals = self.current_pedals = self.visible_pedals = []
+            self.current_channel_info = {}
+            self.current_piano_channels = set()
+            self.current_duration = 0.0
+            self.play_button.setEnabled(False)
+            self._refresh_inspection_render_button()
+            if path and stack is not None:
+                self.catalog_view.load_path(path, display_name=item.get("display_name", ""))
+            elif stack is not None:
+                self.catalog_view.clear()
+            self._refresh_inspection_edit_buttons()
+            return
         try:
             with open(path, "rb") as handle:
                 payload = handle.read()
@@ -7206,8 +7326,10 @@ class FileInspectionDialog(QDialog):
         self._stop_playback()
         self._inspection_render_scope = "all"
         self._inspection_render_output_dir = output_dir
+        song_items = [item for item in self.items
+                      if not FileInspectionDialog._is_catalog_item(item)]
         worker = BatchAudioRenderWorker(
-            self.items,
+            song_items,
             soundfont_path,
             output_dir,
             output_format,
@@ -7236,7 +7358,7 @@ class FileInspectionDialog(QDialog):
         self._set_inspection_rendering(True)
         self._on_inspection_batch_render_progress(
             0,
-            len(self.items),
+            len(song_items),
             self.t("Preparing all songs..."),
         )
         worker.start()
@@ -7812,6 +7934,7 @@ class FileInspectionDialog(QDialog):
         new_output = QAudioOutput(self)
         new_output.setVolume(0.0)
         new_player.setAudioOutput(new_output)
+        self.audio_output_follower.add_output(new_output, new_player)
         handoff = {
             "new_player": new_player,
             "new_output": new_output,
@@ -7873,6 +7996,7 @@ class FileInspectionDialog(QDialog):
                 / max(5, handoff["rendered_tempo"])
             )
         )
+        self.audio_output_follower.refresh()
         player.play()
 
     def _on_audio_handoff_playback_state(self, player, state):
@@ -7943,6 +8067,7 @@ class FileInspectionDialog(QDialog):
         if not self.playback_timer.isActive():
             self.playback_timer.start()
         old_player.stop()
+        self.audio_output_follower.remove_output(old_output)
         old_player.deleteLater()
         old_output.deleteLater()
         old_path = handoff["old_path"]
@@ -7967,6 +8092,7 @@ class FileInspectionDialog(QDialog):
         )
         new_player = handoff["new_player"]
         new_player.stop()
+        self.audio_output_follower.remove_output(handoff["new_output"])
         new_player.deleteLater()
         handoff["new_output"].deleteLater()
         new_path = handoff["new_path"]
@@ -8020,6 +8146,7 @@ class FileInspectionDialog(QDialog):
     ):
         if not self.preview_audio_path or not os.path.exists(self.preview_audio_path):
             return
+        self.audio_output_follower.refresh()
         preview_position_ms = (
             self._current_slider_position_ms()
             if position_ms is None
@@ -8854,10 +8981,11 @@ class BulkExtractionProgressDialog(QDialog):
         return
 
 
-class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
-    # Deferred from 0.8.9. Keep the implementation available for development,
-    # but do not expose it through menus or persisted keyboard shortcuts.
-    ENABLE_SMART_PIANOSOFT_UTILITY = False
+class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin, QMainWindow):
+    ENABLE_SMART_PIANOSOFT_UTILITY = True
+    # Lifetime acknowledgement, deliberately excluded from dismissed-message
+    # resets and versioned UI migrations.
+    SETTING_YAMAHA_PERSONAL_USE_AGREED = "yamaha_personal_use_agreed"
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
     TITLE_RAW_ROLE = Qt.UserRole + 1
@@ -8868,6 +8996,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
     SETTING_USE_DOS83_FILENAMES = "use_dos83_filenames"
+    SETTING_RANDOM_OUTPUT_SUFFIXES = SETTING_RANDOM_OUTPUT_SUFFIXES
     SETTING_HIDE_STATUS = "hide_status"
     SETTING_HIDE_QUICK_PANEL = "hide_quick_panel"
     SETTING_HIDE_ALBUM_METADATA = "hide_album_metadata"
@@ -9018,6 +9147,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def __init__(self, *, initial_settings=None, settings=None):
         super().__init__()
+        # Unlocked through About for this window/session; never persisted.
+        self._admin_mode_enabled = False
         install_tooltip_delay_style()
         self.setWindowTitle(APP_NAME)
         apply_window_icon(self)
@@ -9614,6 +9745,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self.toggle_image_album_subfolder
         )
 
+        self.settingsRandomOutputSuffixesAction = QAction(self._t("output_naming.action"), self)
+        self.settingsRandomOutputSuffixesAction.setCheckable(True)
+        self.settingsRandomOutputSuffixesAction.setChecked(self._random_output_suffixes_enabled())
+        self.settingsRandomOutputSuffixesAction.setToolTip(self._t("output_naming.tooltip"))
+        self.settingsRandomOutputSuffixesAction.toggled.connect(self.toggle_random_output_suffixes)
+
         self.fileCreateTagSidecarsAction = QAction("Create Tag Sidecars When Saving", self)
         self.fileCreateTagSidecarsAction.setCheckable(True)
         self.fileCreateTagSidecarsAction.setChecked(self._tag_sidecars_enabled())
@@ -9675,6 +9812,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.fileSaveOptionsMenu = QMenu(self._lt("Save Options"), self)
         self.fileSaveOptionsMenu.addAction(self.fileCreateAlbumSubfolderAction)
         self.fileSaveOptionsMenu.addAction(self.fileCreateImageAlbumSubfolderAction)
+        self.fileSaveOptionsMenu.addAction(self.settingsRandomOutputSuffixesAction)
         self.fileSaveOptionsMenu.addAction(self.fileBackUpBeforeSavingAction)
         self.fileSaveOptionsMenu.addSeparator()
         self.fileSaveOptionsMenu.addAction(self.fileCreateTagSidecarsAction)
@@ -9805,6 +9943,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self._set_static_tooltip(self.utilitiesRenderAudioAction, 'Render all currently listed MIDI or E-SEQ files to WAV or MP3 using a selected SoundFont.')
         self.utilitiesRenderAudioAction.triggered.connect(self.show_audio_render_tool)
         self.utilitiesMenu.addAction(self.utilitiesRenderAudioAction)
+
+        self.utilitiesDisklavierWavAction = QAction(self._t("dwav.action"), self)
+        self.utilitiesDisklavierWavAction.triggered.connect(self.show_disklavier_wav_utility)
+        self.utilitiesMenu.addAction(self.utilitiesDisklavierWavAction)
         self.utilitiesMenu.addSeparator()
 
         self.utilitiesBulkExtractionAction = QAction(self._t("bulk.action"), self)
@@ -10926,6 +11068,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     self._convert_all_image_rows(source, target, confirm=False)
                 else:
                     self._convert_all_regular_rows(source, target, confirm=False)
+            if target == "eseq" and not self._preparation_song_counts().get("midi", 0):
+                self._drop_mng_catalog_rows_for_eseq()
             self._prepare_destination_midi_type()
             self._prepare_destination_filenames()
             if self.is_image_mode():
@@ -11144,6 +11288,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             )
         if hasattr(self, "settingsKeyboardShortcutsAction"):
             self.settingsKeyboardShortcutsAction.setText(self._menu_action_text("Keyboard Shortcuts...", "K"))
+        if hasattr(self, "settingsRandomOutputSuffixesAction"):
+            self.settingsRandomOutputSuffixesAction.setText(self._t("output_naming.action"))
+            self.settingsRandomOutputSuffixesAction.setToolTip(self._t("output_naming.tooltip"))
+            self.settingsRandomOutputSuffixesAction.setChecked(self._random_output_suffixes_enabled())
         if hasattr(self, "settingsPianoOverlapAction"):
             self.settingsPianoOverlapAction.setText(self._menu_action_text("Overlapping Piano Notes...", "O"))
         if hasattr(self, "settingsResetHiddenDialogsAction"):
@@ -11201,6 +11349,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             {"id": "file.write_protect_original", "category": "File", "label": "Write-Protect Original", "action": "fileWriteProtectOriginalAction", "default": "Ctrl+Alt+P"},
             {"id": "file.create_album_subfolder", "category": "Settings", "label": "Create Album Subfolder for Folder Exports", "action": "fileCreateAlbumSubfolderAction", "default": "Ctrl+Shift+A"},
             {"id": "file.create_image_album_subfolder", "category": "Settings", "label": "Create Album Subfolder for Save As Image", "action": "fileCreateImageAlbumSubfolderAction", "default": ""},
+            {"id": "settings.random_output_suffixes", "category": "Settings", "label": self._t("output_naming.action"), "action": "settingsRandomOutputSuffixesAction", "default": ""},
             {"id": "file.back_up_before_saving", "category": "Settings", "label": "Back Up Before Saving", "action": "fileBackUpBeforeSavingAction", "default": "Ctrl+Alt+B"},
             {"id": "file.create_tag_sidecars", "category": "Settings", "label": "Create Tag Sidecars When Saving", "action": "fileCreateTagSidecarsAction", "default": "Ctrl+Shift+T"},
             {"id": "file.create_metadata_summary", "category": "Settings", "label": "Create Metadata Summary When Saving", "action": "fileCreateMetadataSummaryAction", "default": "Ctrl+Shift+Y"},
@@ -11215,6 +11364,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             {"id": "utilities.song_list", "category": "Utilities", "label": "Song List...", "action": "utilitiesSongListAction", "default": "F3"},
             {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
             {"id": "utilities.render_audio", "category": "Utilities", "label": "Render Audio...", "action": "utilitiesRenderAudioAction", "default": "F5"},
+            {"id": "utilities.disklavier_wav", "category": "Utilities", "label": self._t("dwav.action"), "action": "utilitiesDisklavierWavAction", "default": ""},
             {"id": "utilities.bulk_extraction", "category": "Utilities", "label": "Bulk Extraction...", "action": "utilitiesBulkExtractionAction", "default": ""},
             {"id": "utilities.markiv_backup", "category": "Utilities", "label": "Back Up Mark IV Music...", "action": "utilitiesMarkIVBackupAction", "default": ""},
             {"id": "utilities.smart_pianosoft", "category": "Utilities", "label": self._t("sps.action"), "action": "utilitiesSmartPianoSoftAction", "default": ""},
@@ -11638,6 +11788,24 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 source_device=source_device,
             )
 
+    def show_disklavier_wav_utility(self):
+        existing = getattr(self, "disklavierWavDialog", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
+        from .disklavier_decoder_dialog import DisklavierWavPlayerDialog
+
+        dialog = DisklavierWavPlayerDialog(
+            self.settings, self, admin_mode=self._admin_mode_enabled,
+        )
+        self.disklavierWavDialog = dialog
+        try:
+            self._exec_child_dialog(dialog, resize_to_contents=False)
+        finally:
+            self.disklavierWavDialog = None
+            dialog.deleteLater()
+
     def show_smart_pianosoft_utility(self):
         if not self.ENABLE_SMART_PIANOSOFT_UTILITY:
             return
@@ -11659,6 +11827,106 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         finally:
             self.smartPianoSoftDialog = None
             dialog.deleteLater()
+
+    def _show_yamaha_personal_use_notice(self):
+        if self.settings.value(self.SETTING_YAMAHA_PERSONAL_USE_AGREED, False, type=bool):
+            return True
+        box = QMessageBox(QMessageBox.Information, self._t("sps.personal_use_title"),
+                          self._t("sps.personal_use_html"), QMessageBox.Yes | QMessageBox.Cancel, self)
+        box.button(QMessageBox.Yes).setText(self._t("sps.personal_use_agree"))
+        box.setDefaultButton(QMessageBox.Yes)
+        box.setEscapeButton(QMessageBox.Cancel)
+        remember = QCheckBox(self._t("sps.personal_use_never_again"), box)
+        remember.setChecked(True)
+        box.setCheckBox(remember)
+        box.setTextFormat(Qt.RichText)
+        box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self._yamaha_notice_open = True
+        agreed = False
+        try:
+            agreed = self._exec_child_dialog(box) == QMessageBox.Yes
+            if agreed and remember.isChecked():
+                self.settings.setValue(self.SETTING_YAMAHA_PERSONAL_USE_AGREED, True)
+                self.settings.sync()
+            return agreed
+        finally:
+            self._yamaha_notice_open = False
+            box.deleteLater()
+            deferred = getattr(self, "_deferred_yamaha_media_session", None)
+            self._deferred_yamaha_media_session = None
+            if agreed and deferred is not None:
+                QTimer.singleShot(0, lambda: self._offer_yamaha_media_workflow(deferred))
+
+    def _configure_yamaha_consent(self, worker):
+        worker.yamaha_consent_required = not self.settings.value(
+            self.SETTING_YAMAHA_PERSONAL_USE_AGREED, False, type=bool,
+        )
+        worker.yamahaConsentRequested.connect(
+            lambda request, owner=worker: self._on_yamaha_consent_requested(owner, request)
+        )
+
+    def _on_yamaha_consent_requested(self, worker, request):
+        if worker not in (self.diskLoadWorker, self.diskRecoveryWorker, self.diskImageCaptureWorker):
+            request.resolve(False)
+            return
+        if worker._cancel_requested():
+            request.resolve(False)
+            return
+        dialog = next((getattr(self, dialog_name) for worker_name, dialog_name in (
+            ("diskLoadWorker", "diskLoadProgressDialog"),
+            ("diskRecoveryWorker", "diskRecoveryProgressDialog"),
+            ("diskImageCaptureWorker", "diskImageCaptureProgressDialog"),
+        ) if getattr(self, worker_name) is worker), None)
+        update_disk_activity(self, dialog, self._t("sps.waiting_for_consent"))
+        agreed = False
+        try:
+            agreed = self._show_yamaha_personal_use_notice()
+        finally:
+            request.resolve(agreed and not worker._cancel_requested())
+            if not agreed:
+                cancel_disk_activity(self, worker, dialog)
+
+    def _note_yamaha_disk_read_progress(self, _step, _total, message):
+        # A generic "checking possible ..." message is not a detection. The
+        # question-mark status is emitted only after observing the first-track
+        # protection pattern; it can precede a later read failure or cancel.
+        if "yamaha copy protection?" in str(message).casefold():
+            return self._show_yamaha_personal_use_notice()
+
+    def _offer_yamaha_media_workflow(self, session):
+        # A deferred read result must never prompt for a replaced/closed disk.
+        if session is not self.image_session or getattr(self, "_yamaha_media_offered_session", None) is session:
+            return
+        if getattr(self, "_yamaha_notice_open", False):
+            self._deferred_yamaha_media_session = session
+            return
+        self._yamaha_media_offered_session = session
+        from .smart_pianosoft_workflow import is_smart_pianosoft_source
+
+        source = self._smart_pianosoft_loaded_source()
+        smart = is_smart_pianosoft_source(source)
+        if (smart or self._session_has_yamaha_protection(session)) and not getattr(session, "_yamaha_consent_granted", False):
+            if not self._show_yamaha_personal_use_notice():
+                return
+            session._yamaha_consent_granted = True
+        if not smart or session is not self.image_session:
+            return
+        reply = QMessageBox.question(
+            self, self._t("sps.detected_title"), self._t("sps.detected_prompt"),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes and session is self.image_session:
+            self.show_smart_pianosoft_utility()
+
+    def _session_has_yamaha_protection(self, session):
+        yamaha_catalog = any(
+            os.path.basename(path).upper() in {"PIANODIR.FIL", "PSONG.MNG"}
+            for path in self.imageEntriesByPath
+        )
+        return (yamaha_catalog and bool(getattr(session, "source_boot_sector_repaired", False))) or any(
+            (report.get("sector_map") or {}).get("expected_yamaha_protection", 0)
+            for report in (getattr(session, "gw_sector_reports", ()) or ())
+        )
 
     def show_markiv_backup_utility(self):
         if self._disk_worker_busy() or not self.choose_button.isEnabled():
@@ -12011,10 +12279,18 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             use_album_names=use_album_names,
             job_record_path=(
                 selected_job["path"]
-                or os.path.join(output_directory, f"aps-extraction-job-{uuid.uuid4().hex[:8]}.json")
+                or self._new_extraction_job_path(output_directory)
             ) if save_progress_checkbox.isChecked() else None,
             resume=bool(selected_job["path"]),
         )
+
+    def _new_extraction_job_path(self, output_directory):
+        from .helpers.output_names import available_output_path, random_output_suffixes_enabled
+
+        return str(available_output_path(
+            output_directory, "aps-extraction-job", suffix=".json",
+            random_suffixes=random_output_suffixes_enabled(self.settings),
+        ))
 
     def _start_bulk_extraction(
         self,
@@ -12079,7 +12355,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         worker.extractionFinished.connect(self._on_bulk_extraction_success)
         worker.extractionFailed.connect(self._on_bulk_extraction_failure)
         worker.operationCancelled.connect(self._on_bulk_extraction_cancelled)
-        worker.finished.connect(self._on_bulk_extraction_finished)
+        worker.finished.connect(
+            lambda owner=worker: self._on_bulk_extraction_finished() if self.bulkExtractionWorker is owner else None
+        )
 
         self.bulkExtractionWorker = worker
         self.bulkExtractionProgressDialog = progress_dialog
@@ -12927,7 +13205,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         worker.buildFailed.connect(self._on_emulator_image_failure)
         worker.buildRecoveryAvailable.connect(self._on_emulator_image_recovery)
         worker.operationCancelled.connect(self._on_emulator_image_cancelled)
-        worker.finished.connect(self._on_emulator_image_finished)
+        worker.finished.connect(
+            lambda owner=worker: self._on_emulator_image_finished() if self.emulatorImageWorker is owner else None
+        )
         self.emulatorImageWorker = worker
         self.emulatorImageProgressDialog = progress_dialog
         self.emulatorImageContext = {
@@ -13496,6 +13776,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         smart_pianosoft_action = getattr(self, "utilitiesSmartPianoSoftAction", None)
         if smart_pianosoft_action is not None:
             smart_pianosoft_action.setText(self._t("sps.action"))
+        disklavier_wav_action = getattr(self, "utilitiesDisklavierWavAction", None)
+        if disklavier_wav_action is not None:
+            disklavier_wav_action.setText(self._t("dwav.action"))
 
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
@@ -13637,6 +13920,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         dialog.setWindowTitle(self._progress_dialog_title(dialog))
         dialog.setWindowModality(Qt.WindowModal)
         dialog.setMinimumDuration(0)
+        if getattr(dialog, "_aps_stable_progress_label", None) is None:
+            dialog.setLabel(WrappedProgressLabel(dialog.labelText(), dialog))
         self._center_child_dialog(dialog)
         return dialog
 
@@ -14054,17 +14339,34 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 dialog.setRange(0, 1)
                 dialog.setValue(0)
         self._set_progress_dialog_message(dialog, message)
+        update_disk_activity(self, dialog, message)
         QApplication.processEvents()
 
     def _set_disk_load_busy(self, busy):
-        is_busy = bool(busy)
+        is_busy = bool(busy or self._disk_worker_busy())
         self.choose_button.setEnabled(not is_busy)
         self.open_image_button.setEnabled(not is_busy)
         self.read_floppy_button.setEnabled(not is_busy)
+        if is_busy:
+            start_disk_activity(self)
+        else:
+            stop_disk_activity(self)
+            if self.is_image_mode():
+                self._refresh_image_mode_action_state()
+            else:
+                self._refresh_regular_mode_action_state()
         self._update_menu_actions()
 
+    @staticmethod
+    def _close_disk_progress_dialog(dialog):
+        blocked = dialog.blockSignals(True)
+        try:
+            dialog.close()
+        finally:
+            dialog.blockSignals(blocked)
+
     def _set_disk_write_busy(self, busy):
-        is_busy = bool(busy)
+        is_busy = bool(busy or self._disk_worker_busy())
         self._set_disk_load_busy(is_busy)
         for widget_name in (
             "clearButton",
@@ -14132,8 +14434,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         progress_dialog.setWindowTitle(progress_title)
         self._prepare_progress_dialog(progress_dialog)
         progress_dialog.setAutoClose(False)
-        self._apply_stage_progress(progress_dialog, 0, progress_total, initial_message)
-        self._show_centered_progress_dialog(progress_dialog)
 
         worker = DiskSessionLoadWorker(
             load_kind,
@@ -14142,21 +14442,23 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             final_message=final_message,
             parent=self,
         )
+        self._configure_yamaha_consent(worker)
         worker.progressChanged.connect(
             lambda step, total, message, dialog=progress_dialog: self._apply_stage_progress(
                 dialog, step, total, message
             )
         )
-        progress_dialog.canceled.connect(worker.cancel)
         progress_dialog.canceled.connect(
-            lambda dialog=progress_dialog: dialog.setLabelText(self._lt("Cancelling..."))
+            lambda owner=worker, dialog=progress_dialog: cancel_disk_activity(self, owner, dialog)
         )
         worker.sessionLoaded.connect(self._on_disk_load_success)
         worker.captureReady.connect(self._on_greaseweazle_capture_ready)
         worker.loadFailedWithDetails.connect(self._on_disk_load_failure_with_details)
         worker.loadFailed.connect(self._on_disk_load_failure)
         worker.operationCancelled.connect(self._on_disk_load_cancelled)
-        worker.finished.connect(self._on_disk_load_finished)
+        worker.finished.connect(
+            lambda owner=worker: self._on_disk_load_finished() if self.diskLoadWorker is owner else None
+        )
 
         self.diskLoadWorker = worker
         self.diskLoadProgressDialog = progress_dialog
@@ -14186,15 +14488,23 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             source=self._log_source_label(source),
             title=progress_title,
         )
+        self._apply_stage_progress(progress_dialog, 0, progress_total, initial_message)
         worker.start()
+        self._show_centered_progress_dialog(progress_dialog)
         return True
 
     @zip_import_operation
     def _on_disk_load_success(self, session, listing):
+        worker = self.diskLoadWorker
+        if worker is not None and getattr(worker, "_cancel_requested", lambda: False)():
+            session.cleanup()
+            self._on_disk_load_cancelled("Operation cancelled.")
+            return
         self._remember_disk_read_diagnostics(session)
         read_kind = self.diskLoadContext.get("load_kind", "")
+        should_offer_capture = bool(self.diskLoadShouldOfferCapture)
         if self.diskLoadProgressDialog is not None:
-            self.diskLoadProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskLoadProgressDialog)
             self.diskLoadProgressDialog = None
 
         self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
@@ -14215,7 +14525,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 self.reviewPrompt.record_successful_read(read_kind)
             return
 
-        should_offer_capture = bool(self.diskLoadShouldOfferCapture)
         if not should_offer_capture and getattr(session, "source_kind", "") == "floppy_gw":
             gw_source = getattr(session, "gw_source", None)
             should_offer_capture = bool(
@@ -14257,6 +14566,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         else:
             QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
         self.reviewPrompt.record_successful_read(read_kind)
+        # Capture-save dialogs and export progress process worker.finished in
+        # nested event loops. Make the Smart offer eligible only after the
+        # entire save flow has returned, including its completion/error dialog.
+        if not self._disk_worker_busy() and self.choose_button.isEnabled():
+            self._pending_yamaha_media_session = None
+            QTimer.singleShot(0, lambda: self._offer_yamaha_media_workflow(session))
+        else:
+            self._pending_yamaha_media_session = session
 
     def _open_pianodisc_system3_session_as_midi(self, session, listing):
         source_name = getattr(session, "source_name", "") or os.path.basename(
@@ -14599,7 +14916,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         extra_regular_paths = [
             os.path.abspath(path)
             for path in (extra_regular_paths or [])
-            if os.path.isfile(path) and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+            if os.path.isfile(path) and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir", "catalog"}
         ]
         if not source_inputs:
             QMessageBox.warning(
@@ -15005,7 +15322,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             for path in (extra_regular_paths or [])
             if os.path.isfile(path)
             and self._regular_drop_file_kind(path)
-            in {"midi", "eseq", "pianodir"}
+            in {"midi", "eseq", "pianodir", "catalog"}
         ]
         warnings = list(pre_conversion_warnings or [])
         if not source_inputs:
@@ -15169,7 +15486,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 for path in (file_paths or [])
                 if os.path.abspath(path) not in blk_path_set
                 and self._regular_drop_file_kind(path)
-                in {"midi", "eseq", "pianodir"}
+                in {"midi", "eseq", "pianodir", "catalog"}
             ]
 
         if not self._prompt_for_psr600_blk_conversion(
@@ -15429,7 +15746,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         extra_regular_paths = [
             os.path.abspath(path)
             for path in (extra_regular_paths or [])
-            if os.path.isfile(path) and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+            if os.path.isfile(path) and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir", "catalog"}
         ]
         warnings = list(pre_conversion_warnings or [])
         if not evt_inputs:
@@ -15593,7 +15910,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 path
                 for path in (file_paths or [])
                 if os.path.abspath(path) not in evt_path_set
-                and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+                and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir", "catalog"}
             ]
 
         if not self._prompt_for_electone_evt_conversion(
@@ -15872,7 +16189,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         extra_regular_paths = [
             os.path.abspath(path)
             for path in (extra_regular_paths or [])
-            if os.path.isfile(path) and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+            if os.path.isfile(path) and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir", "catalog"}
         ]
         warnings = list(pre_conversion_warnings or [])
         if not seq_inputs:
@@ -16031,7 +16348,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 path
                 for path in (file_paths or [])
                 if os.path.abspath(path) not in v50_path_set
-                and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+                and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir", "catalog"}
             ]
 
         if not self._prompt_for_v50_nseq_conversion(summary):
@@ -16058,7 +16375,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 path
                 for path in (file_paths or [])
                 if os.path.abspath(path) not in seq_path_set
-                and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir"}
+                and self._regular_drop_file_kind(path) in {"midi", "eseq", "pianodir", "catalog"}
             ]
 
         if not self._prompt_for_mpc_seq_conversion(
@@ -16077,7 +16394,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _on_greaseweazle_capture_ready(self, payload):
         if self.diskLoadProgressDialog is not None:
-            self.diskLoadProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskLoadProgressDialog)
             self.diskLoadProgressDialog = None
         self.pendingGwCapture = dict(payload or {})
         QTimer.singleShot(25, self._handle_pending_greaseweazle_capture_if_ready)
@@ -16190,7 +16507,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def _on_disk_load_failure(self, message):
         self._remember_disk_read_diagnostics(getattr(self, "diskLoadWorker", None))
         if self.diskLoadProgressDialog is not None:
-            self.diskLoadProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskLoadProgressDialog)
             self.diskLoadProgressDialog = None
         if self._message_indicates_cancelled(message):
             self._on_disk_load_cancelled(message)
@@ -16324,7 +16641,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _on_disk_load_failure_with_details(self, details):
         if self.diskLoadProgressDialog is not None:
-            self.diskLoadProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskLoadProgressDialog)
             self.diskLoadProgressDialog = None
         details = dict(details or {})
         self._remember_disk_read_diagnostics(details.get("read_diagnostics"))
@@ -16506,9 +16823,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _on_disk_load_cancelled(self, _message):
         self._remember_disk_read_diagnostics(getattr(self, "diskLoadWorker", None))
-        if self.diskLoadProgressDialog is not None:
-            self.diskLoadProgressDialog.close()
-            self.diskLoadProgressDialog = None
         self._log_warning_event(
             "Disk",
             "Read cancelled",
@@ -16525,6 +16839,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if capture is not None:
                 capture.cleanup()
         self.pendingGwCapture = None
+        self.diskLoadContext["cancelled_status"] = self.status_label.text()
 
     def _queue_disk_load_result(self, handler, payload):
         # A queued callback owns its sources even after the worker and its
@@ -16547,11 +16862,17 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @zip_import_operation
     def _on_disk_load_finished(self):
-        self._set_disk_load_busy(False)
+        cancelled_status = self.diskLoadContext.get("cancelled_status")
         self.diskLoadShouldOfferCapture = False
         if self.diskLoadWorker is not None:
             self.diskLoadWorker.deleteLater()
             self.diskLoadWorker = None
+        if self.diskLoadProgressDialog is not None:
+            self._close_disk_progress_dialog(self.diskLoadProgressDialog)
+            self.diskLoadProgressDialog = None
+        self._set_disk_load_busy(False)
+        if cancelled_status:
+            self.status_label.setText(cancelled_status)
         gw_conversion_details = self.pendingGwConversionDetails
         self.pendingGwConversionDetails = None
         gw_capture = self.pendingGwCapture
@@ -16572,6 +16893,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             MidiTitleWindow._queue_disk_load_result(self, self._offer_disk_recovery, recovery_request)
         else:
             self.diskLoadContext = {}
+        yamaha_session = getattr(self, "_pending_yamaha_media_session", None)
+        self._pending_yamaha_media_session = None
+        if yamaha_session is not None:
+            QTimer.singleShot(0, lambda: self._offer_yamaha_media_workflow(yamaha_session))
 
     @zip_import_operation
     def _offer_disk_recovery(self, request):
@@ -16760,7 +17085,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         progress_dialog.setWindowTitle(progress_text)
         self._prepare_progress_dialog(progress_dialog)
         progress_dialog.setAutoClose(False)
-        self._apply_stage_progress(progress_dialog, 0, 100, progress_text)
 
         worker = DiskSessionRecoveryWorker(
             request.get("load_kind"),
@@ -16769,19 +17093,21 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             final_message="Opening recovered files...",
             parent=self,
         )
+        self._configure_yamaha_consent(worker)
         worker.progressChanged.connect(
             lambda step, total, message, dialog=progress_dialog: self._apply_stage_progress(
                 dialog, step, total, message
             )
         )
-        progress_dialog.canceled.connect(worker.cancel)
         progress_dialog.canceled.connect(
-            lambda dialog=progress_dialog: dialog.setLabelText(self._lt("Cancelling..."))
+            lambda owner=worker, dialog=progress_dialog: cancel_disk_activity(self, owner, dialog)
         )
         worker.sessionRecovered.connect(self._on_disk_recovery_success)
         worker.recoveryFailed.connect(self._on_disk_recovery_failure)
         worker.operationCancelled.connect(self._on_disk_recovery_cancelled)
-        worker.finished.connect(self._on_disk_recovery_finished)
+        worker.finished.connect(
+            lambda owner=worker: self._on_disk_recovery_finished() if self.diskRecoveryWorker is owner else None
+        )
 
         self.diskRecoveryWorker = worker
         self.diskRecoveryProgressDialog = progress_dialog
@@ -16794,13 +17120,20 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             source=self._log_source_label(request.get("source")),
             title=progress_text,
         )
+        self._apply_stage_progress(progress_dialog, 0, 100, progress_text)
         worker.start()
+        self._show_centered_progress_dialog(progress_dialog)
         return True
 
     def _on_disk_recovery_success(self, session, listing):
+        worker = self.diskRecoveryWorker
+        if worker is not None and getattr(worker, "_cancel_requested", lambda: False)():
+            session.cleanup()
+            self._on_disk_recovery_cancelled("Operation cancelled.")
+            return
         read_kind = self.diskRecoveryContext.get("load_kind", "")
         if self.diskRecoveryProgressDialog is not None:
-            self.diskRecoveryProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskRecoveryProgressDialog)
             self.diskRecoveryProgressDialog = None
 
         self._remember_disk_recovery_diagnostics(session, self.diskRecoveryWorker)
@@ -16853,9 +17186,16 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
         self.reviewPrompt.record_successful_read(read_kind)
 
+        # Recovery Complete can also process worker.finished before closing.
+        if not self._disk_worker_busy() and self.choose_button.isEnabled():
+            self._pending_yamaha_media_session = None
+            QTimer.singleShot(0, lambda: self._offer_yamaha_media_workflow(session))
+        else:
+            self._pending_yamaha_media_session = session
+
     def _on_disk_recovery_failure(self, message):
         if self.diskRecoveryProgressDialog is not None:
-            self.diskRecoveryProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskRecoveryProgressDialog)
             self.diskRecoveryProgressDialog = None
         self._remember_disk_recovery_diagnostics(self.diskRecoveryWorker)
         if self._message_indicates_cancelled(message):
@@ -16892,9 +17232,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.pendingFloppyReadTrimTitles = False
 
     def _on_disk_recovery_cancelled(self, _message):
-        if self.diskRecoveryProgressDialog is not None:
-            self.diskRecoveryProgressDialog.close()
-            self.diskRecoveryProgressDialog = None
         self._remember_disk_recovery_diagnostics(self.diskRecoveryWorker)
         self._log_warning_event(
             "Recovery",
@@ -16908,15 +17245,28 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
 
+        self.diskRecoveryContext["cancelled_status"] = self.status_label.text()
+
     @zip_import_operation
+
     def _on_disk_recovery_finished(self):
+        cancelled_status = self.diskRecoveryContext.get("cancelled_status")
         self._remember_disk_recovery_diagnostics(self.diskRecoveryWorker)
-        self._set_disk_load_busy(False)
         self.diskLoadContext = {}
         self.diskRecoveryContext = {}
         if self.diskRecoveryWorker is not None:
             self.diskRecoveryWorker.deleteLater()
             self.diskRecoveryWorker = None
+        if self.diskRecoveryProgressDialog is not None:
+            self._close_disk_progress_dialog(self.diskRecoveryProgressDialog)
+            self.diskRecoveryProgressDialog = None
+        self._set_disk_load_busy(False)
+        if cancelled_status:
+            self.status_label.setText(cancelled_status)
+        yamaha_session = getattr(self, "_pending_yamaha_media_session", None)
+        self._pending_yamaha_media_session = None
+        if yamaha_session is not None:
+            QTimer.singleShot(0, lambda: self._offer_yamaha_media_workflow(yamaha_session))
 
     def _migrate_filename_defaults_if_needed(self):
         """Apply the new defaults once, including existing installations.
@@ -17606,6 +17956,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             # Keep its parent and the event loop alive until that has finished.
             event.ignore()
             markiv_dialog.reject()
+            return
+        decoder_dialog = getattr(self, "disklavierWavDialog", None)
+        if decoder_dialog is not None and decoder_dialog.is_busy:
+            event.ignore()
+            decoder_dialog.reject()
             return
         if (self.is_image_mode() and not getattr(self, "_self_update_discard_authorized", False)
                 and not self._confirm_discard_image_changes()):
@@ -18301,8 +18656,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         }
 
     def show_pedal_compatibility_utility(self):
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return
 
         rows = self._midi_rows_for_pedal_compatibility()
@@ -18572,8 +18926,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return None
 
     def show_channel_merging_utility(self):
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return
 
         rows = self._midi_rows_for_channel_merging()
@@ -18694,8 +19047,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return int(target_combo.currentData())
 
     def show_xf_stripping_utility(self):
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return
 
         rows = self._midi_rows_for_xf_stripping()
@@ -19386,12 +19738,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         has_listed_files = self.choose_button.isEnabled() and any(
             self.table.item(row, 1) is not None and not self._is_special_pianodir_row(row)
+            and os.path.basename(self.table.item(row, 1).text()).upper() not in CATALOG_NAMES
             for row in range(self.table.rowCount())
         )
         if hasattr(self, "utilitiesSongListAction"):
             self.utilitiesSongListAction.setEnabled(has_listed_files)
         if hasattr(self, "utilitiesFileInspectionAction"):
-            self.utilitiesFileInspectionAction.setEnabled(has_listed_files)
+            self.utilitiesFileInspectionAction.setEnabled(self.choose_button.isEnabled())
         if hasattr(self, "utilitiesRenderAudioAction"):
             self.utilitiesRenderAudioAction.setEnabled(has_listed_files)
         if hasattr(self, "utilitiesBulkExtractionAction"):
@@ -20061,12 +20414,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             for row in range(self.table.rowCount()):
                 if self._is_special_pianodir_row(row):
                     continue
-                if self.table.item(row, 1) is not None:
+                item = self.table.item(row, 1)
+                if item is not None and os.path.basename(item.text()).upper() not in CATALOG_NAMES:
                     rows.append(row)
             return rows
         if self.is_local_eseq_mode():
             return self._regular_eseq_rows()
-        return self._regular_file_rows()
+        return [row for row in self._regular_file_rows()
+                if self._listed_file_title_mode(self.table.item(row, 1).text()) != "catalog"]
 
     def _song_title_for_row(self, row):
         title = (self._row_raw_title(row) or "").strip()
@@ -20150,6 +20505,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             title = self._song_list_display_text(self._song_title_for_row(row), self._lt("Untitled"))
             lines.append(f"{index}. {title}")
         return "\n".join(lines).strip()
+
+    def toggle_random_output_suffixes(self, enabled):
+        self.settings.setValue(self.SETTING_RANDOM_OUTPUT_SUFFIXES, bool(enabled))
+        action = getattr(self, "settingsRandomOutputSuffixesAction", None)
+        if action is not None and action.isChecked() != bool(enabled):
+            action.setChecked(bool(enabled))
+
+    def _random_output_suffixes_enabled(self):
+        return random_output_suffixes_enabled(self.settings)
 
     def toggle_tag_sidecar_writing(self, enabled):
         self.settings.setValue(self.SETTING_WRITE_TAG_SIDECARS, bool(enabled))
@@ -20303,7 +20667,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return lines
 
     def _write_tag_sidecar_file(self, output_path, row):
-        if is_pianodir_path(output_path):
+        if is_pianodir_path(output_path) or os.path.basename(output_path).upper() in CATALOG_NAMES:
             return None
         tag_path = self._tag_sidecar_path_for_output(output_path)
         try:
@@ -20371,7 +20735,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self._center_child_dialog(dialog)
         dialog.show()
 
-    def _inspection_items(self):
+    def _inspection_items(self, *, include_catalogs=False):
+        from .catalog_inspection import CATALOG_NAMES
+
         items = []
         rows = self._current_song_rows_for_listing()
         for row in rows:
@@ -20380,6 +20746,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if path_item is None:
                 continue
             display_name = filename_item.text().strip() if filename_item and filename_item.text().strip() else os.path.basename(path_item.text())
+            if (os.path.basename(path_item.text()).upper() in CATALOG_NAMES
+                    or os.path.basename(display_name).upper() in CATALOG_NAMES):
+                continue
             title = self._song_title_for_row(row)
             label = display_name if title == "Untitled" else f"{display_name} - {title}"
             try:
@@ -20401,13 +20770,95 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                         "session_id": id(self.image_session) if self.is_image_mode() else None,
                     }
                 )
+        if include_catalogs:
+            items.extend(self._inspection_catalog_items(items))
+        return items
+
+    def _inspection_catalog_items(self, song_items):
+        from .catalog_inspection import CATALOG_NAMES
+
+        items = []
+        if self.is_image_mode():
+            paths = set(getattr(self, "imageEntriesByPath", {}))
+            paths.update(getattr(self, "pendingImageAdditions", {}))
+            paths.difference_update(getattr(self, "pendingImageDeletes", set()))
+            for source_path in sorted(paths):
+                name = os.path.basename(source_path)
+                if name.upper() not in CATALOG_NAMES:
+                    continue
+                try:
+                    material_path = (
+                        getattr(self, "pendingSmartPianoSoftCatalogReplacement", "")
+                        if name.upper() == "PSONG.MNG" else ""
+                    ) or self._pending_or_extracted_image_path(source_path)
+                except Exception:
+                    continue
+                if material_path and os.path.isfile(material_path):
+                    items.append({"kind": "catalog", "display_name": name,
+                                  "label": name, "path": material_path,
+                                  "source_path": source_path,
+                                  "session_id": id(self.image_session)})
+        else:
+            folders = {os.path.dirname(item.get("source_path") or item["path"])
+                       for item in song_items}
+            context = str(getattr(self, "regularModeContextPath", "") or "")
+            if context and os.path.isdir(context):
+                folders.add(context)
+            seen = set()
+            table = getattr(self, "table", None)
+            if table is not None:
+                for row in range(table.rowCount()):
+                    path_item = table.item(row, 1)
+                    if path_item is None:
+                        continue
+                    path = path_item.text()
+                    name = os.path.basename(path)
+                    if name.upper() not in CATALOG_NAMES:
+                        continue
+                    try:
+                        material_path = self._regular_source_material_path(path)
+                    except (OSError, ValueError):
+                        continue
+                    if not material_path or not os.path.isfile(material_path):
+                        continue
+                    identity = os.path.normcase(os.path.abspath(path))
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    items.append({"kind": "catalog", "display_name": name,
+                                  "label": name, "path": material_path,
+                                  "source_path": path, "session_id": None,
+                                  "row": row})
+            for folder in sorted(folders):
+                try:
+                    with os.scandir(folder) as entries:
+                        paths = sorted(entry.path for entry in entries
+                                       if entry.name.upper() in CATALOG_NAMES and entry.is_file())
+                except OSError:
+                    continue
+                for path in paths:
+                    identity = os.path.normcase(os.path.abspath(path))
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    name = os.path.basename(path)
+                    items.append({"kind": "catalog", "display_name": name,
+                                  "label": name, "path": path, "source_path": path,
+                                  "session_id": None})
+        table = getattr(self, "table", None)
+        if table is not None:
+            rows = {table.item(row, 1).text(): row for row in range(table.rowCount())
+                    if table.item(row, 1) is not None}
+            for item in items:
+                if item["source_path"] in rows:
+                    item["row"] = rows[item["source_path"]]
         return items
 
     @manual_midi_inspection_action
     def _stage_inspected_midi_action(self, item, action):
         """Apply one explicit inspection edit to the current staged source."""
-        if not self.choose_button.isEnabled():
-            raise ValueError(self._lt("Please wait for MIDI processing to finish."))
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
+            raise ValueError(self.status_label.text())
         if action not in {"type0", "piano"}:
             raise ValueError(self._lt("Unsupported inspection action."))
         image_mode = self.is_image_mode()
@@ -20502,10 +20953,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
     def show_file_inspection_tool(self, selected_row=None):
         if isinstance(selected_row, bool):
             selected_row = None
-        items = self._inspection_items()
-        if not items:
-            QMessageBox.information(self, "No Files", "No loaded MIDI or E-SEQ files are available to inspect.")
-            return
+        items = self._inspection_items(include_catalogs=True)
         initial_row = None
         if selected_row is not None:
             if not any(item.get("row") == selected_row for item in items):
@@ -20519,7 +20967,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         dialog = FileInspectionDialog(
             items, parent=self, initial_row=initial_row,
             edit_callback=self._stage_inspected_midi_action,
-            items_callback=self._inspection_items,
+            items_callback=lambda: self._inspection_items(include_catalogs=True),
+            catalog_action_callback=self._stage_inspected_catalog_action,
         )
         self.fileInspectionDialog = dialog
         self._center_child_dialog(dialog)
@@ -20690,7 +21139,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if self._is_special_pianodir_row(row):
                 continue
             path_item = self.table.item(row, 1)
-            if path_item is not None:
+            if path_item is not None and os.path.basename(path_item.text()).upper() not in CATALOG_NAMES:
                 count += 1
         return count
 
@@ -20899,6 +21348,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._apply_local_eseq_mode_ui()
 
     def _probe_regular_file(self, file_path):
+        if os.path.basename(file_path).upper() in CATALOG_NAMES:
+            return "", "MNG", "catalog", False, b""
         title = ""
         title_mode = ""
         is_midi = is_midi_file(file_path)
@@ -20946,6 +21397,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return ""
         if not is_file:
             return ""
+        if os.path.basename(file_path).upper() in CATALOG_NAMES:
+            return "catalog"
         if os.path.basename(file_path).upper() in {PIANODIR_FILENAME, MUSICDIR_FILENAME}:
             return "pianodir"
         if is_midi_file(file_path):
@@ -20967,7 +21420,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         return ESEQ_VARIANT_DISKLAVIER
 
     def can_accept_regular_drop_path(self, file_path):
-        return not self.is_image_mode() and self._regular_drop_file_kind(file_path) in {"midi", "eseq", "pianodir"}
+        return not self.is_image_mode() and self._regular_drop_file_kind(file_path) in {"midi", "eseq", "pianodir", "catalog"}
 
     def _regular_folder_file_paths(self, directory):
         file_paths = []
@@ -20990,7 +21443,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 file_kind = self._regular_drop_file_kind(full_path)
             except Exception:
                 file_kind = ""
-            if file_kind in {"midi", "eseq"}:
+            if file_kind in {"midi", "eseq", "catalog"}:
                 file_paths.append(full_path)
         return file_paths
 
@@ -21084,6 +21537,32 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.pendingRegularConversions.pop(full_path, None)
         self.pendingRegularRenames.pop(full_path, None)
         self.listedFileInfo.pop(full_path, None)
+
+    def _drop_mng_catalog_rows_for_eseq(self):
+        """Omit MIDI companion catalogs from an E-SEQ set, leaving sources intact."""
+        removed = 0
+        for row in reversed(range(self.table.rowCount())):
+            item = self.table.item(row, 1)
+            if item is None or os.path.basename(item.text()).upper() not in CATALOG_NAMES:
+                continue
+            path = item.text()
+            if self.is_image_mode():
+                if path in self.pendingImageAdditions:
+                    self.pendingImageAdditions.pop(path, None)
+                    self.imageFileInfo.pop(path, None)
+                else:
+                    self.pendingImageDeletes.add(path)
+                self.pendingImageReplacements.pop(path, None)
+                self.pendingImageRenames.pop(path, None)
+                self.pendingImageTitleEdits.pop(path, None)
+                self.pendingImageExportFilenames.pop(path, None)
+                self.table.removeRow(row)
+                if os.path.basename(path).upper() == "PSONG.MNG":
+                    self.pendingSmartPianoSoftCatalogReplacement = ""
+            else:
+                self._remove_regular_row_for_path(path)
+            removed += 1
+        return removed
 
     def _regular_eseq_conversion_title(self, full_path, current_title):
         if full_path in self.pendingEdits:
@@ -21185,6 +21664,20 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 "path": full_path,
                 "message": f"Loaded {self._eseq_directory_filename(self.regularEseqVariant)}.",
             }
+        if file_kind == "catalog":
+            existing_row = self._find_regular_row_for_filename(os.path.basename(full_path))
+            if existing_row >= 0:
+                existing_path = self._regular_row_source_path(existing_row)
+                if existing_path == full_path:
+                    return {"status": "skipped", "kind": "catalog", "path": full_path}
+                choice = self._regular_drop_conflict_choice(full_path, existing_path)
+                if choice == "cancel":
+                    return {"status": "cancelled", "path": full_path}
+                if choice != "replace":
+                    return {"status": "skipped", "kind": "catalog", "path": full_path}
+                self._remove_regular_row_for_path(existing_path)
+            self.add_table_row(full_path, os.path.basename(full_path), "", "MNG", title_mode="catalog")
+            return {"status": "added", "kind": "catalog", "path": full_path}
         if file_kind not in {"midi", "eseq"}:
             return {"status": "error", "path": full_path, "message": "Unsupported file type."}
         if self.regularDropBatchPrepared:
@@ -21283,6 +21776,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         ]
         if accepted_paths and not self.regularModeContextPath:
             self._set_regular_mode_context(file_paths=accepted_paths)
+        catalog_paths = [result.get("path", "") for result in results
+                         if result.get("status") in {"added", "skipped"}
+                         and self._listed_file_title_mode(result.get("path", "")) == "catalog"]
+        song_paths = [path for path in accepted_paths if self._listed_file_title_mode(path) == "midi"]
+        apply_catalogs = getattr(self, "_apply_imported_catalogs", None)
+        catalog_summary = apply_catalogs(catalog_paths, song_paths=song_paths) if catalog_paths and song_paths and callable(apply_catalogs) else ""
+        if self.is_local_eseq_mode() and not self._regular_midi_file_count():
+            self._drop_mng_catalog_rows_for_eseq()
 
         self._refresh_regular_eseq_mode()
         if self.regularEseqMode:
@@ -21301,7 +21802,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         cancelled_count = sum(1 for result in results if result.get("status") == "cancelled")
         errors = [result for result in results if result.get("status") == "error"]
 
-        status_parts = []
+        status_parts = [catalog_summary] if catalog_summary else []
         if added_count:
             status_parts.append(self._lt('Added {added_count} file(s).', added_count=added_count))
         if converted_count:
@@ -21471,7 +21972,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.refresh_compat_indicators()
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
-        self.status_label.setText(status_text)
+        catalog_summary = ""
+        apply_catalogs = getattr(self, "_apply_imported_catalogs", None)
+        if prepare_destination and callable(apply_catalogs):
+            catalogs = [path for path in file_paths if self._listed_file_title_mode(path) == "catalog"]
+            songs = [path for path in file_paths if self._listed_file_title_mode(path) == "midi"]
+            if catalogs and songs:
+                catalog_summary = apply_catalogs(catalogs, song_paths=songs)
+        self.status_label.setText("\n".join(part for part in (status_text, catalog_summary) if part))
         self._auto_fit_table_columns_after_batch_change()
         self._log_event(
             "Folder",
@@ -21497,7 +22005,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._refresh_eseq_reorder_buttons()
             return
 
-        row_count = self._regular_file_count()
+        row_count = sum(info.get("title_mode") != "catalog" for info in self.listedFileInfo.values())
         midi_count = 0
         eseq_count = 0
         unknown_count = 0
@@ -21507,7 +22015,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 midi_count += 1
             elif title_mode == "eseq":
                 eseq_count += 1
-            else:
+            elif title_mode != "catalog":
                 unknown_count += 1
 
         has_midi = midi_count > 0
@@ -21816,6 +22324,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 continue
             source_path = path_item.text()
             final_path = self._final_image_path(source_path)
+            if os.path.basename(final_path).upper() in CATALOG_NAMES:
+                continue
             is_midi = self._image_path_is_midi(source_path)
             if self._is_eseq_candidate(final_path, is_midi=is_midi):
                 eseq_count += 1
@@ -24236,7 +24746,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         worker.sessionFormatted.connect(self._on_floppy_format_success)
         worker.formatFailed.connect(self._on_floppy_format_failure)
         worker.operationCancelled.connect(self._on_floppy_format_cancelled)
-        worker.finished.connect(self._on_floppy_format_finished)
+        worker.finished.connect(
+            lambda owner=worker: self._on_floppy_format_finished() if self.diskFormatWorker is owner else None
+        )
 
         self.diskFormatWorker = worker
         self.diskFormatProgressDialog = progress_dialog
@@ -24348,11 +24860,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self.status_label.setText(self._lt("Floppy formatting cancelled."))
 
     def _on_floppy_format_finished(self):
-        self._set_disk_write_busy(False)
         self.diskFormatContext = {}
         if self.diskFormatWorker is not None:
             self.diskFormatWorker.deleteLater()
             self.diskFormatWorker = None
+        self._set_disk_write_busy(False)
 
     def _collect_current_image_write_operations(self, *, for_export=False):
         renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
@@ -24852,7 +25364,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 file_level=file_level,
             )
         )
-        worker.finished.connect(self._on_write_image_to_floppy_finished)
+        worker.finished.connect(
+            lambda owner=worker: self._on_write_image_to_floppy_finished() if self.diskWriteTargetWorker is owner else None
+        )
 
         self.diskWriteTargetWorker = worker
         self.diskWriteTargetProgressDialog = progress_dialog
@@ -24950,8 +25464,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self._resume_floppy_image_recovery()
 
     def _prepare_for_disk_load(self, source_label):
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return False
         if self.is_image_mode() and not self._confirm_discard_image_changes():
             return False
@@ -25123,6 +25636,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 output_path,
                 selected_ext,
                 progress_callback=progress_callback,
+                verify_entire_image=True,
             )
             progress_callback(5, 5, "Finalizing floppy export...")
             progressDialog.close()
@@ -25614,12 +26128,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         is_logical_recovery = source_kind == "floppy_usb_recovery"
         progress_title = "Logical Floppy Recovery" if is_logical_recovery else "Convert Image" if is_image_conversion else "Image Floppy"
         progress_label = "Converting image..." if is_image_conversion else "Imaging floppy..."
-        operation_label = "image conversion" if is_image_conversion else "floppy imaging"
         progress_dialog = QProgressDialog(progress_label, "Cancel", 0, 100, self)
         progress_dialog.setWindowTitle(progress_title)
         self._prepare_progress_dialog(progress_dialog)
         progress_dialog.setAutoClose(False)
-        self._apply_stage_progress(progress_dialog, 0, 100, self._lt("Preparing..."))
 
         worker = DiskImageCaptureWorker(
             source_kind,
@@ -25627,24 +26139,25 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             output_path,
             disk_format=disk_format,
             exact_failure=exact_failure,
+            random_suffixes=self._random_output_suffixes_enabled(),
             parent=self,
         )
+        self._configure_yamaha_consent(worker)
         worker.progressChanged.connect(
             lambda step, total, message, dialog=progress_dialog: self._apply_stage_progress(
                 dialog, step, total, message
             )
         )
-        progress_dialog.canceled.connect(worker.cancel)
         progress_dialog.canceled.connect(
-            lambda dialog=progress_dialog, label=operation_label: dialog.setLabelText(
-                self._lt("Cancelling...")
-            )
+            lambda owner=worker, dialog=progress_dialog: cancel_disk_activity(self, owner, dialog)
         )
         worker.captureFinished.connect(self._on_floppy_image_capture_success)
         worker.captureFailed.connect(self._on_floppy_image_capture_failure)
         worker.captureRecoveryAvailable.connect(self._on_floppy_image_capture_recovery_available)
         worker.operationCancelled.connect(self._on_floppy_image_capture_cancelled)
-        worker.finished.connect(self._on_floppy_image_capture_finished)
+        worker.finished.connect(
+            lambda owner=worker: self._on_floppy_image_capture_finished() if self.diskImageCaptureWorker is owner else None
+        )
 
         self.diskImageCaptureWorker = worker
         self.diskImageCaptureProgressDialog = progress_dialog
@@ -25664,11 +26177,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             output=output_path,
             format=self._log_disk_format_label(disk_format),
         )
+        self._apply_stage_progress(progress_dialog, 0, 100, self._lt("Preparing..."))
         worker.start()
+        self._show_centered_progress_dialog(progress_dialog)
 
     def _on_floppy_image_capture_success(self, payload):
         if self.diskImageCaptureProgressDialog is not None:
-            self.diskImageCaptureProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskImageCaptureProgressDialog)
             self.diskImageCaptureProgressDialog = None
         payload = dict(payload or {})
         output_path = payload.get("output_path") or self.diskImageCaptureContext.get("output_path", "")
@@ -25769,7 +26284,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _on_floppy_image_capture_recovery_available(self, payload):
         if self.diskImageCaptureProgressDialog is not None:
-            self.diskImageCaptureProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskImageCaptureProgressDialog)
             self.diskImageCaptureProgressDialog = None
         self.diskImageCaptureContext["recovery_offer"] = dict(payload or {})
         self._log_error_event("Image", "Exact capture failed",
@@ -25813,7 +26328,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     def _on_floppy_image_capture_failure(self, message):
         if self.diskImageCaptureProgressDialog is not None:
-            self.diskImageCaptureProgressDialog.close()
+            self._close_disk_progress_dialog(self.diskImageCaptureProgressDialog)
             self.diskImageCaptureProgressDialog = None
         source_name = self.diskImageCaptureContext.get("source_name", "the selected floppy")
         is_image_conversion = self.diskImageCaptureContext.get("source_kind") == "image_convert"
@@ -25836,9 +26351,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
 
     def _on_floppy_image_capture_cancelled(self, _message):
-        if self.diskImageCaptureProgressDialog is not None:
-            self.diskImageCaptureProgressDialog.close()
-            self.diskImageCaptureProgressDialog = None
         self._log_warning_event(
             "Image",
             "Conversion cancelled" if self.diskImageCaptureContext.get("source_kind") == "image_convert" else "Capture cancelled",
@@ -25849,14 +26361,23 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         else:
             self.status_label.setText(self._lt('Floppy imaging cancelled. No image was saved.'))
 
+        self.diskImageCaptureContext["cancelled_status"] = self.status_label.text()
+
     @zip_import_operation
+
     def _on_floppy_image_capture_finished(self):
+        cancelled_status = self.diskImageCaptureContext.get("cancelled_status")
         context = self.diskImageCaptureContext
-        self._set_disk_load_busy(False)
         self.diskImageCaptureContext = {}
         if self.diskImageCaptureWorker is not None:
             self.diskImageCaptureWorker.deleteLater()
             self.diskImageCaptureWorker = None
+        if self.diskImageCaptureProgressDialog is not None:
+            self._close_disk_progress_dialog(self.diskImageCaptureProgressDialog)
+            self.diskImageCaptureProgressDialog = None
+        self._set_disk_load_busy(False)
+        if cancelled_status:
+            self.status_label.setText(cancelled_status)
         if context.get("recovery_offer"):
             self._offer_logical_floppy_capture(context)
 
@@ -26367,6 +26888,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             self._update_compat_indicator(row, self._row_raw_title(row))
 
     def _type_column_tooltip(self, midi_type, *, image_mode=False, is_midi=True):
+        if midi_type == "MNG":
+            return self._lt("MNG catalog")
         if midi_type and midi_type.startswith(("FIL", "ESQ", "MDA")):
             tooltip = "Yamaha E-SEQ type and arrangement information."
         elif image_mode and not is_midi:
@@ -26522,8 +27045,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @zip_import_operation
     def clear_list(self):
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return
         if self.is_image_mode():
             if not self._confirm_discard_image_changes():
@@ -26637,8 +27159,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         )
 
     def create_long_midi_filenames(self):
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return
         if not self.is_image_mode() and MidiTitleWindow._preparation_requires_dos83_filenames(self):
             QMessageBox.information(
@@ -26786,15 +27307,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @staged_batch
     def rename_all_for_disk(self):
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return
 
         if self.is_image_mode():
             self._rename_all_image_files_dos83()
             return
 
-        rows = self._regular_file_rows()
+        rows = [row for row in self._regular_file_rows()
+                if self._listed_file_title_mode(self.table.item(row, 1).text()) != "catalog"]
         if not rows:
             QMessageBox.information(self, "No Files", "Add one or more files first.")
             return
@@ -26874,6 +27395,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             for row in range(self.table.rowCount())
             if not self._is_special_pianodir_row(row)
             and self.table.item(row, 1) is not None
+            and os.path.basename(self.table.item(row, 1).text()).upper() not in CATALOG_NAMES
         ]
         if not rows:
             QMessageBox.information(self, "No Files", "Add one or more files first.")
@@ -27051,8 +27573,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
     @staged_batch
     def convert_all_to_type0(self):
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return
 
         row_count = self._regular_file_count()
@@ -28401,8 +28922,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         if reason:
             QMessageBox.information(self, self._lt("Preparing for..."), reason)
             return True
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return True
 
         applicable_paths = []
@@ -28561,6 +29081,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
 
         progressDialog.close()
 
+        if target_kind == "eseq" and converted_count and not self._regular_midi_file_count():
+            self._drop_mng_catalog_rows_for_eseq()
         if target_kind == "eseq" and converted_count and not self.regularHasPianodir:
             self.pendingGeneratePianodir = True
         if converted_count and not any(
@@ -28740,6 +29262,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             QApplication.processEvents()
 
         progressDialog.close()
+        if target_kind == "eseq" and converted and not self._preparation_song_counts().get("midi", 0):
+            self._drop_mng_catalog_rows_for_eseq()
         if source_kind == "eseq" and target_kind == "midi":
             has_eseq_remaining = False
             for row in range(self.table.rowCount()):
@@ -29494,6 +30018,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
 
         source_path = path_item.text()
+        if self._listed_file_title_mode(source_path) == "catalog":
+            self.show_file_inspection_tool(selected_row=row)
+            return
         current_name = self._regular_row_output_filename(row)
         force_dos83 = self._listed_file_title_mode(source_path) == "eseq"
         new_name, ok = self._prompt_for_image_filename(
@@ -30240,6 +30767,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         pianodir_loaded = False
         used_paths = self._active_image_paths()
         pending_extra = {}
+        imported_catalogs = []
+        imported_songs = []
         for host_path in valid_files:
             original_name = os.path.basename(host_path)
             if original_name.upper() in {PIANODIR_FILENAME, MUSICDIR_FILENAME}:
@@ -30321,6 +30850,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                     continue
                 used_paths.add(dos_filename_key(target_path))
                 replaced.append(target_path)
+                if original_name.upper() in CATALOG_NAMES:
+                    imported_catalogs.append(host_path)
+                elif self._image_path_is_midi(existing_path):
+                    imported_songs.append(existing_path)
                 if conversion_kind:
                     converted_count += 1
                 continue
@@ -30404,13 +30937,22 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                 is_pending_addition=True,
             )
             added.append(target_path)
+            if original_name.upper() in CATALOG_NAMES:
+                imported_catalogs.append(host_path)
+            elif is_midi:
+                imported_songs.append(target_path)
 
+        apply_catalogs = getattr(self, "_apply_imported_catalogs", None)
+        catalog_summary = (apply_catalogs(imported_catalogs, song_paths=imported_songs)
+                           if imported_catalogs and imported_songs and callable(apply_catalogs) else "")
+        if self.imageEseqMode and not self._preparation_song_counts().get("midi", 0):
+            self._drop_mng_catalog_rows_for_eseq()
         self._refresh_pianodir_row()
         self._reapply_image_centered_title_assumption()
         self._auto_fit_table_columns_after_batch_change()
         self._refresh_image_mode_action_state()
 
-        status_parts = []
+        status_parts = [catalog_summary] if catalog_summary else []
         if added:
             status_parts.append(
                 self._image_mode_summary() if MidiTitleWindow._is_file_output_import(self)
@@ -30701,6 +31243,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             return
         full_path = full_path_item.text()
         title_mode = self._listed_file_title_mode(full_path)
+        if title_mode == "catalog":
+            self.show_file_inspection_tool(selected_row=row)
+            return
         if not title_mode:
             QMessageBox.information(self, "No Editable Title", "Only MIDI and E-SEQ files have editable title metadata.")
             return
@@ -30988,7 +31533,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         worker.commitFinished.connect(self._on_floppy_commit_success)
         worker.commitFailed.connect(self._on_floppy_commit_failure)
         worker.operationCancelled.connect(self._on_floppy_commit_cancelled)
-        worker.finished.connect(self._on_floppy_commit_finished)
+        worker.finished.connect(
+            lambda owner=worker: self._on_floppy_commit_finished() if self.diskCommitWorker is owner else None
+        )
 
         self.diskCommitWorker = worker
         self.diskCommitProgressDialog = progress_dialog
@@ -31126,62 +31673,22 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
         self._exec_child_dialog(dialog)
 
     def show_about_dialog(self):
-        dialog = QDialog(self)
-        apply_window_icon(dialog)
-        dialog.setWindowTitle(self._t("dialog.about.title", app=APP_TITLE_WITH_VERSION))
-        dialog.setModal(True)
-        layout, content_layout = scrollable_dialog_layout(
-            dialog, width=600, height=540, spacing=12,
+        from .about_dialog import AboutDialog
+
+        dialog = AboutDialog(
+            self, language_code=self._language_code(),
+            admin_mode_enabled=getattr(self, "_admin_mode_enabled", False),
         )
 
-        logo_label = QLabel(dialog)
-        logo_label.setAlignment(Qt.AlignCenter)
-        pixmap = pixmap_from_base64(embedded_logo_dt if is_dark_theme() else embedded_logo_lt)
-        if not pixmap.isNull():
-            logo_label.setPixmap(pixmap.scaled(220, 68, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            logo_label.setText("APS MIDI Prep Tool")
-        content_layout.addWidget(logo_label)
+        def enable_admin_mode():
+            self._admin_mode_enabled = True
 
-        title_label = QLabel(APP_TITLE_WITH_VERSION, dialog)
-        title_label.setAlignment(Qt.AlignCenter)
-        title_label.setWordWrap(True)
-        title_label.setFont(self._make_heading_font(13))
-        content_layout.addWidget(title_label)
-
-        website_label = QLabel(f'<a href="{APP_WEBSITE}">{APP_WEBSITE}</a>', dialog)
-        website_label.setAlignment(Qt.AlignCenter)
-        website_label.setWordWrap(True)
-        website_label.setOpenExternalLinks(True)
-        website_label.setToolTip(self._lt("Project website."))
-        content_layout.addWidget(website_label)
-
-        info_label = QLabel(
-            (
-                f"{APP_COPYRIGHT_NOTICE}<br>"
-                f"{self._lt('Author')}: {APP_AUTHOR}<br>"
-                f"{APP_COMPANY}<br>"
-                f"{APP_COMPANY_ADDRESS}<br>"
-                f"{self._lt('License')}: {APP_LICENSE}<br><br>"
-                f"<small>{html.escape(onboarding_text('notice', self._language_code()))}</small>"
-            ),
-            dialog,
-        )
-        info_label.setTextFormat(Qt.RichText)
-        info_label.setAlignment(Qt.AlignCenter)
-        info_label.setWordWrap(True)
-        content_layout.addWidget(info_label)
-        content_layout.addStretch(1)
-
-        buttons = self._make_dialog_button_box(QDialogButtonBox.Close, dialog)
-        disclaimer_button = buttons.addButton(self._lt("Disclaimer"), QDialogButtonBox.ActionRole)
-        disclaimer_button.clicked.connect(self.show_disclaimer_dialog)
-        buttons.rejected.connect(dialog.reject)
-        buttons.accepted.connect(dialog.accept)
-        buttons.button(QDialogButtonBox.Close).clicked.connect(dialog.accept)
-        layout.addWidget(buttons)
-
-        self._exec_child_dialog(dialog)
+        dialog.admin_mode_activated.connect(enable_admin_mode)
+        dialog.disclaimer_requested.connect(self.show_disclaimer_dialog)
+        try:
+            self._exec_child_dialog(dialog, resize_to_contents=False)
+        finally:
+            dialog.deleteLater()
 
     def show_welcome_dialog(self):
         show_first_time_dialog(self.windowIcon(), parent=self, force_show=True)
@@ -32514,8 +33021,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if for_floppy:
                 return self.save_image_as(for_floppy=True)
             return self.save_image_as()
-        if not self.choose_button.isEnabled():
-            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+        if not self.choose_button.isEnabled() and show_busy_operation(self):
             return
         if self._regular_file_count() == 0:
             QMessageBox.information(self, "No Files", "Add one or more files first.")
@@ -32967,12 +33473,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
             if not self._ensure_pianodir_generation_for_save():
                 return
         else:
-            if not self.choose_button.isEnabled():
-                QMessageBox.information(
-                    self,
-                    self._lt("Busy"),
-                    self._lt("Please wait for MIDI processing to finish."),
-                )
+            if not self.choose_button.isEnabled() and show_busy_operation(self):
                 return
             if self._regular_file_count() == 0:
                 QMessageBox.information(
@@ -33095,7 +33596,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, QMainWindow):
                  for row in MidiTitleWindow._regular_export_rows(self)]
         if self._tag_sidecars_enabled():
             paths.extend(self._tag_sidecar_path_for_output(path) for path in tuple(paths)
-                         if not is_pianodir_path(path))
+                         if not is_pianodir_path(path) and os.path.basename(path).upper() not in CATALOG_NAMES)
         if self.is_local_eseq_mode() and not MidiTitleWindow._preparation_uses_file_output(self) and (
             self._should_generate_pianodir(for_export=True) or self.regularHasPianodir
         ):

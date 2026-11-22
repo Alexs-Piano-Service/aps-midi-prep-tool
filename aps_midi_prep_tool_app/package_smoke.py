@@ -25,8 +25,7 @@ from .build_info import build_identity
 SMOKE_ARGUMENT = "--aps-package-smoke"
 SMART_PIANOSOFT_ARGUMENT = "--include-smart-pianosoft"
 REPORT_FILENAME = "package-smoke.json"
-CASE_NAMES = ("ui", "img", "image_source_changes", "hfe", "mp3")
-OPTIONAL_CASE_NAMES = ("smart_pianosoft",)
+CASE_NAMES = ("ui", "img", "image_source_changes", "hfe", "mp3", "smart_pianosoft")
 
 
 def _sha256(path):
@@ -82,12 +81,14 @@ def _check_ui(directory, state):
 
     window = MidiTitleWindow(settings=settings)
     try:
-        experimental_action = getattr(window, "utilitiesSmartPianoSoftAction", None)
-        if ((experimental_action is not None
-                and experimental_action in window.utilitiesMenu.actions())
-                or any(spec["id"] == "utilities.smart_pianosoft"
-                       for spec in window._keyboard_shortcut_specs())):
-            raise RuntimeError("The deferred Smart PianoSoft utility is exposed in the release UI.")
+        smart_action = getattr(window, "utilitiesSmartPianoSoftAction", None)
+        if (smart_action is None or smart_action not in window.utilitiesMenu.actions()
+                or not any(spec["id"] == "utilities.smart_pianosoft"
+                           for spec in window._keyboard_shortcut_specs())):
+            raise RuntimeError("The Smart PianoSoft utility is missing from the release UI.")
+        decoder_action = getattr(window, "utilitiesDisklavierWavAction", None)
+        if decoder_action is None or decoder_action not in window.utilitiesMenu.actions():
+            raise RuntimeError("The Disklavier WAV Player is missing from the release UI.")
         settings_file = Path(window.settings.fileName()).resolve()
         if not settings_file.is_relative_to(settings_dir.resolve()):
             raise RuntimeError("The package check did not isolate application settings.")
@@ -102,7 +103,8 @@ def _check_ui(directory, state):
             raise RuntimeError("The main application window remained visible after Close.")
         window.settings.sync()
         return {"settings_file": str(settings_file), "window_shown_and_closed": True,
-                "smart_pianosoft_utility_hidden": True}
+                "smart_pianosoft_utility_available": True,
+                "disklavier_wav_player_available": True}
     finally:
         window.deleteLater()
         application.sendPostedEvents(None, QEvent.DeferredDelete)
@@ -287,6 +289,7 @@ def _check_smart_pianosoft(directory, state):
     from .smart_pianosoft_dialog import SmartPianoSoftDialog
     from .smart_pianosoft_sync import _envelope
     from .smart_pianosoft_workflow import prepare_album
+    from .disklavier_decoder import decode_disklavier_wav
     from .floppy_image import DISK_FORMAT_BY_KEY, FloppyImageSession, create_floppy_images_from_files
     from .main_window import MidiTitleWindow
 
@@ -294,6 +297,9 @@ def _check_smart_pianosoft(directory, state):
     state["application"] = application
     settings = QSettings(str(directory / "settings" / "smart-pianosoft.ini"), QSettings.IniFormat)
     settings.setFallbacksEnabled(False)
+    # This unattended check uses only original synthetic media. Acknowledge the
+    # notice in its isolated settings; dedicated UI tests cover first-use behavior.
+    settings.setValue(MidiTitleWindow.SETTING_YAMAHA_PERSONAL_USE_AGREED, True)
     source = directory / "Synthetic Smart PianoSoft source"
     source.mkdir()
     times = np.arange(14 * 44100) / 44100
@@ -420,6 +426,26 @@ def _check_smart_pianosoft(directory, state):
         if (len(frames) != len(pcm) or not np.array_equal(frames[:, 0], mono)
                 or not np.any(frames[:, 1]) or np.array_equal(frames[:, 0], frames[:, 1])):
             raise RuntimeError("Smart PianoSoft encoded music/control channels are invalid.")
+        recovered_midi = directory / "Decoded package phrase.mid"
+        recovered_audio = directory / "Decoded package accompaniment.wav"
+        decode_disklavier_wav(encoded_path, recovered_midi, recovered_audio)
+        elapsed = 0.0
+        recovered_notes = []
+        for message in mido.MidiFile(recovered_midi):
+            elapsed += message.time
+            if message.type in {"note_on", "note_off"}:
+                recovered_notes.append((message.type, message.note, elapsed))
+        if (len(recovered_notes) != 2
+                or [event[:2] for event in recovered_notes] != [("note_on", 60), ("note_off", 60)]
+                or abs(recovered_notes[0][2] - 2.5) > .02
+                or abs(recovered_notes[1][2] - 3.5) > .02):
+            raise RuntimeError("The encoded WAV did not decode to the original piano phrase and timing.")
+        with wave.open(str(recovered_audio), "rb") as recovered:
+            if recovered.getnchannels() != 1:
+                raise RuntimeError("Decoded accompaniment must exclude the control channel.")
+            recovered.setpos(round(result["encoding"]["audio_preroll_seconds"] * 44100))
+            if not np.array_equal(np.frombuffer(recovered.readframes(len(mono)), dtype="<i2"), mono):
+                raise RuntimeError("Decoded accompaniment differs from the encoded music channel.")
         if _sha256(offline_image) != original_image:
             raise RuntimeError("Smart PianoSoft preparation changed the original source image.")
         if not dialog.close():
@@ -436,6 +462,7 @@ def _check_smart_pianosoft(directory, state):
                 "original_hashes": originals, "audio_sha256": original_audio,
                 "originals_preserved": True, "confidence": alignment["confidence"],
                 "encoded_wav": str(encoded_path), "encoded_sha256": _sha256(encoded_path),
+                "decoded_piano_and_accompaniment_verified": True,
                 "numpy_version": np.__version__, "hardware_verified": False}
     finally:
         if offline_image.exists():
@@ -462,8 +489,8 @@ def _check_smart_pianosoft(directory, state):
 
 
 def run_package_smoke(output_directory, *, include_smart_pianosoft=False):
-    """Run release acceptance, optionally adding the retained experimental check."""
-    case_names = CASE_NAMES + (OPTIONAL_CASE_NAMES if include_smart_pianosoft else ())
+    """Run release acceptance; the former Smart opt-in remains accepted for compatibility."""
+    case_names = CASE_NAMES
     directory = Path(output_directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     report = {

@@ -25,6 +25,7 @@ import wave
 
 from .floppy_image import (
     DISK_FORMAT_BY_SIZE, FloppyDriveInfo, FloppyImageError, FloppyImageSession,
+    GreaseweazleFloppySource,
     FloppyOperationCancelled, _terminate_process,
 )
 from .subprocess_utils import windows_subprocess_kwargs
@@ -143,7 +144,7 @@ def _run_command(args, *, timeout, cancel=None, progress=None, output=None, tota
                     except FileNotFoundError:
                         completed = 0
                     _progress(progress, min(completed, total), total,
-                              "Reading audio CD with secure error correction…", cancel)
+                              "Reading with secure error correction…", cancel)
                 time.sleep(0.1)
             _check_cancel(cancel)
             log.seek(0)
@@ -263,28 +264,31 @@ def rip_cd_track(device, track, destination, cancel=None, progress=None):
         )
     destination = _new_destination(destination)
     identity = _device_identity(device)
+    total = track.sectors * 2352
+    _progress(progress, 0, total, "Checking CD track list…", cancel)
     toc = read_cd_toc(device, cancel=cancel)
     if track not in toc:
         raise SmartPianoSoftMediaError("The audio CD changed. Read its track list again.")
     descriptor, temporary = tempfile.mkstemp(prefix=".aps_cd_", suffix=".wav", dir=destination.parent)
     os.close(descriptor)
     try:
-        total = track.sectors * 2352
-        _progress(progress, 0, total, f"Reading CD track {track.number}…", cancel)
+        _progress(progress, 0, total, "Reading with secure error correction…", cancel)
         _run_command(
             [_cdparanoia(), "-w", "-X", "-z", "-d", device, str(track.number), temporary],
             timeout=max(180.0, min(3600.0, track.duration_seconds * 12)),
             cancel=cancel, progress=progress, output=temporary, total=total,
         )
+        _progress(progress, total, total, "Checking WAV format and length…", cancel)
         _validate_cd_wav(temporary, track, cancel)
+        _progress(progress, total, total, "Checking CD track list…", cancel)
         if _device_identity(device) != identity or read_cd_toc(device, cancel=cancel) != toc:
             raise SmartPianoSoftMediaError("The audio CD changed during ripping; its output was discarded.")
-        _check_cancel(cancel)
+        _progress(progress, total, total, "Saving audio track…", cancel)
         # Windows requires write access for fsync; preserve the validated bytes.
         with open(temporary, "r+b") as handle:
             os.fsync(handle.fileno())
         _publish_new_file(temporary, destination, cancel)
-        _progress(progress, total, total, f"CD track {track.number} read and verified.")
+        _progress(progress, total, total, "Audio track saved.")
         return destination
     finally:
         try:
@@ -361,7 +365,12 @@ def _copy_folder(source, destination, cancel=None, progress=None):
 
 
 def _copy_session(source, destination, cancel=None, progress=None):
-    loader = FloppyImageSession.load_floppy if isinstance(source, FloppyDriveInfo) else FloppyImageSession.load
+    if isinstance(source, GreaseweazleFloppySource):
+        loader = FloppyImageSession.load_greaseweazle
+    elif isinstance(source, FloppyDriveInfo):
+        loader = FloppyImageSession.load_floppy
+    else:
+        loader = FloppyImageSession.load
     session = loader(source, cancel_callback=cancel, progress_callback=progress)
     try:
         entries = [entry for entry in session.list_entries().entries
@@ -377,7 +386,7 @@ def _copy_session(source, destination, cancel=None, progress=None):
             _progress(progress, index, len(entries), f"Extracting {entry.name}…", cancel)
             extracted = Path(session.extract_file(entry.path))
             _copy_checked(extracted, destination.joinpath(*relative.parts), cancel)
-        if not isinstance(source, FloppyDriveInfo):
+        if not isinstance(source, (FloppyDriveInfo, GreaseweazleFloppySource)):
             session._assert_source_unchanged()
     finally:
         session.cleanup()
@@ -400,7 +409,7 @@ def _helper_command(source, destination):
 
 
 def read_floppy_source(source, destination, cancel=None, progress=None):
-    """Snapshot unchanged catalog/MIDI bytes from one album folder, image, or USB floppy.
+    """Snapshot unchanged catalog/MIDI bytes from one folder, image, or floppy.
 
     Album folders are intentionally non-recursive. Existing long MIDI names
     remain intact for the caller's catalog/name reconciliation. No repair or
@@ -409,16 +418,21 @@ def read_floppy_source(source, destination, cancel=None, progress=None):
     """
     cancel = _cancel_callback(cancel)
     _check_cancel(cancel)
-    path = Path(source.path if isinstance(source, FloppyDriveInfo) else source)
-    physical = isinstance(source, FloppyDriveInfo) or stat.S_ISBLK(path.stat().st_mode)
+    greaseweazle = isinstance(source, GreaseweazleFloppySource)
+    path = None if greaseweazle else Path(source.path if isinstance(source, FloppyDriveInfo) else source)
+    physical = not greaseweazle and (isinstance(source, FloppyDriveInfo) or stat.S_ISBLK(path.stat().st_mode))
     destination = Path(os.path.abspath(os.fspath(destination)))
-    if path.is_dir() and destination.resolve().is_relative_to(path.resolve()):
+    if path is not None and path.is_dir() and destination.resolve().is_relative_to(path.resolve()):
         raise SmartPianoSoftMediaError("The snapshot destination must be outside its source folder.")
     destination = _new_destination(destination)
     with tempfile.TemporaryDirectory(prefix=".aps_source_", dir=destination.parent) as temporary:
         snapshot = Path(temporary) / "snapshot"
         snapshot.mkdir()
-        if physical:
+        if greaseweazle:
+            # The regular read backend owns the cancellable Greaseweazle
+            # process and repairs only its temporary working image.
+            _copy_session(source, snapshot, cancel, progress)
+        elif physical:
             _linux_required()
             identity = _device_identity(path)
             info = _floppy_info(source)

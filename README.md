@@ -98,6 +98,11 @@ to stage the conversions required by your piano.
   create the short DOS 8.3 filenames required by older hardware.
 - **Playback compatibility:** optionally merge instruments onto one piano
   channel, adjust pedals, or remove Yamaha XF metadata.
+- **Smart PianoSoft (Beta):** pair a Smart floppy with its companion CD or
+  existing WAV tracks and export one combined Disklavier WAV per song.
+  Recognized Smart disks offer to open the dialog automatically. See
+  [Smart PianoSoft preparation](docs/playback-and-audio.md#smart-pianosoft-beta)
+  for CD-reading requirements and playback limits.
 
 Review the proposed changes before saving. Conversion reports compare notes,
 duration, channels, pedals, titles, and removed metadata. See
@@ -124,6 +129,17 @@ Open **Utilities → File Inspection...** to view notes on a piano roll and list
 through your computer or a connected MIDI device. Preview mix and tempo changes
 leave the saved song unchanged. The dialog also offers conversion and piano-merge
 buttons, which stage edits for saving.
+PDISK.MNG and PSONG.MNG catalogs have graphical album and song-table views.
+Use **Apply album title** or **Apply song titles** to copy their metadata into
+the current list. Dropping catalogs together with their MIDI files applies
+them automatically. Song-title changes remain staged until Save and can be
+reverted with Undo. E-SEQ conversion omits these MIDI companion catalogs from
+the output while preserving the original files.
+
+Use **Utilities → Disklavier WAV Player...** to decode a completed Disklavier
+WAV and hear its recovered piano performance, alone or with the accompaniment.
+The player provides listening and timing checks without offering MIDI export
+in normal use.
 
 Use **Utilities → Render Audio...** to create WAV or MP3 copies with a SoundFont.
 The [playback and audio guide](docs/playback-and-audio.md) explains preview,
@@ -184,6 +200,7 @@ app reports a missing tool.
 | Use Greaseweazle hardware, convert HFE images, or capture magnetic disk signals | The Greaseweazle CLI (`gw`), plus hardware for physical disks. |
 | Preview with a SoundFont or render audio | FluidSynth and a compatible SoundFont. Neither is bundled by default; basic piano preview does not need FluidSynth. |
 | Create MP3 files | LAME, in addition to the audio-rendering tools above. |
+| Rip a matching Smart PianoSoft audio CD | Linux, an audio-CD drive, and `cdparanoia` (bundled in standard AppImages). Windows supports pairing existing WAV files. |
 | Play through a MIDI device | A connected MIDI device. Source installations also need `python-rtmidi`; release builds include it. |
 | Read or write a physical floppy | A compatible drive and operating-system permission to access it. |
 

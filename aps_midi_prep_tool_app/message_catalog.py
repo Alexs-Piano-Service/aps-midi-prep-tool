@@ -8,6 +8,8 @@ layer instead of being embedded directly at every call site.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from .about_admin_translations import ABOUT_ADMIN_MESSAGES
+from .activity_translations import ACTIVITY_MESSAGES
 from .pending_changes_translations import PENDING_CHANGE_MESSAGES
 from .review_prompt_translations import REVIEW_PROMPT_MESSAGES
 from .recovery_delivery_translations import RECOVERY_DELIVERY_TRANSLATIONS
@@ -22,9 +24,12 @@ from .write_safety_translations import WRITE_SAFETY_TRANSLATIONS
 from .piano_overlap_translations import PIANO_OVERLAP_TRANSLATIONS
 from .boot_sector_translations import BOOT_SECTOR_TRANSLATIONS
 from .window_menu_translations import WINDOW_MENU_TRANSLATIONS
+from .output_naming_translations import OUTPUT_NAMING_MESSAGES
 from .update_translations import UPDATE_MESSAGES
 from .smart_pianosoft_translations import SMART_PIANOSOFT_MESSAGES
 from .logical_capture_translations import LOGICAL_CAPTURE_TRANSLATIONS
+from .catalog_inspection_translations import CATALOG_INSPECTION_TRANSLATIONS
+from .disklavier_decoder_translations import DISKLAVIER_DECODER_MESSAGES
 
 from .bulgarian_translations import (
     BULGARIAN_MESSAGE_TRANSLATIONS,
@@ -3055,6 +3060,14 @@ MESSAGES.update(REVIEW_PROMPT_MESSAGES)
 MESSAGES.update(MARKIV_BACKUP_MESSAGES)
 MESSAGES.update(UPDATE_MESSAGES)
 MESSAGES.update(SMART_PIANOSOFT_MESSAGES)
+TEXT_TO_MESSAGE_ID.update({
+    copies["en"]: key for key, copies in SMART_PIANOSOFT_MESSAGES.items()
+    if key.startswith("sps.cd_")
+})
+MESSAGES.update(DISKLAVIER_DECODER_MESSAGES)
+MESSAGES.update(OUTPUT_NAMING_MESSAGES)
+MESSAGES.update(ABOUT_ADMIN_MESSAGES)
+MESSAGES.update(ACTIVITY_MESSAGES)
 MESSAGES["startup_config.error"] = {
     "en": "The startup configuration could not be loaded. APS will use its saved settings. Correct the file and restart APS to try again.",
     "es": "No se pudo cargar la configuración inicial. APS usará sus ajustes guardados. Corrija el archivo y reinicie APS para volver a intentarlo.",
@@ -3086,6 +3099,7 @@ COMMON_TEXT_TRANSLATIONS.update(PIANO_OVERLAP_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(BOOT_SECTOR_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(WINDOW_MENU_TRANSLATIONS)
 COMMON_TEXT_TRANSLATIONS.update(LOGICAL_CAPTURE_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(CATALOG_INSPECTION_TRANSLATIONS)
 
 
 def tr(message_id, language_code=None, **kwargs):

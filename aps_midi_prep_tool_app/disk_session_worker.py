@@ -2,11 +2,14 @@ import threading
 
 from PySide6.QtCore import QThread, Signal
 
+from .yamaha_consent import YamahaConsentRequest, session_requires_yamaha_consent
+
 from .bulk_extraction import bulk_extract_images
 from .emulator_image_builder import build_emulator_disk_images
 from .floppy_image import (
     BlankDiskImageError,
     FloppyImageSession,
+    FloppyImageError,
     FloppyCaptureReadError,
     FloppyOperationCancelled,
     GreaseweazleConversionError,
@@ -14,21 +17,82 @@ from .floppy_image import (
     capture_logical_floppy_image,
     capture_greaseweazle_floppy_image,
     convert_greaseweazle_image_file,
+    image_extension,
+    RAW_IMAGE_EXTENSIONS,
 )
 
 
 class _CancellableDiskWorker(QThread):
     progressChanged = Signal(int, int, str)
+    yamahaConsentRequested = Signal(object)
     operationCancelled = Signal(str)
     CANCELLED_MESSAGE = "Operation cancelled."
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cancel_was_requested = False
+        self.yamaha_consent_required = False
+        self._yamaha_consent_accepted = False
+        self._yamaha_consent_request = None
 
     def cancel(self):
         self._cancel_was_requested = True
         self.requestInterruption()
+        request = self._yamaha_consent_request
+        if request is not None:
+            request.resolve(False)
+
+    def _request_yamaha_consent(self):
+        self._raise_if_cancelled()
+        if not self.yamaha_consent_required or self._yamaha_consent_accepted:
+            return
+        request = self._yamaha_consent_request = YamahaConsentRequest()
+        try:
+            self.yamahaConsentRequested.emit(request)
+            while not request.wait(.05):
+                self._raise_if_cancelled()
+            if not request.approved:
+                self.cancel()
+            self._raise_if_cancelled()
+            self._yamaha_consent_accepted = True
+        finally:
+            if self._cancel_requested():
+                request.resolve(False)
+            self._yamaha_consent_request = None
+
+    def _confirm_yamaha_session(self, session, listing):
+        if self.yamaha_consent_required and session_requires_yamaha_consent(session, listing):
+            self._request_yamaha_consent()
+        session._yamaha_consent_granted = not self.yamaha_consent_required or self._yamaha_consent_accepted
+
+    def _confirm_yamaha_capture(self, path, sector_map):
+        """Pause before publishing known protected or Smart captured media."""
+        self._raise_if_cancelled()
+        if not self.yamaha_consent_required or self._yamaha_consent_accepted:
+            return
+        if (sector_map or {}).get("expected_yamaha_protection", 0):
+            self._request_yamaha_consent()
+            return
+        # Raw bytes are already acquired; inspect only a disposable working
+        # copy. Unknown flux containers need their decoded sector map instead
+        # of another physical read or a speculative format conversion.
+        if image_extension(path) not in RAW_IMAGE_EXTENSIONS:
+            return
+        session = None
+        try:
+            session = FloppyImageSession.load(path, cancel_callback=self._cancel_requested)
+            if (sector_map or {}).get("boot_sector_reconstructed", False):
+                session.source_boot_sector_repaired = True
+            self._confirm_yamaha_session(session, session.list_entries())
+        except FloppyOperationCancelled:
+            raise
+        except (FloppyImageError, OSError, ValueError):
+            # Exact captures are allowed to preserve unformatted/non-FAT data;
+            # failed classification does not authorize inventing Yamaha data.
+            pass
+        finally:
+            if session is not None:
+                session.cleanup()
 
     def _cancel_requested(self):
         return self._cancel_was_requested or self.isInterruptionRequested()
@@ -39,6 +103,8 @@ class _CancellableDiskWorker(QThread):
 
     def _emit_progress(self, step, total, message):
         self._raise_if_cancelled()
+        if "yamaha copy protection?" in str(message).casefold():
+            self._request_yamaha_consent()
         self.progressChanged.emit(int(step or 0), int(total or 0), str(message or ""))
         self._raise_if_cancelled()
 
@@ -109,6 +175,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                     progress_callback=self._emit_progress,
                     cancel_callback=self._cancel_requested,
                 )
+                self._confirm_yamaha_capture(capture.capture_path, capture.sector_map)
                 if self.final_message:
                     self._emit_progress(self.final_total, self.final_total, self.final_message)
                 self._raise_if_cancelled()
@@ -140,6 +207,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
 
             self._raise_if_cancelled()
             listing = session.list_entries()
+            self._confirm_yamaha_session(session, listing)
             self._raise_if_cancelled()
             self.sessionLoaded.emit(session, listing)
             session = None
@@ -407,13 +475,15 @@ class DiskImageCaptureWorker(_CancellableDiskWorker):
     captureFailed = Signal(str)
     captureRecoveryAvailable = Signal(object)
 
-    def __init__(self, source_kind, source, output_path, *, disk_format=None, exact_failure=None, parent=None):
+    def __init__(self, source_kind, source, output_path, *, disk_format=None, exact_failure=None,
+                 random_suffixes=True, parent=None):
         super().__init__(parent)
         self.source_kind = source_kind
         self.source = source
         self.output_path = output_path
         self.disk_format = disk_format
         self.exact_failure = exact_failure
+        self.random_suffixes = bool(random_suffixes)
 
     def run(self):
         try:
@@ -424,12 +494,15 @@ class DiskImageCaptureWorker(_CancellableDiskWorker):
                     disk_format=self.disk_format,
                     progress_callback=self._emit_progress,
                     cancel_callback=self._cancel_requested,
+                    before_publish=self._confirm_yamaha_capture,
                 )
             elif self.source_kind == "floppy_usb_recovery":
                 recovery_result = capture_logical_floppy_image(
                     self.source, self.output_path, disk_format=self.disk_format,
                     exact_failure=self.exact_failure,
+                    random_suffixes=self.random_suffixes,
                     progress_callback=self._emit_progress, cancel_callback=self._cancel_requested,
+                    before_publish=self._confirm_yamaha_capture,
                 )
                 output_path = recovery_result["output_path"]
             elif self.source_kind == "floppy_gw":
@@ -438,6 +511,7 @@ class DiskImageCaptureWorker(_CancellableDiskWorker):
                     self.output_path,
                     progress_callback=self._emit_progress,
                     cancel_callback=self._cancel_requested,
+                    before_publish=self._confirm_yamaha_capture,
                 )
                 if isinstance(capture_result, tuple):
                     output_path, sector_map = capture_result
@@ -445,12 +519,14 @@ class DiskImageCaptureWorker(_CancellableDiskWorker):
                     output_path = capture_result
                     sector_map = {}
             elif self.source_kind == "image_convert":
+                self._confirm_yamaha_capture(self.source, {})
                 output_path, sector_map = convert_greaseweazle_image_file(
                     self.source,
                     self.output_path,
                     self.disk_format,
                     progress_callback=self._emit_progress,
                     cancel_callback=self._cancel_requested,
+                    before_publish=self._confirm_yamaha_capture,
                 )
             else:
                 raise ValueError(f"Unsupported disk image capture source kind: {self.source_kind}")
@@ -524,6 +600,7 @@ class DiskSessionRecoveryWorker(_CancellableDiskWorker):
                 self._emit_progress(self.final_total, self.final_total, self.final_message)
             self._raise_if_cancelled()
             listing = session.list_entries()
+            self._confirm_yamaha_session(session, listing)
             self._raise_if_cancelled()
             self.sessionRecovered.emit(session, listing)
             session = None

@@ -1188,7 +1188,16 @@ def _run_streaming_command(args, error_prefix, *, line_callback=None, env=None, 
             if line_callback is not None:
                 line_callback(line)
             _raise_if_cancelled(cancel_callback)
-        returncode = process.wait()
+        # EOF only means the helper closed its output pipe. It can still be
+        # waiting on a floppy or cleaning up, so cancellation must remain live
+        # until the process exits as well.
+        while True:
+            _raise_if_cancelled(cancel_callback)
+            try:
+                returncode = process.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                continue
     except FloppyOperationCancelled:
         _terminate_process(process)
         raise
@@ -4489,6 +4498,8 @@ def capture_floppy_drive_image(
     disk_format=None,
     progress_callback=None,
     cancel_callback=None,
+    *,
+    before_publish=None,
 ):
     """Copy a physical floppy to an image without opening/scanning it."""
     if not isinstance(drive_info, FloppyDriveInfo):
@@ -4539,6 +4550,10 @@ def capture_floppy_drive_image(
                 **dict(getattr(exc, "read_diagnostics", {}) or {}),
             }) from exc
         _raise_if_cancelled(cancel_callback)
+
+        if before_publish is not None:
+            before_publish(raw_temp_path, {})
+            _raise_if_cancelled(cancel_callback)
 
         if raw_output:
             _notify_progress(progress_callback, 95, 100, "Saving floppy image...")
@@ -4621,10 +4636,11 @@ def _guard_logical_capture_destination(drive_info, output_path):
 
 def capture_logical_floppy_image(
     drive_info, output_path, *, disk_format=None, exact_failure=None,
-    progress_callback=None, cancel_callback=None,
+    progress_callback=None, cancel_callback=None, before_publish=None, random_suffixes=True,
 ):
     """Explicitly reconstruct a readable IMG; never represent it as raw acquisition."""
     from .helpers.atomic_file import publish_new_file
+    from .helpers.output_names import output_path_candidates
 
     if not isinstance(drive_info, FloppyDriveInfo):
         raise FloppyImageError("Invalid floppy drive selection.")
@@ -4633,7 +4649,7 @@ def capture_logical_floppy_image(
     _guard_logical_capture_destination(drive_info, output_path)
     output_path = os.path.abspath(output_path)
     stage = _capture_temp_output_path(output_path, suffix=".img")
-    report_path = f"{output_path}.recovery-{uuid.uuid4().hex[:8]}.json"
+    report_path = ""
     report_stage = ""
     report_published = False
     image_published = False
@@ -4675,6 +4691,11 @@ def capture_logical_floppy_image(
                 boot_sector_reconstructed=session.source_boot_sector_repaired,
             )
         _raise_if_cancelled(cancel_callback)
+        if before_publish is not None:
+            before_publish(stage, {
+                "boot_sector_reconstructed": diagnostics.get("boot_sector_reconstructed", False),
+            })
+            _raise_if_cancelled(cancel_callback)
         diagnostics.update(
             output_path=output_path, files_listed=sum(not entry.is_directory for entry in listing.entries),
             image_bytes=os.path.getsize(stage), image_sha256=floppy_save_recovery.digest(stage),
@@ -4684,15 +4705,28 @@ def capture_logical_floppy_image(
                               and diagnostics.get("file_map_complete") else "incomplete_or_uncertain"),
             limitation="Logical reconstruction: free/unreadable sectors may be omitted or zero-filled; metadata may be repaired. This is not a bit-exact or archival capture.",
         )
-        report_stage = _capture_temp_output_path(report_path, suffix=".json")
+        report_stage = _capture_temp_output_path(output_path, suffix=".json")
         with open(report_stage, "w", encoding="utf-8") as handle:
             json.dump(diagnostics, handle, indent=2, ensure_ascii=False)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         _notify_progress(progress_callback, 98, 100, "Saving logical recovery image and diagnostics...")
-        publish_new_file(report_stage, report_path, check_cancel=lambda: _raise_if_cancelled(cancel_callback))
-        report_published = True
+        for candidate in output_path_candidates(
+            os.path.dirname(output_path), os.path.basename(output_path) + ".recovery",
+            suffix=".json", random_suffixes=random_suffixes,
+        ):
+            try:
+                publish_new_file(report_stage, candidate, check_cancel=lambda: _raise_if_cancelled(cancel_callback))
+            except FileExistsError:
+                # A collision may appear after the name is chosen. Skip it
+                # without overwriting a report, directory, or dangling link.
+                if not os.path.lexists(candidate):
+                    raise
+                continue
+            report_path = os.fspath(candidate)
+            report_published = True
+            break
         _raise_if_cancelled(cancel_callback)
         _finish_capture_output(stage, output_path)
         image_published = True
@@ -4714,6 +4748,8 @@ def capture_greaseweazle_floppy_image(
     output_path,
     progress_callback=None,
     cancel_callback=None,
+    *,
+    before_publish=None,
 ):
     """Read a Greaseweazle floppy image without converting/opening it afterward."""
     if not isinstance(gw_source, GreaseweazleFloppySource):
@@ -4750,6 +4786,9 @@ def capture_greaseweazle_floppy_image(
             cancel_callback=cancel_callback,
         )
         _raise_if_cancelled(cancel_callback)
+        if before_publish is not None:
+            before_publish(temp_path, sector_map)
+            _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 95, 100, f"Saving {capture_kind}...")
         final_path = _finish_capture_output(temp_path, output_path)
         temp_path = ""
@@ -4771,6 +4810,7 @@ def convert_greaseweazle_image_file(
     cancel_callback=None,
     *,
     allow_sector_failures=True,
+    before_publish=None,
 ):
     if not isinstance(disk_format, DiskFormat):
         raise FloppyImageError("Invalid Greaseweazle conversion format.")
@@ -4796,6 +4836,9 @@ def convert_greaseweazle_image_file(
         )
         sector_map = _parse_gw_sector_map(conversion_output, disk_format)
         _raise_if_cancelled(cancel_callback)
+        if before_publish is not None:
+            before_publish(temp_path, sector_map)
+            _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 95, 100, "Saving converted image...")
         final_path = _finish_capture_output(temp_path, output_path)
         temp_path = ""
@@ -8199,14 +8242,23 @@ def _floppy_required_file_sector_runs(file_chains, geometry):
     return [(start * sector_size, (end - start + 1) * sector_size) for start, end in runs]
 
 
+USB_FLOPPY_720K_READ_GUIDANCE = (
+    "If this is a 720 KB (2DD) floppy, check that your USB floppy drive explicitly supports "
+    "reading 720 KB disks. Some drives only support 1.44 MB (2HD) disks. If possible, try a "
+    "known-good 720 KB disk or a drive known to read 720 KB disks."
+)
+
+
 def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None, *, diagnostics=None, allow_incomplete=False):
+    # Keep read evidence even when the caller does not request a diagnostic report.
+    # A reported capacity and zero-filled failed reads cannot establish a format.
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics["selected_capacity_bytes"] = int(size_bytes or 0)
     try:
         device = _open_block_device_for_read(device_path)
     except FloppyImageError as exc:
         raise FastFloppyReadError(str(exc), fallback_allowed=False) from exc
-    if diagnostics is not None:
-        diagnostics["selected_capacity_bytes"] = int(size_bytes or 0)
-        device = _DiagnosticReadDevice(device, diagnostics)
+    device = _DiagnosticReadDevice(device, diagnostics)
     try:
         fallback_allowed = False
         try:
@@ -8304,8 +8356,16 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                         diagnostics["layout_probe"] = {"recognized": False}
                     if candidate_root_failure is not None:
                         raise candidate_root_failure
+                    if diagnostics.get("failed_read_calls"):
+                        first_error = diagnostics.get("first_failed_read", {}).get("message", "")
+                        raise FastFloppyReadError(
+                            "The disk could not be read well enough to determine its format."
+                            + (f"\n\nDetails: {first_error}" if first_error else "")
+                            + f"\n\n{USB_FLOPPY_720K_READ_GUIDANCE}",
+                            fallback_allowed=True,
+                        )
                     raise FastFloppyReadError(
-                        "Fast floppy read only supports valid FAT12 disks or Yamaha protected FAT12 disks. "
+                        "Fast floppy read obtained sector data but did not recognize a supported FAT12 layout. "
                         "If this is a non-FAT disk or a difficult original, try reading it with Greaseweazle.",
                         fallback_allowed=True,
                     )
@@ -9859,6 +9919,32 @@ def _usb_recovery_no_data_message(diagnostics):
     selected_label = str(details.get("selected_format_label") or "the selected format")
     detected_label = str(details.get("detected_format_label") or "another disk geometry")
 
+    stop_reason = str(details.get("stop_reason") or "")
+    stop_note = ""
+    if stop_reason == "soft_deadline":
+        if details.get("read_deadline_mode") == "windows_overlapped_cancel":
+            stop_note = (
+                " Recovery reached its five-minute read deadline and requested cancellation "
+                "of the pending Windows device read."
+            )
+        else:
+            stop_note = (
+                " Recovery stopped at its five-minute soft deadline; a single synchronous "
+                "operating-system read can finish after that limit."
+            )
+    elif stop_reason in {"all_sectors_bad", "mostly_bad_media", "consecutive_bad_sectors"}:
+        stop_note = " Recovery stopped early because the sampled media was all or mostly unreadable."
+
+    if readable == 0:
+        return (
+            "The disk could not be read. Recovery obtained no readable sectors, so its format "
+            "could not be determined. "
+            f"Of {expected} sectors, {bad} were unreadable, {unresolved} attempted sectors "
+            f"remained unresolved, and {unattempted} were not attempted."
+            + stop_note
+            + f"\n\n{USB_FLOPPY_720K_READ_GUIDANCE}"
+        )
+
     # A credible geometry disagreement is more actionable than the downstream
     # absence of carved files, so it deliberately takes precedence here.
     if details.get("geometry_mismatch"):
@@ -9878,25 +9964,6 @@ def _usb_recovery_no_data_message(diagnostics):
         )
 
     if expected <= 0 or readable_ratio < 0.90:
-        stop_reason = str(details.get("stop_reason") or "")
-        stop_note = ""
-        if stop_reason == "soft_deadline":
-            if details.get("read_deadline_mode") == "windows_overlapped_cancel":
-                stop_note = (
-                    " Recovery reached its five-minute read deadline and requested cancellation "
-                    "of the pending Windows device read."
-                )
-            else:
-                stop_note = (
-                    " Recovery stopped at its five-minute soft deadline; a single synchronous "
-                    "operating-system read can finish after that limit."
-                )
-        elif stop_reason in {
-            "all_sectors_bad",
-            "mostly_bad_media",
-            "consecutive_bad_sectors",
-        }:
-            stop_note = " Recovery stopped early because the sampled media was all or mostly unreadable."
         return (
             f"Recovery could read only {readable} of {expected} sectors ({readable_percent}); "
             f"{bad} were unreadable, {unresolved} attempted sectors remained unresolved, and "
@@ -10875,10 +10942,17 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             except FastFloppyReadError as fast_exc:
                 acquisition["first_error"] = _read_failure_record(fast_exc)
                 if not fast_exc.fallback_allowed:
+                    recognized = acquisition["fast_path"].get("layout_probe", {}).get("recognized")
+                    summary = (
+                        "Fast floppy read recognized this disk but could not finish without losing data."
+                        if recognized else
+                        "The disk could not be read well enough to determine its format."
+                    )
                     raise FloppyImageError(
-                        "Fast floppy read recognized this disk but could not finish without losing data.\n\n"
+                        f"{summary}\n\n"
                         f"Details: {fast_exc}\n\n"
                         "Use Disk > Read Floppy... with Start in recovery mode for a slower full-disk recovery pass."
+                        + (f"\n\n{USB_FLOPPY_720K_READ_GUIDANCE}" if not recognized else "")
                     ) from fast_exc
                 acquisition["fallback_reason"] = str(fast_exc)
                 acquisition["raw_fallback"] = {}
@@ -10887,7 +10961,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     progress_callback,
                     0,
                     100,
-                    f"Fast floppy read unavailable: {fast_exc} Reading full floppy image from {drive_info.path}...",
+                    f"Fast floppy read unavailable: {fast_exc}\n\nReading full floppy image from {drive_info.path}...",
                 )
                 if os.name == "nt":
                     raw_data = _read_windows_block_device_bytes(
@@ -10990,6 +11064,16 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 acquisition["final_error"] = _read_failure_record(exc)
             exc.read_diagnostics = acquisition
             shutil.rmtree(temp_dir, ignore_errors=True)
+            if acquisition["stage"] == "raw_read" and isinstance(exc, FloppyImageError) and not isinstance(
+                exc, (FloppyOperationCancelled, FloppyWorkingCopyError, _FloppyReadStalled)
+            ):
+                error = FloppyImageError(
+                    "The disk could not be read completely.\n\n"
+                    f"Details: {exc}\n\n{USB_FLOPPY_720K_READ_GUIDANCE}"
+                )
+                # Preserve the original OS error and partial-read evidence in the report.
+                error.read_diagnostics = acquisition
+                raise error from exc
             raise
 
     @classmethod
@@ -12970,7 +13054,10 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             disk_format=self.disk_format,
         )
 
-    def write_image(self, source_img, output_path, output_ext, progress_callback=None, cancel_callback=None):
+    def write_image(
+        self, source_img, output_path, output_ext, progress_callback=None, cancel_callback=None,
+        *, verify_entire_image=False,
+    ):
         output_path = os.path.abspath(output_path)
         validate_output_path = lambda path: FloppyImageSession._assert_export_destination_unchanged(self, path)
         validate_output_path(output_path)
@@ -12988,7 +13075,12 @@ class FloppyImageSession(_WindowsFileSaveMixin):
             _raise_if_cancelled(cancel_callback)
             if output_ext.lower().lstrip(".") not in RAW_IMAGE_EXTENSIONS:
                 _notify_progress(progress_callback, 4, 5, "Verifying converted image contents...")
-                verify_image_payloads(
+                # A preserved Greaseweazle capture may intentionally lack a
+                # readable boot sector (Yamaha copy protection). Verify every
+                # captured sector instead of interpreting it as a repaired FAT
+                # filesystem. Edited delivery images still verify their files.
+                verify = verify_image_sectors if verify_entire_image else verify_image_payloads
+                verify(
                     temp_output, source_img, self.disk_format, cancel_callback=cancel_callback,
                 )
                 _raise_if_cancelled(cancel_callback)

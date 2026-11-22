@@ -4,15 +4,20 @@ from pathlib import Path
 import tempfile
 import threading
 
-from PySide6.QtCore import QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QThread, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMenu, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QStyle, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .floppy_image import (
+    DISK_FORMATS, FloppyDriveInfo, FloppyOperationCancelled, GreaseweazleDeviceInfo,
+    GreaseweazleFloppySource,
+)
 from .icon_utils import apply_window_icon
+from .helpers.output_names import random_output_suffixes_enabled
 from .message_catalog import normalize_language_code, tr, translate_text
 from .responsive_button_box import ResponsiveDialogButtonBox
 from .smart_pianosoft_workflow import LoadedAlbumSource, scan_album, scan_loaded_album, prepare_album
@@ -20,12 +25,11 @@ from .ui_utils import resize_dialog_to_screen
 
 
 class _WrappingLabel(QLabel):
-    """Keep wrapped text tall enough when a scroll bar narrows the viewport."""
+    """Use the actual wrapped height, without retaining a narrow size hint."""
 
     def _fit_text_height(self):
         if self.wordWrap():
-            self.setMinimumHeight(0)
-            self.setMinimumHeight(max(0, self.heightForWidth(self.width())))
+            self.setFixedHeight(max(0, self.heightForWidth(self.width())))
 
     def setText(self, text):
         super().setText(text)
@@ -36,20 +40,53 @@ class _WrappingLabel(QLabel):
         if event.size().width() != event.oldSize().width():
             self._fit_text_height()
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._fit_text_height()
+
 
 class SmartPianoSoftWorker(QThread):
     progressChanged = Signal(object)
+    consentRequested = Signal(object)
     succeeded = Signal(object)
     failed = Signal(object)
 
-    def __init__(self, task, parent=None):
+    def __init__(self, task, parent=None, *, require_consent=False):
         super().__init__(parent)
         self.task = task
         self.cancelled = threading.Event()
+        self.consent_granted = not require_consent
+
+    def _check_cancel(self):
+        if self.cancelled.is_set():
+            raise FloppyOperationCancelled("Smart PianoSoft preparation cancelled.")
+
+    def _progress(self, detail):
+        self._check_cancel()
+        smart_track = detail.get("phase") == "scan" and detail.get("completed", 0) > 0
+        protected_read = "yamaha copy protection?" in str(detail.get("message", "")).casefold()
+        if not self.consent_granted and (smart_track or protected_read):
+            from .yamaha_consent import YamahaConsentRequest
+
+            request = YamahaConsentRequest()
+            self.consentRequested.emit(request)
+            try:
+                while not request.wait(0.05):
+                    self._check_cancel()
+            finally:
+                if self.cancelled.is_set():
+                    request.resolve(False)
+            if not request.approved:
+                self.cancelled.set()
+            self._check_cancel()
+            self.consent_granted = True
+        self.progressChanged.emit(detail)
 
     def run(self):
         try:
-            result = self.task(self.cancelled, self.progressChanged.emit)
+            result = self.task(self.cancelled, self._progress)
+            self._check_cancel()
             self.succeeded.emit(result)
         except Exception as exc:
             self.failed.emit({"error": str(exc), "cancelled": self.cancelled.is_set(),
@@ -71,32 +108,44 @@ class SmartPianoSoftDialog(QDialog):
         self.album = None
         self.audio_paths = {}
         self.result_folder = None
+        self._completed_cd_device = None
         self._workspace = None
+        self._floppy_source = None
         self._closing = False
         self._operation = ""
         self._loaded_source = loaded_source
         self._using_loaded_source = loaded_source is not None
+        self._loaded_source_consent_granted = loaded_source is not None and bool(
+            getattr(getattr(parent, "image_session", None), "_yamaha_consent_granted", False)
+        )
+        self._source_consent_granted = self._loaded_source_consent_granted
         self._discover_after_scan = False
         self.setWindowTitle(self.text("action"))
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         self.setSizeGripEnabled(True)
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(8)
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setSpacing(6)
         description = self._label("description")
         layout.addWidget(description)
 
         self.options = QWidget()
         form = QFormLayout(self.options)
         form.setContentsMargins(0, 0, 0, 0)
+        form.setVerticalSpacing(6)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         source_text = (self.text("current_list_source", source=loaded_source.label)
                        if loaded_source is not None else str(settings.value("sps_source", "") or ""))
         self.source_edit = QLineEdit(source_text)
+        self.source_edit.setCursorPosition(0)
+        self.source_edit.setToolTip(source_text)
         self.source_edit.setReadOnly(self._using_loaded_source)
         self.source_edit.setPlaceholderText(self.text("source_hint"))
         self.source_edit.setObjectName("smartPianoSoftSource")
@@ -114,7 +163,7 @@ class SmartPianoSoftDialog(QDialog):
         menu.addAction(self.text("folder"), self.choose_folder)
         self.source_button.setMenu(menu)
         source_row.addWidget(self.source_button)
-        form.addRow(self._label("source"), source_row)
+        form.addRow(self._label("source", wrap=False), source_row)
 
         self.cd_combo = QComboBox()
         self.cd_combo.setObjectName("smartPianoSoftCD")
@@ -129,7 +178,7 @@ class SmartPianoSoftDialog(QDialog):
         cd_row = QHBoxLayout()
         cd_row.addWidget(self.cd_combo, 1)
         cd_row.addWidget(self.refresh_button)
-        form.addRow(self._label("cd"), cd_row)
+        form.addRow(self._label("cd", wrap=False), cd_row)
 
         self.output_edit = QLineEdit(str(settings.value("sps_output", "") or ""))
         self.output_edit.setObjectName("smartPianoSoftOutput")
@@ -139,7 +188,7 @@ class SmartPianoSoftDialog(QDialog):
         browse.setAutoDefault(False)
         browse.clicked.connect(self.choose_output)
         output_row.addWidget(browse)
-        form.addRow(self._label("output"), output_row)
+        form.addRow(self._label("output", wrap=False), output_row)
         # WrapLongRows can omit column spacing when deciding whether a field
         # fits. Keep that gap inside the label so it counts toward row width.
         label_gap = max(0, form.horizontalSpacing())
@@ -181,17 +230,23 @@ class SmartPianoSoftDialog(QDialog):
             self.pairing_buttons.addButton(button, QDialogButtonBox.ActionRole)
         layout.addWidget(self.pairing_buttons)
         note = self._label("format_note")
+        note.setToolTip(self.text("format_details"))
+        note.setAccessibleDescription(self.text("format_details"))
         layout.addWidget(note)
         self.status = self._label("ready")
+        self.status.hide()
         layout.addWidget(self.status)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
+        self.progress.hide()
         layout.addWidget(self.progress)
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
         self.details.setMaximumBlockCount(400)
         self.details.setMinimumHeight(self.fontMetrics().height() * 3)
         self.details.setMaximumHeight(115)
+        self.details.hide()
+        self.details.textChanged.connect(lambda: self.details.setVisible(bool(self.details.toPlainText())))
         layout.addWidget(self.details)
         self.scroll_area.setWidget(content)
         outer.addWidget(self.scroll_area, 1)
@@ -200,6 +255,11 @@ class SmartPianoSoftDialog(QDialog):
         self.open_button = QPushButton(self.text("open"))
         self.open_button.clicked.connect(self.open_output)
         self.start_button = QPushButton(self.text("start"))
+        self.start_button.setObjectName("smartPianoSoftStart")
+        self.start_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        start_font = self.start_button.font()
+        start_font.setBold(True)
+        self.start_button.setFont(start_font)
         self.start_button.setDefault(True)
         self.start_button.clicked.connect(self.start_preparation)
         self.cancel_button = QPushButton(translate_text("Close", self.language))
@@ -211,6 +271,8 @@ class SmartPianoSoftDialog(QDialog):
         self.buttons.addButton(self.cancel_button, QDialogButtonBox.RejectRole)
         outer.addWidget(self.buttons)
         self.source_edit.textChanged.connect(self.invalidate_scan)
+        self.source_edit.textChanged.connect(self.source_edit.setToolTip)
+        self.cd_combo.currentTextChanged.connect(self._update_controls)
         self.table.itemSelectionChanged.connect(self._update_controls)
         self._update_controls()
         resize_dialog_to_screen(self, width=940, height=700)
@@ -223,11 +285,12 @@ class SmartPianoSoftDialog(QDialog):
     def text(self, key, **values):
         return tr("sps." + key, self.language, **values)
 
-    def _label(self, key):
-        label = _WrappingLabel(self.text(key))
+    def _label(self, key, *, wrap=True):
+        label_type = _WrappingLabel if wrap else QLabel
+        label = label_type(self.text(key))
         label.setTextFormat(Qt.PlainText)
-        label.setWordWrap(True)
-        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        label.setWordWrap(wrap)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         return label
 
     @property
@@ -239,20 +302,36 @@ class SmartPianoSoftDialog(QDialog):
         self.options.setEnabled(not busy)
         self.scan_button.setEnabled(not busy)
         self.start_button.setEnabled(not busy)
+        cd_device = self._cd_device()
+        cd_selected = bool(cd_device)
+        restarting = cd_selected and cd_device == self._completed_cd_device
+        self.start_button.setText(self.text("restart" if restarting else "start" if cd_selected else "start_files"))
+        self.start_button.setIcon(self.style().standardIcon(
+            QStyle.SP_BrowserReload if restarting else QStyle.SP_MediaPlay,
+        ))
+        self.start_button.setToolTip(self.text("start_hint" if cd_selected else "start_files_hint"))
+        self.start_button.setAccessibleDescription(self.start_button.toolTip())
         self.table.setEnabled(not busy)
         selected = self.table.currentRow() >= 0 and self.album is not None
         self.pair_button.setEnabled(not busy and selected)
         self.automatic_button.setEnabled(not busy and selected)
         self.open_button.setEnabled(not busy and self.result_folder is not None)
+        self.open_button.setVisible(self.result_folder is not None)
         self.cancel_button.setText(translate_text("Cancel" if busy else "Close", self.language))
 
     def _start(self, operation, task):
         if self.is_busy or self._closing:
             return
         self._operation = operation
+        if operation != "discover":
+            self.status.show()
+        self.progress.show()
         self.progress.setRange(0, 0)
-        self.worker = SmartPianoSoftWorker(task, self)
+        require_consent = (operation != "discover" and not self._source_consent_granted
+                           and callable(getattr(self.parent(), "_show_yamaha_personal_use_notice", None)))
+        self.worker = SmartPianoSoftWorker(task, self, require_consent=require_consent)
         self.worker.progressChanged.connect(self._progress)
+        self.worker.consentRequested.connect(self._request_personal_use_consent)
         self.worker.succeeded.connect(self._success)
         self.worker.failed.connect(self._failure)
         self.worker.finished.connect(self._finished)
@@ -270,11 +349,14 @@ class SmartPianoSoftDialog(QDialog):
     def choose_floppy(self):
         from .disk_device_discovery import discover_floppy_devices
         from PySide6.QtWidgets import QInputDialog
-        result = discover_floppy_devices(self, include_greaseweazle=False,
+        if self.is_busy or self._closing:
+            return
+        result = discover_floppy_devices(self, include_greaseweazle=True,
                                         translate=lambda value, **kw: translate_text(value, self.language, **kw))
         if result is None:
             return
-        drives, _greaseweazles, issues = result
+        drives, greaseweazles, issues = result
+        drives = [*drives, *greaseweazles]
         for issue in issues:
             self.details.appendPlainText(issue)
         if not drives:
@@ -288,7 +370,61 @@ class SmartPianoSoftDialog(QDialog):
             if not accepted:
                 return
             selected = drives[labels.index(label)]
-        self._select_external_source(selected.path)
+        if isinstance(selected, GreaseweazleDeviceInfo):
+            selected = self._choose_greaseweazle_source(selected)
+            if selected is None:
+                return
+        self._select_external_source(selected)
+
+    def _choose_greaseweazle_source(self, device):
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle("Greaseweazle")
+        form = QFormLayout(dialog)
+        form.addRow(QLabel(device.display_name))
+        drive = QComboBox(dialog)
+        drive.setObjectName("smartPianoSoftGreaseweazleDrive")
+        drive.addItems(["A", "B", "0", "1", "2"])
+        saved_drive = str(self.settings.value("greaseweazle_drive", "A") or "A")
+        drive.setCurrentIndex(max(0, drive.findText(saved_drive)))
+        formats = QComboBox(dialog)
+        formats.setObjectName("smartPianoSoftGreaseweazleFormat")
+        for disk_format in DISK_FORMATS:
+            formats.addItem(disk_format.label, disk_format)
+        saved_format = str(self.settings.value("read_floppy_gw_format", "ibm.720") or "ibm.720")
+        formats.setCurrentIndex(next((i for i, item in enumerate(DISK_FORMATS) if item.key == saved_format), 0))
+        form.addRow(translate_text("Drive:", self.language), drive)
+        form.addRow(translate_text("Disk format:", self.language), formats)
+        spins = []
+        for label, setting, default in (("Read revs:", "read_floppy_gw_revs", 0),
+                                        ("Read retries:", "read_floppy_gw_retries", 3)):
+            spin = QSpinBox(dialog)
+            spin.setRange(0, 20)
+            spin.setValue(self.settings.value(setting, default, type=int))
+            if not default:
+                spin.setSpecialValueText(translate_text("CLI default", self.language))
+            form.addRow(translate_text(label, self.language), spin)
+            spins.append(spin)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.button(QDialogButtonBox.Ok).setText(translate_text("OK", self.language))
+        buttons.button(QDialogButtonBox.Cancel).setText(translate_text("Cancel", self.language))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        try:
+            if dialog.exec() != QDialog.Accepted:
+                return None
+            selected = GreaseweazleFloppySource(device.path, drive.currentText(), formats.currentData(),
+                                               revs=spins[0].value(), retries=spins[1].value())
+            for key, value in (("greaseweazle_device_path", selected.device_path),
+                               ("greaseweazle_drive", selected.drive),
+                               ("read_floppy_gw_format", selected.disk_format.key),
+                               ("read_floppy_gw_revs", selected.revs),
+                               ("read_floppy_gw_retries", selected.retries)):
+                self.settings.setValue(key, value)
+            return selected
+        finally:
+            dialog.deleteLater()
 
     def choose_image(self):
         filename, _ = QFileDialog.getOpenFileName(self, self.text("image"), self.source_edit.text(),
@@ -303,15 +439,21 @@ class SmartPianoSoftDialog(QDialog):
 
     def _select_external_source(self, source):
         self._using_loaded_source = False
-        self.source_edit.setReadOnly(False)
-        self.source_edit.setText(str(source))
+        self._source_consent_granted = False
+        self._floppy_source = source if isinstance(source, (FloppyDriveInfo, GreaseweazleFloppySource)) else None
+        self.source_edit.setReadOnly(self._floppy_source is not None)
+        self.source_edit.setText(source.display_name if self._floppy_source is not None else str(source))
+        self.source_edit.setCursorPosition(0)
 
     def use_current_list(self):
         if self.is_busy or self._closing or self._loaded_source is None:
             return
         self._using_loaded_source = True
+        self._source_consent_granted = self._loaded_source_consent_granted
+        self._floppy_source = None
         self.source_edit.setReadOnly(True)
         self.source_edit.setText(self.text("current_list_source", source=self._loaded_source.label))
+        self.source_edit.setCursorPosition(0)
         self.start_scan()
 
     def choose_output(self):
@@ -321,6 +463,7 @@ class SmartPianoSoftDialog(QDialog):
 
     def invalidate_scan(self):
         self.album = None
+        self._completed_cd_device = None
         self.audio_paths.clear()
         self.table.setRowCount(0)
         self.album_label.clear()
@@ -331,15 +474,20 @@ class SmartPianoSoftDialog(QDialog):
         if self._workspace is not None:
             self._workspace.cleanup()
         self._workspace = tempfile.TemporaryDirectory(prefix="aps-smart-pianosoft-")
+        self._source_consent_granted = self._using_loaded_source and self._loaded_source_consent_granted
         self.invalidate_scan()
         return Path(self._workspace.name) / "source"
 
     def _source(self):
         if self._using_loaded_source:
             return self._loaded_source
+        if self._floppy_source is not None:
+            return self._floppy_source
         source = self.source_edit.text().strip()
         if not source:
             self.choose_floppy()
+            if self._floppy_source is not None:
+                return self._floppy_source
             source = self.source_edit.text().strip()
         return source
 
@@ -350,8 +498,8 @@ class SmartPianoSoftDialog(QDialog):
         if not source:
             return
         target = self._new_scan()
-        if not isinstance(source, LoadedAlbumSource):
-            self.settings.setValue("sps_source", source)
+        if isinstance(source, (str, Path)):
+            self.settings.setValue("sps_source", str(source))
         self._start("scan", lambda cancel, progress: _scan_source(source, target, cancel=cancel, progress=progress))
 
     def _cd_device(self):
@@ -370,15 +518,16 @@ class SmartPianoSoftDialog(QDialog):
         destination = self.output_edit.text().strip()
         if not destination:
             return
-        if not isinstance(source, LoadedAlbumSource):
-            self.settings.setValue("sps_source", source)
+        if isinstance(source, (str, Path)):
+            self.settings.setValue("sps_source", str(source))
         self.settings.setValue("sps_output", destination)
         album, audio, cd_device = self.album, dict(self.audio_paths), self._cd_device()
+        random_suffixes = random_output_suffixes_enabled(self.settings)
         target = self._new_scan() if album is None else None
         def prepare(cancel, progress):
             snapshot = album or _scan_source(source, target, cancel=cancel, progress=progress)
             output = prepare_album(snapshot, destination, cd_device=cd_device, audio_paths=audio,
-                                   cancel=cancel, progress=progress)
+                                   cancel=cancel, progress=progress, random_suffixes=random_suffixes)
             return snapshot, output
         self._start("prepare", prepare)
 
@@ -392,7 +541,7 @@ class SmartPianoSoftDialog(QDialog):
                       str(audio) if audio else self.text("cd_hint", number=track.number))
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                item.setToolTip(value)
+                item.setToolTip(self.text("cd_hint_details") if column == 3 and not audio else value)
                 self.table.setItem(row, column, item)
         if self.album.tracks:
             self.table.selectRow(0)
@@ -416,15 +565,39 @@ class SmartPianoSoftDialog(QDialog):
         self.table.selectRow(row)
 
     def _progress(self, detail):
+        self.status.show()
+        self.progress.show()
         total = detail.get("total", 0)
         if total:
             self.progress.setRange(0, 100)
             self.progress.setValue(round(100 * detail.get("completed", 0) / total))
         else:
             self.progress.setRange(0, 0)
-        message = str(detail.get("message", ""))
         phase = detail.get("phase", "scan")
-        self.status.setText(self.text("phase_" + phase) + (": " + message if message else ""))
+        message = str(detail.get("message", ""))
+        if phase == "rip":
+            message = translate_text(message, self.language)
+        if phase == "rip" and "cd_track" in detail:
+            self.status.setText(self.text("cd_track_progress", number=detail["cd_track"],
+                                          index=detail["track_index"], count=detail["track_count"],
+                                          message=message))
+        else:
+            self.status.setText(self.text("phase_" + phase) + (": " + message if message else ""))
+
+    def _request_personal_use_consent(self, request):
+        approved = False
+        try:
+            if self.worker is None or self.worker.cancelled.is_set() or self._closing:
+                return
+            self.status.setText(self.text("waiting_for_consent"))
+            notice = getattr(self.parent(), "_show_yamaha_personal_use_notice", None)
+            approved = bool(notice()) if callable(notice) else True
+            if self.worker is None or self.worker.cancelled.is_set() or self._closing:
+                approved = False
+            if approved:
+                self._source_consent_granted = True
+        finally:
+            request.resolve(approved)
 
     def _success(self, result):
         if self._operation == "discover":
@@ -441,6 +614,7 @@ class SmartPianoSoftDialog(QDialog):
             self.status.setText(self.text("scanned", count=len(result.tracks)))
         else:
             self.album, self.result_folder = result
+            self._completed_cd_device = self._cd_device() or None
             self._populate()
             self.status.setText(self.text("complete"))
             self.details.appendPlainText(str(self.result_folder))
@@ -448,6 +622,9 @@ class SmartPianoSoftDialog(QDialog):
         self.progress.setValue(100 if self._operation != "discover" else 0)
 
     def _failure(self, result):
+        self.status.show()
+        if result["cancelled"]:
+            self._discover_after_scan = False
         self.status.setText(self.text("cancelled" if result["cancelled"] else "failed"))
         self.details.appendPlainText(result["error"])
         if result.get("output"):
@@ -459,6 +636,7 @@ class SmartPianoSoftDialog(QDialog):
     def _finished(self):
         worker, self.worker = self.worker, None
         worker.deleteLater()
+        self.progress.hide()
         self._update_controls()
         if self._closing:
             self.close()

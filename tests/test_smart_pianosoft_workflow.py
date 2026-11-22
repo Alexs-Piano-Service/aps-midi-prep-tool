@@ -67,6 +67,41 @@ def test_complete_album_preserves_sources_and_separates_originals_from_encoded_a
     assert np.any(frames[:, 1] != frames[:, 0])
 
 
+def test_clean_album_output_names_preserve_previous_completed_album(tmp_path, album_files):
+    source, audio, _pcm = album_files
+    album = _scan(tmp_path, source)
+    first = prepare_album(album, tmp_path, audio_paths={1: audio}, random_suffixes=False)
+    assert first.name == "Smart PianoSoft - Original test album"
+    original = {path.relative_to(first): path.read_bytes() for path in first.rglob("*") if path.is_file()}
+    second = prepare_album(album, tmp_path, audio_paths={1: audio}, random_suffixes=False)
+    assert second.name == "Smart PianoSoft - Original test album (2)"
+    assert {path.relative_to(first): path.read_bytes() for path in first.rglob("*") if path.is_file()} == original
+    assert json.loads((second / "manifest.json").read_text())["status"] == "complete"
+
+
+def test_greaseweazle_snapshot_can_encode_after_controller_disconnected(tmp_path, album_files, monkeypatch):
+    from aps_midi_prep_tool_app.floppy_image import DISK_FORMAT_BY_KEY, GreaseweazleFloppySource
+
+    folder, audio, _pcm = album_files
+    source = GreaseweazleFloppySource("/dev/serial/by-id/disconnected-greaseweazle", "A",
+                                    DISK_FORMAT_BY_KEY["ibm.720"])
+    reads = []
+
+    def copy_source(selected, destination, **_kwargs):
+        reads.append(selected)
+        return shutil.copytree(folder, destination)
+
+    monkeypatch.setattr(media, "read_floppy_source", copy_source)
+    album = _scan(tmp_path, source)
+    assert album.title == "Original test album"
+    assert album.original_source == Path(source.device_path)
+    assert album.source_kind == "floppy_gw"
+    result = prepare_album(album, tmp_path, audio_paths={1: audio})
+    assert len(list((result / "Disklavier").glob("*.wav"))) == 1
+    assert json.loads((result / "manifest.json").read_text())["status"] == "complete"
+    assert reads == [source]
+
+
 def test_ordinary_cataloged_midi_is_not_mistaken_for_smart_pianosoft(tmp_path, album_files):
     source, _audio, _pcm = album_files
     midi = mido.MidiFile()
@@ -139,6 +174,46 @@ def test_cancellation_never_publishes_partial_encoded_wav(tmp_path, album_files)
     folder = error.value.output_directory
     assert json.loads((folder / "manifest.json").read_text())["status"] == "cancelled"
     assert not list((folder / "Disklavier").iterdir())
+
+
+def test_cd_progress_counts_audio_bytes_across_unequal_nonconsecutive_tracks(
+    tmp_path, album_files, monkeypatch,
+):
+    from aps_midi_prep_tool_app import smart_pianosoft_sync as sync
+
+    source, audio, _pcm = album_files
+    toc = (media.CDTrack(1, 0, 75), media.CDTrack(3, 150, 225))
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_k: toc)
+
+    def rip(device, track, path, *, cancel, progress):
+        size = track.sectors * 2352
+        for step in (0, size // 2, size):
+            progress(step, size, "Reading with secure error correction…")
+        return shutil.copyfile(audio, path)
+
+    def match(metadata, path, **kwargs):
+        if path.name == "CD01.wav":
+            raise sync.SynchronizationError("Not this recording")
+        return sync.Alignment(0, 1, .99, .99, .99)
+
+    monkeypatch.setattr(media, "rip_cd_track", rip)
+    monkeypatch.setattr(sync, "synchronize", match)
+    updates = []
+    prepare_album(_scan(tmp_path, source), tmp_path, cd_device="fake-cd", progress=updates.append)
+    rip_updates = [detail for detail in updates if detail["phase"] == "rip" and detail["total"]]
+    assert {detail["total"] for detail in rip_updates} == {300 * 2352}
+    completed = [detail["completed"] for detail in rip_updates]
+    assert completed == sorted(completed)
+    assert (completed[0], completed[-1]) == (0, 300 * 2352)
+    reading = [detail for detail in rip_updates if detail["message"].startswith("Reading")]
+    assert [100 * detail["completed"] / detail["total"] for detail in reading] == [
+        0, 12.5, 25, 25, 62.5, 100,
+    ]
+    assert [(detail["cd_track"], detail["track_index"], detail["track_count"]) for detail in reading] == [
+        (1, 1, 2), (1, 1, 2), (1, 1, 2), (3, 2, 2), (3, 2, 2), (3, 2, 2),
+    ]
+    assert [detail["cd_track"] for detail in rip_updates
+            if detail["message"] == "Calculating audio checksum…"] == [1, 3]
 
 
 def test_output_cannot_be_inside_original_source_and_pairings_must_be_complete(tmp_path, album_files):

@@ -244,9 +244,11 @@ def test_allocated_song_read_error_is_reported_as_incomplete_not_verified(tmp_pa
 
 
 @pytest.mark.parametrize("decision", ["accept", "decline", "cancel_destination"])
+@pytest.mark.parametrize("random_suffixes", [False, True])
 def test_image_floppy_offers_recovery_after_worker_stops_and_requires_consent(
-    window, tmp_path, monkeypatch, decision,
+    window, tmp_path, monkeypatch, decision, random_suffixes,
 ):
+    window.settings.setValue("random_output_suffixes", random_suffixes)
     drive, source, songs, _geometry, devices = _windows_disk(tmp_path, monkeypatch)
     original = source.read_bytes()
     exact, recovered = tmp_path / "exact.img", tmp_path / "chosen-logical.img"
@@ -285,11 +287,15 @@ def test_image_floppy_offers_recovery_after_worker_stops_and_requires_consent(
         assert "not opened, scanned" not in completions[0][2]
         for name, payload in songs.items():
             assert image._read_fat12_file_bytes(recovered, name) == payload
-        report, = tmp_path.glob("chosen-logical.img.recovery-*.json")
+        report, = tmp_path.glob("chosen-logical.img.recovery*.json")
+        if not random_suffixes:
+            assert report.name == "chosen-logical.img.recovery.json"
+        else:
+            assert report.name.startswith("chosen-logical.img.recovery-")
         assert json.loads(report.read_text())["exact_capture_failure"]["failed_read_offset_bytes"] == 65536
     else:
         assert not completions
-        assert not list(tmp_path.glob("*.recovery-*.json"))
+        assert not list(tmp_path.glob("*.recovery*.json"))
     assert source.read_bytes() == original
 
 

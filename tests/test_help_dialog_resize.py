@@ -17,7 +17,7 @@ from test_window_menu_behavior import window
 
 
 HELP_DIALOGS = {
-    "show_about_dialog": (600, 540),
+    "show_about_dialog": (600, 520),
     "show_disclaimer_dialog": (720, 540),
     "show_bug_report_dialog": (800, 720),
     "show_feedback_dialog": (760, 600),

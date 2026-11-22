@@ -7,14 +7,76 @@ with release sections grouped by version and date.
 
 ## [0.9.0] - Unreleased
 
+### Added
+
+- Add a Piano/Accompaniment balance slider to the Disklavier WAV Player,
+  with a remembered mix, separate master volume, and unchanged playback timing.
+- Add **Settings → Save Options → Add Random Suffixes to Output Names**.
+  Turn it off for clean Smart PianoSoft album, Mark IV backup, extraction
+  progress, and recovery-report names, with numbered suffixes only on conflicts.
+- Show the accompaniment waveform below the Disklavier WAV Player's piano roll,
+  with a shared timeline, synchronized playheads, and click-to-seek in either view.
+- Add a separate Disklavier WAV Player utility that decodes the completed WAV's
+  control channel and previews the recovered performance with a software piano,
+  alone or with accompaniment. Playback includes seeking and pause/stop without
+  changing the source WAV. Saving decoded MIDI requires session-only Admin Mode.
+- Show PDISK.MNG album information and PSONG.MNG song records graphically in
+  File Inspection, with optional raw contents and standalone catalog opening.
+- Apply PDISK album names and PSONG song titles from File Inspection, with
+  filename matching, skipped-record feedback, and staged Save/Undo behavior.
+  Dropping catalogs together with their MIDI files applies the metadata
+  automatically.
+
 ### Changed
 
+- Keep the Disklavier WAV Player's moving marker a constant width at fractional
+  display scaling, in both the piano roll and accompaniment waveform.
+- Hide decoded MIDI export during normal playback and require Admin Mode to
+  enable it. Compact the About dialog around its contents.
+- Compact the Smart PianoSoft dialog with balanced margins, more room for the
+  song table, and progress/details shown when needed. The primary action now
+  says **Start CD rip + WAV export** (or **Start WAV export** for paired files).
+  Automatic CD pairing no longer appears to require manual audio verification.
+- Restore Smart PianoSoft (Beta) in Utilities and saved keyboard shortcuts.
+  Confirmed Smart disks offer to open the CD-ripping and pairing dialog after
+  reading finishes. Each verified MIDI/audio pair exports as one combined
+  Disklavier WAV. Ordinary Yamaha catalogs do not trigger the offer.
+- Accept USB floppy drives and Greaseweazle in the Smart PianoSoft source
+  picker. Greaseweazle sources offer drive, disk format, read revolutions, and
+  retry settings before scanning or preparing the album.
+- Ask for personal-use agreement when protected Yamaha or Smart PianoSoft
+  media is detected, with a link to the disclaimer. **Agree** continues reading;
+  **Cancel** stops it. **Never show this again** starts checked and remembers
+  only an agreement. Previously displaying the notice does not count as agreement.
 - Begin the 0.9.x development branch for bug fixes, reliability, and polish
   toward a stable 1.0 release. This branch excludes major feature additions;
   no 1.0 release date is scheduled.
 
 ### Fixed
 
+- Show the current CD track and reading/checking/saving stage during Smart
+  PianoSoft ripping, with progress across the CD instead of restarting per track.
+- Finish the Greaseweazle capture-save flow before offering Smart PianoSoft
+  CD ripping. Recovery Complete also closes before the Smart PianoSoft offer.
+- Wrap detailed floppy-read progress messages and allow the dialog to grow at
+  larger display scales. Failed USB reads no longer imply an invalid disk
+  format; unreadable media errors include conditional 720 KB (2DD) drive
+  compatibility advice, even when the drive reports a 720 KB capacity.
+- Accept PDISK.MNG and PSONG.MNG when dropped into a MIDI collection instead
+  of reporting unsupported files. E-SEQ conversion omits these companion
+  catalogs from the prepared output without deleting the originals.
+- Follow system audio-output changes in File Inspection and the Disklavier WAV
+  Player, including both outputs during a preview crossfade. Reconnect an output
+  that disappears and returns without restarting or seeking the song.
+- Keep cancellation progress visible until the disk operation has stopped and
+  cleanup has restored the controls. Busy messages identify the active operation,
+  its last stage, elapsed time, and intervals without progress. Completed workers
+  no longer leave the window disabled or report unrelated MIDI processing.
+- Save protected Greaseweazle captures without requiring a valid FAT12 boot
+  sector. HFE exports verify every decoded sector against the original capture,
+  preserving the protected source separately from the repaired working image.
+- Stop encoded WAV export if an early MIDI setup message would overlap the
+  control channel's silent lead-in, preventing loss of the message's beginning.
 - Save As Image splits E-SEQ collections at each disk's catalog limit (60
   Disklavier songs or 64 Clavinova songs), even when all songs fit in one disk's
   storage. Each image contains a catalog referencing only its resident songs.

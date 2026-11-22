@@ -146,6 +146,42 @@ def test_keep_originals_option_follows_conversion_and_remembers_choice(applicati
         reopened.close()
 
 
+@pytest.mark.parametrize("saved_suffixes", (None, True, False))
+def test_backup_uses_persisted_global_suffix_preference_and_reads_updates(
+        application, dialog, volume, tmp_path, monkeypatch, saved_suffixes):
+    if saved_suffixes is not None:
+        dialog.settings.setValue("random_output_suffixes", saved_suffixes)
+    dialog.settings.sync()
+    settings = QSettings(dialog.settings.fileName(), QSettings.IniFormat)
+    reopened = dialog_module.MarkIVBackupDialog(settings, refresh_on_open=False)
+    forwarded = []
+    backup = dialog_module.run_backup
+
+    def record_backup(plan, target, **kwargs):
+        forwarded.append(kwargs["random_suffixes"])
+        return backup(plan, target, **kwargs)
+
+    monkeypatch.setattr(dialog_module, "run_backup", record_backup)
+    expected = saved_suffixes is not False
+    try:
+        reopened.plan = dialog_module.scan_library(volume[0])
+        reopened.destination_edit.setText(str(tmp_path / "backups"))
+        reopened.start_backup()
+        _wait(application, lambda: not reopened.is_busy)
+        assert forwarded == [expected]
+        assert reopened.result_folder is not None
+
+        settings.setValue("random_output_suffixes", not expected)
+        reopened.start_backup()
+        _wait(application, lambda: not reopened.is_busy)
+        assert forwarded == [expected, not expected]
+    finally:
+        if reopened.is_busy:
+            reopened.cancel_operation()
+            _wait(application, lambda: not reopened.is_busy)
+        reopened.close()
+
+
 def test_album_selection_shows_matching_files_even_with_duplicate_album_names(
         application, dialog, volume, monkeypatch):
     from aps_midi_prep_tool_app.markiv_backup.metadata import MetadataCatalog

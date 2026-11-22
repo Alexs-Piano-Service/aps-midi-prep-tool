@@ -1,4 +1,3 @@
-import html
 import os
 
 import pytest
@@ -76,11 +75,12 @@ def test_about_dialog_renders_translated_notice_and_opens_disclaimer(code):
     window = _DialogHarness(code)
     inspected = []
 
-    def inspect(dialog):
+    def inspect(dialog, *, resize_to_contents):
+        assert not resize_to_contents
         dialog.show()
         app.processEvents()
         labels = dialog.findChildren(QLabel)
-        expected_notice = html.escape(onboarding_text("notice", code))
+        expected_notice = onboarding_text("notice", code)
         assert any(expected_notice in label.text() for label in labels)
         assert any(window._lt("Author") in label.text() and window._lt("License") in label.text() for label in labels)
         buttons = dialog.findChild(QDialogButtonBox)
@@ -88,7 +88,7 @@ def test_about_dialog_renders_translated_notice_and_opens_disclaimer(code):
         disclaimer.click()
         assert window.disclaimer_opened
         for label in labels:
-            if label.wordWrap():
+            if label.isVisible() and label.wordWrap():
                 assert label.height() >= label.heightForWidth(label.width())
         inspected.append(True)
         dialog.close()

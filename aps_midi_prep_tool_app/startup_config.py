@@ -21,9 +21,10 @@ PATH_SETTINGS = frozenset({
     "bulk_extraction_source", "bulk_extraction_output", "bulk_extraction_last_job",
     "emulator_image_source", "emulator_image_output", "disk_recovery_image_path",
     "markiv_backup_source", "markiv_backup_output", "markiv_backup_last_folder",
-    "sps_source", "sps_output",
+    "sps_source", "sps_output", "disklavier_wav_folder",
 })
 BOOLEAN_SETTINGS = frozenset({
+    "random_output_suffixes",
     "show_compat_warning", "store_backups", "use_dos83_filenames", "hide_status",
     "hide_quick_panel", "hide_album_metadata", "show_save_destination",
     "show_preparation_row", "skip_first_time_dialog", "skip_type0_warning",
@@ -50,9 +51,12 @@ BOOLEAN_SETTINGS = frozenset({
     "hide_gw_sector_report_write_v1", "hide_gw_sector_report_convert_v1",
     "hide_gw_sector_report_recover_v1",
     "never_ask_for_review",
+    "yamaha_personal_use_notice_shown",
+    "yamaha_personal_use_agreed",
     "markiv_backup_convert_eseq", "markiv_backup_keep_originals",
 })
 INTEGER_SETTINGS = frozenset({
+    "disklavier_wav_balance",
     "read_floppy_gw_revs", "read_floppy_gw_retries",
     "emulator_image_starting_number", "emulator_image_safety_margin_kib",
     "hide_choices_reset_version", "gw_sector_report_hide_version",
@@ -130,6 +134,8 @@ def load_startup_config(path=None):
                 raise ValueError(f"{key}: expected {expected.__name__}.")
             if isinstance(value, str) and "\0" in value:
                 raise ValueError(f"{key}: text cannot contain a null character.")
+            if key == "disklavier_wav_balance" and not 0 <= value <= 100:
+                raise ValueError(f"{key}: expected an integer from 0 to 100.")
             if expected is int and not 0 <= value <= 2147483647:
                 raise ValueError(f"{key}: expected an integer from 0 to 2147483647.")
         if SETTING_PROFILE in values and values[SETTING_PROFILE] not in PROFILES_BY_KEY:

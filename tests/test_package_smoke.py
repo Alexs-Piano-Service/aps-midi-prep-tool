@@ -33,7 +33,7 @@ def _invoke(tmp_path, *args, code=None):
     )
 
 
-def test_real_app_smoke_exercises_ui_img_source_changes_hfe_and_mp3(tmp_path):
+def test_real_app_smoke_exercises_all_released_workflows(tmp_path):
     _require_tools((*IMAGE_TOOLS, "lame", "gw"))
     results = tmp_path / "new results é"
 
@@ -51,9 +51,11 @@ def test_real_app_smoke_exercises_ui_img_source_changes_hfe_and_mp3(tmp_path):
     assert (results / "Package test é.img").stat().st_size == 737280
     assert (results / "Restored from HFE.img").stat().st_size == 737280
     assert report["cases"]["mp3"]["renderer"] == "built-in piano"
-    assert report["cases"]["ui"]["smart_pianosoft_utility_hidden"] is True
-    assert "smart_pianosoft" not in report["cases"]
-    assert not (results / "Synthetic Smart PianoSoft source").exists()
+    assert report["cases"]["ui"]["smart_pianosoft_utility_available"] is True
+    assert report["cases"]["ui"]["disklavier_wav_player_available"] is True
+    assert report["cases"]["smart_pianosoft"]["originals_preserved"] is True
+    assert report["cases"]["smart_pianosoft"]["decoded_piano_and_accompaniment_verified"] is True
+    assert (results / "Synthetic Smart PianoSoft source").is_dir()
     source_changes = report["cases"]["image_source_changes"]
     assert source_changes["stale_writes_rejected"] == [
         "commit_to_source", "export_to_source", "export_to_images_source",
@@ -67,7 +69,7 @@ def test_real_app_smoke_exercises_ui_img_source_changes_hfe_and_mp3(tmp_path):
     assert source_changes["recovered_image_sha256"] == hashlib.sha256(recovered.read_bytes()).hexdigest()
 
 
-def test_explicit_developer_smoke_adds_retained_smart_pianosoft_case(tmp_path):
+def test_former_smart_opt_in_remains_compatible(tmp_path):
     _require_tools((*IMAGE_TOOLS, "lame", "gw"))
     results = tmp_path / "developer results"
 
@@ -77,8 +79,8 @@ def test_explicit_developer_smoke_adds_retained_smart_pianosoft_case(tmp_path):
     report = json.loads((results / package_smoke.REPORT_FILENAME).read_text(encoding="utf-8"))
     assert completed.returncode == 0, completed.stderr + json.dumps(report, indent=2)
     assert report["status"] == "passed"
-    assert set(report["cases"]) == set(package_smoke.CASE_NAMES + package_smoke.OPTIONAL_CASE_NAMES)
-    assert report["cases"]["ui"]["smart_pianosoft_utility_hidden"] is True
+    assert set(report["cases"]) == set(package_smoke.CASE_NAMES)
+    assert report["cases"]["ui"]["smart_pianosoft_utility_available"] is True
     smart = report["cases"]["smart_pianosoft"]
     assert smart["dialog_shown_and_closed"] is True
     assert smart["loaded_image_list_verified"] is True
@@ -199,22 +201,22 @@ def test_invalid_command_arguments_fail_without_running_checks(monkeypatch):
     ]) == 2
 
 
-def test_release_ui_smoke_rejects_exposing_deferred_utility(tmp_path, monkeypatch, qt_application):
+def test_release_ui_smoke_rejects_missing_smart_utility(tmp_path, monkeypatch, qt_application):
     from aps_midi_prep_tool_app.main_window import MidiTitleWindow
 
-    monkeypatch.setattr(MidiTitleWindow, "ENABLE_SMART_PIANOSOFT_UTILITY", True)
-    with pytest.raises(RuntimeError, match="deferred Smart PianoSoft utility is exposed"):
+    monkeypatch.setattr(MidiTitleWindow, "ENABLE_SMART_PIANOSOFT_UTILITY", False)
+    with pytest.raises(RuntimeError, match="Smart PianoSoft utility is missing"):
         package_smoke._check_ui(tmp_path, {"application": qt_application})
 
 
-def test_default_smoke_ignores_unavailable_experimental_dependencies(tmp_path):
+def test_default_smoke_requires_smart_dependencies(tmp_path):
     results = tmp_path / "release results"
     code = f"""
 import sys
 sys.path.insert(0, {str(ROOT)!r})
 from aps_midi_prep_tool_app import app, package_smoke
 def missing_dependency(*args):
-    raise ImportError('Experimental dependency unavailable')
+    raise ImportError('Smart PianoSoft dependency unavailable')
 for name in package_smoke.CASE_NAMES:
     setattr(package_smoke, '_check_' + name, lambda *args: {{}})
 package_smoke._check_smart_pianosoft = missing_dependency
@@ -224,9 +226,9 @@ app.main()
     completed = _invoke(tmp_path, package_smoke.SMOKE_ARGUMENT, results, code=code)
 
     report = json.loads((results / package_smoke.REPORT_FILENAME).read_text(encoding="utf-8"))
-    assert completed.returncode == 0, completed.stderr
-    assert report["status"] == "passed"
-    assert "smart_pianosoft" not in report["cases"]
+    assert completed.returncode == 1, completed.stderr
+    assert report["status"] == "failed"
+    assert report["cases"]["smart_pianosoft"]["status"] == "failed"
 
 
 def test_mp3_case_rejects_non_audio_encoder_output(tmp_path, monkeypatch):

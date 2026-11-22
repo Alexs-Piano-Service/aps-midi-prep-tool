@@ -38,7 +38,37 @@ Recovery tools can retry difficult disks. Greaseweazle hardware also supports
 SCP archives, which capture the disk's magnetic signals for preservation.
 Recovery cannot guarantee that damaged recordings will play correctly.
 
+## Progress and cancellation
+
+While a disk operation runs, its status identifies the operation, elapsed time,
+and last reported stage. If no new progress arrives for ten seconds, the status
+also shows how long it has been waiting. **Cancel** requests a stop and keeps
+the progress window visible while the current read or helper process stops and
+temporary files are cleaned up. The controls become available when cleanup
+finishes. A finished disk read does not leave a MIDI-processing lock behind.
+
+Protected Yamaha or Smart PianoSoft media may pause for a personal-use
+agreement. **Agree** continues reading and **Cancel** stops the operation.
+**Never show this again** is checked by default and remembers only an agreement.
+
+When saving an original Greaseweazle capture, a blank or protected Yamaha boot
+sector is preserved. HFE verification compares every decoded sector with the
+capture and does not require a valid FAT12 boot sector. This allows a protected
+Smart PianoSoft capture to be saved even when its boot sector needed repair in
+the separate working image used to display the songs.
+
 ## When exact floppy imaging fails
+
+If APS obtains no readable sectors, it cannot determine the disk's format.
+A USB drive reporting 737,280 bytes does not prove it can read 720 KB (2DD)
+media. Check that the drive explicitly supports 720 KB disks; some USB floppy
+drives only support 1.44 MB (2HD) disks. If possible, try a known-good 720 KB
+disk or a drive known to read 720 KB disks. This is a possible compatibility
+issue, not a confirmed diagnosis. Do not format the original disk.
+
+Readable sectors with an unrecognized format are a different case: APS can
+read the media but may not support its filesystem. Recovery reports the number
+of sectors actually read separately from failed and unattempted sectors.
 
 An unreadable or protected sector can prevent **Create Image from Floppy...**
 from copying every sector even when **Read Floppy...** can read the songs.

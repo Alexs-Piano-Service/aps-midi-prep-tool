@@ -212,6 +212,7 @@ class ExtractionJob:
         self.root = os.path.realpath(output_directory)
         self.check_cancelled = check_cancelled
         self._saved_payload = None
+        self._can_replace = bool(resume)
         if resume:
             self.data = read_extraction_job(self.path)
             if (
@@ -231,7 +232,8 @@ class ExtractionJob:
 
     def save(self):
         payload = (json.dumps(self.data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        atomic_write_bytes(self.path, payload)
+        atomic_write_bytes(self.path, payload, replace_existing=self._can_replace)
+        self._can_replace = True
         self._saved_payload = payload
 
     def remove_completed(self):

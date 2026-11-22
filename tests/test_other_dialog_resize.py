@@ -157,7 +157,10 @@ def test_standalone_tool_windows_preserve_user_geometry(window, monkeypatch, kin
     elif kind == "render-audio":
         dialog = main_window.BatchAudioRenderDialog([], window)
     elif kind == "file-inspection":
+        from aps_midi_prep_tool_app import audio_output_routing
+        from test_audio_output_routing import _FakeMediaDevices
         from test_file_inspection_actions import _SilentAudioOutput, _SilentPlayer
+        monkeypatch.setattr(audio_output_routing, "QMediaDevices", _FakeMediaDevices)
         monkeypatch.setattr(main_window, "QMediaPlayer", _SilentPlayer)
         monkeypatch.setattr(main_window, "QAudioOutput", _SilentAudioOutput)
         monkeypatch.setattr(main_window, "_midi_output_ports", lambda: ([], ""))

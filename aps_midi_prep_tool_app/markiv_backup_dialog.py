@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .icon_utils import apply_window_icon
+from .helpers.output_names import random_output_suffixes_enabled
 from .markiv_backup.backup import run_backup, verify_backup
 from .markiv_backup.devices import resolve_source
 from .markiv_backup.library import CancelledError, check_cancel, scan_library
@@ -42,7 +43,7 @@ class MarkIVBackupWorker(QThread):
     cancelled = Signal()
 
     def __init__(self, operation, *, source="", target="", plan=None,
-                 convert_eseq=False, keep_originals=True, parent=None):
+                 convert_eseq=False, keep_originals=True, random_suffixes=True, parent=None):
         super().__init__(parent)
         self.operation = operation
         self.source = source
@@ -50,6 +51,7 @@ class MarkIVBackupWorker(QThread):
         self.plan = plan
         self.convert_eseq = convert_eseq
         self.keep_originals = keep_originals
+        self.random_suffixes = random_suffixes
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -67,7 +69,8 @@ class MarkIVBackupWorker(QThread):
                 result = run_backup(self.plan, Path(self.target),
                                     progress=self.progressChanged.emit, cancel=self._cancel,
                                     convert_eseq=self.convert_eseq,
-                                    keep_originals=self.keep_originals)
+                                    keep_originals=self.keep_originals,
+                                    random_suffixes=self.random_suffixes)
             elif self.operation == "verify":
                 result = verify_backup(Path(self.target),
                                        progress=self.progressChanged.emit, cancel=self._cancel)
@@ -429,7 +432,8 @@ class MarkIVBackupDialog(QDialog):
         if self.plan is not None and self.destination_edit.text().strip():
             self._start("backup", plan=self.plan, target=self.destination_edit.text().strip(),
                         convert_eseq=self.convert_checkbox.isChecked(),
-                        keep_originals=self.keep_originals_checkbox.isChecked())
+                        keep_originals=self.keep_originals_checkbox.isChecked(),
+                        random_suffixes=random_output_suffixes_enabled(self.settings))
 
     def verify_existing_backup(self):
         if self.is_busy:

@@ -71,18 +71,17 @@ Results and a SHA-256 of the complete AppImage are retained under
 creates a release checksum. These local checks do not establish clean-machine
 acceptance or change an unreleased version's publication status.
 
-The default package checks cover the five released cases: `ui`, `img`,
-`image_source_changes`, `hfe`, and `mp3`. The Smart PianoSoft synchronization
-utility is deferred from 0.8.9, and its retained `smart_pianosoft` case is an
-optional development check. Opt in with
-`--aps-package-smoke OUTPUT --include-smart-pianosoft`, or add
-`-IncludeSmartPianoSoft` to the Windows package-test script. It uses an original
+The default package checks cover six cases: `ui`, `img`,
+`image_source_changes`, `hfe`, `mp3`, and `smart_pianosoft`. The UI check requires
+the restored Smart PianoSoft utility. Its workflow check uses an original
 synthetic recording and MIDI fingerprints to check the loaded song-list path,
 source preservation, synchronization, and encoded WAV channels without a CD
-drive or commercial music. This does not enable the utility in the release UI.
-Linux builds omit the CD reader by default (`BUNDLE_CDDA=0`); developers can
-include it with `BUNDLE_CDDA=1`. Physical Disklavier playback remains a future
-[development acceptance check](playback-and-audio.md#smart-pianosoft-development-deferred).
+drive or commercial music. The former `--include-smart-pianosoft` and Windows
+`-IncludeSmartPianoSoft` flags remain accepted for compatibility; this case runs
+with or without them. Linux builds include the CD reader by default
+(`BUNDLE_CDDA=1`); development builds can opt out with `BUNDLE_CDDA=0`.
+Physical Disklavier playback remains a future
+[hardware acceptance check](playback-and-audio.md#smart-pianosoft-beta).
 
 For an offline rebuild with the existing, populated build environment:
 

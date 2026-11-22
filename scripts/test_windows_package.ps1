@@ -93,8 +93,7 @@ try {
         throw 'The smoke report application version does not match the expected release.'
     }
     if ($report.status -ne 'passed') { throw 'The package smoke report does not show a complete pass.' }
-    $requiredCases = @('ui', 'img', 'image_source_changes', 'hfe', 'mp3')
-    if ($IncludeSmartPianoSoft) { $requiredCases += 'smart_pianosoft' }
+    $requiredCases = @('ui', 'img', 'image_source_changes', 'hfe', 'mp3', 'smart_pianosoft')
     foreach ($name in $requiredCases) {
         if ($report.cases.$name.status -ne 'passed') { throw "Package smoke case did not pass: $name" }
     }

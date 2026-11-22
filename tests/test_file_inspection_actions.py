@@ -37,6 +37,9 @@ class _SilentPlayer(QObject):
     def setAudioOutput(self, output):
         self.audio_output = output
 
+    def audioOutput(self):
+        return self.audio_output
+
     def setSource(self, source):
         self._source = source
 
@@ -63,6 +66,17 @@ class _SilentPlayer(QObject):
 
 
 class _SilentAudioOutput(QObject):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from test_audio_output_routing import _FakeAudioDevice
+        self._device = _FakeAudioDevice()
+
+    def device(self):
+        return self._device
+
+    def setDevice(self, device):
+        self._device = device
+
     def setVolume(self, value):
         self._volume = value
 
@@ -98,8 +112,12 @@ def _item(path, *, row=0, source_path=None, session_id=None, title="Original"):
 
 @pytest.fixture
 def dialog_factory(application, monkeypatch):
+    from aps_midi_prep_tool_app import audio_output_routing
+    from test_audio_output_routing import _FakeMediaDevices
+
     dialogs = []
     parents = []
+    monkeypatch.setattr(audio_output_routing, "QMediaDevices", _FakeMediaDevices)
     monkeypatch.setattr(main_window, "QMediaPlayer", _SilentPlayer)
     monkeypatch.setattr(main_window, "QAudioOutput", _SilentAudioOutput)
     monkeypatch.setattr(main_window, "_midi_output_ports", lambda: ([], ""))

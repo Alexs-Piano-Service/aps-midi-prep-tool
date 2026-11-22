@@ -63,6 +63,10 @@ original-format music with unchanged file contents, including audio and
 supporting assets. Portable filenames and suffixes handle names that would
 otherwise collide.
 
+Turn off **Settings → Save Options → Add Random Suffixes to Output Names**
+to keep the backup folder's timestamp without a random suffix. If that name
+already exists, APS adds `(2)`, `(3)`, and so on, preserving previous backups.
+
 Protected PianoSoft packages and supporting assets are retained as originals;
 the conversion option does not unlock protected packages. Source files are
 always unchanged.

@@ -1,6 +1,7 @@
 """Bulk extraction keeps its form usable while users resize or resume a job."""
 
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -262,3 +263,28 @@ def test_bulk_extract_submits_selected_or_resumed_options(
         {**job["options"], "job_record_path": job_path if resume else None, "resume": resume},
     )]
     assert w.settings.value(w.SETTING_BULK_EXTRACTION_PRESERVE_VOLUME, type=bool) is preserve_volume
+
+
+@pytest.mark.parametrize("random_suffixes", [False, True])
+def test_new_extraction_progress_file_obeys_global_naming_setting(window, monkeypatch, random_suffixes):
+    w, source, output = window
+    output.mkdir()
+    existing = output / "aps-extraction-job.json"
+    existing.write_text("previous job")
+    w.settings.setValue("random_output_suffixes", random_suffixes)
+    launches = []
+    monkeypatch.setattr(w, "_start_bulk_extraction", lambda *args, **kwargs: launches.append(kwargs))
+
+    def exercise(dialog):
+        _controls(w, dialog)["save"].setChecked(True)
+        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).click()
+
+    _run_dialog(w, monkeypatch, exercise)
+    path = Path(launches[0]["job_record_path"])
+    assert path.parent == output
+    if random_suffixes:
+        assert path.name.startswith("aps-extraction-job-")
+    else:
+        assert path.name == "aps-extraction-job (2).json"
+    assert not launches[0]["resume"]
+    assert existing.read_text() == "previous job"

@@ -127,6 +127,28 @@ def test_advancing_music_increases_preroll_without_losing_early_notes(tmp_path):
     assert symbols[1569:1575].tolist() == [9, 0, 3, 12, 4, 0]
 
 
+@pytest.mark.parametrize("offset", [0.0, -2.0])
+def test_initial_long_sysex_cannot_be_erased_by_the_silent_leader(tmp_path, offset):
+    source, destination = tmp_path / "music.wav", tmp_path / "encoded.wav"
+    _audio(source)
+    original = source.read_bytes()
+    # 1,504 symbols would begin at symbol 71; the first 92 symbols are muted.
+    message = b"\xf0" + b"\x01" * 750 + b"\xf7"
+    with pytest.raises(ValueError, match="silent lead-in"):
+        encode_disklavier_wav([(0, message)], source, destination,
+                              midi_offset_seconds=offset)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".disklavier-*"))
+    assert source.read_bytes() == original
+
+    # The same complete message is supported when it falls later in the song.
+    encode_disklavier_wav([(1, message)], source, destination)
+    symbols = _demodulate(_read(destination)[:, 1])
+    packet = midi_message_nibbles(message)
+    completion = round(1.5 * 3150)
+    assert symbols[completion - len(packet):completion].tolist() == list(packet)
+
+
 def test_cancel_and_truncated_input_never_publish_partial_output(tmp_path):
     source, destination = tmp_path / "music.wav", tmp_path / "encoded.wav"
     _audio(source, seconds=3)

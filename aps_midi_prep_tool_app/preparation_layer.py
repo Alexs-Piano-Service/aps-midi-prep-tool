@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QTableWidgetItem
 
+from .catalog_inspection import CATALOG_NAMES
 from .eseq_pianodir import PIANODIR_ROW_PATH
 
 
@@ -220,11 +221,20 @@ class PreparationLayer:
                         merged.setdefault("pendingRegularRenames", {})[path] = name
             rows[identity] = row
 
-        # A removed song stays removed. Remove all of its original staged state,
-        # including original manual conversions which no longer have a row.
+        # E-SEQ preparation consumes MIDI catalogs. Restore those companions
+        # when changing destination, while preserving a later replacement catalog.
+        replacement_catalogs = {os.path.basename(_path(row)).upper()
+                                for identity, row in latest.items() if identity not in originals}
+        restored_catalogs = []
+        # A deliberately removed song stays removed, including its staged state.
         for identity, original in originals.items():
             if identity not in latest:
                 path = _path(original)
+                name = os.path.basename(path).upper()
+                if identity not in prepared and name in CATALOG_NAMES and name not in replacement_catalogs:
+                    rows[identity] = _clone_row(original)
+                    restored_catalogs.append(identity)
+                    continue
                 for field in _SONG_MAPS:
                     merged.get(field, {}).pop(path, None)
                 if image_mode and path not in baseline.get("pendingImageAdditions", {}):
@@ -232,7 +242,7 @@ class PreparationLayer:
 
         common = set(prepared) & set(latest)
         reordered = [key for key in latest if key in common] != [key for key in prepared if key in common]
-        order = list(latest) if reordered else list(originals) + [key for key in latest if key not in originals]
+        order = list(latest) + restored_catalogs if reordered else list(originals) + [key for key in latest if key not in originals]
         result_rows = [rows[key] for key in order if key in rows]
 
         # Additions have no immutable image entry: their key is their filename.

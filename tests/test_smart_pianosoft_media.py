@@ -9,7 +9,9 @@ import wave
 import pytest
 
 from aps_midi_prep_tool_app import smart_pianosoft_media as media
-from aps_midi_prep_tool_app.floppy_image import FloppyOperationCancelled, ImageEntry, ImageListing
+from aps_midi_prep_tool_app.floppy_image import (
+    DISK_FORMAT_BY_KEY, FloppyOperationCancelled, GreaseweazleFloppySource, ImageEntry, ImageListing,
+)
 
 
 TOC = """Table of contents (audio tracks only):
@@ -89,6 +91,58 @@ def test_secure_rip_publishes_validated_audio(cd, tmp_path, monkeypatch):
     assert calls[0][:7] == ["cdparanoia", "-w", "-X", "-z", "-d", "/dev/sr0", "1"]
     media._validate_cd_wav(destination, cd)
     assert list(tmp_path.iterdir()) == [destination]
+
+
+def test_rip_progress_distinguishes_reading_wav_checks_and_saving(cd, tmp_path, monkeypatch):
+    updates = []
+    total = cd.sectors * 2352
+
+    class Reader:
+        returncode = 0
+
+        def __init__(self, args, **kwargs):
+            self.output = Path(args[-1])
+            self.polls = 0
+
+        def poll(self):
+            self.polls += 1
+            if self.polls == 1:
+                self.output.write_bytes(b"\0" * (44 + total // 2))
+            elif self.polls == 2:
+                _wav(self.output)
+            else:
+                return 0
+            return None
+
+    monkeypatch.setattr(media.subprocess, "Popen", Reader)
+    monkeypatch.setattr(media.time, "sleep", lambda _seconds: None)
+    validate, publish = media._validate_cd_wav, media._publish_new_file
+
+    def check_wav(*args):
+        assert updates[-1][2] == "Checking WAV format and length…"
+        return validate(*args)
+
+    def save(*args):
+        assert updates[-1][2] == "Saving audio track…"
+        return publish(*args)
+
+    monkeypatch.setattr(media, "_validate_cd_wav", check_wav)
+    monkeypatch.setattr(media, "_publish_new_file", save)
+    destination = tmp_path / "track.wav"
+    media.rip_cd_track("/dev/sr0", cd, destination,
+                       progress=lambda *args: updates.append(args))
+    assert [message for _step, _total, message in updates] == [
+        "Checking CD track list…",
+        *(["Reading with secure error correction…"] * 3),
+        "Checking WAV format and length…",
+        "Checking CD track list…",
+        "Saving audio track…",
+        "Audio track saved.",
+    ]
+    assert [(step, size) for step, size, message in updates if message.startswith("Reading")] == [
+        (0, total), (total // 2, total), (total, total),
+    ]
+    validate(destination, cd)
 
 
 def test_rip_syncs_through_writable_descriptor_without_changing_audio(cd, tmp_path, monkeypatch):
@@ -310,6 +364,47 @@ def test_image_snapshot_uses_session_and_always_cleans_up(tmp_path, monkeypatch)
     assert (destination / "SONG.MID").read_bytes() == b"original midi"
     assert calls == ["identity checked", "cleaned"]
     assert source.read_bytes() == b"image"
+
+
+@pytest.mark.parametrize("cancel_read", [False, True])
+def test_greaseweazle_snapshot_keeps_read_progress_and_cancellation(tmp_path, monkeypatch, cancel_read):
+    source = GreaseweazleFloppySource("COM42", "B", DISK_FORMAT_BY_KEY["ibm.720"], revs=2, retries=3)
+    original = tmp_path / "original.mid"
+    original.write_bytes(b"original midi")
+    cancelled = threading.Event()
+    progress, cleaned = [], []
+    session = SimpleNamespace(
+        list_entries=lambda: ImageListing([ImageEntry("SONG.MID", 13, 13)], 0, 512),
+        extract_file=lambda _path: original,
+        cleanup=lambda: cleaned.append(True),
+    )
+
+    def load(selected, *, cancel_callback, progress_callback):
+        assert selected is source
+        assert callable(cancel_callback) and not cancel_callback()
+        progress_callback(4, 80, "Reading cylinder 4 via Greaseweazle")
+        return session
+
+    def report(step, total, message):
+        progress.append((step, total, message))
+        if cancel_read:
+            cancelled.set()
+
+    monkeypatch.setattr(media.sys, "platform", "win32")
+    monkeypatch.setattr(media.FloppyImageSession, "load_greaseweazle", load)
+    monkeypatch.setattr(media.FloppyImageSession, "load", lambda *_a, **_k: pytest.fail("Treated serial port as image"))
+    destination = tmp_path / "snapshot"
+    if cancel_read:
+        with pytest.raises(FloppyOperationCancelled):
+            media.read_floppy_source(source, destination, cancel=cancelled, progress=report)
+        assert not destination.exists()
+    else:
+        assert media.read_floppy_source(source, destination, cancel=cancelled, progress=report) == destination
+        assert (destination / "SONG.MID").read_bytes() == b"original midi"
+    assert progress[0] == (4, 80, "Reading cylinder 4 via Greaseweazle")
+    assert cleaned == [True]
+    assert original.read_bytes() == b"original midi"
+    assert not list(tmp_path.glob(".aps_source_*"))
 
 
 def test_image_path_traversal_is_rejected_and_session_cleaned(tmp_path, monkeypatch):

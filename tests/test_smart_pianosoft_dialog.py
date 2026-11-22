@@ -3,6 +3,7 @@
 import json
 from itertools import combinations
 from pathlib import Path
+from types import SimpleNamespace
 import threading
 import time
 import wave
@@ -12,13 +13,16 @@ import pytest
 from PySide6.QtCore import QPoint, QRect, QSettings, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QPushButton, QWidget
 
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app import smart_pianosoft_dialog as dialogs
 from aps_midi_prep_tool_app import smart_pianosoft_media as media
 from aps_midi_prep_tool_app import smart_pianosoft_sync as sync
-from aps_midi_prep_tool_app.floppy_image import FloppyOperationCancelled
+from aps_midi_prep_tool_app.floppy_image import (
+    DISK_FORMAT_BY_KEY, FloppyDriveInfo, FloppyOperationCancelled, GreaseweazleDeviceInfo,
+    GreaseweazleFloppySource,
+)
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
 from aps_midi_prep_tool_app.smart_pianosoft_workflow import LoadedAlbumSource, ListedAlbumTrack
 from test_smart_pianosoft import _pdisk_bytes, _psong_bytes
@@ -91,6 +95,196 @@ def _loaded_source(source):
         tracks=(ListedAlbumTrack("SONG.MID", "song.mid", "Synthetic song",
                                  (source / "song.mid").read_bytes()),),
     )
+
+
+@pytest.mark.parametrize("kind", ["greaseweazle", "usb"])
+def test_source_picker_accepts_discovered_floppy_descriptors(dialog, monkeypatch, kind):
+    from aps_midi_prep_tool_app import disk_device_discovery
+
+    device = GreaseweazleDeviceInfo("COM42", "Greaseweazle")
+    gw_source = GreaseweazleFloppySource(device.path, "B", DISK_FORMAT_BY_KEY["ibm.720"])
+    usb_source = FloppyDriveInfo("/dev/example-floppy", 737280, transport="usb")
+    selected = gw_source if kind == "greaseweazle" else usb_source
+
+    def discover(_parent, **kwargs):
+        assert kwargs["include_greaseweazle"] is True
+        return ([], [device], []) if kind == "greaseweazle" else ([usb_source], [], [])
+
+    monkeypatch.setattr(disk_device_discovery, "discover_floppy_devices", discover)
+    monkeypatch.setattr(dialog, "_choose_greaseweazle_source", lambda found: gw_source if found is device else None)
+    dialog.choose_floppy()
+    assert dialog._source() is selected
+    assert dialog.source_edit.isReadOnly()
+    assert dialog.source_edit.text() == selected.display_name
+    dialog._select_external_source("replacement.img")
+    assert dialog._source() == "replacement.img"
+    assert not dialog.source_edit.isReadOnly()
+
+
+def test_greaseweazle_options_preserve_selected_drive_and_geometry(dialog, monkeypatch):
+    device = GreaseweazleDeviceInfo("COM42", "Greaseweazle")
+    dialog.settings.setValue("greaseweazle_drive", "B")
+    dialog.settings.setValue("read_floppy_gw_format", "ibm.1440")
+    dialog.settings.setValue("read_floppy_gw_revs", 2)
+    dialog.settings.setValue("read_floppy_gw_retries", 4)
+
+    def accept(options):
+        assert options.findChild(QComboBox, "smartPianoSoftGreaseweazleDrive").currentText() == "B"
+        assert options.findChild(QComboBox, "smartPianoSoftGreaseweazleFormat").currentData().key == "ibm.1440"
+        return QDialog.Accepted
+
+    monkeypatch.setattr(dialogs.QDialog, "exec", accept)
+    selected = dialog._choose_greaseweazle_source(device)
+    assert selected == GreaseweazleFloppySource("COM42", "B", DISK_FORMAT_BY_KEY["ibm.1440"], revs=2, retries=4)
+    assert dialog.settings.value("greaseweazle_device_path") == "COM42"
+
+
+def test_cancelled_greaseweazle_options_keep_current_source(dialog, source, monkeypatch):
+    from aps_midi_prep_tool_app import disk_device_discovery
+
+    dialog._select_external_source(source)
+    monkeypatch.setattr(disk_device_discovery, "discover_floppy_devices", lambda *_a, **_k:
+                        ([], [GreaseweazleDeviceInfo("COM42", "Greaseweazle")], []))
+    monkeypatch.setattr(dialogs.QDialog, "exec", lambda _dialog: QDialog.Rejected)
+    dialog.choose_floppy()
+    assert dialog._source() == str(source)
+
+
+def test_greaseweazle_scan_uses_selected_source_without_saving_its_label(dialog, source, monkeypatch):
+    selected = GreaseweazleFloppySource("COM42", "B", DISK_FORMAT_BY_KEY["ibm.720"])
+    snapshots = []
+
+    def snapshot(found, destination, **kwargs):
+        import shutil
+        snapshots.append(found)
+        assert callable(kwargs["progress"])
+        kwargs["progress"](2, 80, "Reading cylinder 2")
+        return shutil.copytree(source, destination)
+
+    monkeypatch.setattr(media, "read_floppy_source", snapshot)
+    dialog._select_external_source(selected)
+    dialog.start_scan()
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.album is not None, dialog.details.toPlainText()
+    assert dialog.album.title == "Synthetic album"
+    assert dialog.table.rowCount() == 1
+    assert snapshots == [selected]
+    assert not dialog.settings.contains("sps_source")
+
+
+def test_agreement_continues_scan_and_preparation_without_repeating_notice(source, tmp_path, qt_application, monkeypatch):
+    parent = QWidget()
+    notices = []
+    parent._show_yamaha_personal_use_notice = lambda: notices.append(True) or True
+    settings = QSettings(str(tmp_path / "consent.ini"), QSettings.IniFormat)
+    instance = dialogs.SmartPianoSoftDialog(settings, parent, discover_on_open=False)
+    instance.show()
+    monkeypatch.setattr(sync, "synchronize", lambda *_a, **_k: sync.Alignment(0, 1, .99, .99, .99))
+    try:
+        _scan(instance, source)
+        assert notices == [True]
+        audio = tmp_path / "paired.wav"
+        _wav(audio)
+        instance.audio_paths[1] = audio
+        instance.output_edit.setText(str(tmp_path))
+        instance.start_preparation()
+        _wait(lambda: not instance.is_busy)
+        assert instance.result_folder is not None, instance.details.toPlainText()
+        assert len(list((instance.result_folder / "Disklavier").glob("*.wav"))) == 1
+        assert notices == [True]
+    finally:
+        instance.close()
+        parent.close()
+
+
+def test_declining_consent_stops_direct_preparation_before_encoding(source, tmp_path, qt_application, monkeypatch):
+    parent = QWidget()
+    parent._show_yamaha_personal_use_notice = lambda: False
+    settings = QSettings(str(tmp_path / "decline.ini"), QSettings.IniFormat)
+    instance = dialogs.SmartPianoSoftDialog(settings, parent, discover_on_open=False)
+    instance.show()
+    monkeypatch.setattr(dialogs, "prepare_album", lambda *_a, **_k: pytest.fail("Encoded without agreement"))
+    try:
+        instance.source_edit.setText(str(source))
+        instance.output_edit.setText(str(tmp_path))
+        instance.start_preparation()
+        _wait(lambda: not instance.is_busy)
+        assert instance.album is None and instance.result_folder is None
+        assert instance.status.text() == instance.text("cancelled")
+        assert instance.options.isEnabled() and instance.start_button.isEnabled()
+        assert not instance._source_consent_granted
+    finally:
+        instance.close()
+        parent.close()
+
+
+@pytest.mark.parametrize("close", [False, True])
+def test_cancelling_while_waiting_for_consent_releases_worker(source, tmp_path, qt_application, monkeypatch, close):
+    parent = QWidget()
+    parent._show_yamaha_personal_use_notice = lambda: pytest.fail("Unexpected synchronous notice")
+    settings = QSettings(str(tmp_path / "waiting.ini"), QSettings.IniFormat)
+    instance = dialogs.SmartPianoSoftDialog(settings, parent, discover_on_open=False)
+    instance.show()
+    requests = []
+    monkeypatch.setattr(instance, "_request_personal_use_consent", requests.append)
+    monkeypatch.setattr(dialogs, "prepare_album", lambda *_a, **_k: pytest.fail("Continued after cancellation"))
+    try:
+        instance.source_edit.setText(str(source))
+        instance.output_edit.setText(str(tmp_path))
+        instance.start_preparation()
+        _wait(lambda: bool(requests))
+        assert instance.is_busy
+        assert not requests[0].wait(0)
+        instance.close() if close else instance.cancel_or_close()
+        _wait(lambda: not instance.is_busy, timeout=2)
+        assert requests[0].wait(0) and not requests[0].approved
+        assert instance.album is None and instance.result_folder is None
+        if close:
+            assert not instance.isVisible()
+            assert instance._workspace is None
+        else:
+            assert instance.status.text() == instance.text("cancelled")
+            assert instance.start_button.isEnabled()
+    finally:
+        instance.close()
+        parent.close()
+
+
+def test_loaded_source_inherits_prior_read_agreement(source, tmp_path, qt_application):
+    parent = QWidget()
+    parent.image_session = SimpleNamespace(_yamaha_consent_granted=True)
+    parent._show_yamaha_personal_use_notice = lambda: pytest.fail("Repeated agreement for the loaded disk")
+    settings = QSettings(str(tmp_path / "agreed-read.ini"), QSettings.IniFormat)
+    instance = dialogs.SmartPianoSoftDialog(settings, parent, discover_on_open=False, loaded_source=_loaded_source(source))
+    instance.show()
+    try:
+        _wait(lambda: instance.album is not None and not instance.is_busy)
+        assert instance.table.rowCount() == 1
+    finally:
+        instance.close()
+        parent.close()
+
+
+def test_smart_worker_pauses_at_copy_protection_before_continuing(qt_application):
+    continued, requests, failures = [], [], []
+
+    def read(_cancel, progress):
+        progress({"phase": "read", "completed": 1, "total": 80, "message": "Yamaha copy protection?"})
+        continued.append(True)
+
+    worker = dialogs.SmartPianoSoftWorker(read, require_consent=True)
+    worker.consentRequested.connect(requests.append)
+    worker.failed.connect(failures.append)
+    worker.start()
+    try:
+        _wait(lambda: bool(requests))
+        assert not continued
+        requests[0].resolve(True)
+        _wait(lambda: not worker.isRunning())
+        assert continued == [True] and not failures
+    finally:
+        worker.cancelled.set()
+        worker.wait(2000)
 
 
 def test_loaded_list_scans_automatically_before_cd_discovery(source, tmp_path, qt_application, monkeypatch):
@@ -214,7 +408,8 @@ def test_scan_pair_and_clear_leave_sources_untouched(dialog, source, tmp_path, m
     assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
 
 
-def test_start_scans_and_runs_cd_pipeline_without_blocking_ui(dialog, source, tmp_path, monkeypatch):
+@pytest.mark.parametrize("random_suffixes", [False, True])
+def test_start_scans_and_runs_cd_pipeline_without_blocking_ui(dialog, source, tmp_path, monkeypatch, random_suffixes):
     originals = {path.name: path.read_bytes() for path in source.iterdir()}
     calls = []
     track = media.CDTrack(1, 0, 75)
@@ -238,13 +433,20 @@ def test_start_scans_and_runs_cd_pipeline_without_blocking_ui(dialog, source, tm
     monkeypatch.setattr(sync, "synchronize", lambda *_a, **_k: sync.Alignment(0, 1, .99, .99, .99))
     dialog.source_edit.setText(str(source))
     dialog.output_edit.setText(str(tmp_path))
+    dialog.settings.setValue("random_output_suffixes", random_suffixes)
     dialog.cd_combo.setEditText("/dev/test-cd")
+    initial_icon = dialog.start_button.icon().pixmap(24, 24).toImage()
+    assert dialog.start_button.text() == dialog.text("start")
     dialog.start_preparation()
     assert dialog.is_busy
     assert not dialog.options.isEnabled()
     assert not dialog.start_button.isEnabled()
     _wait(lambda: not dialog.is_busy)
     assert dialog.result_folder is not None, dialog.details.toPlainText()
+    if random_suffixes:
+        assert dialog.result_folder.name.startswith("Smart PianoSoft - Synthetic album - ")
+    else:
+        assert dialog.result_folder.name == "Smart PianoSoft - Synthetic album"
     report = json.loads((dialog.result_folder / "manifest.json").read_text())
     assert report["status"] == "complete"
     assert report["hardware_verified"] is False
@@ -253,21 +455,46 @@ def test_start_scans_and_runs_cd_pipeline_without_blocking_ui(dialog, source, tm
     assert calls == ["toc", "rip", "toc"]
     assert dialog.open_button.isEnabled()
     assert dialog.options.isEnabled()
+    assert dialog.start_button.text() == dialog.text("restart")
+    assert dialog.start_button.icon().pixmap(24, 24).toImage() != initial_icon
+    first_output = dialog.result_folder
+    dialog.start_button.click()
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result_folder != first_output
+    assert json.loads((dialog.result_folder / "manifest.json").read_text())["status"] == "complete"
+    assert calls == ["toc", "rip", "toc"] * 2
+    assert dialog.start_button.text() == dialog.text("restart")
+    dialog.invalidate_scan()
+    assert dialog.start_button.text() == dialog.text("start")
+    assert dialog.start_button.icon().pixmap(24, 24).toImage() == initial_icon
     assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
 
 
-def test_manual_pairing_runs_without_accessing_cd(dialog, source, tmp_path, monkeypatch):
+@pytest.mark.parametrize("song_count", [1, 2])
+def test_manual_pairing_runs_without_accessing_cd(dialog, source, tmp_path, monkeypatch, song_count):
+    if song_count == 2:
+        (source / "SECOND.MID").write_bytes((source / "song.mid").read_bytes())
+        (source / "PSONG.MNG").write_bytes(_psong_bytes([
+            ("SONG.MID", "First song"), ("SECOND.MID", "Second song"),
+        ]))
     _scan(dialog, source)
     paired = tmp_path / "paired.wav"
     _wav(paired)
     monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_k: pytest.fail("Unexpected CD access"))
     monkeypatch.setattr(sync, "synchronize", lambda *_a, **_k: sync.Alignment(0, 1, .99, .99, .99))
     dialog.audio_paths[1] = paired
+    if song_count == 2:
+        dialog.audio_paths[2] = paired
     dialog.output_edit.setText(str(tmp_path))
     dialog.start_preparation()
     _wait(lambda: not dialog.is_busy)
     assert dialog.result_folder is not None, dialog.details.toPlainText()
     assert (dialog.result_folder / "WAV/Paired01.wav").read_bytes() == paired.read_bytes()
+    report = json.loads((dialog.result_folder / "manifest.json").read_text())
+    assert report["status"] == "complete"
+    encoded = [track["encoded"] for track in report["tracks"]]
+    assert len(set(encoded)) == song_count
+    assert len(list((dialog.result_folder / "Disklavier").glob("*.wav"))) == song_count
 
 
 @pytest.mark.parametrize("close_window", [False, True])
@@ -400,13 +627,15 @@ def _bounds_in(parent, widget):
 def _assert_large_font_layout_fits(instance):
     # A full caption needs the native button's text, margins and menu indicator.
     for button in instance.findChildren(QPushButton):
+        if not button.isVisible():
+            continue
         assert button.width() >= button.sizeHint().width(), button.text()
         assert button.height() >= button.sizeHint().height(), button.text()
         assert button.parentWidget().rect().contains(button.geometry()), button.text()
         if instance.options.isAncestorOf(button):
             assert instance.options.rect().contains(_bounds_in(instance.options, button)), button.text()
     for box in (instance.pairing_buttons, instance.buttons):
-        for first, second in combinations(box.buttons(), 2):
+        for first, second in combinations([b for b in box.buttons() if b.isVisible()], 2):
             assert not first.geometry().intersects(second.geometry())
     for label in instance.findChildren(QLabel):
         if label.wordWrap() and label.isVisible():
@@ -414,6 +643,88 @@ def _assert_large_font_layout_fits(instance):
     assert instance.rect().contains(instance.buttons.geometry())
     assert instance.scroll_area.geometry().bottom() < instance.buttons.geometry().top()
     assert instance.scroll_area.horizontalScrollBar().maximum() == 0
+
+
+@pytest.mark.parametrize("point_size,width,height", [(12, 940, 700), (18, 1180, 874), (18, 1000, 800)])
+def test_album_layout_uses_table_space_without_scrolling_the_dialog(
+    tmp_path, qt_application, source, point_size, width, height,
+):
+    original_font = QFont(qt_application.font())
+    font = QFont(original_font)
+    font.setPointSize(point_size)
+    qt_application.setFont(font)
+    settings = QSettings(str(tmp_path / "compact-layout.ini"), QSettings.IniFormat)
+    instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False,
+                                          loaded_source=_loaded_source(source))
+    instance.resize(width, height)
+    instance.show()
+    try:
+        _wait(lambda: instance.album is not None and not instance.is_busy)
+        QTest.qWait(30)
+        assert instance.size().toTuple() == (width, height)
+        assert instance.scroll_area.verticalScrollBar().maximum() == 0
+        _assert_large_font_layout_fits(instance)
+        description = instance.scroll_area.widget().layout().itemAt(0).widget()
+        assert description.height() == description.heightForWidth(description.width())
+        assert _bounds_in(instance, description).top() <= 16
+        table_bounds = _bounds_in(instance, instance.table)
+        assert table_bounds.left() >= 16
+        assert width - table_bounds.right() - 1 == table_bounds.left()
+        assert not instance.progress.isVisible()
+        assert not instance.details.isVisible()
+        # Active work can reveal its status and progress without displacing
+        # the always-accessible start/cancel area or forcing an outer scroll.
+        instance._progress({"phase": "rip", "completed": 1, "total": 10,
+                            "cd_track": 3, "track_index": 2, "track_count": 12,
+                            "message": "Reading with secure error correction…"})
+        QTest.qWait(30)
+        assert instance.progress.isVisible()
+        assert instance.scroll_area.verticalScrollBar().maximum() == 0
+        assert instance.rect().contains(instance.buttons.geometry())
+    finally:
+        instance.close()
+        qt_application.setFont(original_font)
+        qt_application.processEvents()
+
+
+def test_start_action_identifies_cd_ripping_and_paired_file_export(dialog):
+    assert dialog.start_button.text() == dialog.text("start_files")
+    assert dialog.start_button.toolTip() == dialog.text("start_files_hint")
+    dialog.cd_combo.addItem("Audio CD", "/dev/sr0")
+    dialog.cd_combo.setCurrentIndex(1)
+    assert dialog.start_button.text() == dialog.text("start")
+    assert dialog.start_button.toolTip() == dialog.text("start_hint")
+    dialog.cd_combo.setCurrentIndex(0)
+    assert dialog.start_button.text() == dialog.text("start_files")
+    assert dialog.start_button.isDefault()
+
+
+@pytest.mark.parametrize("language", [entry.code for entry in SUPPORTED_LANGUAGES])
+def test_cd_progress_keeps_disc_track_and_audio_track_count_visible(dialog, language):
+    dialog.language = language
+    for stage, message in (
+        ("check_disc", "Checking CD track list…"),
+        ("read", "Reading with secure error correction…"),
+        ("check_wav", "Checking WAV format and length…"),
+        ("save", "Saving audio track…"),
+        ("saved", "Audio track saved."),
+        ("checksum", "Calculating audio checksum…"),
+    ):
+        dialog._progress({"phase": "rip", "completed": 125, "total": 200,
+                          "cd_track": 3, "track_index": 2, "track_count": 8, "message": message})
+        assert dialog.progress.value() == 62
+        assert dialog.status.text() == dialog.text(
+            "cd_track_progress", number=3, index=2, count=8, message=dialog.text("cd_" + stage),
+        )
+        if language == "en":
+            assert dialog.status.text() == f"CD track 3 (2 of 8): {message}"
+
+
+@pytest.mark.parametrize("phase", ["scan", "sync", "encode"])
+def test_progress_preserves_song_titles_when_translating_phase_labels(dialog, phase):
+    dialog.language = "es"
+    dialog._progress({"phase": phase, "completed": 1, "total": 2, "message": "Help"})
+    assert dialog.status.text() == dialog.text("phase_" + phase) + ": Help"
 
 
 @pytest.mark.parametrize("language", [entry.code for entry in SUPPORTED_LANGUAGES])
@@ -440,15 +751,13 @@ def test_large_font_translations_reflow_and_scroll_after_repeated_resizes(
             if width == wide:
                 assert instance.pairing_buttons.orientation() == Qt.Horizontal
                 assert instance.buttons.orientation() == Qt.Horizontal
-            else:
-                assert instance.scroll_area.verticalScrollBar().maximum() > 0
             geometry = instance.geometry()
             footer = instance.buttons.geometry()
             viewport = instance.scroll_area.viewport()
-            # Pairing controls and progress remain reachable even though the
-            # large-font body is taller than the narrow window's viewport.
+            # Pairing controls and status remain reachable if a translated
+            # large-font body needs the narrow window's scrolling fallback.
             for target in (instance.scan_button, instance.pair_button,
-                           instance.automatic_button, instance.status, instance.progress):
+                           instance.automatic_button, instance.status):
                 instance.scroll_area.ensureWidgetVisible(target, 0, 0)
                 QTest.qWait(10)
                 assert viewport.rect().contains(_bounds_in(viewport, target))

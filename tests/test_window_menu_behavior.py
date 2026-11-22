@@ -55,22 +55,73 @@ def test_empty_main_menu_disables_commands_that_need_content(window):
     assert window.utilitiesRepairBootSectorAction.isEnabled()
 
 
-def test_deferred_smart_pianosoft_cannot_be_opened_by_menu_or_saved_shortcut(window, monkeypatch):
-    assert not window.ENABLE_SMART_PIANOSOFT_UTILITY
-    assert not hasattr(window, "utilitiesSmartPianoSoftAction")
-    assert "utilities.smart_pianosoft" not in {
+@pytest.mark.parametrize("admin_mode", [False, True])
+def test_disklavier_wav_player_opens_without_loaded_songs(window, monkeypatch, admin_mode):
+    from aps_midi_prep_tool_app import disklavier_decoder_dialog
+
+    opened = []
+    disposed = []
+    assert window._admin_mode_enabled is False
+    window._admin_mode_enabled = admin_mode
+
+    class Player:
+        def __init__(self, settings, parent, *, admin_mode):
+            assert settings is window.settings
+            assert parent is window
+            assert admin_mode is window._admin_mode_enabled
+
+        def deleteLater(self):
+            disposed.append(self)
+
+    def execute(dialog, *, resize_to_contents):
+        assert not resize_to_contents
+        assert window.disklavierWavDialog is dialog
+        opened.append(dialog)
+
+    monkeypatch.setattr(disklavier_decoder_dialog, "DisklavierWavPlayerDialog", Player)
+    monkeypatch.setattr(window, "_exec_child_dialog", execute)
+    action = window.utilitiesDisklavierWavAction
+    assert action.isEnabled()
+    assert action in window.utilitiesMenu.actions()
+    assert any(spec["id"] == "utilities.disklavier_wav"
+               for spec in window._keyboard_shortcut_specs())
+    action.trigger()
+    assert len(opened) == 1 and disposed == opened
+    assert window.disklavierWavDialog is None
+
+
+def test_main_window_waits_for_decoder_cancellation_before_close(window, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtGui import QCloseEvent
+
+    cancelled = []
+    window.disklavierWavDialog = SimpleNamespace(is_busy=True, reject=lambda: cancelled.append(True))
+    with monkeypatch.context() as patch:
+        patch.setattr(window, "_cleanup_for_close", lambda: pytest.fail("Cleanup ran while decoding"))
+        event = QCloseEvent()
+        window.closeEvent(event)
+    assert not event.isAccepted()
+    assert cancelled == [True]
+    window.disklavierWavDialog = None
+
+
+def test_smart_pianosoft_is_available_by_menu_and_saved_shortcut(window, monkeypatch):
+    assert window.ENABLE_SMART_PIANOSOFT_UTILITY
+    assert window.utilitiesSmartPianoSoftAction in window.utilitiesMenu.actions()
+    assert "utilities.smart_pianosoft" in {
         spec["id"] for spec in window._keyboard_shortcut_specs()
     }
     window.settings.setValue(
         window._shortcut_settings_key("utilities.smart_pianosoft"), "Ctrl+Alt+8",
     )
     window._setup_keyboard_shortcuts()
-    assert "utilities.smart_pianosoft" not in window.keyboardShortcutObjects
+    assert "utilities.smart_pianosoft" in window.keyboardShortcutObjects
 
     def unexpected_snapshot():
-        pytest.fail("The deferred utility attempted to open the current list")
+        pytest.fail("The busy utility attempted to open the current list")
 
     monkeypatch.setattr(window, "_smart_pianosoft_loaded_source", unexpected_snapshot)
+    window._set_disk_load_busy(True)
     window.show_smart_pianosoft_utility()
     assert getattr(window, "smartPianoSoftDialog", None) is None
 

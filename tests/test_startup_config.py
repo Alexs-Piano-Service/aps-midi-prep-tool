@@ -153,6 +153,39 @@ def test_config_overrides_saved_preferences_each_launch_and_allows_session_chang
     assert settings.value("language") == "de"
 
 
+@pytest.mark.parametrize("balance", [0, 37, 50, 100])
+def test_disklavier_balance_config_persists_endpoints_and_intermediate_values(tmp_path, settings, balance):
+    path = write_config(tmp_path, {"disklavier_wav_balance": balance})
+    apply_startup_config(settings, load_startup_config(path))
+
+    reopened = QSettings(settings.fileName(), QSettings.IniFormat)
+    reopened.setFallbacksEnabled(False)
+    assert reopened.value("disklavier_wav_balance", type=int) == balance
+
+    # Other deployment overrides must preserve the remembered balance when its
+    # key is omitted; an explicit value must still replace that preference.
+    apply_startup_config(reopened, {"language": "de"})
+    assert reopened.value("disklavier_wav_balance", type=int) == balance
+    replacement = 100 - balance if balance != 50 else 37
+    write_config(tmp_path, {"disklavier_wav_balance": replacement})
+    apply_startup_config(reopened, load_startup_config(path))
+    settings.sync()
+    assert settings.value("disklavier_wav_balance", type=int) == replacement
+
+
+@pytest.mark.parametrize("balance", [-1, 101, True, "50", 50.0, None])
+def test_invalid_disklavier_balance_rejects_entire_config(tmp_path, settings, balance):
+    settings.setValue("disklavier_wav_balance", 37)
+    settings.setValue("language", "fr")
+    path = write_config(tmp_path, {"language": "de", "disklavier_wav_balance": balance})
+
+    with pytest.raises(StartupConfigError, match="disklavier_wav_balance"):
+        apply_startup_config(settings, load_startup_config(path))
+
+    assert settings.value("disklavier_wav_balance", type=int) == 37
+    assert settings.value("language") == "fr"
+
+
 def test_instrument_uses_its_default_medium_and_clears_old_image_overrides(settings):
     settings.setValue("preparation_medium", "nalbantov")
     settings.setValue("preparation_image_format", "hfe")

@@ -6,6 +6,7 @@ No proprietary executable, music, or fingerprint is included here.
 """
 
 from dataclasses import dataclass
+import io
 import math
 from pathlib import Path
 import wave
@@ -90,7 +91,9 @@ def parse_sps_midi(path):
     selection must be verified by audio fingerprints, so cd_track is None.
     """
     try:
-        midi = mido.MidiFile(filename=str(path), clip=False)
+        midi = (mido.MidiFile(file=io.BytesIO(path), clip=False)
+                if isinstance(path, (bytes, bytearray))
+                else mido.MidiFile(filename=str(path), clip=False))
         if midi.type not in (0, 1) or midi.ticks_per_beat <= 0:
             raise SynchronizationError("Smart PianoSoft requires a synchronous, PPQN MIDI file.")
         fingerprints = {}
