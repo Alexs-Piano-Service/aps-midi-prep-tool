@@ -49,6 +49,55 @@ def test_default_balance_preserves_existing_half_gain_mix(tmp_path):
 
 
 @pytest.mark.parametrize("balance", [0, .25, .5, 1])
+@pytest.mark.parametrize("piano_channels", [1, 2])
+@pytest.mark.parametrize("longer_stem", ["piano", "accompaniment"])
+def test_pair_balance_preserves_stereo_channels_and_shared_timeline(
+        tmp_path, balance, piano_channels, longer_stem):
+    piano, accompaniment, mixed = (tmp_path / name for name in ("piano.wav", "audio.wav", "mix.wav"))
+    short_frames, long_frames = 44100 + 3, 2 * 44100 + 7
+    keys = np.zeros((long_frames if longer_stem == "piano" else short_frames, piano_channels), dtype="<i2")
+    audio = np.zeros((long_frames if longer_stem == "accompaniment" else short_frames, 2), dtype="<i2")
+    keys[22050] = 8000 if piano_channels == 1 else [8000, -4000]
+    audio[22051] = [16000, -12000]
+    keys[44100:44103] = -8000 if piano_channels == 1 else [-8000, 16000]
+    audio[44100:44103] = [4000, 20000]
+    keys[-1] = 12000
+    audio[-1] = [-20000, 10000]
+    _write_wav(piano, keys, channels=piano_channels)
+    _write_wav(accompaniment, audio, channels=2)
+    originals = piano.read_bytes(), accompaniment.read_bytes()
+    progress = []
+
+    preview._mix_preview(piano, accompaniment, mixed, balance=balance,
+                         allow_stereo=True, progress=progress.append)
+
+    expected = np.zeros((long_frames, 2), dtype=float)
+    expected[:len(keys)] += keys * (1 - balance)
+    expected[:len(audio)] += audio * balance
+    result = _read_wav(mixed)
+    assert np.array_equal(result, expected.astype("<i2"))
+    assert not result[:22050].any()
+    assert progress == sorted(progress) and len(progress) == 3 and progress[-1] == 1
+    assert (piano.read_bytes(), accompaniment.read_bytes()) == originals
+
+
+@pytest.mark.parametrize("truncated_stem", ["piano", "accompaniment"])
+@pytest.mark.parametrize("balance", [0, 1])
+@pytest.mark.parametrize("allow_stereo", [False, True])
+def test_mix_rejects_truncated_pcm_even_when_stem_is_muted(
+        tmp_path, truncated_stem, balance, allow_stereo):
+    piano, accompaniment, mixed = (tmp_path / name for name in ("piano.wav", "audio.wav", "mix.wav"))
+    _write_wav(piano, np.zeros(44100 + 10, dtype="<i2"))
+    channels = 2 if allow_stereo else 1
+    _write_wav(accompaniment, np.zeros((44100 + 10, channels), dtype="<i2"), channels=channels)
+    path = piano if truncated_stem == "piano" else accompaniment
+    path.write_bytes(path.read_bytes()[:-2])
+
+    with pytest.raises(ValueError, match="truncated"):
+        preview._mix_preview(piano, accompaniment, mixed, balance=balance, allow_stereo=allow_stereo)
+
+
+@pytest.mark.parametrize("balance", [0, .25, .5, 1])
 @pytest.mark.parametrize("longer_stem", ["piano", "accompaniment"])
 def test_balance_retains_leading_silence_block_boundary_and_longer_tail(tmp_path, balance, longer_stem):
     piano, accompaniment, mixed = (tmp_path / name for name in ("piano.wav", "audio.wav", "mix.wav"))

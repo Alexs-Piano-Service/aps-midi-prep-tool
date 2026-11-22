@@ -9,6 +9,13 @@ with release sections grouped by version and date.
 
 ### Added
 
+- Let the Disklavier WAV Player open a MIDI file with its same-name WAV or MP3
+  accompaniment automatically. Detect encoded audio or existing pairs, show the
+  loaded format, and preserve stereo audio, timing, waveform, and balance controls.
+- Add **Utilities → Decode Audio for ENSPIRE...** in Admin Mode to process
+  individual WAV/MP3 files or entire directory trees. Recover matching MIDI and
+  clean MP3 pairs in a new output folder, with progress, cancellation, and a
+  per-file report; preserve originals and skip audio without encoded control data.
 - Add a Piano/Accompaniment balance slider to the Disklavier WAV Player,
   with a remembered mix, separate master volume, and unchanged playback timing.
 - Add **Settings → Save Options → Add Random Suffixes to Output Names**.
@@ -43,6 +50,15 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Move the Disklavier WAV Player's introductory instructions into tooltips,
+  leaving more room for the piano roll and accompaniment waveform.
+- Read Smart PianoSoft's embedded CD track references so songs omitted from
+  the floppy do not make the displayed CD numbers shift. Show automatic matching
+  when no valid reference is present; verify both audio fingerprints before
+  export. Cover missing middle tracks in both playback formats.
+- Widen the Smart PianoSoft playback-format selector, align dialog spacing,
+  and remove the Beta label and extra explanatory paragraphs from the
+  Smart PianoSoft and Mark IV backup windows.
 - Keep the Disklavier WAV Player's moving marker a constant width at fractional
   display scaling, in both the piano roll and accompaniment waveform.
 - Hide decoded MIDI export during normal playback and require Admin Mode to
@@ -51,7 +67,7 @@ with release sections grouped by version and date.
   song table, and progress/details shown when needed. The primary action now
   identifies CD ripping versus paired-file export and the selected format.
   Automatic CD pairing no longer appears to require manual audio verification.
-- Restore Smart PianoSoft (Beta) in Utilities and saved keyboard shortcuts.
+- Restore Smart PianoSoft in Utilities and saved keyboard shortcuts.
   Confirmed Smart disks offer to open the CD-ripping and pairing dialog after
   reading finishes. Verified songs export in the selected playback format.
   Ordinary Yamaha catalogs do not trigger the offer.
@@ -68,6 +84,28 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Defer responsive dialog button reflow until Qt finishes the current layout
+  event, combine repeated requests, and cancel queued reflow on dialog deletion.
+- Show “Exporting paired MIDI/MP3” during Smart PianoSoft paired-file export;
+  reserve “Encoding Disklavier WAV” for encoded WAV output.
+- Stop failed, disconnected, or stalled CD reads with clear reconnect-and-retry
+  guidance. Keep the scanned Smart PianoSoft floppy and pairings available,
+  restore the controls, and restart into a fresh output folder without reusing
+  partial tracks or overwriting files from the failed attempt.
+- Keep Disklavier WAV Player playback continuous when adjusting the balance
+  or switching to piano alone. Mix the prepared piano and accompaniment in one
+  audio stream with smooth level changes instead of reloading a new WAV.
+- Speed up Disklavier WAV Player preparation of MIDI/audio pairs while retaining
+  the full check for encoded piano data. Show accompaniment-check progress
+  instead of claiming to decode piano data from ordinary audio.
+- Accept the strongest Smart PianoSoft fingerprint match in repeating intros,
+  following Yamaha's selection rule instead of requiring a large lead over
+  similar repetitions. Retain checks for indistinguishable peaks, weak audio
+  matches, and inconsistent timing between the beginning and ending references.
+- Inspect Mark IV backup audio for encoded control data even when a same-basename
+  MIDI or E-SEQ companion exists. Recover synchronized MIDI/MP3 pairs without
+  changing the originals, and check for LAME before starting a backup that
+  requests audio decoding.
 - Show the current CD track and reading/checking/saving stage during Smart
   PianoSoft ripping, with progress across the CD instead of restarting per track.
 - Finish the Greaseweazle capture-save flow before offering Smart PianoSoft

@@ -12,9 +12,37 @@ from aps_midi_prep_tool_app.disklavier_audio_decode import (
     DisklavierDecodeError,
     DisklavierDecodingCancelled,
     NotEncodedAudioError,
+    _measure,
     _parse_messages,
     decode_disklavier_audio,
 )
+
+
+@pytest.mark.parametrize("strided", [False, True])
+def test_carrier_measurement_preserves_phase_level_and_energy_thresholds(strided):
+    # Two orthogonal tones have a known energy ratio. Exercise both sides of
+    # the carrier checks, including the interleaved PCM view used by scanning.
+    samples = np.arange(14)
+    phases = np.array([0, 7 * np.pi / 8, -7 * np.pi / 8, np.pi / 4])
+    amplitudes = np.array([99.9, 100.1, 25000, 12000])
+    fits = np.array([1, 1, .849, .851])
+    interference = amplitudes * np.sqrt(1 / fits - 1)
+    blocks = (amplitudes[:, None] * np.cos(2 * np.pi * samples / 7 - phases[:, None])
+              + interference[:, None] * np.cos(2 * np.pi * samples / 14))
+    blocks = np.vstack((blocks, np.zeros(14)))
+    if strided:
+        stereo = np.empty((len(blocks), 14, 2))
+        stereo[:, :, 0] = blocks
+        stereo[:, :, 1] = 32767
+        blocks = stereo[:, :, 0]
+        assert not blocks.flags.c_contiguous
+
+    measured_phase, measured_amplitude, measured_fit = _measure(blocks)
+    np.testing.assert_allclose(np.exp(1j * measured_phase[:-1]), np.exp(1j * phases), atol=1e-12)
+    np.testing.assert_allclose(measured_amplitude, np.r_[amplitudes, 0], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(measured_fit, np.r_[fits, 0], atol=1e-12)
+    assert ((measured_amplitude >= 100) & (measured_fit >= .85)).tolist() == [
+        False, True, False, True, False]
 
 
 def _write(path, samples):

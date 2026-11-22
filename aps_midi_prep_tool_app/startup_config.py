@@ -22,6 +22,7 @@ PATH_SETTINGS = frozenset({
     "emulator_image_source", "emulator_image_output", "disk_recovery_image_path",
     "markiv_backup_source", "markiv_backup_output", "markiv_backup_last_folder",
     "sps_source", "sps_output", "disklavier_wav_folder",
+    "audio_decode_batch_input", "audio_decode_batch_output",
 })
 BOOLEAN_SETTINGS = frozenset({
     "random_output_suffixes",

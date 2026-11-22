@@ -77,9 +77,12 @@ def _identity(path):
 def _measure(blocks):
     """Return phase, amplitude and explained carrier energy for PCM blocks."""
     blocks = blocks.astype(np.float64)
-    quadrature = blocks @ _CARRIER
+    # Each row is only fourteen samples. Sending thousands of these tiny
+    # reductions through threaded BLAS costs more than the arithmetic, especially
+    # in the GUI process. Keep the same projection without BLAS thread dispatch.
+    quadrature = np.einsum("ij,j->i", blocks, _CARRIER, optimize=False)
     amplitude = np.abs(quadrature) * (2 / SAMPLES_PER_SYMBOL)
-    power = np.sum(blocks * blocks, axis=1)
+    power = np.einsum("ij,ij->i", blocks, blocks, optimize=False)
     fit = 2 * np.abs(quadrature) ** 2 / (SAMPLES_PER_SYMBOL * power + 1e-20)
     return np.angle(quadrature), amplitude, fit
 

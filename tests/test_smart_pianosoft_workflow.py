@@ -16,7 +16,9 @@ from aps_midi_prep_tool_app import audio_tools
 from aps_midi_prep_tool_app.disklavier_audio import read_midi_events
 from aps_midi_prep_tool_app.smart_pianosoft_workflow import AlbumBuildError, prepare_album, scan_album
 from test_smart_pianosoft import _psong_bytes, _pdisk_bytes
-from test_smart_pianosoft_sync import _fingerprint_message, _wav, original_phrase
+from test_smart_pianosoft_sync import (
+    _cd_reference_message, _fingerprint_message, _reference_envelope, _wav, original_phrase,
+)
 
 
 @pytest.fixture
@@ -50,7 +52,11 @@ def test_complete_album_preserves_sources_and_separates_originals_from_encoded_a
     originals = {p.name: p.read_bytes() for p in source.iterdir()}
     audio_before = audio.read_bytes()
     album = _scan(tmp_path, source)
-    result = prepare_album(album, tmp_path, audio_paths={1: audio}, cancel=threading.Event())
+    updates = []
+    result = prepare_album(album, tmp_path, audio_paths={1: audio}, cancel=threading.Event(),
+                           progress=updates.append)
+    assert any(detail["phase"] == "encode" for detail in updates)
+    assert not any(detail["phase"] == "export_pairs" for detail in updates)
     assert {p.name for p in result.iterdir()} == {"MIDI", "WAV", "Disklavier", "manifest.json"}
     assert {p.name: p.read_bytes() for p in source.iterdir()} == originals
     assert (result / "MIDI/01.MID").read_bytes() == originals["01.MID"]
@@ -112,7 +118,11 @@ def test_paired_album_reuses_fingerprint_alignment_and_delivers_matching_midi_mp
     original_midi = (source / "01.MID").read_bytes()
     original_audio = audio.read_bytes()
     album = _scan(tmp_path, source)
-    folder = prepare_album(album, tmp_path, audio_paths={1: audio}, output_format="midi_mp3")
+    updates = []
+    folder = prepare_album(album, tmp_path, audio_paths={1: audio}, output_format="midi_mp3",
+                           progress=updates.append)
+    assert any(detail["phase"] == "export_pairs" for detail in updates)
+    assert not any(detail["phase"] == "encode" for detail in updates)
     report = json.loads((folder / "manifest.json").read_text())
     assert report["status"] == "complete"
     assert report["output_format"] == "midi_mp3"
@@ -177,6 +187,10 @@ def test_wrong_manual_pairing_retains_originals_but_never_encodes_a_guess(tmp_pa
 @pytest.mark.parametrize("ambiguous", [False, True])
 def test_cd_track_order_is_only_a_hint_and_ambiguous_fallback_is_rejected(tmp_path, album_files, monkeypatch, ambiguous):
     source, audio, pcm = album_files
+    # An embedded reference from a different CD edition is also only a hint.
+    midi = mido.MidiFile(source / "01.MID")
+    midi.tracks[0].insert(0, _cd_reference_message(1))
+    midi.save(source / "01.MID")
     wrong = tmp_path / "wrong.wav"
     _wav(wrong, np.random.default_rng(556).integers(-12000, 12000, pcm.shape, dtype=np.int16))
     toc = tuple(media.CDTrack(n, (n - 1) * 1050, 1050) for n in range(1, 4 if ambiguous else 3))
@@ -193,6 +207,91 @@ def test_cd_track_order_is_only_a_hint_and_ambiguous_fallback_is_rejected(tmp_pa
         report = json.loads((result / "manifest.json").read_text())
         assert report["tracks"][0]["audio"] == "WAV/CD02.wav"
         assert len(report["audio"]) == 2
+
+
+@pytest.mark.parametrize("output_format", ["encoded_wav", "midi_mp3"])
+@pytest.mark.parametrize("cd_reference", [False, True])
+def test_missing_middle_cd_song_does_not_shift_later_floppy_pairings(tmp_path, monkeypatch, output_format, cd_reference):
+    """Four floppy performances match CD 1, 3, 4, 5 using real fingerprints."""
+    if output_format == "midi_mp3" and not audio_tools.find_lame_command():
+        pytest.skip("LAME is unavailable")
+    source = tmp_path / "source"
+    source.mkdir()
+    cd_numbers = (1, 3, 4, 5)
+    recordings, catalog = {}, []
+    # All recordings have the same duration, and CD audio has no song titles.
+    # The only way to distinguish them is their independent audio content.
+    times = np.arange(14 * 44100) / 44100
+    knots = np.arange(0, 14.02, .02)
+    carrier = np.sin(2 * np.pi * 437 * times) + .3 * np.sin(2 * np.pi * 731 * times)
+    for cd_number in range(1, 6):
+        rng = np.random.default_rng(1247 + cd_number)
+        amplitude = np.interp(times, knots, rng.uniform(.05, .8, len(knots)))
+        mono = np.asarray(20000 * amplitude * carrier, dtype=np.int16)
+        pcm = np.column_stack((mono, mono))
+        audio = tmp_path / f"recording-{cd_number}.wav"
+        _wav(audio, pcm)
+        recordings[cd_number] = audio
+        if cd_number not in cd_numbers:
+            continue
+        number = cd_numbers.index(cd_number) + 1
+        envelope = _reference_envelope(pcm)
+        track = mido.MidiTrack()
+        if cd_reference:
+            track.append(_cd_reference_message(cd_number, tuple(150 + n * 1050 for n in range(6))))
+        for kind, index in ((0, 345), (2, 1723)):
+            segment = envelope[index:index + 256]
+            samples = np.rint(segment / np.max(np.abs(segment)) * 60).astype(int)
+            track.append(_fingerprint_message(kind, index * 256 / 44100, samples))
+        track.extend([
+            mido.MetaMessage("set_tempo", tempo=1000000),
+            mido.Message("note_on", note=60 + number, velocity=80, time=2000),
+            mido.Message("note_off", note=60 + number, time=1000),
+            mido.MetaMessage("end_of_track", time=11000),
+        ])
+        midi = mido.MidiFile(type=0, ticks_per_beat=1000)
+        midi.tracks.append(track)
+        filename = f"{number:02d}.MID"
+        midi.save(source / filename)
+        catalog.append((filename, f"Original phrase {number}"))
+    (source / "PSONG.MNG").write_bytes(_psong_bytes(catalog))
+    (source / "PDISK.MNG").write_bytes(_pdisk_bytes("Missing middle song"))
+    originals = {path.name: path.read_bytes() for path in source.iterdir()}
+    toc = tuple(media.CDTrack(number, (number - 1) * 1050, 1050) for number in range(1, 6))
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_k: toc)
+    monkeypatch.setattr(media, "rip_cd_track", lambda device, track, path, **kw:
+                        shutil.copyfile(recordings[track.number], path))
+
+    result = prepare_album(_scan(tmp_path, source), tmp_path, cd_device="fake-cd", output_format=output_format)
+
+    report = json.loads((result / "manifest.json").read_text())
+    assert report["status"] == "complete"
+    assert [(track["number"], track["audio"]) for track in report["tracks"]] == [
+        (number, f"WAV/CD{cd_number:02d}.wav") for number, cd_number in enumerate(cd_numbers, 1)
+    ]
+    assert len(report["audio"]) == 5  # Unpaired CD track 2 is still preserved.
+    for cd_number, audio in recordings.items():
+        assert (result / f"WAV/CD{cd_number:02d}.wav").read_bytes() == audio.read_bytes()
+    assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
+    for filename, content in originals.items():
+        assert (result / "MIDI" / filename).read_bytes() == content
+    for number, track in enumerate(report["tracks"], 1):
+        assert track["alignment"]["confidence"] > .98
+        assert track["alignment"]["offset_seconds"] == pytest.approx(0, abs=.01)
+        assert track["alignment"]["time_scale"] == pytest.approx(1, abs=.001)
+        if output_format == "encoded_wav":
+            with wave.open(str(result / track["encoded"]), "rb") as encoded:
+                encoded.setpos(round(track["encoding"]["audio_preroll_seconds"] * 44100))
+                frames = np.frombuffer(encoded.readframes(1000), dtype="<i2").reshape(-1, 2)
+            with wave.open(str(recordings[cd_numbers[number - 1]]), "rb") as audio:
+                expected = np.frombuffer(audio.readframes(1000), dtype="<i2").reshape(-1, 2)
+            np.testing.assert_array_equal(frames[:, 0], expected[:, 0])
+        else:
+            midi, audio = result / track["prepared_midi"], result / track["prepared_audio"]
+            assert midi.stem == audio.stem and audio.stat().st_size > 0
+            assert [data[1] for _, data in read_midi_events(midi) if data[0] & 0xF0 == 0x90] == [60 + number]
+    delivery = result / ("Disklavier" if output_format == "encoded_wav" else "ENSPIRE")
+    assert len(list(delivery.iterdir())) == (4 if output_format == "encoded_wav" else 8)
 
 
 def test_cancellation_never_publishes_partial_encoded_wav(tmp_path, album_files):
@@ -247,6 +346,87 @@ def test_cd_progress_counts_audio_bytes_across_unequal_nonconsecutive_tracks(
     ]
     assert [detail["cd_track"] for detail in rip_updates
             if detail["message"] == "Calculating audio checksum…"] == [1, 3]
+
+
+@pytest.mark.parametrize("failure_stage", ["toc", "second_track", "final_toc"])
+@pytest.mark.parametrize("output_format", ["encoded_wav", "midi_mp3"])
+def test_cd_read_failure_retains_verified_files_and_restarts_from_reconnected_drive(
+        tmp_path, album_files, monkeypatch, failure_stage, output_format):
+    if output_format == "midi_mp3" and not audio_tools.find_lame_command():
+        pytest.skip("LAME is unavailable")
+    source, audio, pcm = album_files
+    originals = {path.name: path.read_bytes() for path in source.iterdir()}
+    album = _scan(tmp_path, source)
+    wrong_audio = tmp_path / "other-track.wav"
+    _wav(wrong_audio, np.zeros_like(pcm))
+    toc = (media.CDTrack(1, 0, 1050), media.CDTrack(2, 1050, 1050))
+    failing, toc_calls = True, 0
+    ripped = []
+
+    def read_toc(device, **_kwargs):
+        nonlocal toc_calls
+        assert device == ("old-cd" if failing else "reconnected-cd")
+        toc_calls += 1
+        if failing and (failure_stage == "toc" or failure_stage == "final_toc" and toc_calls == 2):
+            raise media.CDReadError("The CD drive disconnected while reading its track list.")
+        return toc
+
+    def rip(device, track, destination, **_kwargs):
+        assert device == ("old-cd" if failing else "reconnected-cd")
+        assert not destination.exists()
+        ripped.append((device, track.number))
+        if failing and failure_stage == "second_track" and track.number == 2:
+            raise media.CDReadError("The CD drive disconnected while reading track 2.")
+        return shutil.copyfile(wrong_audio if track.number == 1 else audio, destination)
+
+    monkeypatch.setattr(media, "read_cd_toc", read_toc)
+    monkeypatch.setattr(media, "rip_cd_track", rip)
+    with pytest.raises(AlbumBuildError) as caught:
+        prepare_album(album, tmp_path, cd_device="old-cd", output_format=output_format,
+                      random_suffixes=False)
+    assert caught.value.cd_read_error
+    failed_folder = caught.value.output_directory
+    report = json.loads((failed_folder / "manifest.json").read_text())
+    assert report["status"] == "failed" and report["failure_kind"] == "cd_read"
+    assert report["cd_device"] == "old-cd"
+    assert len(report["audio"]) == {"toc": 0, "second_track": 1, "final_toc": 2}[failure_stage]
+    delivery = "ENSPIRE" if output_format == "midi_mp3" else "Disklavier"
+    assert not list((failed_folder / delivery).iterdir())
+    retained = {path.relative_to(failed_folder): path.read_bytes()
+                for path in failed_folder.rglob("*") if path.is_file()}
+
+    failing = False
+    result = prepare_album(album, tmp_path, cd_device="reconnected-cd", output_format=output_format,
+                           random_suffixes=False)
+    assert result != failed_folder
+    assert ripped[-2:] == [("reconnected-cd", 1), ("reconnected-cd", 2)]
+    assert json.loads((result / "manifest.json").read_text())["status"] == "complete"
+    assert list((result / delivery).iterdir())
+    assert {path.relative_to(failed_folder): path.read_bytes()
+            for path in failed_folder.rglob("*") if path.is_file()} == retained
+    assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_cd_storage_failure_or_cancellation_is_not_reported_as_drive_failure(
+        tmp_path, album_files, monkeypatch, cancelled):
+    source, _audio, _pcm = album_files
+    cancel = threading.Event()
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_kw: (media.CDTrack(1, 0, 1050),))
+
+    def fail(*_args, **_kwargs):
+        if cancelled:
+            cancel.set()
+            raise media.FloppyOperationCancelled("Operation cancelled.")
+        raise OSError("The output disk is full.")
+
+    monkeypatch.setattr(media, "rip_cd_track", fail)
+    with pytest.raises(AlbumBuildError) as caught:
+        prepare_album(_scan(tmp_path, source), tmp_path, cd_device="fake-cd", cancel=cancel)
+    assert not caught.value.cd_read_error
+    report = json.loads((caught.value.output_directory / "manifest.json").read_text())
+    assert report["status"] == ("cancelled" if cancelled else "failed")
+    assert "failure_kind" not in report
 
 
 def test_output_cannot_be_inside_original_source_and_pairings_must_be_complete(tmp_path, album_files):

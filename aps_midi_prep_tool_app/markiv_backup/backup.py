@@ -366,9 +366,6 @@ def _split_audio_copies(plan, folder, records, manifest, journal, *, cancel=None
     candidate_sources = {item.source for item in _audio_candidates(plan)}
     candidates = [(index, item, record) for index, (item, record) in enumerate(zip(plan.files, records))
                   if item.source in candidate_sources and record['status'] == 'verified']
-    native_pairs = {_path_key(Path(item.source).with_suffix(''))
-                    for item, record in zip(plan.files, records)
-                    if item.kind in {'MIDI', 'E-SEQ'} and record['status'] in {'verified', 'replaced'}}
     root = _audio_pair_root(folder, plan)
     reserved = set()
     decoded = skipped = failed = completed = 0
@@ -390,10 +387,6 @@ def _split_audio_copies(plan, folder, records, manifest, journal, *, cancel=None
         journal.append('files', index, original_record)
         emit(f'Decoding {item.destination}', force=True)
         try:
-            if _path_key(Path(item.source).with_suffix('')) in native_pairs:
-                details.update(status='skipped', reason='Existing MIDI/audio companion retained')
-                skipped += 1
-                continue
             original = _contained(folder, item.destination)
             if _hash(original, cancel) != original_record['sha256']:
                 raise ValueError('Original backup checksum changed before audio decoding')
@@ -401,6 +394,8 @@ def _split_audio_copies(plan, folder, records, manifest, journal, *, cancel=None
                 raise ValueError('Not enough free space for audio decoding and temporary PCM files.')
             with tempfile.TemporaryDirectory(prefix='.decode-', dir=folder) as temporary:
                 music = Path(temporary) / 'music.wav'
+                # A same-stem MIDI or E-SEQ file does not prove the audio is
+                # clean. Inspect its channels before classifying it as ordinary.
                 decoded_audio = decode_disklavier_audio(
                     original, music, cancel=cancel,
                     progress=lambda _fraction: emit(f'Decoding {item.destination}'),
@@ -500,6 +495,13 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     check_cancel(cancel)
     keep_originals = not convert_eseq or bool(keep_originals)
     target = _validate_target(plan, Path(target), convert_eseq=convert_eseq, split_audio=split_audio)
+    if split_audio and _audio_candidates(plan):
+        from ..audio_tools import find_lame_command
+
+        if not find_lame_command():
+            raise ValueError(
+                'LAME is required to create paired MIDI/MP3 files. Install LAME or turn off '
+                '"Create paired MIDI + MP3 files from encoded WAV/MP3" before starting the backup.')
     target.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     folder = create_output_directory(target, f'MarkIV-Backup-{stamp}',

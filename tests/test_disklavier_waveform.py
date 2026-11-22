@@ -3,6 +3,7 @@
 import threading
 import wave
 
+import mido
 import numpy as np
 import pytest
 
@@ -52,6 +53,35 @@ def test_partial_bins_crossing_stream_chunks_retain_both_extrema(tmp_path, monke
     assert result["frame_count"] == 101
     assert result["minimums"] == [int(part.min()) / 32768 for part in expected]
     assert result["maximums"] == [int(part.max()) / 32768 for part in expected]
+
+
+def test_pair_stereo_waveform_preserves_opposite_phases_and_timed_extrema(tmp_path, monkeypatch):
+    samples = np.zeros((101, 2), dtype="<i2")
+    samples[22] = [16384, -16384]
+    samples[65] = [-32768, 32767]
+    samples[100] = [-4000, 8000]
+    source = tmp_path / "stereo.wav"
+    _write_wav(source, samples, channels=2)
+    monkeypatch.setattr(preview, "_WAVEFORM_BLOCK_FRAMES", 13)
+
+    result = preview._accompaniment_waveform(source, max_bins=10, allow_stereo=True)
+
+    expected = [samples[index:index + 11] for index in range(0, len(samples), 11)]
+    assert result["frame_count"] == len(samples)
+    assert result["duration_seconds"] == len(samples) / 44100
+    assert result["frames_per_bin"] == 11
+    assert result["minimums"] == [int(part.min()) / 32768 for part in expected]
+    assert result["maximums"] == [int(part.max()) / 32768 for part in expected]
+    assert result["minimums"][2] == -.5 and result["maximums"][2] == .5
+    assert result["minimums"][:2] == result["maximums"][:2] == [0, 0]
+
+
+def test_pair_stereo_waveform_rejects_truncated_pcm(tmp_path):
+    source = tmp_path / "truncated.wav"
+    _write_wav(source, np.zeros((200, 2), dtype="<i2"), channels=2)
+    source.write_bytes(source.read_bytes()[:-2])
+    with pytest.raises(ValueError, match="truncated"):
+        preview._accompaniment_waveform(source, allow_stereo=True)
 
 
 def test_long_waveform_has_bounded_reads_and_output(monkeypatch):
@@ -174,3 +204,39 @@ def test_prepared_waveform_uses_decoded_left_channel_and_retains_midi_preroll(tm
     assert first_time <= result["notes"][0]["start_sec"] < last_time
     assert not any(waveform["maximums"][:nonzero[0]])
     assert not any(waveform["maximums"][nonzero[-1] + 1:])
+
+
+def test_prepared_pair_retains_stereo_and_original_midi_audio_timeline(tmp_path, monkeypatch):
+    midi = tmp_path / "song.mid"
+    music = tmp_path / "song.wav"
+    song = mido.MidiFile(type=0, ticks_per_beat=1000)
+    song.tracks.append(mido.MidiTrack([
+        mido.MetaMessage("set_tempo", tempo=1000000),
+        mido.Message("note_on", note=60, velocity=100, time=250),
+        mido.Message("note_off", note=60, time=250),
+    ]))
+    song.save(str(midi))
+    samples = np.zeros((44100, 2), dtype="<i2")
+    samples[11025:11125] = [16384, -16384]
+    _write_wav(music, samples, channels=2)
+    decoded = {"source_kind": "pair", "midi_path": str(midi),
+               "accompaniment_path": str(music), "duration_seconds": 1.0}
+    monkeypatch.setattr(preview, "_render_soundfont", lambda *_args: False)
+
+    result = preview.prepare_preview(decoded, tmp_path)
+
+    assert result["notes"][0]["start_sec"] == pytest.approx(.25)
+    assert result["notes"][0]["end_sec"] == pytest.approx(.5)
+    waveform = result["accompaniment_waveform"]
+    assert waveform["frame_count"] == len(samples)
+    assert waveform["duration_seconds"] == 1.0
+    assert max(waveform["maximums"]) == .5
+    assert min(waveform["minimums"]) == -.5
+    first_bin = next(index for index, value in enumerate(waveform["maximums"]) if value)
+    width_seconds = waveform["frames_per_bin"] / 44100
+    assert first_bin * width_seconds <= .25 < (first_bin + 1) * width_seconds
+    assert result["preview_durations"]["mixed_path"] == 1.0
+    with wave.open(result["mixed_path"], "rb") as audio:
+        mixed = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2").reshape(-1, 2)
+    assert not mixed[:11025].any()
+    assert mixed[11025].tolist() == [8192, -8192]

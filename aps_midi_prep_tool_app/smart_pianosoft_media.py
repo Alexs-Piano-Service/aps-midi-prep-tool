@@ -10,6 +10,7 @@ FloppyOperationCancelled.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
@@ -35,11 +36,19 @@ from .helpers.atomic_file import publish_new_file
 MEDIA_HELPER_ARG = "--aps-smart-pianosoft-media-helper"
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 CD_QUERY_TIMEOUT = 30.0
+# Allow spin-up and secure error correction, but do not leave a disconnected
+# drive or an unrecoverable sector occupying the workflow for up to an hour.
+CD_STALL_TIMEOUT = 60.0
+CD_DEVICE_CHECK_INTERVAL = 0.5
 FLOPPY_TIMEOUT = 180.0
 
 
 class SmartPianoSoftMediaError(FloppyImageError):
     pass
+
+
+class CDReadError(SmartPianoSoftMediaError):
+    """An unsuccessful CD read that can be retried after checking the disc/drive."""
 
 
 @dataclass(frozen=True)
@@ -119,40 +128,67 @@ def _cdparanoia():
     return command
 
 
-def _run_command(args, *, timeout, cancel=None, progress=None, output=None, total=0):
-    """Bound helpers and keep potentially large diagnostics out of pipe buffers."""
+def _run_command(args, *, timeout, cancel=None, progress=None, output=None, total=0,
+                 check_source=None, stall_timeout=None):
+    """Bound helpers, optionally watch source loss/audio stalls, and retain logs."""
     _check_cancel(cancel)
     env = dict(os.environ, LC_ALL="C", LANG="C")
     with tempfile.TemporaryFile() as log:
-        process = subprocess.Popen(
-            list(map(os.fspath, args)), stdin=subprocess.DEVNULL,
-            stdout=log, stderr=subprocess.STDOUT, env=env,
-            start_new_session=os.name != "nt",
-            **windows_subprocess_kwargs(),
-        )
-        deadline = time.monotonic() + timeout
+        try:
+            process = subprocess.Popen(
+                list(map(os.fspath, args)), stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT, env=env,
+                start_new_session=os.name != "nt",
+                **windows_subprocess_kwargs(),
+            )
+        except OSError as exc:
+            if exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+                raise
+            raise SmartPianoSoftMediaError(f"The media reader could not be started: {exc}") from exc
+        started = time.monotonic()
+        deadline = started + timeout
+        last_growth, next_source_check, high_water = started, started, 0
         try:
             while process.poll() is None:
                 _check_cancel(cancel)
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if check_source is not None and now >= next_source_check:
+                    check_source()
+                    next_source_check = now + CD_DEVICE_CHECK_INTERVAL
+                if now >= deadline:
                     raise SmartPianoSoftMediaError(
                         f"Media reading did not finish within {timeout:g} seconds."
                     )
-                if progress is not None and output is not None:
+                if output is not None:
                     try:
                         completed = max(0, Path(output).stat().st_size - 44)
                     except FileNotFoundError:
                         completed = 0
+                    if completed > high_water:
+                        high_water, last_growth = completed, now
+                    if stall_timeout is not None and now - last_growth >= stall_timeout:
+                        raise SmartPianoSoftMediaError(
+                            f"The CD reader made no audio progress for {stall_timeout:g} seconds."
+                        )
                     _progress(progress, min(completed, total), total,
                               "Reading with secure error correction…", cancel)
                 time.sleep(0.1)
             _check_cancel(cancel)
+            if process.returncode:
+                # Keep the final diagnostic even if secure-reading retries
+                # generated more than a megabyte of earlier log messages.
+                log.seek(0, os.SEEK_END)
+                log.seek(max(0, log.tell() - 6000))
+                text = log.read().decode("utf-8", errors="replace").strip()
+                for diagnostic, code in (("No space left on device", errno.ENOSPC),
+                                         ("Disk quota exceeded", getattr(errno, "EDQUOT", errno.ENOSPC))):
+                    if diagnostic.casefold() in text.casefold():
+                        raise OSError(code, diagnostic, os.fspath(output) if output else None)
+                raise SmartPianoSoftMediaError(
+                    f"Media reader failed (exit {process.returncode}): {text}"
+                )
             log.seek(0)
             text = log.read(1024 * 1024).decode("utf-8", errors="replace")
-            if process.returncode:
-                raise SmartPianoSoftMediaError(
-                    f"Media reader failed (exit {process.returncode}): {text[-6000:].strip()}"
-                )
             return text
         except BaseException:
             if os.name != "nt":
@@ -160,7 +196,7 @@ def _run_command(args, *, timeout, cancel=None, progress=None, output=None, tota
                     # A floppy helper may have started mtools children. Stop
                     # its entire owned session before removing staging files.
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                except OSError:
                     pass
             _terminate_process(process)
             raise
@@ -202,12 +238,36 @@ def read_cd_toc(device, cancel=None):
     cancel = _cancel_callback(cancel)
     _linux_required()
     _check_cancel(cancel)
-    identity = _device_identity(device)
-    text = _run_command([_cdparanoia(), "-Q", "-d", device],
-                        timeout=CD_QUERY_TIMEOUT, cancel=cancel)
-    if _device_identity(device) != identity:
-        raise SmartPianoSoftMediaError("The selected CD drive changed while reading its track list.")
-    return _parse_cd_toc(text)
+    identity = _cd_device_identity(device)
+    command = _cdparanoia()
+    try:
+        text = _run_command([command, "-Q", "-d", device],
+                            timeout=CD_QUERY_TIMEOUT, cancel=cancel,
+                            check_source=lambda: _check_cd_device(device, identity))
+        _check_cd_device(device, identity)
+        return _parse_cd_toc(text)
+    except CDReadError:
+        raise
+    except SmartPianoSoftMediaError as exc:
+        raise CDReadError(f"The audio CD track list could not be read. {exc}") from exc
+
+
+def _cd_device_identity(device):
+    try:
+        return _device_identity(device)
+    except (OSError, SmartPianoSoftMediaError) as exc:
+        raise CDReadError(
+            f"The CD drive is unavailable ({device}). Check its connection and insert "
+            "the original audio CD, then try again."
+        ) from exc
+
+
+def _check_cd_device(device, identity):
+    if _cd_device_identity(device) != identity:
+        raise CDReadError(
+            "The selected CD drive changed while reading. Reconnect the drive and "
+            "insert the original audio CD, then try again."
+        )
 
 
 def _new_destination(destination):
@@ -225,19 +285,19 @@ def _validate_cd_wav(path, track, cancel=None):
             if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(),
                     audio.getcomptype(), audio.getnframes()) != (
                         2, 2, 44100, "NONE", expected_frames):
-                raise SmartPianoSoftMediaError(
+                raise CDReadError(
                     "The CD reader did not produce the complete 44.1 kHz, 16-bit stereo track."
                 )
             frames = 0
             while data := audio.readframes(16384):
                 _check_cancel(cancel)
                 if len(data) % 4:
-                    raise SmartPianoSoftMediaError("The ripped WAV contains an incomplete audio frame.")
+                    raise CDReadError("The ripped WAV contains an incomplete audio frame.")
                 frames += len(data) // 4
             if frames != expected_frames:
-                raise SmartPianoSoftMediaError("The ripped WAV audio is truncated.")
+                raise CDReadError("The ripped WAV audio is truncated.")
     except (wave.Error, EOFError) as exc:
-        raise SmartPianoSoftMediaError(f"The CD reader produced an invalid WAV: {exc}") from exc
+        raise CDReadError(f"The CD reader produced an invalid WAV: {exc}") from exc
 
 
 def _publish_new_file(staged_path, destination, cancel=None):
@@ -263,26 +323,38 @@ def rip_cd_track(device, track, destination, cancel=None, progress=None):
             "de-emphasis yet; pair a correctly de-emphasized audio file instead."
         )
     destination = _new_destination(destination)
-    identity = _device_identity(device)
+    identity = _cd_device_identity(device)
     total = track.sectors * 2352
     _progress(progress, 0, total, "Checking CD track list…", cancel)
     toc = read_cd_toc(device, cancel=cancel)
     if track not in toc:
-        raise SmartPianoSoftMediaError("The audio CD changed. Read its track list again.")
+        raise CDReadError("The audio CD changed. Insert the original CD and read its track list again.")
     descriptor, temporary = tempfile.mkstemp(prefix=".aps_cd_", suffix=".wav", dir=destination.parent)
     os.close(descriptor)
     try:
         _progress(progress, 0, total, "Reading with secure error correction…", cancel)
-        _run_command(
-            [_cdparanoia(), "-w", "-X", "-z", "-d", device, str(track.number), temporary],
-            timeout=max(180.0, min(3600.0, track.duration_seconds * 12)),
-            cancel=cancel, progress=progress, output=temporary, total=total,
-        )
+        command = _cdparanoia()
+        try:
+            _run_command(
+                [command, "-w", "-X", "-z", "-d", device, str(track.number), temporary],
+                timeout=max(180.0, min(3600.0, track.duration_seconds * 12)),
+                cancel=cancel, progress=progress, output=temporary, total=total,
+                check_source=lambda: _check_cd_device(device, identity),
+                stall_timeout=CD_STALL_TIMEOUT,
+            )
+        except CDReadError:
+            raise
+        except SmartPianoSoftMediaError as exc:
+            raise CDReadError(
+                f"Audio CD track {track.number} could not be read. Check the disc and "
+                f"drive connection, then try again. {exc}"
+            ) from exc
         _progress(progress, total, total, "Checking WAV format and length…", cancel)
         _validate_cd_wav(temporary, track, cancel)
         _progress(progress, total, total, "Checking CD track list…", cancel)
-        if _device_identity(device) != identity or read_cd_toc(device, cancel=cancel) != toc:
-            raise SmartPianoSoftMediaError("The audio CD changed during ripping; its output was discarded.")
+        _check_cd_device(device, identity)
+        if read_cd_toc(device, cancel=cancel) != toc:
+            raise CDReadError("The audio CD changed during ripping; its output was discarded.")
         _progress(progress, total, total, "Saving audio track…", cancel)
         # Windows requires write access for fsync; preserve the validated bytes.
         with open(temporary, "r+b") as handle:

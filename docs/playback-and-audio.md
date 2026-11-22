@@ -55,11 +55,17 @@ PDISK and PSONG are supported companion files for MIDI collections. A conversion
 to E-SEQ omits them from the prepared output; it does not delete the original
 catalog files from the source folder.
 
-## Play a completed Disklavier WAV
+## Play a Disklavier WAV or MIDI/audio pair
 
 1. Open **Utilities → Disklavier WAV Player...**.
-2. Open a completed encoded WAV from Smart PianoSoft export.
-3. Wait for decoding and piano rendering, then choose **Play**.
+2. Open an encoded WAV, or a `.mid`/`.midi` file with a same-name WAV or MP3 in
+   the same folder (for example, `Song.mid` and `Song.mp3`). You can also open
+   the audio file to find its matching MIDI. Filename matching accepts
+   differences in letter case. If both WAV and MP3 companions exist, opening
+   the MIDI prefers WAV; open the MP3 directly to use it instead. Ambiguous
+   matches within a format are reported instead of guessed.
+3. The player detects the format and shows the selected pair or **Encoded WAV**.
+   Wait for preparation and piano rendering, then choose **Play**.
 4. Listen to the piano alone or together with the accompaniment. The audio
    waveform below the piano roll shares its timeline and moving playhead.
    Click either view or use the seek bar, pause, and stop controls to check
@@ -68,23 +74,62 @@ catalog files from the source folder.
    balance** slider left for more piano or right for more accompaniment.
    The endpoints play only the selected part; the center mixes both equally.
    The player remembers the balance, independently of the master volume.
-   Adjustments prepare in the background and retain your playback position
-   and the shared timeline.
+   Adjustments smoothly change the levels during playback without reloading
+   the song. Switching to piano alone also keeps the same playback timeline.
 
-This separate utility recovers MIDI directly from the WAV's right-channel
-control signal; the original MIDI, CD, and export manifest are not required.
-It preserves the shared timing of the piano and left-channel accompaniment.
-The waveform shows that accompaniment, including its original silence and
-lead-in, rather than the synthesized piano or encoded control signal.
-Only decoded piano sound and accompaniment go to the speakers.
-The source WAV remains unchanged. Saving decoded MIDI is hidden and unavailable
-in normal use; it requires Admin Mode for the current application session.
+Hover over **Open file...** for supported-file guidance. The empty piano roll
+also has a tooltip; introductory instructions do not occupy the playback area.
+
+For an encoded WAV, the player recovers the embedded MIDI and separates the
+music from the control channel; the original MIDI, CD, and export manifest are
+not required. Opening an encoded WAV uses its embedded performance even if a
+same-name MIDI is present. Opening a MIDI uses that selected performance and
+removes recoverable encoded control data from its accompaniment when necessary.
+
+Ordinary pairs retain their MIDI tempo map, stereo accompaniment, and common
+time zero. Pairing by name assumes the files are already synchronized; the
+player does not guess a new offset or remove leading silence. The waveform
+shows the accompaniment on the same timeline as the piano roll. Only the
+software piano and clean accompaniment go to the speakers. Source files remain
+unchanged.
+
+Saving decoded MIDI requires Admin Mode for the current application session
+and is available only for encoded audio playback. A pair already has its MIDI.
 Admin Mode is not remembered after restarting the app.
 
-The player accepts the app's 44.1-kHz, 16-bit stereo Y-modulation WAV exports.
+The player accepts the app's 44.1-kHz, 16-bit stereo Y-modulation WAV exports,
+and MIDI paired with 44.1-kHz, 16-bit mono or stereo PCM WAV or 44.1-kHz MP3.
+MP3 playback uses LAME to prepare temporary PCM audio, respecting encoder delay
+and padding metadata without adding a guessed MIDI offset. Missing LAME is
+reported before preparation starts. Recoverable encoded MP3s are detected too;
+damaged control data is reported instead of played as accompaniment.
 It uses a software piano, with the built-in piano available when FluidSynth
-or a SoundFont is unavailable. This is a listening tool for encoded exports;
+or a SoundFont is unavailable. This is a listening tool;
 it does not establish playback compatibility with a physical Disklavier.
+
+## Decode files and folders for ENSPIRE
+
+With Admin Mode enabled, open **Utilities → Decode Audio for ENSPIRE...**.
+Add individual WAV/MP3 files or folders; folder selections include all subfolders.
+Choose an output folder and start decoding. Existing MIDI or E-SEQ companions
+do not prevent an encoded audio file from being inspected. Symbolic links are
+not followed.
+
+Each recovered song becomes a matching `.mid` and clean accompaniment `.mp3`
+pair inside a new output directory. Selected folder names and their nested
+structure are preserved. Conflicting names receive numbered suffixes; the new
+run folder follows **Settings → Save Options → Add Random Suffixes to Output
+Names**. Source files remain unchanged.
+
+The decoder checks both stereo channels for Yamaha control data and retains
+the shared MIDI/audio timing. Ordinary audio is skipped. Files with damaged or
+ambiguous control data are reported individually, while the remaining files
+continue. Lossy MP3 encoding can destroy control data, so recovery depends on
+the source. LAME must be available before the batch can start.
+
+Progress identifies scanning, decoding, and exporting. Cancellation keeps
+completed pairs. The results list and JSON report record successful, skipped,
+and failed files. Admin Mode is available only for the current app session.
 
 ## Create WAV or MP3 copies
 
@@ -103,7 +148,7 @@ See [optional tools](../README.md#compatibility-and-optional-tools).
 
 ## Smart PianoSoft: synchronized piano and music
 
-The development build includes **Utilities → Smart PianoSoft (Beta)...**.
+The development build includes **Utilities → Smart PianoSoft...**.
 After reading a confirmed Smart floppy or image, APS offers to prepare its
 matching CD once capture-save and recovery dialogs have finished. Accepting
 opens the utility with the loaded song list; declining leaves the disk
@@ -168,14 +213,22 @@ shown in the dialog.
    The start button identifies the selected export format when using paired files.
 
 Track pairing and audio synchronization run automatically after starting; there
-is no manual “verify by audio” step. The dialog shows the catalog's suggested
-CD track before processing. The song table uses the available height, while
+is no manual “verify by audio” step. When the MIDI contains Yamaha's CD reference,
+the dialog shows **CD track N (disk reference)**. Otherwise it shows
+**Match CD track automatically**; floppy song numbers need not match CD track numbers.
+The song table uses the available height, while
 progress and details appear when needed. The main controls stay compact;
 smaller windows or larger fonts can still scroll to keep every control reachable.
 During CD ripping, the bar measures audio read across all audio tracks. The label
 shows the actual CD track number, its position in the audio-track list, and
 whether APS is reading, checking the saved WAV or disc, saving, or calculating
 the audio checksum. Matching and playback-file export have their own progress stages.
+
+If a CD read fails or the drive disconnects, APS stops the reader and shows how
+to retry. Reconnect the drive, insert the matching CD, then use **Refresh** and
+select the drive again before restarting. The scanned floppy and manual pairings
+remain available. Each retry reads the CD into a new output folder; verified
+files from the failed attempt remain in its folder with a failed manifest.
 
 To use names such as `Smart PianoSoft - BELIEVE - CHER`, turn off
 **Settings → Save Options → Add Random Suffixes to Output Names**. This global
@@ -185,7 +238,8 @@ name receive `(2)`, `(3)`, and so on. The setting applies to newly created outpu
 
 When using the current song list, the utility includes its remaining songs and
 staged MIDI and title edits. Sorting the list or removing songs preserves each
-song's original CD track number. The pairing table displays the current
+song's original catalog position; audio matching determines its CD track.
+The pairing table displays the current
 filenames; the exported MIDI files retain the filenames from the Smart PianoSoft
 catalog so the catalog continues to identify them correctly.
 
@@ -220,17 +274,28 @@ lead-in preserves events that would otherwise occur before the recording
 starts. The clean source's stereo channels are retained. CD synchronization
 and control messages are removed from the playback MIDI.
 
+The floppy can omit songs that are present on the CD. Yamaha's MIDI metadata
+can contain the CD's track-start table and the intended song's position in that
+table. This identifies the CD track independently of the floppy catalog order.
+APS tries that reference first, but compares each song's two audio fingerprints
+with every CD track and requires one unique match. For
+example, four floppy songs can match CD tracks **1, 3, 4, and 5**, skipping CD
+track 2. The skipped recording remains in **WAV**, but has no prepared piano
+file. Prepared songs keep their floppy catalog numbers; **manifest.json**
+records the actual CD audio chosen for each one.
+
 `PDISK.MNG` supplies the album title; `PSONG.MNG` supplies song identities and
 catalog order. The inspected PDISK catalogs do not provide per-song CD timing
 corrections. Yamaha's [Mark III operating manual](https://fr.yamaha.com/files/download/other_assets/3/314153/DKVMK3Full_A_e_X2657B0.pdf)
 (page 61) explains that different editions of the same CD can have different
 start times and tempos, and that Smart PianoSoft adjusts playback for these
-differences. The app therefore uses catalog order first and automatically checks
-the MIDI's audio references against the actual CD to calculate alignment.
+differences. The app therefore uses the embedded CD reference (or catalog order
+when no valid reference is present) as a hint and automatically checks the
+MIDI's audio references against the actual CD to calculate alignment.
 These catalogs also occur on ordinary Yamaha MIDI disks, so the
 automatic offer additionally requires both synchronization fingerprints in
-every loaded song. Catalog order is a candidate pairing, not proof of a match. Both beginning and
-ending fingerprints must match. They establish the start offset and playback
+every loaded song. Neither the CD reference nor catalog order proves a match.
+Both beginning and ending fingerprints must match unambiguously. They establish the start offset and playback
 speed correction; the source MIDI's complete tempo map is retained. Incorrect,
 silent, ambiguous, or unsupported references stop the operation. All pairings
 are verified before encoding begins. Cancellation or a read error leaves an
@@ -288,6 +353,14 @@ the two anchors. The inspected host sequencer does not continuously rematch
 the audio or fit independent timing corrections throughout the song. APS uses
 a direct fit between the same two anchors; it does not reproduce every detail
 of the older sequencer's integer arithmetic.
+
+Yamaha selects the strongest correlation within each fingerprint's search
+window. Similar repetitions of an intro do not require a large score gap.
+APS follows that selection rule while keeping a stricter minimum match score,
+checking both anchors, and rejecting inconsistent playback-speed corrections.
+It also rejects competing peaks when their apparent difference can be explained
+by the interpolation corrections used to estimate positions between samples.
+That last check is an APS safeguard; it is not a Yamaha fingerprint-format rule.
 
 For verification:
 

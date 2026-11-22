@@ -1,6 +1,7 @@
 """Archive integration keeps originals and publishes verifiable audio pairs."""
 
 import hashlib
+import io
 import json
 from datetime import datetime
 from pathlib import Path
@@ -13,9 +14,10 @@ import numpy as np
 import pytest
 
 from aps_midi_prep_tool_app import disklavier_audio_decode as decoder
-from aps_midi_prep_tool_app import paired_audio
+from aps_midi_prep_tool_app import audio_tools, paired_audio
 from aps_midi_prep_tool_app.audio_tools import find_lame_command
-from aps_midi_prep_tool_app.disklavier_audio import encode_disklavier_wav
+from aps_midi_prep_tool_app.disklavier_audio import encode_disklavier_wav, read_midi_events
+from aps_midi_prep_tool_app.eseq_converter import convert_midi_bytes_to_eseq_bytes
 from aps_midi_prep_tool_app.helpers.file_batch import FileBatchWriteError
 from aps_midi_prep_tool_app.markiv_backup import backup
 from aps_midi_prep_tool_app.markiv_backup.library import scan_library
@@ -37,10 +39,11 @@ def _manifest(result):
 @pytest.fixture
 def fake_decode(monkeypatch):
     calls = []
+    monkeypatch.setattr(audio_tools, 'find_lame_command', lambda: 'fake-lame')
 
     def decode(source, output, **kwargs):
         calls.append(Path(source).name)
-        if Path(source).read_bytes() == b'ordinary music':
+        if Path(source).read_bytes() in {b'ordinary music', b'native accompaniment'}:
             raise decoder.NotEncodedAudioError('No reliable control channel')
         Path(output).write_bytes(b'clean music PCM')
         return SimpleNamespace(events=((1.0, b'\x90\x3c\x40'), (2.0, b'\x80\x3c\x00')),
@@ -81,7 +84,7 @@ def test_audio_split_is_opt_in_and_retains_native_pairs_and_ordinary_music(tmp_p
     events = []
     result = backup.run_backup(plan, tmp_path / 'backup', split_audio=True, progress=events.append)
     assert (result.status, result.decoded, result.audio_skipped) == ('complete', 1, 2)
-    assert set(fake_decode) == {'Encoded.WAV', 'Ordinary.wav'}
+    assert set(fake_decode) == {'Encoded.WAV', 'Native.mp3', 'Ordinary.wav'}
     _assert_originals(result, source)
     derivatives = _manifest(result)['derivatives']
     assert [item['kind'] for item in derivatives] == ['MIDI', 'MP3']
@@ -185,15 +188,14 @@ def test_audio_headroom_is_checked_before_creating_backup(tmp_path, monkeypatch)
     source = _source(tmp_path, {'songs/user/1/Encoded.MP3': b'mp3'})
     plan = scan_library(source)
     free = plan.total_bytes + backup._manifest_allowance(plan)
+    monkeypatch.setattr(audio_tools, 'find_lame_command', lambda: 'fake-lame')
     monkeypatch.setattr(backup.shutil, 'disk_usage', lambda path: SimpleNamespace(free=free))
     with pytest.raises(ValueError, match='decoded audio pairs'):
         backup.run_backup(plan, tmp_path / 'backup', split_audio=True)
     assert not (tmp_path / 'backup').exists()
 
 
-def test_real_encoded_wav_import_produces_playable_midi_and_clean_mp3(tmp_path):
-    if not find_lame_command():
-        pytest.skip('LAME is needed for the real MP3 integration check')
+def _encoded_library(tmp_path, companion_extension=None):
     source = tmp_path / 'source'
     album = source / 'songs/user/1'
     album.mkdir(parents=True)
@@ -206,8 +208,33 @@ def test_real_encoded_wav_import_produces_playable_midi_and_clean_mp3(tmp_path):
     events = [(.5, bytes([0x90, 60, 80])), (1.5, bytes([0x80, 60, 0]))]
     encoded = album / 'Phrase.wav'
     encode_disklavier_wav(events, music, encoded)
-    original_hash = hashlib.sha256(encoded.read_bytes()).hexdigest()
-    result = backup.run_backup(scan_library(source), tmp_path / 'backup', split_audio=True)
+    if companion_extension:
+        companion = mido.MidiFile(type=0, ticks_per_beat=480)
+        companion.tracks.append(mido.MidiTrack([
+            mido.Message('note_on', note=72, velocity=64),
+            mido.Message('note_off', note=72, velocity=0, time=480),
+            mido.MetaMessage('end_of_track'),
+        ]))
+        payload = io.BytesIO()
+        companion.save(file=payload)
+        data = payload.getvalue()
+        if companion_extension == 'FIL':
+            data = convert_midi_bytes_to_eseq_bytes(data)
+        (album / f'Phrase.{companion_extension}').write_bytes(data)
+    return source, encoded, events
+
+
+@pytest.mark.parametrize('companion_extension', [None, 'mid', 'FIL'],
+                         ids=['audio-only', 'midi-companion', 'eseq-companion'])
+def test_real_encoded_wav_import_produces_playable_midi_and_clean_mp3(tmp_path, companion_extension):
+    if not find_lame_command():
+        pytest.skip('LAME is needed for the real MP3 integration check')
+    source, encoded, events = _encoded_library(tmp_path, companion_extension)
+    originals = {path.relative_to(source): path.read_bytes() for path in source.rglob('*') if path.is_file()}
+    plan = scan_library(source)
+    if companion_extension == 'FIL':
+        assert next(item for item in plan.files if item.kind == 'E-SEQ').convertible_eseq
+    result = backup.run_backup(plan, tmp_path / 'backup', split_audio=True)
     assert result.status == 'complete', result.errors
     assert result.decoded == 1
     manifest = _manifest(result)
@@ -215,6 +242,52 @@ def test_real_encoded_wav_import_produces_playable_midi_and_clean_mp3(tmp_path):
     song = mido.MidiFile(result.folder / midi_record['destination'])
     actual = [(message.type, message.note) for message in song if message.type in {'note_on', 'note_off'}]
     assert actual == [('note_on', 60), ('note_off', 60)]
-    assert (result.folder / audio_record['destination']).stat().st_size > 1000
-    assert hashlib.sha256(encoded.read_bytes()).hexdigest() == original_hash
+    actual_events = read_midi_events(result.folder / midi_record['destination'])
+    assert [data for _, data in actual_events] == [data for _, data in events]
+    assert [seconds for seconds, _ in actual_events] == pytest.approx(
+        [seconds + .5 for seconds, _ in events], abs=1 / 3150)
+    assert Path(midi_record['destination']).with_suffix('') == Path(audio_record['destination']).with_suffix('')
+
+    clean_audio = tmp_path / 'decoded-mp3.wav'
+    audio_tools.decode_mp3(result.folder / audio_record['destination'], clean_audio)
+    with wave.open(str(encoded), 'rb') as stream:
+        expected_music = np.frombuffer(stream.readframes(stream.getnframes()), dtype='<i2').reshape(-1, 2)[:, 0]
+    with wave.open(str(clean_audio), 'rb') as stream:
+        assert stream.getnchannels() == 1
+        assert stream.getframerate() == 44100
+        actual_music = np.frombuffer(stream.readframes(stream.getnframes()), dtype='<i2')
+    assert len(actual_music) == len(expected_music)
+    assert np.corrcoef(actual_music, expected_music)[0, 1] > .98
+    assert song.length == pytest.approx(len(actual_music) / 44100, abs=.0001)
+    assert originals == {path.relative_to(source): path.read_bytes() for path in source.rglob('*') if path.is_file()}
+    _assert_originals(result, source)
     assert backup.verify_backup(result.folder) == []
+
+
+def test_missing_lame_is_reported_before_creating_or_copying_backup(tmp_path, monkeypatch):
+    source, encoded, _events = _encoded_library(tmp_path)
+    original = encoded.read_bytes()
+    plan = scan_library(source)
+    monkeypatch.setattr(audio_tools, 'find_lame_command', lambda: '')
+    monkeypatch.setattr(backup, '_hash', lambda *args, **kwargs: pytest.fail('Copy started before LAME validation'))
+    target = tmp_path / 'backup'
+    with pytest.raises(ValueError, match='LAME'):
+        backup.run_backup(plan, target, split_audio=True)
+    assert not target.exists()
+    assert encoded.read_bytes() == original
+
+
+@pytest.mark.parametrize('split_audio,files', [
+    (False, {'songs/user/1/Encoded.wav': b'control and music'}),
+    (True, {'songs/user/1/Native.mid': b'native MIDI'}),
+    (True, {'songs/tool/metadata.wav': b'metadata asset',
+            'songs/pspg/archive/cache/1/Show.WAV': b'presentation dependency'}),
+], ids=['splitting-disabled', 'no-audio', 'excluded-audio'])
+def test_backup_without_audio_to_split_does_not_require_lame(tmp_path, monkeypatch, split_audio, files):
+    source = _source(tmp_path, files)
+    monkeypatch.setattr(audio_tools, 'find_lame_command', lambda: '')
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup', split_audio=split_audio)
+    assert result.status == 'complete', result.errors
+    assert result.decoded == 0
+    assert _manifest(result)['derivatives'] == []
+    _assert_originals(result, source)

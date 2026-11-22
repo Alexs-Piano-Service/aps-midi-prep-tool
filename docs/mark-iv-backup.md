@@ -178,13 +178,19 @@ control track. It does not add a guessed mechanical-delay correction. MIDI
 completion times are recovered from the signal; exact acoustic alignment and
 the piano's MP3 delay handling still require a playback check.
 
-Ordinary audio and existing MIDI/audio companions are kept without decoding.
+APS inspects eligible audio even when a MIDI or E-SEQ file has the same basename;
+the companion alone does not establish that the audio is clean. Audio without
+a control signal is kept without creating derivatives. Encoded audio receives
+a new MIDI/MP3 pair without replacing the archived audio or companion files.
 Metadata, protected packages, and presentation dependencies are also preserved.
 An unreadable, ambiguous, or damaged control stream is reported without creating
 a guessed performance. Lossy MP3 encoding can destroy control symbols even
 when the music sounds normal, so not every MP3 can be recovered. WAV input must
 be 44.1 kHz, 16-bit stereo PCM; MP3 input must decode to that format. LAME is
-required to decode MP3 and create the clean MP3 output.
+required to decode MP3 and create the clean MP3 output. When decoding is selected
+and eligible audio files exist, APS checks for LAME before creating the backup
+folder or copying any files. If it is missing, install LAME or turn off the
+encoded-audio option to make an originals-only audio backup.
 
 The manifest records the detected control channel, decoder measurements,
 timing, and separate checksums for both output files. The result counts decoded

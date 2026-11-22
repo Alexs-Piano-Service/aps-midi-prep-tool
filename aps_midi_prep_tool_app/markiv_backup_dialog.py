@@ -8,7 +8,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton,
-    QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QSizePolicy, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .audio_preparation import default_split_audio
@@ -111,13 +111,22 @@ class MarkIVBackupDialog(QDialog):
         self.setWindowTitle(self._t("markiv.title"))
         self.resize(850, 690)
         layout = QVBoxLayout(self)
-        layout.addWidget(self._label("markiv.description"))
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
 
         form = QFormLayout()
+        form.setVerticalSpacing(8)
+        form.setHorizontalSpacing(max(12, self.fontMetrics().horizontalAdvance("  ")))
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.source_combo = QComboBox()
         self.source_combo.setEditable(True)
+        self.source_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.source_combo.setMinimumContentsLength(12)
+        self.source_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.source_combo.setInsertPolicy(QComboBox.NoInsert)
         self.source_combo.setObjectName("markivBackupSource")
+        self.source_combo.setToolTip(self._t("markiv.source_note"))
         self.source_combo.setEditText(str(settings.value(SETTING_SOURCE, "") or ""))
         self.source_browse = QPushButton(self.lt("Browse..."))
         self.refresh_button = QPushButton(self._t("markiv.refresh"))
@@ -126,16 +135,15 @@ class MarkIVBackupDialog(QDialog):
         source_row.addWidget(self.source_browse)
         source_row.addWidget(self.refresh_button)
         form.addRow(self._t("markiv.source"), source_row)
-        form.addRow(self._label("markiv.source_note"))
 
         self.destination_edit = QLineEdit(str(settings.value(SETTING_OUTPUT, "") or ""))
         self.destination_edit.setObjectName("markivBackupDestination")
+        self.destination_edit.setToolTip(self._t("markiv.destination_note"))
         self.destination_browse = QPushButton(self.lt("Browse..."))
         destination_row = QHBoxLayout()
         destination_row.addWidget(self.destination_edit, 1)
         destination_row.addWidget(self.destination_browse)
         form.addRow(self._t("markiv.destination"), destination_row)
-        form.addRow(self._label("markiv.destination_note"))
         layout.addLayout(form)
 
         self.convert_checkbox = QCheckBox(self._t("markiv.convert"))
@@ -159,12 +167,6 @@ class MarkIVBackupDialog(QDialog):
         self.split_audio_checkbox.setChecked(default_split_audio(profile.key))
         self.split_audio_checkbox.setToolTip(self._t("markiv.split_audio_tooltip"))
         layout.addWidget(self.split_audio_checkbox)
-        target_key = ("markiv.audio_target_enabled" if self.split_audio_checkbox.isChecked()
-                      else "markiv.audio_target_disabled")
-        self.audio_target_note = self._label(target_key, target=self.lt(profile.label))
-        layout.addWidget(self.audio_target_note)
-        self.split_audio_note = self._label("markiv.split_audio_note")
-        layout.addWidget(self.split_audio_note)
 
         preview_row = QHBoxLayout()
         self.summary_label = self._label("markiv.ready")
@@ -207,7 +209,9 @@ class MarkIVBackupDialog(QDialog):
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
         layout.addWidget(self.progress_bar)
-        self.status_label = self._label("markiv.ready")
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextFormat(Qt.PlainText)
         self.progress_label = QLabel()
         self.result_label = QLabel(saved_folder)
         self.result_label.setWordWrap(True)
@@ -290,7 +294,7 @@ class MarkIVBackupDialog(QDialog):
         self.album_table.clear()
         self.summary_label.setText(self._t("markiv.ready"))
         if not self.is_busy:
-            self.status_label.setText(self._t("markiv.ready"))
+            self.status_label.clear()
             self.details.clear()
         self._update_buttons()
 
@@ -394,6 +398,7 @@ class MarkIVBackupDialog(QDialog):
                                    object_name="markivBackupReportDetails")
 
     def _update_buttons(self, *_args):
+        self._update_status_visibility()
         idle = not self.is_busy
         for widget in (self.source_combo, self.source_browse, self.refresh_button,
                        self.destination_edit, self.destination_browse, self.convert_checkbox,
@@ -406,6 +411,10 @@ class MarkIVBackupDialog(QDialog):
         )
         self.cancel_button.setEnabled(not idle and not self._cancelling)
         self.open_button.setEnabled(idle and self.result_folder is not None)
+
+    def _update_status_visibility(self):
+        for label in (self.status_label, self.progress_label, self.result_label):
+            label.setVisible(bool(label.text()))
 
     def _browse_source(self):
         path = QFileDialog.getExistingDirectory(
@@ -493,6 +502,7 @@ class MarkIVBackupDialog(QDialog):
             self.progress_bar.setValue(min(1000, int(done * 1000 / size)))
         if total:
             self.progress_label.setText(self._t("markiv.file_progress", completed=completed, total=total))
+        self._update_status_visibility()
 
     def _succeeded(self, result):
         if self._operation == "discover":
@@ -508,7 +518,7 @@ class MarkIVBackupDialog(QDialog):
                 selected = next((str(device.mountpoint) for device in result if device.is_mark_iv), "")
             self.source_combo.setEditText(selected)
             self.source_combo.blockSignals(False)
-            self.status_label.setText(self._t("markiv.ready"))
+            self.status_label.clear()
         elif self._operation == "scan":
             self.plan = result
             self.album_table.clear()
@@ -525,7 +535,7 @@ class MarkIVBackupDialog(QDialog):
             if self.album_table.topLevelItemCount():
                 self.album_table.setCurrentItem(self.album_table.topLevelItem(0))
             self._show_details()
-            self.status_label.setText(self.summary_label.text())
+            self.status_label.clear()
         elif self._operation == "backup":
             self.result_folder = result.folder
             self.result_label.setText(str(result.folder))
@@ -547,14 +557,17 @@ class MarkIVBackupDialog(QDialog):
             self.progress_bar.setRange(0, 1000)
             self.progress_bar.setValue(1000)
         self._save_settings()
+        self._update_status_visibility()
 
     def _failed(self, message):
         self.status_label.setText(self._t("markiv.failed"))
         self._set_report([*self._report_messages, message])
+        self._update_status_visibility()
 
     def _cancelled(self):
         key = "markiv.scan_cancelled" if self._operation == "scan" else "markiv.cancelled"
         self.status_label.setText(self._t(key))
+        self._update_status_visibility()
 
     def _finished(self):
         worker = self.worker

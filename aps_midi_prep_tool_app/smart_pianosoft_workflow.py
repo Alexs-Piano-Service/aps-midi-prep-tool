@@ -27,9 +27,10 @@ from .helpers.output_names import create_output_directory
 
 
 class AlbumBuildError(RuntimeError):
-    def __init__(self, message, output_directory=None):
+    def __init__(self, message, output_directory=None, *, cd_read_error=False):
         super().__init__(message)
         self.output_directory = output_directory
+        self.cd_read_error = cd_read_error
 
 
 @dataclass(frozen=True)
@@ -189,9 +190,10 @@ def scan_album(source, destination, *, cancel=None, progress=None):
 def scan_loaded_album(source: LoadedAlbumSource, destination, *, cancel=None, progress=None):
     """Snapshot current-list bytes without reading the original disk or folder.
 
-    Canonical catalog identities keep their original CD track numbers. Display
+    Canonical catalog identities keep their original catalog positions. Display
     names and row order belong to the current list; removed catalog slots stay
-    blank so a subset cannot silently be matched against different CD tracks.
+    blank so a subset keeps those identities. Audio fingerprints determine the
+    actual CD track, whose number may differ from the catalog position.
     """
     from .smart_pianosoft_sync import parse_sps_midi
 
@@ -363,7 +365,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
     from .disklavier_audio import encode_disklavier_wav
     from .audio_tools import find_lame_command
     from .paired_audio import export_midi_mp3
-    from .smart_pianosoft_media import read_cd_toc, rip_cd_track
+    from .smart_pianosoft_media import CDReadError, read_cd_toc, rip_cd_track
     from .smart_pianosoft_sync import synchronize
 
     _check_cancel(cancel)
@@ -390,7 +392,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
         output_parent, f"Smart PianoSoft - {_safe_title(album.title)}",
         random_suffixes=random_suffixes, separator=" - ",
     )
-    report = {"schema": 1, "album": album.title, "status": "incomplete", "beta": True,
+    report = {"schema": 1, "album": album.title, "status": "incomplete",
               "hardware_verified": False, "output_format": output_format,
               "format": ("PianoSoft PlusAudio: left music, right piano data" if output_format == "encoded_wav"
                          else "Synchronized MIDI/MP3 pair: matching names in one folder"),
@@ -446,7 +448,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
         if toc:
             _emit(progress, "rip", cd_bytes, cd_bytes, "Checking CD track list…")
         if toc and tuple(read_cd_toc(cd_device, cancel=cancel)) != tuple(toc):
-            raise ValueError("The audio CD changed while it was being read.")
+            raise CDReadError("The audio CD changed while it was being read.")
         for number, source in audio_paths.items():
             _check_cancel(cancel)
             destination = wav_folder / f"Paired{number:02d}.wav"
@@ -475,7 +477,8 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
                 audio = explicit[track.number]
                 alignment = match_audio(track.metadata, audio)
             else:
-                hint = audio_candidates.get(track.number)
+                hint_number = track.metadata.cd_track or track.number
+                hint = audio_candidates.get(hint_number)
                 candidates = ([hint] if hint is not None else []) + [
                     candidate for candidate in audio_candidates.values() if candidate != hint
                 ]
@@ -498,6 +501,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
             _save_report(folder, report)
 
         # All pairings must be verified before any playback file is produced.
+        output_phase = "encode" if output_format == "encoded_wav" else "export_pairs"
         for index, (track, audio, alignment) in enumerate(pairs):
             _check_cancel(cancel)
             if _digest(audio) != audio_hashes[audio]:
@@ -506,7 +510,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
             events = [(event.time_seconds, event.data) for event in track.metadata.events]
             options = dict(midi_offset_seconds=alignment.offset_seconds,
                            midi_time_scale=alignment.time_scale, cancel=cancel,
-                           progress=lambda fraction, title=track.title: _emit(progress, "encode", fraction, 1, title))
+                           progress=lambda fraction, title=track.title: _emit(progress, output_phase, fraction, 1, title))
             if output_format == "encoded_wav":
                 output = Path(str(stem) + ".wav")
                 result = encode_disklavier_wav(events, audio, output, **options)
@@ -546,8 +550,12 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
     except Exception as exc:
         report["status"] = "cancelled" if cancel is not None and cancel.is_set() else "failed"
         report["error"] = str(exc)
+        cd_read_error = isinstance(exc, CDReadError) and report["status"] != "cancelled"
+        if cd_read_error:
+            report["failure_kind"] = "cd_read"
+            report["cd_device"] = str(cd_device)
         try:
             _save_report(folder, report)
         except OSError:
             pass
-        raise AlbumBuildError(str(exc), folder) from exc
+        raise AlbumBuildError(str(exc), folder, cd_read_error=cd_read_error) from exc

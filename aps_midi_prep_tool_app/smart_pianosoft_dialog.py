@@ -1,4 +1,4 @@
-"""Beta Smart PianoSoft: insert media, verify pairings, prepare an album."""
+"""Smart PianoSoft: insert media, verify pairings, prepare an album."""
 
 from pathlib import Path
 import tempfile
@@ -117,7 +117,9 @@ class SmartPianoSoftWorker(QThread):
             self.succeeded.emit(result)
         except Exception as exc:
             self.failed.emit({"error": str(exc), "cancelled": self.cancelled.is_set(),
-                              "output": getattr(exc, "output_directory", None)})
+                              "output": getattr(exc, "output_directory", None),
+                              "cd_read_error": getattr(exc, "cd_read_error", False),
+                              "album": getattr(exc, "album_snapshot", None)})
 
 
 def _scan_source(source, destination, *, cancel=None, progress=None):
@@ -140,6 +142,7 @@ class SmartPianoSoftDialog(QDialog):
         self._floppy_source = None
         self._closing = False
         self._operation = ""
+        self._operation_done = False
         self._loaded_source = loaded_source
         self._using_loaded_source = loaded_source is not None
         self._loaded_source_consent_granted = loaded_source is not None and bool(
@@ -160,23 +163,24 @@ class SmartPianoSoftDialog(QDialog):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(4, 0, 4, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
         description = self._label("description")
         layout.addWidget(description)
 
         self.options = _WrappingForm()
         form = QFormLayout(self.options)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setVerticalSpacing(6)
+        form.setVerticalSpacing(8)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.target_label = _WrappingLabel(translate_text(self.profile.label, self.language))
         self.target_label.setTextFormat(Qt.PlainText)
         self.target_label.setWordWrap(True)
         form.addRow(self._label("preparing_for", wrap=False), self.target_label)
         self.format_combo = QComboBox()
         self.format_combo.setObjectName("smartPianoSoftOutputFormat")
-        self.format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.format_combo.setMinimumContentsLength(15)
+        self.format_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.format_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         for key in ("encoded_wav", "midi_mp3"):
             self.format_combo.addItem(self.text("output_" + key), key)
         self.format_combo.setCurrentIndex(self.format_combo.findData(default_audio_output(self.profile.key)))
@@ -231,7 +235,7 @@ class SmartPianoSoftDialog(QDialog):
         form.addRow(self._label("output", wrap=False), output_row)
         # WrapLongRows can omit column spacing when deciding whether a field
         # fits. Keep that gap inside the label so it counts toward row width.
-        label_gap = max(0, form.horizontalSpacing())
+        label_gap = max(12, self.fontMetrics().horizontalAdvance("  "))
         form.setHorizontalSpacing(0)
         for row in range(form.rowCount()):
             form.itemAt(row, QFormLayout.LabelRole).widget().setContentsMargins(0, 0, label_gap, 0)
@@ -272,10 +276,8 @@ class SmartPianoSoftDialog(QDialog):
             button.setAutoDefault(False)
             self.pairing_buttons.addButton(button, QDialogButtonBox.ActionRole)
         layout.addWidget(self.pairing_buttons)
-        self.format_note = self._label(audio_playback_note_key(self.profile.key, self.format_combo.currentData()))
-        self.format_combo.currentIndexChanged.connect(self._update_format_note)
-        self._update_format_note()
-        layout.addWidget(self.format_note)
+        self.format_combo.currentIndexChanged.connect(self._update_format_help)
+        self._update_format_help()
         self.status = self._label("ready")
         self.status.hide()
         layout.addWidget(self.status)
@@ -329,12 +331,10 @@ class SmartPianoSoftDialog(QDialog):
     def text(self, key, **values):
         return tr("sps." + key, self.language, **values)
 
-    def _update_format_note(self):
+    def _update_format_help(self):
         note = self.text(audio_playback_note_key(self.profile.key, self.format_combo.currentData()))
-        detail = note + "\n\n" + self.text("output_beta")
-        self.format_note.setText(note)
-        self.format_note.setToolTip(detail)
-        self.format_note.setAccessibleDescription(detail)
+        self.format_combo.setToolTip(note)
+        self.format_combo.setAccessibleDescription(note)
 
     def _label(self, key, *, wrap=True):
         label_type = _WrappingLabel if wrap else QLabel
@@ -377,6 +377,7 @@ class SmartPianoSoftDialog(QDialog):
         if self.is_busy or self._closing:
             return
         self._operation = operation
+        self._operation_done = False
         if operation != "discover":
             self.status.show()
         self.progress.show()
@@ -581,9 +582,15 @@ class SmartPianoSoftDialog(QDialog):
         target = self._new_scan() if album is None else None
         def prepare(cancel, progress):
             snapshot = album or _scan_source(source, target, cancel=cancel, progress=progress)
-            output = prepare_album(snapshot, destination, cd_device=cd_device, audio_paths=audio,
-                                   output_format=output_format, cancel=cancel, progress=progress,
-                                   random_suffixes=random_suffixes)
+            try:
+                output = prepare_album(snapshot, destination, cd_device=cd_device, audio_paths=audio,
+                                       output_format=output_format, cancel=cancel, progress=progress,
+                                       random_suffixes=random_suffixes)
+            except Exception as exc:
+                # Retain the verified snapshot even when Start also performed
+                # the scan, so a CD retry does not need the original floppy.
+                exc.album_snapshot = snapshot
+                raise
             return snapshot, output
         self._start("prepare", prepare)
 
@@ -593,8 +600,10 @@ class SmartPianoSoftDialog(QDialog):
         self.table.setRowCount(len(self.album.tracks))
         for row, track in enumerate(self.album.tracks):
             audio = self.audio_paths.get(track.number)
+            cd_reference = (self.text("cd_reference", number=track.metadata.cd_track)
+                            if track.metadata.cd_track is not None else self.text("cd_hint"))
             values = (str(track.number), track.title, track.display_filename or track.filename,
-                      str(audio) if audio else self.text("cd_hint", number=track.number))
+                      str(audio) if audio else cd_reference)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(self.text("cd_hint_details") if column == 3 and not audio else value)
@@ -621,12 +630,16 @@ class SmartPianoSoftDialog(QDialog):
         self.table.selectRow(row)
 
     def _progress(self, detail):
+        if self._closing or (self.worker is not None and
+                             (self.worker.cancelled.is_set() or self._operation_done)):
+            return
         self.status.show()
         self.progress.show()
         total = detail.get("total", 0)
         if total:
             self.progress.setRange(0, 100)
-            self.progress.setValue(round(100 * detail.get("completed", 0) / total))
+            maximum = 99 if self._operation == "prepare" else 100
+            self.progress.setValue(min(maximum, round(100 * detail.get("completed", 0) / total)))
         else:
             self.progress.setRange(0, 0)
         phase = detail.get("phase", "scan")
@@ -656,6 +669,7 @@ class SmartPianoSoftDialog(QDialog):
             request.resolve(approved)
 
     def _success(self, result):
+        self._operation_done = True
         if self._operation == "discover":
             previous = self._cd_device()
             self.cd_combo.clear()
@@ -663,6 +677,8 @@ class SmartPianoSoftDialog(QDialog):
             for device, label in result:
                 self.cd_combo.addItem(f"{label} ({device})", device)
             index = self.cd_combo.findData(previous) if previous else (1 if result else 0)
+            if index < 0 and len(result) == 1:
+                index = 1
             self.cd_combo.setCurrentIndex(max(0, index))
         elif self._operation == "scan":
             self.album = result
@@ -678,14 +694,24 @@ class SmartPianoSoftDialog(QDialog):
         self.progress.setValue(100 if self._operation != "discover" else 0)
 
     def _failure(self, result):
+        self._operation_done = True
         self.status.show()
         if result["cancelled"]:
             self._discover_after_scan = False
-        self.status.setText(self.text("cancelled" if result["cancelled"] else "failed"))
+        if self._operation == "prepare":
+            self._completed_cd_device = None
+            if result.get("album") is not None:
+                self.album = result["album"]
+                self._populate()
+        cd_read_error = result.get("cd_read_error", False) and not result["cancelled"]
+        status = "cancelled" if result["cancelled"] else "cd_read_failed" if cd_read_error else "failed"
+        self.status.setText(self.text(status))
         self.details.appendPlainText(result["error"])
         if result.get("output"):
             self.result_folder = Path(result["output"])
             self.details.appendPlainText(self.text("retained", folder=str(self.result_folder)))
+        if cd_read_error:
+            self.details.appendPlainText(self.text("cd_read_retry"))
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
 

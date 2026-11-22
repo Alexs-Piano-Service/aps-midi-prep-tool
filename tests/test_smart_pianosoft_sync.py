@@ -10,7 +10,7 @@ import pytest
 
 from aps_midi_prep_tool_app.smart_pianosoft_sync import (
     Fingerprint, SPSMetadata, SynchronizationCancelled, SynchronizationError,
-    TimedMidiEvent, _envelope, _timecode as decode_timecode, parse_sps_midi, synchronize,
+    TimedMidiEvent, _envelope, _match, _timecode as decode_timecode, parse_sps_midi, synchronize,
 )
 
 
@@ -28,6 +28,17 @@ def _fingerprint_message(kind, seconds, samples=None):
     samples = samples if samples is not None else [1, -2] * 128
     return mido.Message("sysex", data=[0x43, 0x71, 0x7B, kind, *_timecode(seconds), kind // 2, 3,
                                        *[value & 127 for value in samples]])
+
+
+def _cd_reference_message(number, positions=(150, 1200, 2250, 3300)):
+    def msf(frames):
+        minute, remainder = divmod(frames, 60 * 75)
+        second, frame = divmod(remainder, 75)
+        return [minute, second, frame]
+    return mido.MetaMessage("sequencer_specific", data=[
+        0x43, 0x71, 0x7D, *msf(positions[number - 1]), len(positions),
+        *[value for position in positions for value in msf(position)],
+    ])
 
 
 def _midi(tmp_path, *, head=True, tail=True, duplicate=False):
@@ -65,6 +76,45 @@ def test_parse_preserves_tempo_changes_and_musical_sysex(tmp_path):
     assert [event.time_seconds for event in metadata.events] == pytest.approx([0, .25, 1.0, 1.5])
     assert metadata.events[-1].data == bytes([0xF0, 0x43, 0x10, 0x4C, 0, 0, 0x7E, 0, 0xF7])
     assert metadata.duration_seconds == pytest.approx(1.5)
+
+
+@pytest.mark.parametrize("number", [1, 3, 5])
+def test_embedded_cd_start_position_identifies_track_independently_of_file_order(tmp_path, number):
+    path = _midi(tmp_path)
+    before = parse_sps_midi(path)
+    midi = mido.MidiFile(path)
+    midi.tracks[0].insert(0, _cd_reference_message(number, tuple(182 + n * 1050 for n in range(6))))
+    midi.save(path)
+    assert parse_sps_midi(path) == replace(before, cd_track=number)
+
+
+@pytest.mark.parametrize("data", [
+    (0x43, 0x71, 0x7D),  # Truncated header.
+    (0x43, 0x71, 0x7D, 0, 2, 0, 0),  # No track table.
+    (0x43, 0x71, 0x7D, 0, 2, 0, 2, 0, 2, 0),  # Truncated table.
+    (0x43, 0x71, 0x7D, 0, 60, 0, 2, 0, 2, 0, 0, 20, 0),  # Invalid selected time.
+    (0x43, 0x71, 0x7D, 0, 2, 0, 2, 0, 2, 0, 0, 20, 75),  # Invalid table time.
+    (0x43, 0x71, 0x7D, 0, 2, 0, 2, 0, 2, 0, 0, 2, 0),  # Duplicate positions.
+    (0x43, 0x71, 0x7D, 0, 2, 0, 2, 0, 20, 0, 0, 2, 0),  # Unordered positions.
+    (0x43, 0x71, 0x7D, 0, 3, 0, 2, 0, 2, 0, 0, 20, 0),  # Missing selected track.
+    (0x43, 0x71, 0x7D, 0, 20, 0, 2, 0, 2, 0, 0, 20, 0),  # Lead-out is not a song.
+])
+def test_malformed_optional_cd_reference_keeps_fingerprint_fallback(tmp_path, data):
+    path = _midi(tmp_path)
+    before = parse_sps_midi(path)
+    midi = mido.MidiFile(path)
+    midi.tracks[0].insert(0, mido.MetaMessage("sequencer_specific", data=data))
+    midi.save(path)
+    assert parse_sps_midi(path) == before
+
+
+@pytest.mark.parametrize("second_number", [1, 3])
+def test_repeated_cd_references_must_agree(tmp_path, second_number):
+    path = _midi(tmp_path)
+    midi = mido.MidiFile(path)
+    midi.tracks[0][:0] = [_cd_reference_message(1), _cd_reference_message(second_number)]
+    midi.save(path)
+    assert parse_sps_midi(path).cd_track == (1 if second_number == 1 else None)
 
 
 def test_source_smart_pianosoft_header_is_removed_without_dropping_other_yamaha_sysex(tmp_path):
@@ -247,6 +297,67 @@ def test_repeated_audio_is_rejected_as_ambiguous(tmp_path):
     path = tmp_path / "repeating.wav"
     _wav(path, pcm)
     with pytest.raises(SynchronizationError, match="ambiguous"):
+        synchronize(metadata, path)
+
+
+@pytest.mark.parametrize("boundary", ["start", "end", "eof"])
+def test_identical_repeat_at_search_boundary_remains_ambiguous(tmp_path, original_phrase, boundary):
+    # Four seconds is not an integer number of decimated samples. Identical
+    # phrases therefore have slightly different raw scores solely because of
+    # sampling phase. The competing peak needs its neighbouring scores even
+    # when its start is at the edge of the permitted search window.
+    phrase = original_phrase[0][:4 * 44100]
+    pcm = np.concatenate((phrase, phrase))
+    index = 1034 if boundary == "start" else 345
+    envelope = _reference_envelope(pcm)
+    segment = envelope[index:index + 256]
+    fingerprint = Fingerprint(index * 256 / 44100, tuple(
+        np.rint(segment / max(abs(segment)) * 60).astype(int),
+    ))
+    if boundary == "eof":
+        # The later peak is still a complete 256-sample candidate, but there
+        # is no following candidate from which to estimate its phase loss.
+        pcm = pcm[:(1034 + 256) * 256]
+    path = tmp_path / f"repeating-{boundary}.wav"
+    _wav(path, pcm)
+    with wave.open(str(path), "rb") as audio:
+        with pytest.raises(SynchronizationError, match="ambiguous"):
+            _match(audio, fingerprint, 4.0, None)
+
+
+@pytest.mark.parametrize("stronger_first", [False, True])
+def test_stronger_near_repeat_wins_even_when_farther_from_reference(tmp_path, original_phrase, stronger_first):
+    pcm, metadata = original_phrase
+    # Two similar performances give high correlations less than .025 apart.
+    # Keep one original; slightly vary the other's dynamics. The weaker
+    # repetition is closer to the declared reference in both arrangements.
+    phrase = pcm[:4 * 44100]
+    times = np.arange(len(phrase)) / 44100
+    dynamics = 1 + .04 * np.sin(2 * np.pi * 1.7 * times)
+    altered = np.rint(phrase.astype(float) * dynamics[:, None]).astype(np.int16)
+    choices = (phrase, altered) if stronger_first else (altered, phrase)
+    path = tmp_path / "similar-repetitions.wav"
+    _wav(path, np.concatenate(choices))
+    reference = 4.5 if stronger_first else 3.5
+    fingerprint = replace(metadata.head, reference_seconds=reference)
+    expected = metadata.head.reference_seconds + (0 if stronger_first else 4)
+    with wave.open(str(path), "rb") as audio:
+        position, score = _match(audio, fingerprint, 4.0, None)
+    assert position == pytest.approx(expected, abs=.008)
+    assert abs(position - reference) > 2
+    assert score > .99
+
+
+def test_two_matching_anchors_must_agree_on_playback_speed(tmp_path, original_phrase):
+    pcm, metadata = original_phrase
+    # Both fingerprints still occur in their search windows, but the modified
+    # reference separation requires more than the allowed playback-rate change.
+    metadata = replace(metadata, head=replace(
+        metadata.head, reference_seconds=metadata.head.reference_seconds + .4,
+    ))
+    path = tmp_path / "inconsistent-reference-times.wav"
+    _wav(path, pcm)
+    with pytest.raises(SynchronizationError, match="disagree on playback speed"):
         synchronize(metadata, path)
 
 

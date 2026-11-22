@@ -30,6 +30,7 @@ from .smart_pianosoft_translations import SMART_PIANOSOFT_MESSAGES
 from .logical_capture_translations import LOGICAL_CAPTURE_TRANSLATIONS
 from .catalog_inspection_translations import CATALOG_INSPECTION_TRANSLATIONS
 from .disklavier_decoder_translations import DISKLAVIER_DECODER_MESSAGES
+from .audio_decode_batch_translations import AUDIO_DECODE_BATCH_TRANSLATIONS
 
 from .bulgarian_translations import (
     BULGARIAN_MESSAGE_TRANSLATIONS,
@@ -3065,6 +3066,7 @@ TEXT_TO_MESSAGE_ID.update({
     if key.startswith("sps.cd_")
 })
 MESSAGES.update(DISKLAVIER_DECODER_MESSAGES)
+MESSAGES.update(AUDIO_DECODE_BATCH_TRANSLATIONS)
 MESSAGES.update(OUTPUT_NAMING_MESSAGES)
 MESSAGES.update(ABOUT_ADMIN_MESSAGES)
 MESSAGES.update(ACTIVITY_MESSAGES)

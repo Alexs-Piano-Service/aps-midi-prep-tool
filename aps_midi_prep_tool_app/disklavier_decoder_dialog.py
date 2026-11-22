@@ -1,11 +1,11 @@
-"""A separate utility for listening to decoded Disklavier WAV performances."""
+"""Listen to encoded Disklavier audio or matching MIDI/audio pairs."""
 
 from pathlib import Path
 import math
 import tempfile
 import threading
 
-from PySide6.QtCore import QRectF, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QRectF, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from .disklavier_decoder_preview import prepare_preview
+from .disklavier_stem_player import DisklavierStemPlayer
 from .audio_output_routing import DefaultAudioOutputFollower
 from .icon_utils import apply_window_icon
 from .helpers.atomic_file import atomic_write_bytes
@@ -127,7 +128,7 @@ class DecodedPianoOverview(_PlaybackOverview):
 
 
 class AccompanimentWaveform(_PlaybackOverview):
-    """A peak envelope of the original audio channel on the shared timeline."""
+    """A peak envelope of safe accompaniment on the shared timeline."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -183,12 +184,12 @@ class DisklavierPreviewWorker(QThread):
         self.cancelled.set()
 
     def run(self):
-        from .disklavier_decoder import decode_disklavier_wav, DisklavierDecodingCancelled
+        from .disklavier_decoder import DisklavierDecodingCancelled
+        from .disklavier_playback_source import prepare_playback_source
         try:
-            decoded = decode_disklavier_wav(
-                self.source, self.directory / "decoded.mid", self.directory / "accompaniment.wav",
-                cancel=self.cancelled,
-                progress=lambda value: self.progressChanged.emit("decode", value),
+            decoded = prepare_playback_source(
+                self.source, self.directory, cancel=self.cancelled,
+                progress=self.progressChanged.emit,
             )
             result = prepare_preview(decoded, self.directory, cancel=self.cancelled,
                                      progress=self.progressChanged.emit)
@@ -197,34 +198,6 @@ class DisklavierPreviewWorker(QThread):
             self.succeeded.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc), self.cancelled.is_set() or isinstance(exc, DisklavierDecodingCancelled))
-
-
-class DisklavierBalanceWorker(QThread):
-    succeeded = Signal(int, str)
-    failed = Signal(str, bool)
-
-    def __init__(self, result, destination, balance, parent=None):
-        super().__init__(parent)
-        self.result = result
-        self.destination = Path(destination)
-        self.balance = balance
-        self.cancelled = threading.Event()
-
-    def cancel(self):
-        self.cancelled.set()
-
-    def run(self):
-        from .disklavier_decoder_preview import _mix_preview
-        try:
-            _mix_preview(self.result["piano_path"], self.result["accompaniment_path"],
-                         self.destination, balance=self.balance / 100, cancel=self.cancelled)
-            self.succeeded.emit(self.balance, str(self.destination))
-        except Exception as exc:
-            try:
-                self.destination.unlink(missing_ok=True)
-            except OSError:
-                pass  # The temporary workspace will retry cleanup on close.
-            self.failed.emit(str(exc), self.cancelled.is_set())
 
 
 class DisklavierWavPlayerDialog(QDialog):
@@ -239,48 +212,43 @@ class DisklavierWavPlayerDialog(QDialog):
         self._workspace = None
         self._close_pending = False
         self._source_path = None
-        self._pending_position = 0
-        self._pending_play = False
-        self._pending_paused = False
-        self._source_loading = False
-        self._balance_paths = {}
-        self._obsolete_mixes = set()
-        self._mix_serial = 0
-        self._failed_balance = None
-        self._balance_timer = QTimer(self)
-        self._balance_timer.setSingleShot(True)
-        self._balance_timer.setInterval(150)
-        self._balance_timer.timeout.connect(self._start_balance_mix)
         self.setWindowTitle(self.text("action").rstrip("."))
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         self.setSizeGripEnabled(True)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 12, 16, 12)
         outer.setSpacing(5)
-        description = QLabel(self.text("description"))
-        description.setWordWrap(True)
-        outer.addWidget(description)
-
         source_row = QHBoxLayout()
         self.source_edit = QLineEdit()
         self.source_edit.setReadOnly(True)
         self.source_edit.setPlaceholderText(self.text("choose_hint"))
         self.source_edit.setAccessibleName(self.text("source"))
+        self.source_edit.setAccessibleDescription(self.text("description"))
+        self.source_edit.setToolTip(self.text("description"))
         source_row.addWidget(self.source_edit, 1)
         self.open_button = QPushButton(self.text("open"))
+        self.open_button.setToolTip(self.text("description"))
         self.open_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
         self.open_button.setAutoDefault(False)
         self.open_button.clicked.connect(self.choose_file)
         source_row.addWidget(self.open_button)
         outer.addLayout(source_row)
 
-        self.summary = QLabel(self.text("ready"))
+        self.input_summary = QLabel()
+        self.input_summary.setWordWrap(True)
+        self.input_summary.setTextFormat(Qt.PlainText)
+        self.input_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.input_summary.hide()
+        outer.addWidget(self.input_summary)
+
+        self.summary = QLabel()
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.PlainText)
+        self.summary.hide()
         outer.addWidget(self.summary)
         self.overview = DecodedPianoOverview(self)
         self.overview.setAccessibleName(self.text("piano_roll"))
-        self.overview.setToolTip(self.text("seek_hint"))
+        self.overview.setToolTip(self.text("ready") + "\n" + self.text("seek_hint"))
         self.overview.seekRequested.connect(self.seek)
         outer.addWidget(self.overview, 3)
         self.waveform = AccompanimentWaveform(self)
@@ -372,7 +340,7 @@ class DisklavierWavPlayerDialog(QDialog):
 
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(.7)
-        self.player = QMediaPlayer(self)
+        self.player = DisklavierStemPlayer(self)
         self.player.setAudioOutput(self.audio_output)
         self.audio_output_follower = DefaultAudioOutputFollower(self)
         self.audio_output_follower.add_output(self.audio_output, self.player)
@@ -395,7 +363,7 @@ class DisklavierWavPlayerDialog(QDialog):
     def choose_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, self.text("open"), str(self.settings.value("disklavier_wav_folder", "") or ""),
-            "WAV (*.wav *.WAV)",
+            self.text("file_filter"),
         )
         if path:
             self.open_file(path)
@@ -416,23 +384,21 @@ class DisklavierWavPlayerDialog(QDialog):
         self.worker.failed.connect(self._failed)
         self.worker.finished.connect(self._finished)
         self.summary.setText(self.text("preparing"))
-        self._progress_changed("decode", 0)
+        self.summary.show()
+        self.progress.setValue(0)
+        self._progress_changed("inspect", 0)
         self._update_controls()
         self.worker.start()
 
     def _clear_result(self):
-        self._balance_timer.stop()
-        self._pending_play = False
-        self._pending_paused = False
-        self._pending_position = 0
-        self._source_loading = False
-        self.player.stop()
-        self.player.setSource(QUrl())
+        self.player.clear()
         self.result = None
-        self._balance_paths.clear()
-        self._obsolete_mixes.clear()
-        self._failed_balance = None
+        self.summary.clear()
+        self.summary.hide()
+        self.input_summary.clear()
+        self.input_summary.hide()
         self.overview.set_notes([], 0)
+        self.overview.setToolTip(self.text("ready") + "\n" + self.text("seek_hint"))
         self.waveform.set_waveform(None)
         self.waveform.set_duration(0)
         self.position_slider.setRange(0, 0)
@@ -448,21 +414,45 @@ class DisklavierWavPlayerDialog(QDialog):
         self.status.show()
         self.progress.show()
         self.progress.setRange(0, 0 if fraction < 0 else 100)
-        start, span = {"decode": (0, 45), "piano": (45, 45), "mix": (90, 10)}[phase]
-        self.progress.setValue(round(start + max(0, min(1, fraction)) * span))
+        start, span = {"inspect": (0, 5), "mp3": (5, 15), "check_audio": (20, 25),
+                       "decode": (20, 25), "audio": (20, 25),
+                       "piano": (45, 45), "mix": (90, 10)}[phase]
+        # Format detection may try another receiver or prepare a companion.
+        # Keep those steps within one forward-moving preparation phase.
+        self.progress.setValue(max(self.progress.value(), round(start + max(0, min(1, fraction)) * span)))
 
     def _prepared(self, result):
         if self.worker is not None and self.worker.cancelled.is_set():
             self._failed("", True)
             return
         self.result = result
-        self._balance_paths = {50: result["mixed_path"]}
+        mp3_source = Path(result.get("source_audio_path", "")).suffix.casefold() == ".mp3"
+        if result.get("source_kind") == "pair":
+            files = " + ".join(Path(result[key]).name for key in ("source_midi_path", "source_audio_path"))
+            self.input_summary.setText(self.text("input_pair_mp3" if mp3_source else "input_pair") + ": " + files)
+        else:
+            self.input_summary.setText(self.text("input_encoded_mp3" if mp3_source else "input_encoded"))
+        self.input_summary.show()
+        self.overview.setToolTip(self.text("seek_hint"))
+        self.overview.set_notes(result["notes"], result["duration_seconds"])
         self.waveform.set_waveform(result.get("accompaniment_waveform"))
         self.status.setText(self.text("prepared"))
-        self._change_mix()
+        try:
+            self.player.setBalance(self.balance_slider.value() / 100)
+            self.player.setPianoOnly(self.mode_combo.currentData() == "piano_path")
+            # Only prepared piano and validated accompaniment reach the device.
+            # Both stay on one timeline for the lifetime of this loaded song.
+            self.player.load(result["piano_path"], result["accompaniment_path"],
+                             allow_stereo=result.get("source_kind") == "pair")
+        except (OSError, ValueError) as exc:
+            self.player.clear()
+            self.result = None
+            self.input_summary.hide()
+            self._failed(str(exc), False)
 
     def _failed(self, error, cancelled):
         self.summary.setText(self.text("cancelled" if cancelled else "failed"))
+        self.summary.show()
         self.status.setText(self.text("cancelled") if cancelled else error)
         self.status.show()
 
@@ -478,11 +468,9 @@ class DisklavierWavPlayerDialog(QDialog):
         if self._close_pending:
             self._close_pending = False
             self.reject()
-        elif self.result is not None:
-            self._balance_timer.start()
 
     def _playback_ready(self):
-        return self.result is not None and (not self.is_busy or isinstance(self.worker, DisklavierBalanceWorker))
+        return self.result is not None and not self.is_busy
 
     def _update_controls(self, *_args):
         ready = self._playback_ready()
@@ -491,9 +479,10 @@ class DisklavierWavPlayerDialog(QDialog):
                        self.mode_combo, self.position_slider, self.overview, self.waveform):
             widget.setEnabled(ready)
         self.balance_slider.setEnabled(ready and self.mode_combo.currentData() == "mixed_path")
-        self.save_button.setVisible(self._admin_mode_enabled)
-        self.save_button.setEnabled(ready and not self.is_busy and self._admin_mode_enabled)
-        playing = self._pending_play if self._source_loading else self.player.playbackState() == QMediaPlayer.PlayingState
+        can_export = self._admin_mode_enabled and (self.result is None or self.result.get("source_kind") != "pair")
+        self.save_button.setVisible(can_export)
+        self.save_button.setEnabled(ready and not self.is_busy and can_export)
+        playing = self.player.playbackState() == QMediaPlayer.PlayingState
         self.play_button.setText(translate_text("Pause" if playing else "Play", self.language))
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause if playing else QStyle.SP_MediaPlay))
         self.close_button.setText(translate_text("Cancel" if self.is_busy and not ready else "Close", self.language))
@@ -502,28 +491,7 @@ class DisklavierWavPlayerDialog(QDialog):
     def _change_mix(self, *_args):
         if self.result is None:
             return
-        mode = self.mode_combo.currentData()
-        path = self.result[mode]
-        if mode == "mixed_path":
-            path = self._balance_paths.get(self.balance_slider.value(), path)
-            self._balance_timer.start()
-        elif isinstance(self.worker, DisklavierBalanceWorker):
-            self.worker.cancel()
-        self._update_controls()
-        if self.player.source().toLocalFile() == path:
-            return
-        if not self._source_loading:
-            self._pending_position = self.player.position()
-            self._pending_play = self.player.playbackState() == QMediaPlayer.PlayingState
-            self._pending_paused = self.player.playbackState() == QMediaPlayer.PlaybackState.PausedState
-        self._source_loading = True
-        self.player.stop()
-        duration = self.result.get("preview_durations", {}).get(mode, self.result["duration_seconds"])
-        self.overview.set_notes(self.result["notes"], duration)
-        self._duration_changed(round(duration * 1000))
-        self._pending_position = min(self._pending_position, self.position_slider.maximum())
-        # Only these derived files are ever exposed to an audio device.
-        self.player.setSource(QUrl.fromLocalFile(path))
+        self.player.setPianoOnly(self.mode_combo.currentData() == "piano_path")
         self._update_controls()
 
     def _balance_changed(self, value, *, persist=True):
@@ -532,85 +500,14 @@ class DisklavierWavPlayerDialog(QDialog):
         description = self.text("balance_value", piano=100 - value, accompaniment=value)
         self.balance_slider.setToolTip(self.text("balance_hint") + "\n" + description)
         self.balance_slider.setAccessibleDescription(description)
-        self._failed_balance = None
-        if isinstance(self.worker, DisklavierBalanceWorker) and self.worker.balance != value:
-            self.worker.cancel()
         if self.result is not None:
-            self._balance_timer.start()
-
-    def _start_balance_mix(self):
-        if self.is_busy or self.result is None or self._close_pending or self.mode_combo.currentData() != "mixed_path":
-            return
-        balance = self.balance_slider.value()
-        if balance in self._balance_paths:
-            path = self._balance_paths[balance]
-            if self.player.source().toLocalFile() != path:
-                self._change_mix()
-                self.status.setText(self.text("prepared"))
-            return
-        if balance == self._failed_balance:
-            return
-        self._mix_serial += 1
-        destination = Path(self._workspace.name) / f"balance-{self._mix_serial}.wav"
-        self.worker = DisklavierBalanceWorker(self.result, destination, balance, self)
-        self.worker.succeeded.connect(self._balance_prepared)
-        self.worker.failed.connect(self._balance_failed)
-        self.worker.finished.connect(self._finished)
-        self._update_controls()
-        self.worker.start()
-
-    def _balance_prepared(self, balance, path):
-        if self._close_pending or self.worker.cancelled.is_set() or balance != self.balance_slider.value():
-            self._obsolete_mixes.add(path)
-            self._cleanup_obsolete_mixes()
-            return
-        for old_balance in list(self._balance_paths):
-            if old_balance != 50:
-                self._obsolete_mixes.add(self._balance_paths.pop(old_balance))
-        self._balance_paths[balance] = path
-        self._change_mix()
-        self.status.setText(self.text("prepared"))
-        self._cleanup_obsolete_mixes()
-
-    def _balance_failed(self, error, cancelled):
-        if not cancelled:
-            self._failed_balance = self.worker.balance
-            self.status.setText(self.text("balance_failed", error=error))
-            self.status.show()
-
-    def _cleanup_obsolete_mixes(self):
-        current = self.player.source().toLocalFile()
-        for path in list(self._obsolete_mixes):
-            if path != current:
-                try:
-                    Path(path).unlink(missing_ok=True)
-                except OSError:
-                    continue  # A backend may release the old file after loading.
-                self._obsolete_mixes.discard(path)
+            self.player.setBalance(value / 100)
 
     def _media_status_changed(self, status):
-        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
-            if self._source_loading:
-                self._source_loading = False
-                position, self._pending_position = self._pending_position, 0
-                playing, self._pending_play = self._pending_play, False
-                paused, self._pending_paused = self._pending_paused, False
-                self.player.setPosition(position)
-                if playing:
-                    self.audio_output_follower.refresh()
-                    self.player.play()
-                elif paused:
-                    self.player.pause()
-            self._cleanup_obsolete_mixes()
-            self._update_controls()
+        self._update_controls()
 
     def toggle_play(self):
         if not self._playback_ready():
-            return
-        if self._source_loading:
-            self._pending_play = not self._pending_play
-            self._pending_paused = not self._pending_play
-            self._update_controls()
             return
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
@@ -621,29 +518,19 @@ class DisklavierWavPlayerDialog(QDialog):
             self.player.play()
 
     def stop(self):
-        self._pending_play = False
-        self._pending_paused = False
-        self._pending_position = 0
         self.player.stop()
-        self.player.setPosition(0)
         self._update_controls()
 
     def seek(self, position):
         if self._playback_ready():
             position = max(0, min(position, self.position_slider.maximum()))
-            if self._source_loading:
-                self._pending_position = position
-                self._position_changed(position)
-            else:
-                self.player.setPosition(position)
+            self.player.setPosition(position)
 
     def _slider_changed(self, value):
         if not self.position_slider.isSliderDown() and value != self.player.position():
             self.seek(value)
 
     def _duration_changed(self, duration):
-        if self._source_loading and duration <= 0:
-            return  # Backends may briefly clear the duration while changing WAVs.
         self.position_slider.blockSignals(True)
         self.position_slider.setRange(0, max(0, duration))
         self.position_slider.blockSignals(False)
@@ -652,11 +539,10 @@ class DisklavierWavPlayerDialog(QDialog):
             self.waveform.set_duration(duration)
             self.summary.setText(self.text("summary", notes=len(self.result["notes"]),
                                            duration=_time_label(duration)))
+            self.summary.show()
         self._position_changed(self.player.position())
 
     def _position_changed(self, position):
-        if self._source_loading:
-            position = self._pending_position
         if not self.position_slider.isSliderDown():
             self.position_slider.blockSignals(True)
             self.position_slider.setValue(position)
@@ -667,16 +553,13 @@ class DisklavierWavPlayerDialog(QDialog):
 
     def _audio_error(self, error, message):
         if error != QMediaPlayer.NoError:
-            self._source_loading = False
-            self._pending_play = False
-            self._pending_paused = False
-            self._pending_position = 0
             self.status.setText(self.text("audio_error", error=message))
             self.status.show()
             self._update_controls()
 
     def save_midi(self):
-        if not self._admin_mode_enabled or self.result is None or self.is_busy:
+        if (not self._admin_mode_enabled or self.result is None or self.is_busy
+                or self.result.get("source_kind") == "pair"):
             return
         suggestion = self._source_path.with_name(self._source_path.stem + "-decoded.mid")
         path, _ = QFileDialog.getSaveFileName(self, self.text("save_midi"), str(suggestion), "MIDI (*.mid)")
@@ -703,10 +586,6 @@ class DisklavierWavPlayerDialog(QDialog):
 
     def cancel_or_close(self):
         if self.is_busy:
-            if isinstance(self.worker, DisklavierBalanceWorker):
-                self._close_pending = True
-                self._balance_timer.stop()
-                self.stop()
             self.worker.cancel()
             self.status.setText(self.text("cancelling"))
             self._update_controls()

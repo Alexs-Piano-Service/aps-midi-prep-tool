@@ -84,11 +84,44 @@ def _timecode(data):
     return minute * 60 + second + frame / 75 + subframe / 9600
 
 
+def _cd_track_reference(data):
+    """Read the intended CD track from Yamaha's 43 71 7D meta event.
+
+    The payload contains a selected absolute MSF position, an entry count,
+    then the CD's track starts followed by its lead-out. The selected position
+    identifies a table entry independently of the floppy's catalog order.
+    Treat unsupported or malformed metadata as absent; fingerprints must still
+    verify the recording, including when another CD edition changes its TOC.
+    """
+    if len(data) < 7 or data[:3] != (0x43, 0x71, 0x7D):
+        return None
+    count = data[6]
+    if not 2 <= count <= 100 or len(data) != 7 + count * 3:
+        return None
+
+    def position(msf):
+        minute, second, frame = msf
+        if not (0 <= minute < 100 and 0 <= second < 60 and 0 <= frame < 75):
+            return None
+        return (minute * 60 + second) * 75 + frame
+
+    selected = position(data[3:6])
+    starts = tuple(position(data[index:index + 3]) for index in range(7, len(data), 3))
+    if selected is None or any(value is None for value in starts):
+        return None
+    if any(first >= second for first, second in zip(starts, starts[1:])):
+        return None
+    if selected not in starts[:-1]:
+        return None
+    return starts.index(selected) + 1
+
+
 def parse_sps_midi(path):
     """Parse an SMF, preserving its complete tempo map in event timestamps.
 
-    Yamaha's 43 71 05 01 message is CD control, not a track number. Track
-    selection must be verified by audio fingerprints, so cd_track is None.
+    Yamaha's 43 71 05 01 message is CD control, not a track number. The
+    sequencer-specific 43 71 7D meta event can identify the intended CD track;
+    selection must still be verified by both audio fingerprints.
     """
     try:
         midi = (mido.MidiFile(file=io.BytesIO(path), clip=False)
@@ -97,6 +130,7 @@ def parse_sps_midi(path):
         if midi.type not in (0, 1) or midi.ticks_per_beat <= 0:
             raise SynchronizationError("Smart PianoSoft requires a synchronous, PPQN MIDI file.")
         fingerprints = {}
+        cd_references = []
         events = []
         elapsed = 0.0
         for message in midi:
@@ -104,6 +138,8 @@ def parse_sps_midi(path):
             if not math.isfinite(elapsed) or elapsed < 0:
                 raise SynchronizationError("Invalid MIDI event timing.")
             if message.is_meta:
+                if message.type == "sequencer_specific" and tuple(message.data[:3]) == (0x43, 0x71, 0x7D):
+                    cd_references.append(_cd_track_reference(tuple(message.data)))
                 continue
             if message.type == "sysex":
                 data = tuple(message.data)
@@ -142,7 +178,8 @@ def parse_sps_midi(path):
         raise SynchronizationError("Smart PianoSoft reference times are too close or out of order.")
     if not events:
         raise SynchronizationError("The MIDI contains no musical events.")
-    return SPSMetadata(None, head, tail, tuple(events), elapsed)
+    cd_track = cd_references[0] if cd_references and len(set(cd_references)) == 1 else None
+    return SPSMetadata(cd_track, head, tail, tuple(events), elapsed)
 
 
 def _one_pole(signal, coefficient):
@@ -176,6 +213,18 @@ def _envelope(pcm, cancel=None):
     return np.r_[0.0, lowpass[:-1]][::DECIMATION]
 
 
+def _refine_peak(scores, index):
+    """Estimate fractional-sample position and score gain at a local peak."""
+    if 0 < index < len(scores) - 1:
+        curvature = scores[index - 1] - 2 * scores[index] + scores[index + 1]
+        if curvature < -1e-12:
+            slope = (scores[index + 1] - scores[index - 1]) / 2
+            fraction = float(np.clip(-slope / curvature, -0.5, 0.5))
+            gain = float(slope * fraction + 0.5 * curvature * fraction * fraction)
+            return fraction, max(0.0, min(gain, 1.0 - scores[index]))
+    return 0.0, 0.0
+
+
 def _match(audio, fingerprint, radius, cancel):
     reference = fingerprint.reference_seconds
     # Earlier candidates would contain only pre-track silence and cannot
@@ -183,7 +232,11 @@ def _match(audio, fingerprint, radius, cancel):
     search_start = max(reference - radius, -FINGERPRINT_SIZE * _STEP)
     # Warm the filters before the first candidate, retaining absolute phase.
     start = math.floor((search_start - 1.0) * SAMPLE_RATE / DECIMATION) * DECIMATION
-    end = min(audio.getnframes(), math.ceil((reference + radius + FINGERPRINT_SIZE * _STEP) * SAMPLE_RATE))
+    # Keep one neighbour beyond the last allowed candidate for score refinement.
+    # Without it, a repeated phrase on the search boundary can look artificially
+    # weaker merely because its fractional-sample peak cannot be estimated.
+    end = min(audio.getnframes(), math.ceil((reference + radius + FINGERPRINT_SIZE * _STEP) * SAMPLE_RATE)
+              + DECIMATION)
     # No reference wholly outside the available track can establish a match.
     # Check before allocating pre-track padding, including malformed times
     # representing many minutes before the beginning of the disc.
@@ -213,25 +266,38 @@ def _match(audio, fingerprint, radius, cancel):
     scores = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 1e-9)
     times = start / SAMPLE_RATE + np.arange(len(scores)) * _STEP
     valid = (times >= search_start) & (times <= reference + radius)
-    scores[~valid] = -1
     if not np.any(valid):
         raise SynchronizationError("The CD reference falls outside this audio track.")
-    peak = int(np.argmax(scores))
+    search_scores = np.where(valid, scores, -1.0)
+    peak = int(np.argmax(search_scores))
     correlation = float(np.clip(scores[peak], -1, 1))
     if correlation < 0.95:
         raise SynchronizationError(f"The audio does not match the Smart PianoSoft CD reference (correlation {correlation:.3f}).")
-    rivals = scores.copy()
+    # Yamaha's testFile selects the strongest correlation; a similar later
+    # phrase is not by itself a reason to reject the winning reference. The
+    # former fixed 0.025 runner-up margin rejected valid repeating intros.
+    refinement, gain = _refine_peak(scores, peak)
+    local_peaks = valid & (search_scores >= np.r_[-np.inf, search_scores[:-1]]) & (
+        search_scores >= np.r_[search_scores[1:], -np.inf])
     exclusion = math.ceil(0.25 / _STEP)
-    rivals[max(0, peak - exclusion):peak + exclusion + 1] = -1
-    if float(np.max(rivals)) >= correlation - 0.025:
-        raise SynchronizationError("The audio fingerprint has ambiguous matches; synchronization was not accepted.")
-    # Refine within one decimated sample; never extrapolate beyond the search.
-    refinement = 0.0
-    if 0 < peak < len(scores) - 1 and valid[peak - 1] and valid[peak + 1]:
-        curvature = scores[peak - 1] - 2 * scores[peak] + scores[peak + 1]
-        if curvature < -1e-12:
-            refinement = float(np.clip(0.5 * (scores[peak - 1] - scores[peak + 1]) / curvature, -0.5, 0.5))
-    return float(times[peak] + refinement * _STEP), correlation
+    local_peaks[max(0, peak - exclusion):peak + exclusion + 1] = False
+    for rival in np.flatnonzero(local_peaks):
+        _cancelled(cancel)
+        if rival in (0, len(scores) - 1) and scores[rival] >= 0.95:
+            # At physical EOF the extra neighbour may not exist. A second
+            # credible match without enough data to refine it remains uncertain.
+            raise SynchronizationError("The audio fingerprint has ambiguous matches; synchronization was not accepted.")
+        _, rival_gain = _refine_peak(scores, rival)
+        separation = (correlation + gain) - (scores[rival] + rival_gain)
+        # APS keeps an additional conservative ambiguity check: do not trust
+        # a lead that sub-sample score corrections alone can account for.
+        # Identical repeated phrases sampled at different phases otherwise
+        # produce slightly different scores. This is an interpolation-based
+        # safeguard, not a Yamaha quantization rule or a formal error bound.
+        if separation <= gain + rival_gain + np.finfo(np.float32).eps:
+            raise SynchronizationError("The audio fingerprint has ambiguous matches; synchronization was not accepted.")
+    position = float(np.clip(times[peak] + refinement * _STEP, search_start, reference + radius))
+    return position, correlation
 
 
 def synchronize(metadata, audio_path, cancel=None, progress=None):

@@ -92,6 +92,10 @@ def test_supported_language_metadata_and_regional_aliases_are_consistent():
 
 def test_bulgarian_catalog_never_silently_falls_back_to_english():
     for message_id, translations in MESSAGES.items():
+        if message_id == "sps.action":
+            # The menu caption contains only Yamaha's product name.
+            assert translations["bg"] == translations["en"] == "Smart PianoSoft..."
+            continue
         assert translations["bg"] != translations["en"], message_id
 
     for source, translations in COMMON_TEXT_TRANSLATIONS.items():

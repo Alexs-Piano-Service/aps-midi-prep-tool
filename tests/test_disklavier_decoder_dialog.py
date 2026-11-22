@@ -1,6 +1,7 @@
 """The standalone player decodes control data before any audio is played."""
 
 from pathlib import Path
+import os
 import threading
 import time
 import wave
@@ -17,13 +18,16 @@ from aps_midi_prep_tool_app import disklavier_decoder as decoder
 from aps_midi_prep_tool_app import disklavier_decoder_dialog as dialogs
 from aps_midi_prep_tool_app import disklavier_decoder_preview as preview
 from aps_midi_prep_tool_app import audio_output_routing
+from aps_midi_prep_tool_app import audio_tools
 from aps_midi_prep_tool_app.disklavier_audio import encode_disklavier_wav, read_midi_events
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
 from test_file_inspection_actions import _SilentAudioOutput, _SilentPlayer
 from test_audio_output_routing import _FakeAudioDevice, _FakeMediaDevices
+from test_disklavier_stem_player import _FakeDevice as _StreamingDevice, _FakeOutput as _StreamingOutput, fake_audio
 
 
 class _DecoderPlayer(_SilentPlayer):
+    """Transport spy; the stem player's separate tests exercise streamed PCM."""
     PlayingState = _SilentPlayer.PlaybackState.PlayingState
     LoadedMedia = _SilentPlayer.MediaStatus.LoadedMedia
     BufferedMedia = _SilentPlayer.MediaStatus.BufferedMedia
@@ -34,45 +38,92 @@ class _DecoderPlayer(_SilentPlayer):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state = self.PlaybackState.StoppedState
+        self._status = self.MediaStatus.NoMedia
+        self._duration = 0
+        self.loaded_stems = None
+        self.balance = .5
+        self.piano_only = False
+        self.transport_calls = []
 
-    def setSource(self, source):
-        super().setSource(source)
-        duration = 0
-        if not source.isEmpty():
-            with wave.open(source.toLocalFile()) as audio:
-                duration = round(audio.getnframes() / audio.getframerate() * 1000)
-        self.durationChanged.emit(duration)
-        self.mediaStatusChanged.emit(self.LoadedMedia)
+    def load(self, piano, accompaniment, *, allow_stereo=False):
+        self.transport_calls.append(("load", str(piano), str(accompaniment)))
+        self.loaded_stems = (str(piano), str(accompaniment))
+        self.allow_stereo = allow_stereo
+        durations = []
+        for path in self.loaded_stems:
+            with wave.open(path) as audio:
+                durations.append(audio.getnframes() / audio.getframerate())
+        self._duration = round(max(durations) * 1000)
+        self._position = 0
+        self._state = self.PlaybackState.StoppedState
+        self._status = self.LoadedMedia
+        self.durationChanged.emit(self._duration)
+        self.positionChanged.emit(0)
+        self.mediaStatusChanged.emit(self._status)
+
+    def clear(self):
+        self.transport_calls.append(("clear",))
+        self.loaded_stems = None
+        self._position = self._duration = 0
+        self._state = self.PlaybackState.StoppedState
+        self._status = self.MediaStatus.NoMedia
+        self.durationChanged.emit(0)
+        self.positionChanged.emit(0)
+        self.playbackStateChanged.emit(self._state)
+        self.mediaStatusChanged.emit(self._status)
+
+    def setBalance(self, balance):
+        self.balance = balance
+
+    def setPianoOnly(self, piano_only):
+        self.piano_only = piano_only
+
+    def duration(self):
+        return self._duration
 
     def playbackState(self):
         return self._state
 
     def mediaStatus(self):
-        return self.LoadedMedia
+        return self._status
 
     def play(self):
+        self.transport_calls.append(("play",))
         self._state = self.PlaybackState.PlayingState
         self.playbackStateChanged.emit(self._state)
 
     def pause(self):
+        self.transport_calls.append(("pause",))
         self._state = self.PlaybackState.PausedState
         self.playbackStateChanged.emit(self._state)
 
     def stop(self):
+        self.transport_calls.append(("stop",))
         self._state = self.PlaybackState.StoppedState
         self.setPosition(0)
         self.playbackStateChanged.emit(self._state)
 
     def setPosition(self, value):
+        self.transport_calls.append(("seek", value))
         super().setPosition(value)
         self.positionChanged.emit(value)
+
+    def advance(self, milliseconds):
+        assert self._state == self.PlayingState
+        self._position = min(self._duration, self._position + milliseconds)
+        self.positionChanged.emit(self._position)
+
+    def fail(self, message):
+        self._state = self.PlaybackState.StoppedState
+        self.playbackStateChanged.emit(self._state)
+        self.errorOccurred.emit("unavailable", message)
 
 
 @pytest.fixture(autouse=True)
 def software_audio_device(monkeypatch):
     # Qt's audio-server startup cannot connect from the test sandbox. Exercise
     # real decoding/rendering and GUI control signals without host speakers.
-    monkeypatch.setattr(dialogs, "QMediaPlayer", _DecoderPlayer)
+    monkeypatch.setattr(dialogs, "DisklavierStemPlayer", _DecoderPlayer)
     monkeypatch.setattr(dialogs, "QAudioOutput", _SilentAudioOutput)
     monkeypatch.setattr(audio_output_routing, "QMediaDevices", _FakeMediaDevices)
 
@@ -81,7 +132,9 @@ def _wait(condition, timeout=5):
     deadline = time.monotonic() + timeout
     while not condition() and time.monotonic() < deadline:
         QApplication.instance().processEvents()
-        QTest.qWait(10)
+        # Yield to Python audio workers as the application's main event loop
+        # does; a tight sequence of native qWait calls can starve their work.
+        time.sleep(0.01)
     QApplication.instance().processEvents()
     assert condition()
 
@@ -108,6 +161,26 @@ def encoded(tmp_path):
         (0.7, b"\xb0\x40\x00"),
     ], accompaniment, encoded)
     return encoded
+
+
+@pytest.fixture
+def paired_files(tmp_path):
+    midi_path, wav_path = tmp_path / "My Song.mid", tmp_path / "My Song.WAV"
+    midi = mido.MidiFile(type=1, ticks_per_beat=480)
+    midi.tracks.append(mido.MidiTrack([
+        mido.MetaMessage("set_tempo", tempo=500000),
+        mido.MetaMessage("set_tempo", tempo=1000000, time=720),
+    ]))
+    midi.tracks.append(mido.MidiTrack([
+        mido.Message("note_on", note=67, velocity=90, time=480),
+        mido.Message("note_off", note=67, time=480),
+    ]))
+    midi.save(midi_path)
+    audio = np.zeros((2 * 44100, 2), dtype="<i2")
+    audio[22050:55125, 0] = 8000
+    audio[22050:55125, 1] = -4000
+    _write_wav(wav_path, audio)
+    return midi_path, wav_path
 
 
 @pytest.fixture
@@ -148,16 +221,152 @@ def test_open_decodes_and_renders_piano_without_playing_control_signal(dialog, e
     piano = _read_wav(result["piano_path"])
     assert not piano[:round(.59 * 44100)].any()
     assert np.abs(piano[round(.61 * 44100):round(.7 * 44100)]).max() > 100
-    mixed = _read_wav(result["mixed_path"])
     audio = _read_wav(result["accompaniment_path"])
-    expected = np.clip(piano.astype(float) * .5 + audio.astype(float) * .5, -32768, 32767).astype("<i2")
-    assert np.array_equal(mixed[:, 0], expected[:, 0])
-    assert np.array_equal(mixed[:, 0], mixed[:, 1])
-    assert dialog.player.source().toLocalFile() == result["mixed_path"]
+    assert audio.shape[1] == 1
+    assert dialog.player.loaded_stems == (result["piano_path"], result["accompaniment_path"])
+    assert dialog.player.allow_stereo is False
+    assert dialog.player.balance == .5
     dialog.mode_combo.setCurrentIndex(1)
-    assert dialog.player.source().toLocalFile() == result["piano_path"]
-    assert dialog.player.source().toLocalFile() != str(encoded)
+    assert dialog.player.piano_only is True
+    assert str(encoded) not in dialog.player.loaded_stems
     assert encoded.read_bytes() == original
+
+
+@pytest.mark.parametrize("selected", [0, 1])
+def test_pair_opens_from_either_file_with_stereo_audio_and_shared_timing(dialog, paired_files, selected):
+    midi_path, wav_path = paired_files
+    originals = [path.read_bytes() for path in paired_files]
+    dialog.open_file(paired_files[selected])
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result is not None, dialog.status.text()
+    result = dialog.result
+    assert result["source_kind"] == "pair"
+    assert dialog.text("input_pair") in dialog.input_summary.text()
+    assert midi_path.name in dialog.input_summary.text()
+    assert wav_path.name in dialog.input_summary.text()
+    assert dialog.input_summary.isVisible()
+    assert result["notes"][0]["start_sec"] == pytest.approx(.5)
+    assert result["notes"][0]["end_sec"] == pytest.approx(1.25)
+    assert result["notes"][0]["pitch"] == 67
+    assert dialog.overview.duration == dialog.waveform.duration == 2000
+    assert result["accompaniment_waveform"]["duration_seconds"] == 2
+    assert max(result["accompaniment_waveform"]["maximums"]) == 8000 / 32768
+    assert min(result["accompaniment_waveform"]["minimums"]) == -4000 / 32768
+    assert Path(result["accompaniment_path"]).is_relative_to(Path(dialog._workspace.name))
+    dialog.seek(700)
+    dialog.toggle_play()
+    _set_balance_and_wait(dialog, 100)
+    np.testing.assert_array_equal(_read_wav(dialog.player.loaded_stems[1]), _read_wav(wav_path))
+    assert dialog.player.allow_stereo is True
+    assert dialog.player.balance == 1
+    assert dialog.player.position() == dialog.waveform.position == dialog.overview.position == 700
+    assert dialog.player.playbackState() == _DecoderPlayer.PlayingState
+    dialog.mode_combo.setCurrentIndex(1)
+    assert dialog.player.position() == 700
+    assert dialog.player.piano_only is True
+    assert [path.read_bytes() for path in paired_files] == originals
+
+
+@pytest.mark.parametrize("selected", ["midi", "mp3"])
+def test_mp3_pair_opens_from_either_file_with_balance_and_timing(dialog, paired_files, selected):
+    if not audio_tools.find_lame_command():
+        if os.environ.get("APS_REQUIRE_AUDIO_TESTS") == "1":
+            pytest.fail("LAME is required for MP3 player integration tests")
+        pytest.skip("LAME is not available")
+    midi_path, wav_path = paired_files
+    mp3_path = wav_path.with_suffix(".MP3")
+    samples = np.zeros((2 * 44100, 2), dtype="<i2")
+    times = np.arange(55125 - 22050) / 44100
+    samples[22050:55125, 0] = np.rint(8000 * np.sin(2 * np.pi * 440 * times))
+    samples[22050:55125, 1] = np.rint(4000 * np.sin(2 * np.pi * 660 * times))
+    _write_wav(wav_path, samples)
+    audio_tools.encode_mp3(wav_path, mp3_path)
+    wav_path.unlink()
+    originals = midi_path.read_bytes(), mp3_path.read_bytes()
+    dialog.open_file(midi_path if selected == "midi" else mp3_path)
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result is not None, dialog.status.text()
+    result = dialog.result
+    assert result["source_kind"] == "pair"
+    assert result["source_audio_path"] == str(mp3_path)
+    assert dialog.text("input_pair_mp3") in dialog.input_summary.text()
+    assert midi_path.name in dialog.input_summary.text()
+    assert mp3_path.name in dialog.input_summary.text()
+    assert result["notes"][0]["start_sec"] == pytest.approx(.5)
+    assert result["notes"][0]["end_sec"] == pytest.approx(1.25)
+    assert dialog.overview.duration == dialog.waveform.duration == 2000
+    assert result["accompaniment_waveform"]["duration_seconds"] == 2
+    accompaniment = _read_wav(result["accompaniment_path"])
+    assert accompaniment.shape == (2 * 44100, 2)
+    region = accompaniment[round(.6 * 44100):round(.7 * 44100)].astype(float)
+    assert np.sqrt(np.mean(region[:, 0] ** 2)) > 4000
+    assert 2000 < np.sqrt(np.mean(region[:, 1] ** 2)) < 4000
+    dialog.seek(700)
+    dialog.toggle_play()
+    _set_balance_and_wait(dialog, 100)
+    np.testing.assert_array_equal(_read_wav(dialog.player.loaded_stems[1]), accompaniment)
+    assert dialog.player.balance == 1
+    assert dialog.player.position() == dialog.overview.position == dialog.waveform.position == 700
+    assert dialog.player.playbackState() == _DecoderPlayer.PlayingState
+    assert (midi_path.read_bytes(), mp3_path.read_bytes()) == originals
+
+
+def test_file_picker_accepts_midi_wav_and_mp3_without_a_format_mode(dialog, paired_files, monkeypatch):
+    def choose(_parent, _title, _folder, file_filter):
+        for pattern in ("*.mid", "*.midi", "*.MID", "*.MIDI", "*.wav", "*.WAV", "*.mp3", "*.MP3"):
+            assert pattern in file_filter
+        return str(paired_files[0]), file_filter
+
+    monkeypatch.setattr(dialogs.QFileDialog, "getOpenFileName", choose)
+    dialog.choose_file()
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result is not None, dialog.status.text()
+    assert dialog.result["source_kind"] == "pair"
+
+
+def test_encoded_wav_uses_embedded_notes_even_with_same_name_midi(dialog, encoded, paired_files):
+    companion = encoded.with_suffix(".mid")
+    companion.write_bytes(paired_files[0].read_bytes())
+    original = companion.read_bytes()
+    dialog.open_file(encoded)
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result is not None, dialog.status.text()
+    assert dialog.result["source_kind"] == "encoded"
+    assert dialog.result["notes"][0]["pitch"] == 60
+    assert dialog.input_summary.text() == dialog.text("input_encoded")
+    assert companion.read_bytes() == original
+
+
+def test_missing_companion_clears_old_playback_and_explains_problem(dialog, encoded, paired_files):
+    dialog.open_file(encoded)
+    _wait(lambda: not dialog.is_busy)
+    midi_path, wav_path = paired_files
+    wav_path.unlink()
+    original = midi_path.read_bytes()
+    dialog.open_file(midi_path)
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result is None
+    assert dialog.player.loaded_stems is None
+    assert dialog.input_summary.isHidden()
+    assert not dialog.input_summary.text()
+    assert "WAV" in dialog.status.text()
+    assert "MP3" in dialog.status.text()
+    assert dialog.open_button.isEnabled()
+    assert not dialog.play_button.isEnabled()
+    assert dialog._workspace is None
+    assert midi_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("dialog", [True], indirect=True)
+def test_admin_pair_does_not_offer_to_export_existing_midi(dialog, paired_files, monkeypatch):
+    dialog.open_file(paired_files[0])
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result is not None, dialog.status.text()
+    assert dialog.save_button.isHidden()
+    assert not dialog.save_button.isEnabled()
+    monkeypatch.setattr(dialogs.QFileDialog, "getSaveFileName",
+                        lambda *_a: pytest.fail("A pair already contains its MIDI"))
+    dialog.save_midi()
 
 
 def test_bad_wav_restores_open_controls_and_keeps_source(dialog, tmp_path):
@@ -217,7 +426,7 @@ def test_second_open_clears_previous_audio_and_workspace(dialog, encoded):
     _wait(lambda: not dialog.is_busy)
     old_directory = Path(dialog._workspace.name)
     dialog.open_file(encoded)
-    assert dialog.player.source().isEmpty()
+    assert dialog.player.loaded_stems is None
     assert dialog.waveform.waveform is None
     assert dialog.waveform.duration == dialog.waveform.position == 0
     assert not dialog.waveform.isEnabled()
@@ -248,12 +457,11 @@ def test_transport_seek_pause_stop_and_mix_switch_keep_the_timeline(dialog, enco
 
 def _set_balance_and_wait(dialog, value):
     dialog.balance_slider.setValue(value)
-    _wait(lambda: not dialog.is_busy and value in dialog._balance_paths
-          and dialog.player.source().toLocalFile() == dialog._balance_paths[value])
+    _wait(lambda: not dialog.is_busy and dialog.player.balance == value / 100)
 
 
 @pytest.mark.parametrize("balance", [0, 25, 50, 75, 100])
-def test_balance_blends_decoded_stems_without_changing_timing_or_master_volume(dialog, encoded, balance):
+def test_balance_updates_live_gains_without_changing_transport_or_volume(dialog, encoded, balance):
     original = encoded.read_bytes()
     assert dialog.balance_slider.value() == 50
     assert not dialog.balance_slider.isEnabled()
@@ -262,17 +470,19 @@ def test_balance_blends_decoded_stems_without_changing_timing_or_master_volume(d
     duration = dialog.position_slider.maximum()
     dialog.volume_slider.setValue(37)
     dialog.seek(800)
+    dialog.toggle_play()
+    loaded = dialog.player.loaded_stems
+    dialog.player.transport_calls.clear()
     _set_balance_and_wait(dialog, balance)
 
-    piano = _read_wav(dialog.result["piano_path"])
-    accompaniment = _read_wav(dialog.result["accompaniment_path"])
-    mixed = _read_wav(dialog.player.source().toLocalFile())
-    expected = np.clip(piano.astype(float) * (1 - balance / 100)
-                       + accompaniment.astype(float) * (balance / 100), -32768, 32767).astype("<i2")
-    np.testing.assert_array_equal(mixed[:, 0], expected[:, 0])
-    np.testing.assert_array_equal(mixed[:, 1], expected[:, 0])
+    assert dialog.player.transport_calls == []
+    assert dialog.player.loaded_stems == loaded
+    assert dialog.player.balance == balance / 100
+    assert not dialog.is_busy
+    assert not list(Path(dialog._workspace.name).glob("balance-*.wav"))
     assert dialog.position_slider.maximum() == duration
     assert dialog.player.position() == dialog.overview.position == dialog.waveform.position == 800
+    assert dialog.player.playbackState() == _DecoderPlayer.PlayingState
     assert dialog.volume_slider.value() == 37
     assert dialog.audio_output.volume() == pytest.approx(.37)
     assert dialog.settings.value("disklavier_wav_balance", 50, type=int) == balance
@@ -283,197 +493,226 @@ def test_balance_is_remembered_for_next_player_and_restored_after_piano_only(dia
     dialog.open_file(encoded)
     _wait(lambda: not dialog.is_busy)
     _set_balance_and_wait(dialog, 75)
+    dialog.player.transport_calls.clear()
     dialog.mode_combo.setCurrentIndex(1)
     assert not dialog.balance_slider.isEnabled()
-    assert dialog.player.source().toLocalFile() == dialog.result["piano_path"]
+    assert dialog.player.piano_only is True
     dialog.mode_combo.setCurrentIndex(0)
     assert dialog.balance_slider.isEnabled()
-    assert dialog.player.source().toLocalFile() == dialog._balance_paths[75]
+    assert dialog.player.piano_only is False
+    assert dialog.player.balance == .75
+    assert dialog.player.transport_calls == []
     settings = dialog.settings
     dialog.close()
     reopened = dialogs.DisklavierWavPlayerDialog(settings)
     try:
         assert reopened.balance_slider.value() == 75
         reopened.open_file(encoded)
-        _wait(lambda: not reopened.is_busy and 75 in reopened._balance_paths
-              and reopened.player.source().toLocalFile() == reopened._balance_paths[75])
+        _wait(lambda: not reopened.is_busy)
+        assert reopened.player.balance == .75
+        assert reopened.player.loaded_stems is not None
+        assert len([call for call in reopened.player.transport_calls if call[0] == "load"]) == 1
     finally:
         reopened.close()
         _wait(lambda: not reopened.is_busy)
 
 
-@pytest.mark.parametrize("action", ["play", "pause", "stop", "seek"])
-def test_balance_applies_current_transport_intent_after_background_work(dialog, encoded, monkeypatch, action):
+@pytest.mark.parametrize("state", ["playing", "paused", "stopped"])
+def test_balance_and_mode_changes_preserve_current_transport_intent(dialog, encoded, state):
     dialog.open_file(encoded)
     _wait(lambda: not dialog.is_busy)
     dialog.seek(500)
-    if action != "play":
+    if state != "stopped":
         dialog.toggle_play()
-    entered, release = threading.Event(), threading.Event()
-    mix = preview._mix_preview
-
-    def blocked_mix(*args, **kwargs):
-        entered.set()
-        assert release.wait(5)
-        return mix(*args, **kwargs)
-
-    monkeypatch.setattr(preview, "_mix_preview", blocked_mix)
-    dialog.balance_slider.setValue(25)
-    try:
-        _wait(entered.is_set)
+    if state == "paused":
+        dialog.toggle_play()
+    original_state = dialog.player.playbackState()
+    loaded = dialog.player.loaded_stems
+    dialog.player.transport_calls.clear()
+    for value in (25, 75, 0, 100, 50):
+        dialog.balance_slider.setValue(value)
+        dialog.mode_combo.setCurrentIndex(1)
+        dialog.mode_combo.setCurrentIndex(0)
         assert dialog.play_button.isEnabled()
         assert dialog.position_slider.isEnabled()
         assert dialog.balance_slider.isEnabled()
-        if action in ("play", "pause"):
-            dialog.toggle_play()
-        elif action == "stop":
-            dialog.stop()
-        else:
-            dialog.seek(900)
-        state, position = dialog.player.playbackState(), dialog.player.position()
-    finally:
-        release.set()
-    _set_balance_and_wait(dialog, 25)
-    assert dialog.player.playbackState() == state
-    assert dialog.player.position() == position
-    assert dialog.waveform.position == dialog.overview.position == position
+        assert not dialog.is_busy
+    assert dialog.player.transport_calls == []
+    assert dialog.player.loaded_stems == loaded
+    assert dialog.player.playbackState() == original_state
+    assert dialog.player.position() == dialog.overview.position == dialog.waveform.position == 500
 
 
-def test_rapid_balance_changes_cancel_stale_mix_and_reuse_prepared_stems(dialog, encoded, monkeypatch):
+def test_rapid_balance_drag_keeps_advancing_without_reload_or_background_mix(dialog, encoded, monkeypatch):
     dialog.open_file(encoded)
     _wait(lambda: not dialog.is_busy)
-    initial_source = dialog.player.source()
-    entered, cancelled = threading.Event(), threading.Event()
-    mix = preview._mix_preview
-    requested = []
-
-    def slow_first_mix(*args, balance, cancel, **kwargs):
-        requested.append(balance)
-        if balance == .25:
-            entered.set()
-            assert cancel.wait(5)
-            cancelled.set()
-        return mix(*args, balance=balance, cancel=cancel, **kwargs)
-
-    monkeypatch.setattr(preview, "_mix_preview", slow_first_mix)
+    workspace = Path(dialog._workspace.name)
+    files_before = sorted(path.relative_to(workspace) for path in workspace.rglob("*"))
+    dialog.seek(300)
+    dialog.toggle_play()
+    dialog.player.transport_calls.clear()
+    monkeypatch.setattr(preview, "_mix_preview", lambda *_a, **_kw: pytest.fail("Balance rendered another WAV"))
     monkeypatch.setattr(decoder, "decode_disklavier_wav", lambda *_a, **_kw: pytest.fail("Decode repeated"))
     monkeypatch.setattr(preview, "_render_soundfont", lambda *_a, **_kw: pytest.fail("Piano synthesis repeated"))
-    dialog.balance_slider.setValue(25)
-    _wait(entered.is_set)
-    dialog.balance_slider.setValue(75)
-    _wait(cancelled.is_set)
-    assert dialog.player.source() == initial_source
-    _set_balance_and_wait(dialog, 75)
-    assert requested == [.25, .75]
-    assert 25 not in dialog._balance_paths
-    previous = Path(dialog.player.source().toLocalFile())
-    _set_balance_and_wait(dialog, 100)
-    assert not previous.exists()
-    assert set(dialog._balance_paths) == {50, 100}
-    assert len(list(Path(dialog._workspace.name).glob("balance-*.wav"))) == 1
+    for index, value in enumerate(range(0, 101, 5), 1):
+        dialog.balance_slider.setValue(value)
+        dialog.player.advance(10)
+        assert not dialog.is_busy
+        assert dialog.player.position() == dialog.overview.position == dialog.waveform.position == 300 + index * 10
+        assert dialog.player.playbackState() == _DecoderPlayer.PlayingState
+    # Also catch the old delayed 150 ms timer starting work after the drag.
+    QTest.qWait(250)
+    assert dialog.player.transport_calls == []
+    assert sorted(path.relative_to(workspace) for path in workspace.rglob("*")) == files_before
+    assert dialog.player.balance == 1
 
 
-def test_failed_balance_keeps_playable_source_without_retry_loop(dialog, encoded, monkeypatch):
-    dialog.open_file(encoded)
-    _wait(lambda: not dialog.is_busy)
-    initial_source = dialog.player.source()
-    dialog.seek(700)
-    attempts = []
+def test_balance_slider_changes_real_streamed_pcm_without_interrupting_ui_timeline(
+        qt_application, tmp_path, paired_files, monkeypatch, fake_audio):
+    from aps_midi_prep_tool_app.disklavier_stem_player import DisklavierStemPlayer
 
-    def fail_mix(_piano, _accompaniment, destination, **_kwargs):
-        attempts.append(destination)
-        destination.write_bytes(b"incomplete")
-        raise OSError("Disk is full")
+    class Devices(_FakeMediaDevices):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.default = _StreamingDevice()
 
-    monkeypatch.setattr(preview, "_mix_preview", fail_mix)
-    dialog.balance_slider.setValue(25)
-    _wait(lambda: not dialog.is_busy and dialog._failed_balance == 25)
-    QTest.qWait(400)
-    assert len(attempts) == 1
-    assert not attempts[0].exists()
-    assert dialog.player.source() == initial_source
-    assert dialog.player.position() == 700
-    assert dialog.balance_slider.isEnabled()
-    assert dialog.play_button.isEnabled()
-    assert "Disk is full" in dialog.status.text()
+    def render(_midi, destination, _cancel):
+        _write_wav(destination, np.full((2 * 44100, 2), 2000, dtype="<i2"))
+        return True
 
+    monkeypatch.setattr(dialogs, "DisklavierStemPlayer", DisklavierStemPlayer)
+    monkeypatch.setattr(dialogs, "QAudioOutput", _StreamingOutput)
+    monkeypatch.setattr(audio_output_routing, "QMediaDevices", Devices)
+    monkeypatch.setattr(preview, "_render_soundfont", render)
+    settings = QSettings(str(tmp_path / "streamed-player.ini"), QSettings.IniFormat)
+    instance = dialogs.DisklavierWavPlayerDialog(settings)
+    instance.show()
+    try:
+        instance.open_file(paired_files[0])
+        _wait(lambda: not instance.is_busy)
+        assert instance.result is not None, instance.status.text()
+        instance.seek(700)
+        instance.toggle_play()
+        instance.player._timer.stop()  # Consume the output deterministically below.
+        sink = fake_audio.instances[-1]
+        initial_pcm = np.frombuffer(bytes(sink.captured), dtype="<i2").reshape(-1, 2)
+        np.testing.assert_array_equal(initial_pcm, np.tile([5000, -1000], (len(initial_pcm), 1)))
+        positions = []
+        with monkeypatch.context() as guards:
+            def transport_changed(*_args, **_kwargs):
+                pytest.fail("Changing live gains restarted or repositioned audio")
 
-def test_close_cancels_balance_before_cleaning_workspace(dialog, encoded, monkeypatch):
-    dialog.open_file(encoded)
-    _wait(lambda: not dialog.is_busy)
-    directory = Path(dialog._workspace.name)
-    entered = threading.Event()
-    mix = preview._mix_preview
-
-    def blocked_mix(*args, cancel, **kwargs):
-        entered.set()
-        assert cancel.wait(5)
-        return mix(*args, cancel=cancel, **kwargs)
-
-    monkeypatch.setattr(preview, "_mix_preview", blocked_mix)
-    dialog.balance_slider.setValue(25)
-    _wait(entered.is_set)
-    dialog.cancel_or_close()
-    _wait(lambda: not dialog.is_busy)
-    assert not dialog.isVisible()
-    assert not directory.exists()
+            for name in ("load", "clear", "play", "pause", "stop", "setPosition"):
+                guards.setattr(instance.player, name, transport_changed)
+            for name in ("start", "reset", "suspend", "resume"):
+                guards.setattr(sink, name, transport_changed)
+            instance.balance_slider.setValue(100)
+            for tick in range(1, 13):
+                assert len(sink.consume(441)) == 441 * 4
+                instance.player._pump()
+                position = instance.player.position()
+                positions.append(position)
+                assert position == instance.overview.position == instance.waveform.position == 700 + tick * 10
+                assert instance.player.playbackState() == DisklavierStemPlayer.PlayingState
+                assert not instance.is_busy
+        played = np.frombuffer(bytes(sink.played), dtype="<i2").reshape(-1, 2)
+        np.testing.assert_array_equal(played[:441], np.tile([5000, -1000], (441, 1)))
+        np.testing.assert_array_equal(played[-441:], np.tile([8000, -4000], (441, 1)))
+        assert positions == sorted(positions)
+        assert len(fake_audio.instances) == 1
+        assert sink.start_count == 1 and sink.reset_count == 0
+        assert instance.volume_slider.value() == 70
+        assert instance.audio_output.volume() == pytest.approx(.7)
+        assert not list(Path(instance._workspace.name).glob("balance-*.wav"))
+    finally:
+        instance.close()
+        qt_application.processEvents()
 
 
 @pytest.mark.parametrize("action", ["pause", "stop", "seek"])
-def test_balance_keeps_transport_requests_across_delayed_media_loads(dialog, encoded, monkeypatch, action):
+def test_transport_requests_during_balance_drag_take_effect_immediately(dialog, encoded, action):
     dialog.open_file(encoded)
     _wait(lambda: not dialog.is_busy)
     dialog.seek(500)
     dialog.toggle_play()
-    duration = dialog.position_slider.maximum()
-    load_source = dialog.player.setSource
-
-    def delayed_source(source):
-        _SilentPlayer.setSource(dialog.player, source)
-        # Some real multimedia backends reset these before the WAV has loaded.
-        dialog.player.durationChanged.emit(0)
-        dialog.player.positionChanged.emit(0)
-
-    monkeypatch.setattr(dialog.player, "setSource", delayed_source)
-    _set_balance_and_wait(dialog, 25)
-    assert dialog._source_loading
-    assert dialog.position_slider.maximum() == duration
-    assert dialog.waveform.position == dialog.overview.position == 500
+    dialog.balance_slider.setValue(25)
     if action == "pause":
         dialog.toggle_play()
     elif action == "stop":
         dialog.stop()
     else:
         dialog.seek(900)
-    _set_balance_and_wait(dialog, 75)
-    monkeypatch.setattr(dialog.player, "setSource", load_source)
-    load_source(dialog.player.source())
-    assert not dialog._source_loading
     expected_position = {"pause": 500, "stop": 0, "seek": 900}[action]
     expected_state = {"pause": _DecoderPlayer.PlaybackState.PausedState,
                       "stop": _DecoderPlayer.PlaybackState.StoppedState,
                       "seek": _DecoderPlayer.PlaybackState.PlayingState}[action]
-    assert dialog.player.position() == dialog.waveform.position == dialog.overview.position == expected_position
+    dialog.player.transport_calls.clear()
+    dialog.balance_slider.setValue(75)
+    QTest.qWait(200)
+    assert dialog.player.transport_calls == []
+    assert dialog.player.position() == dialog.overview.position == dialog.waveform.position == expected_position
     assert dialog.player.playbackState() == expected_state
 
 
-def test_failed_media_load_does_not_trap_play_in_pending_state(dialog, encoded, monkeypatch):
+def test_close_after_balance_drag_stops_audio_before_removing_workspace(dialog, encoded, monkeypatch):
+    dialog.open_file(encoded)
+    _wait(lambda: not dialog.is_busy)
+    directory = Path(dialog._workspace.name)
+    dialog.toggle_play()
+    dialog.balance_slider.setValue(25)
+    cleared = []
+    clear = dialog.player.clear
+
+    def checked_clear():
+        assert directory.exists()
+        assert all(Path(path).exists() for path in dialog.player.loaded_stems)
+        clear()
+        cleared.append(True)
+
+    monkeypatch.setattr(dialog.player, "clear", checked_clear)
+    dialog.cancel_or_close()
+    assert cleared == [True]
+    assert not dialog.is_busy
+    assert dialog.player.loaded_stems is None
+    assert not dialog.isVisible()
+    assert not directory.exists()
+    monkeypatch.setattr(dialog.player, "clear", clear)
+
+
+def test_audio_device_error_leaves_balance_and_play_recoverable(dialog, encoded):
     dialog.open_file(encoded)
     _wait(lambda: not dialog.is_busy)
     dialog.seek(500)
     dialog.toggle_play()
-    load_source = dialog.player.setSource
-    monkeypatch.setattr(dialog.player, "setSource", lambda source: _SilentPlayer.setSource(dialog.player, source))
-    _set_balance_and_wait(dialog, 25)
-    assert dialog._source_loading
-    dialog.player.errorOccurred.emit("unavailable", "Audio device unavailable")
-    assert not dialog._source_loading
-    assert not dialog._pending_play
+    loaded = dialog.player.loaded_stems
+    dialog.player.fail("Audio device unavailable")
     assert dialog.play_button.text() == "Play"
     assert "Audio device unavailable" in dialog.status.text()
-    monkeypatch.setattr(dialog.player, "setSource", load_source)
+    dialog.player.transport_calls.clear()
+    dialog.balance_slider.setValue(75)
+    assert dialog.player.transport_calls == []
+    assert dialog.player.loaded_stems == loaded
+    assert dialog.player.position() == 500
+    assert dialog.play_button.isEnabled()
+    assert dialog.balance_slider.isEnabled()
     dialog.toggle_play()
     assert dialog.player.playbackState() == _DecoderPlayer.PlayingState
+    assert dialog.player.transport_calls == [("play",)]
+
+
+def test_failed_stem_load_restores_open_controls_and_cleans_workspace(dialog, encoded, monkeypatch):
+    def fail_load(*_args, **_kwargs):
+        raise ValueError("Prepared accompaniment is unreadable")
+
+    monkeypatch.setattr(dialog.player, "load", fail_load)
+    dialog.open_file(encoded)
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result is None
+    assert dialog.player.loaded_stems is None
+    assert dialog.open_button.isEnabled()
+    assert not dialog.play_button.isEnabled()
+    assert "Prepared accompaniment is unreadable" in dialog.status.text()
+    assert dialog._workspace is None
 
 
 def test_waveform_seeks_on_the_same_timeline_as_the_piano_roll(dialog, encoded):
@@ -533,7 +772,7 @@ def test_headphone_changes_and_reconnection_keep_user_transport_state(dialog, en
     if state == "paused":
         dialog.toggle_play()
     original_state = dialog.player.playbackState()
-    original_source = dialog.player.source()
+    original_source = dialog.player.loaded_stems
     original_volume = dialog.audio_output.volume()
     monitor = dialog.audio_output_follower._devices
 
@@ -545,7 +784,7 @@ def test_headphone_changes_and_reconnection_keep_user_transport_state(dialog, en
     assert dialog.player.audioOutput() is dialog.audio_output
     assert dialog.player.playbackState() == original_state
     assert dialog.player.position() == 800
-    assert dialog.player.source() == original_source
+    assert dialog.player.loaded_stems == original_source
     assert dialog.audio_output.volume() == original_volume
 
 
@@ -559,7 +798,7 @@ def test_play_refreshes_current_headphones_before_resuming(dialog, encoded):
 
 
 @pytest.mark.parametrize("piano_frames", [44100, 3 * 44100])
-def test_rendered_duration_drives_summary_overview_and_seek_in_each_mode(dialog, encoded, monkeypatch, piano_frames):
+def test_both_listening_modes_keep_full_stem_duration_and_position(dialog, encoded, monkeypatch, piano_frames):
     def render(_midi, destination, _cancel):
         # A renderer may stop before the accompaniment, or append a release tail.
         _write_wav(destination, np.zeros((piano_frames, 2), dtype="<i2"))
@@ -572,21 +811,21 @@ def test_rendered_duration_drives_summary_overview_and_seek_in_each_mode(dialog,
     with wave.open(str(encoded)) as source:
         original_duration = source.getnframes() / source.getframerate()
     assert result["duration_seconds"] == original_duration  # original source remains available
-    for mode, path_key in ((0, "mixed_path"), (1, "piano_path")):
+    duration = round(max(original_duration, piano_frames / 44100) * 1000)
+    dialog.seek(duration)
+    dialog.player.transport_calls.clear()
+    for mode in (1, 0, 1):
         dialog.mode_combo.setCurrentIndex(mode)
-        with wave.open(result[path_key]) as audio:
-            seconds = audio.getnframes() / audio.getframerate()
-        duration = round(seconds * 1000)
-        assert result["preview_durations"][path_key] == seconds
         assert dialog.overview.duration == duration
         assert dialog.waveform.duration == duration
         assert dialog.waveform.waveform["duration_seconds"] == original_duration
         assert dialog.position_slider.maximum() == duration
         assert dialog.summary.text().endswith(dialogs._time_label(duration))
         assert dialog.time_label.text().endswith(dialogs._time_label(duration))
-        dialog.seek(duration)
         assert dialog.overview.position == duration
         assert dialog.waveform.position == duration
+        assert dialog.player.position() == duration
+    assert dialog.player.transport_calls == []
 
 
 def test_piano_notes_are_visible_against_a_dark_theme(qt_application):

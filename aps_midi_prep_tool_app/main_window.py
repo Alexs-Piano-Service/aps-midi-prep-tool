@@ -9216,6 +9216,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self.diskImageCaptureContext = {}
         self.bulkExtractionWorker = None
         self.markivBackupDialog = None
+        self.audioDecodeBatchDialog = None
         self.bulkExtractionProgressDialog = None
         self.bulkExtractionContext = {}
         self.emulatorImageWorker = None
@@ -9933,6 +9934,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self.utilitiesDisklavierWavAction = QAction(self._t("dwav.action"), self)
         self.utilitiesDisklavierWavAction.triggered.connect(self.show_disklavier_wav_utility)
         self.utilitiesMenu.addAction(self.utilitiesDisklavierWavAction)
+        self.utilitiesAudioDecodeBatchAction = QAction(self._t("abd.action"), self)
+        self.utilitiesAudioDecodeBatchAction.setVisible(self._admin_mode_enabled)
+        self.utilitiesAudioDecodeBatchAction.setEnabled(self._admin_mode_enabled)
+        self.utilitiesAudioDecodeBatchAction.triggered.connect(self.show_audio_decode_batch_utility)
+        self.utilitiesMenu.addAction(self.utilitiesAudioDecodeBatchAction)
         self.utilitiesMenu.addSeparator()
 
         self.utilitiesBulkExtractionAction = QAction(self._t("bulk.action"), self)
@@ -11351,6 +11357,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
             {"id": "utilities.render_audio", "category": "Utilities", "label": "Render Audio...", "action": "utilitiesRenderAudioAction", "default": "F5"},
             {"id": "utilities.disklavier_wav", "category": "Utilities", "label": self._t("dwav.action"), "action": "utilitiesDisklavierWavAction", "default": ""},
+            {"id": "utilities.audio_decode_batch", "category": "Utilities", "label": self._t("abd.action"), "action": "utilitiesAudioDecodeBatchAction", "default": ""},
             {"id": "utilities.bulk_extraction", "category": "Utilities", "label": "Bulk Extraction...", "action": "utilitiesBulkExtractionAction", "default": ""},
             {"id": "utilities.markiv_backup", "category": "Utilities", "label": "Back Up Mark IV Music...", "action": "utilitiesMarkIVBackupAction", "default": ""},
             {"id": "utilities.smart_pianosoft", "category": "Utilities", "label": self._t("sps.action"), "action": "utilitiesSmartPianoSoftAction", "default": ""},
@@ -11375,7 +11382,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             {"id": "help.about", "category": "Help", "label": "About APS MIDI Prep Tool", "action": "helpAboutAction", "default": "Ctrl+F1"},
         )
         if not self.ENABLE_SMART_PIANOSOFT_UTILITY:
-            return tuple(spec for spec in specs if spec["id"] != "utilities.smart_pianosoft")
+            specs = tuple(spec for spec in specs if spec["id"] != "utilities.smart_pianosoft")
+        if not self._admin_mode_enabled:
+            specs = tuple(spec for spec in specs if spec["id"] != "utilities.audio_decode_batch")
         return specs
 
     def _shortcut_settings_key(self, shortcut_id):
@@ -11790,6 +11799,25 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self._exec_child_dialog(dialog, resize_to_contents=False)
         finally:
             self.disklavierWavDialog = None
+            dialog.deleteLater()
+
+    def show_audio_decode_batch_utility(self):
+        if (not self._admin_mode_enabled or self._disk_worker_busy()
+                or not self.choose_button.isEnabled()):
+            return
+        existing = self.audioDecodeBatchDialog
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
+        from .audio_decode_batch_dialog import AudioDecodeBatchDialog
+
+        dialog = AudioDecodeBatchDialog(self.settings, self)
+        self.audioDecodeBatchDialog = dialog
+        try:
+            self._exec_child_dialog(dialog, resize_to_contents=False)
+        finally:
+            self.audioDecodeBatchDialog = None
             dialog.deleteLater()
 
     def _schedule_smart_pianosoft_from_loaded_media(self):
@@ -13803,6 +13831,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         disklavier_wav_action = getattr(self, "utilitiesDisklavierWavAction", None)
         if disklavier_wav_action is not None:
             disklavier_wav_action.setText(self._t("dwav.action"))
+        batch_decode_action = getattr(self, "utilitiesAudioDecodeBatchAction", None)
+        if batch_decode_action is not None:
+            batch_decode_action.setText(self._t("abd.action"))
 
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
@@ -17986,6 +18017,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             event.ignore()
             decoder_dialog.reject()
             return
+        batch_decode_dialog = getattr(self, "audioDecodeBatchDialog", None)
+        if batch_decode_dialog is not None and batch_decode_dialog.is_busy:
+            event.ignore()
+            batch_decode_dialog.reject()
+            return
         smart_dialog = getattr(self, "smartPianoSoftDialog", None)
         if smart_dialog is not None and smart_dialog.is_busy:
             event.ignore()
@@ -19797,6 +19833,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         if hasattr(self, "utilitiesMarkIVBackupAction"):
             self.utilitiesMarkIVBackupAction.setEnabled(self.choose_button.isEnabled())
             self.utilitiesMarkIVBackupAction.setToolTip(self._t("markiv.tooltip"))
+        if hasattr(self, "utilitiesAudioDecodeBatchAction"):
+            self.utilitiesAudioDecodeBatchAction.setVisible(self._admin_mode_enabled)
+            self.utilitiesAudioDecodeBatchAction.setEnabled(self._admin_mode_enabled and open_enabled)
         if hasattr(self, "utilitiesSmartPianoSoftAction"):
             self.utilitiesSmartPianoSoftAction.setEnabled(open_enabled)
         if hasattr(self, "savePartialCaptureAction"):
@@ -31716,6 +31755,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
         def enable_admin_mode():
             self._admin_mode_enabled = True
+            self._setup_keyboard_shortcuts()
+            self._update_menu_actions()
 
         dialog.admin_mode_activated.connect(enable_admin_mode)
         dialog.disclaimer_requested.connect(self.show_disclaimer_dialog)

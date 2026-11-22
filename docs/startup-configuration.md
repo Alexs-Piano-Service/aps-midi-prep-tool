@@ -185,6 +185,8 @@ Every entry in this table accepts an absolute or relative path string.
 | `markiv_backup_source` | Back Up Mark IV Music source drive or copied data folder containing `songs/`. |
 | `markiv_backup_output` | Parent destination folder for new Mark IV music backups. |
 | `markiv_backup_last_folder` | Last Mark IV backup folder, used for opening or verifying a backup. |
+| `audio_decode_batch_input` | Last folder used to select WAV/MP3 files or recursive folders for Admin Mode decoding. |
+| `audio_decode_batch_output` | Parent destination for new ENSPIRE MIDI/MP3 batch output folders. |
 | `emulator_image_source` | Build Emulator Disk Set source folder. |
 | `emulator_image_output` | Build Emulator Disk Set output folder, such as `./Nalbantov`. |
 | `disk_recovery_image_path` | Initial image path in Recover Damaged Image. |

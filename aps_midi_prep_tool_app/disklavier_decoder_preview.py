@@ -1,7 +1,8 @@
 """Software-only piano preview for decoded Disklavier audio.
 
-The source control channel never enters an audio playback path. All previews
-are made from decoded MIDI and the decoder's separate left-channel WAV.
+The source control channel never enters an audio playback path. Previews use
+decoded MIDI and the decoder's separate left-channel WAV, or a validated
+MIDI/WAV pair whose accompaniment may be stereo.
 """
 
 from pathlib import Path
@@ -26,8 +27,8 @@ def _check_cancel(cancel):
 
 
 def _accompaniment_waveform(source, *, max_bins=_WAVEFORM_MAX_BINS, cancel=None,
-                           progress=None):
-    """Summarize only the decoder's safe mono WAV on its original timeline.
+                           progress=None, allow_stereo=False):
+    """Summarize safe accompaniment on its original timeline.
 
     Each fixed-width bin contains the actual minimum and maximum PCM sample,
     normalized to full scale. Bins start at frame zero, including silent
@@ -41,11 +42,13 @@ def _accompaniment_waveform(source, *, max_bins=_WAVEFORM_MAX_BINS, cancel=None,
     if progress:
         progress(0.0)
     with wave.open(str(source), "rb") as audio:
-        # A stereo input may contain the encoded right-channel control signal.
-        # Accept only the separate, validated accompaniment output.
-        if (audio.getnchannels() != 1 or audio.getsampwidth() != 2
+        # Stereo requires explicit opt-in after validating a MIDI/WAV pair;
+        # the default still excludes an encoded right-channel control signal.
+        channels = audio.getnchannels()
+        if (channels not in ((1, 2) if allow_stereo else (1,)) or audio.getsampwidth() != 2
                 or audio.getframerate() != 44100 or audio.getcomptype() != "NONE"):
-            raise ValueError("The accompaniment waveform requires decoded mono 16-bit PCM at 44.1 kHz.")
+            kind = "validated mono or stereo" if allow_stereo else "decoded mono"
+            raise ValueError(f"The accompaniment waveform requires {kind} 16-bit PCM at 44.1 kHz.")
         frames = audio.getnframes()
         rate = audio.getframerate()
         frames_per_bin = max(1, (frames + max_bins - 1) // max_bins)
@@ -56,18 +59,22 @@ def _accompaniment_waveform(source, *, max_bins=_WAVEFORM_MAX_BINS, cancel=None,
             _check_cancel(cancel)
             count = min(_WAVEFORM_BLOCK_FRAMES, frames - offset)
             raw = audio.readframes(count)
-            if len(raw) != count * 2:
+            if len(raw) != count * channels * 2:
                 raise ValueError("The decoded accompaniment WAV is truncated.")
-            samples = np.frombuffer(raw, dtype="<i2")
+            samples = np.frombuffer(raw, dtype="<i2").reshape(count, channels)
+            # Preserve both channels' extrema rather than downmixing: opposite
+            # phases must not make audible stereo accompaniment look silent.
+            frame_minimums = samples.min(axis=1)
+            frame_maximums = samples.max(axis=1)
             first_bin = offset // frames_per_bin
             first_boundary = (first_bin + 1) * frames_per_bin - offset
             starts = np.concatenate((np.array([0], dtype=np.intp),
                                      np.arange(first_boundary, count, frames_per_bin, dtype=np.intp)))
             last_bin = first_bin + len(starts)
             minimums[first_bin:last_bin] = np.minimum(
-                minimums[first_bin:last_bin], np.minimum.reduceat(samples, starts))
+                minimums[first_bin:last_bin], np.minimum.reduceat(frame_minimums, starts))
             maximums[first_bin:last_bin] = np.maximum(
-                maximums[first_bin:last_bin], np.maximum.reduceat(samples, starts))
+                maximums[first_bin:last_bin], np.maximum.reduceat(frame_maximums, starts))
             if progress:
                 progress((offset + count) / frames)
         _check_cancel(cancel)
@@ -191,7 +198,8 @@ def _write_builtin_piano(notes, output_path, duration, *, cancel=None, progress=
                 progress((offset + count) / frame_count)
 
 
-def _mix_preview(piano, accompaniment, destination, *, balance=.5, cancel=None, progress=None):
+def _mix_preview(piano, accompaniment, destination, *, balance=.5, cancel=None, progress=None,
+                 allow_stereo=False):
     """Blend derived stems on one timeline; 0 is piano and 1 accompaniment.
 
     The gains sum to one to retain headroom. Even at the endpoints, preserve
@@ -207,8 +215,9 @@ def _mix_preview(piano, accompaniment, destination, *, balance=.5, cancel=None, 
             raise ValueError("Preview audio must be 16-bit PCM at 44.1 kHz.")
         if first.getnchannels() not in (1, 2):
             raise ValueError("Preview piano audio must be mono or stereo.")
-        if second.getnchannels() != 1:
-            raise ValueError("Preview accompaniment must be the decoded mono WAV.")
+        if second.getnchannels() not in ((1, 2) if allow_stereo else (1,)):
+            kind = "validated mono or stereo WAV" if allow_stereo else "decoded mono WAV"
+            raise ValueError(f"Preview accompaniment must be the {kind}.")
         total = max(first.getnframes(), second.getnframes())
         with wave.open(str(destination), "wb") as output:
             output.setparams((2, 2, 44100, 0, "NONE", "not compressed"))
@@ -217,7 +226,11 @@ def _mix_preview(piano, accompaniment, destination, *, balance=.5, cancel=None, 
                 count = min(44100, total - offset)
                 mixed = np.zeros((count, 2), dtype=np.float64)
                 for source, gain in ((first, 1 - balance), (second, balance)):
-                    samples = np.frombuffer(source.readframes(count), dtype="<i2")
+                    raw = source.readframes(count)
+                    expected = min(count, max(0, source.getnframes() - offset))
+                    if len(raw) != expected * source.getnchannels() * 2:
+                        raise ValueError("The preview audio WAV is truncated.")
+                    samples = np.frombuffer(raw, dtype="<i2")
                     samples = samples.reshape((-1, source.getnchannels()))
                     mixed[:len(samples)] += samples * gain
                 output.writeframes(np.clip(mixed, -32768, 32767).astype("<i2").tobytes())
@@ -239,7 +252,9 @@ def prepare_preview(decoded, directory, *, cancel=None, progress=None):
     _check_cancel(cancel)
     if progress:
         progress("piano", 0)
-    waveform = _accompaniment_waveform(decoded["accompaniment_path"], cancel=cancel)
+    allow_stereo = decoded.get("source_kind") == "pair"
+    waveform = _accompaniment_waveform(decoded["accompaniment_path"], cancel=cancel,
+                                      allow_stereo=allow_stereo)
     rendered = False
     if _piano_midi(decoded["midi_path"], piano_midi):
         try:
@@ -253,7 +268,8 @@ def prepare_preview(decoded, directory, *, cancel=None, progress=None):
                              cancel=cancel, progress=lambda value: progress and progress("piano", value))
     _check_cancel(cancel)
     _mix_preview(piano_wav, decoded["accompaniment_path"], mixed_wav, cancel=cancel,
-                 progress=lambda value: progress and progress("mix", value))
+                 progress=lambda value: progress and progress("mix", value),
+                 allow_stereo=allow_stereo)
     durations = {}
     for key, path in (("piano_path", piano_wav), ("mixed_path", mixed_wav)):
         with wave.open(str(path), "rb") as audio:

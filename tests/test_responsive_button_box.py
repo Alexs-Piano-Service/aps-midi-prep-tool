@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from itertools import combinations
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -34,6 +34,48 @@ def _assert_buttons_fit(box):
         assert box.rect().contains(button.geometry())
     for first, second in combinations(buttons, 2):
         assert not first.geometry().intersects(second.geometry())
+
+
+def test_layout_requests_finish_before_button_layout_is_rebuilt(application):
+    fits_during_event = []
+
+    class ObservedBox(ResponsiveDialogButtonBox):
+        in_event = False
+
+        def event(self, event):
+            self.in_event = True
+            try:
+                return super().event(event)
+            finally:
+                self.in_event = False
+
+        def _fit_width(self, width):
+            fits_during_event.append(self.in_event)
+            super()._fit_width(width)
+
+    box = ObservedBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    for _ in range(100):
+        QCoreApplication.sendEvent(box, QEvent(QEvent.LayoutRequest))
+    assert fits_during_event == []
+    QTest.qWait(10)
+    assert fits_during_event == [False]
+
+
+def test_deleting_button_box_cancels_pending_layout_update(application):
+    import shiboken6
+
+    box = ResponsiveDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    timer = box._fit_timer
+    fitted = []
+    timer.timeout.connect(lambda: fitted.append(True))
+    QCoreApplication.sendEvent(box, QEvent(QEvent.LayoutRequest))
+    assert timer.isActive()
+    box.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    QTest.qWait(10)
+    assert not shiboken6.isValid(box)
+    assert not shiboken6.isValid(timer)
+    assert fitted == []
 
 
 @pytest.mark.parametrize("style", ["Fusion", "Windows"])

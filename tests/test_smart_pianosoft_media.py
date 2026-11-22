@@ -3,7 +3,11 @@
 from pathlib import Path
 from types import SimpleNamespace
 import errno
+import os
+import subprocess
+import sys
 import threading
+import time
 import wave
 
 import pytest
@@ -457,3 +461,220 @@ def test_physical_cd_unsupported_platform_has_manual_fallback_message(monkeypatc
 def test_helper_dispatch_does_not_intercept_normal_startup():
     assert media.run_media_helper_from_argv(["app"]) is None
     assert media.run_media_helper_from_argv(["app", media.MEDIA_HELPER_ARG]) == 2
+
+
+def _fake_cd_reader(monkeypatch, poll, *, seconds_per_poll=1):
+    """An independently clocked reader whose writes and exit are test-controlled."""
+    state = SimpleNamespace(now=0.0, processes=[], terminated=[], killed=[])
+
+    class Reader:
+        pid = 123
+        returncode = None
+
+        def __init__(self, args, **options):
+            self.output = Path(args[-1])
+            self.log = options["stdout"]
+            self.polls = 0
+            state.processes.append(self)
+
+        def poll(self):
+            self.polls += 1
+            self.returncode = poll(self)
+            return self.returncode
+
+    def advance(_seconds):
+        state.now += seconds_per_poll
+
+    monkeypatch.setattr(media.subprocess, "Popen", Reader)
+    monkeypatch.setattr(media.time, "monotonic", lambda: state.now)
+    monkeypatch.setattr(media.time, "sleep", advance)
+    monkeypatch.setattr(media.os, "killpg", lambda *args: state.killed.append(args), raising=False)
+    monkeypatch.setattr(media, "_terminate_process", lambda child: state.terminated.append(child))
+    return state
+
+
+def test_stalled_cd_read_stops_without_progress_callback_and_retry_starts_fresh(cd, tmp_path, monkeypatch):
+    def stalled(reader):
+        if reader.polls == 1:
+            reader.output.write_bytes(b"RIFF" + b"\0" * 100)
+        # A verbose error-correction loop is not evidence of new audio.
+        reader.log.write(b"retrying damaged sector\n")
+
+    state = _fake_cd_reader(monkeypatch, stalled, seconds_per_poll=10)
+    destination = tmp_path / "track.wav"
+    with pytest.raises(media.CDReadError, match="no audio progress for 60 seconds"):
+        media.rip_cd_track("/dev/sr0", cd, destination)
+    assert state.now == 60
+    assert state.terminated == state.processes
+    assert not list(tmp_path.iterdir())
+    failed_stage = state.processes[0].output
+
+    def retry(args, **_options):
+        assert Path(args[-1]) != failed_stage
+        assert Path(args[-1]).read_bytes() == b""
+        _wav(args[-1])
+
+    monkeypatch.setattr(media, "_run_command", retry)
+    assert media.rip_cd_track("/dev/sr0", cd, destination) == destination
+    media._validate_cd_wav(destination, cd)
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+def test_slow_cd_read_with_continuing_audio_progress_does_not_time_out(cd, tmp_path, monkeypatch):
+    def progressing(reader):
+        if reader.polls == 5:
+            return 0
+        if reader.polls == 4:
+            _wav(reader.output)
+        else:
+            reader.output.write_bytes(b"\0" * (44 + 100 * reader.polls))
+
+    state = _fake_cd_reader(monkeypatch, progressing, seconds_per_poll=45)
+    destination = tmp_path / "track.wav"
+    assert media.rip_cd_track("/dev/sr0", cd, destination) == destination
+    assert state.now > media.CD_STALL_TIMEOUT
+    assert not state.terminated
+
+
+@pytest.mark.parametrize("change", ["disconnected", "replaced"])
+def test_cd_device_loss_interrupts_running_reader_even_with_complete_wav(cd, tmp_path, monkeypatch, change):
+    def reading(reader):
+        _wav(reader.output)
+
+    state = _fake_cd_reader(monkeypatch, reading)
+    identities = []
+
+    def identity(_device):
+        identities.append(True)
+        if len(identities) == 1:
+            return ("drive", 1)
+        if change == "disconnected":
+            raise FileNotFoundError("unplugged")
+        return ("replacement drive", 2)
+
+    monkeypatch.setattr(media, "_device_identity", identity)
+    with pytest.raises(media.CDReadError, match="unavailable|drive changed"):
+        media.rip_cd_track("/dev/sr0", cd, tmp_path / "track.wav")
+    assert state.now == 0
+    assert state.terminated == state.processes
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("failure", ["missing_device", "query_failed", "invalid_toc"])
+def test_cd_track_list_read_failures_are_retryable(monkeypatch, failure):
+    monkeypatch.setattr(media, "_linux_required", lambda: None)
+    monkeypatch.setattr(media, "_cdparanoia", lambda: "reader")
+
+    def identity(_device):
+        if failure == "missing_device":
+            raise OSError(errno.ENODEV, "drive unplugged")
+        return ("drive", 1)
+
+    def query(*_args, **_options):
+        if failure == "query_failed":
+            raise media.SmartPianoSoftMediaError("drive not ready")
+        return "No readable audio table"
+
+    monkeypatch.setattr(media, "_device_identity", identity)
+    monkeypatch.setattr(media, "_run_command", query)
+    with pytest.raises(media.CDReadError):
+        media.read_cd_toc("/dev/sr0")
+
+
+@pytest.mark.parametrize("reader_exit", [0, 1])
+def test_incomplete_cd_read_is_retryable_even_when_reader_reports_success(cd, tmp_path, monkeypatch, reader_exit):
+    def incomplete(reader):
+        _wav(reader.output)
+        reader.output.write_bytes(reader.output.read_bytes()[:-4])
+        reader.log.write(b"unrecoverable read error")
+        return reader_exit
+
+    _fake_cd_reader(monkeypatch, incomplete)
+    with pytest.raises(media.CDReadError):
+        media.rip_cd_track("/dev/sr0", cd, tmp_path / "track.wav")
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("diagnostic,code", [
+    ("No space left on device", errno.ENOSPC),
+    ("Disk quota exceeded", getattr(errno, "EDQUOT", errno.ENOSPC)),
+])
+def test_reader_destination_failure_is_not_offered_as_cd_retry(cd, tmp_path, monkeypatch, diagnostic, code):
+    def failed(reader):
+        reader.log.write(b"old progress log\n" * 100000)
+        reader.log.write(diagnostic.encode())
+        return 1
+
+    _fake_cd_reader(monkeypatch, failed)
+    with pytest.raises(OSError) as failure:
+        media.rip_cd_track("/dev/sr0", cd, tmp_path / "track.wav")
+    assert failure.value.errno == code
+    assert not list(tmp_path.iterdir())
+
+
+def test_reader_error_retains_final_diagnostic_after_large_log(cd, tmp_path, monkeypatch):
+    def failed(reader):
+        reader.log.write(b"old progress log\n" * 100000)
+        reader.log.write(b"the drive was disconnected")
+        return 1
+
+    _fake_cd_reader(monkeypatch, failed)
+    with pytest.raises(media.CDReadError, match="the drive was disconnected"):
+        media.rip_cd_track("/dev/sr0", cd, tmp_path / "track.wav")
+    assert not list(tmp_path.iterdir())
+
+
+def test_cancellation_stops_running_cd_reader_and_removes_partial_track(cd, tmp_path, monkeypatch):
+    cancel = threading.Event()
+
+    def reading(reader):
+        reader.output.write_bytes(b"incomplete audio")
+        cancel.set()
+
+    state = _fake_cd_reader(monkeypatch, reading)
+    with pytest.raises(FloppyOperationCancelled):
+        media.rip_cd_track("/dev/sr0", cd, tmp_path / "track.wav", cancel=cancel)
+    assert state.terminated == state.processes
+    assert not list(tmp_path.iterdir())
+
+
+def test_failed_process_group_shutdown_does_not_hide_cancellation(monkeypatch):
+    process = SimpleNamespace(poll=lambda: None, pid=123)
+    monkeypatch.setattr(media.subprocess, "Popen", lambda *_a, **_k: process)
+
+    def failed_kill(*_args):
+        raise PermissionError("cannot terminate process group")
+
+    monkeypatch.setattr(media.os, "killpg", failed_kill, raising=False)
+    checks = iter([False, True])
+    terminated = []
+    monkeypatch.setattr(media, "_terminate_process", lambda child: terminated.append(child))
+    with pytest.raises(FloppyOperationCancelled):
+        media._run_command(["helper"], timeout=30, cancel=lambda: next(checks))
+    assert terminated == [process]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="CD ingestion and POSIX process groups are Linux-specific")
+def test_actual_reader_is_reaped_after_timeout(monkeypatch):
+    processes = []
+    popen = subprocess.Popen
+
+    def launch(*args, **options):
+        process = popen(*args, **options)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(media.subprocess, "Popen", launch)
+    started = time.monotonic()
+    try:
+        with pytest.raises(media.SmartPianoSoftMediaError, match="within"):
+            media._run_command(
+                [sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.1,
+            )
+        assert processes[0].poll() is not None
+        assert time.monotonic() - started < 5
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)

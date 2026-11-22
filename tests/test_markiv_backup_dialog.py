@@ -197,10 +197,6 @@ def test_audio_split_default_follows_target_on_open(application, tmp_path, profi
     try:
         assert instance.split_audio_checkbox.isChecked() is expected
         assert instance.split_audio_checkbox.isEnabled()
-        key = "markiv.audio_target_enabled" if expected else "markiv.audio_target_disabled"
-        target = dialog_module.get_preparation_profile(profile)
-        assert instance.audio_target_note.text() == instance._t(key, target=instance.lt(target.label))
-        assert instance.split_audio_note.text() == instance._t("markiv.split_audio_note")
         assert instance.split_audio_checkbox.toolTip() == instance._t("markiv.split_audio_tooltip")
     finally:
         instance.close()

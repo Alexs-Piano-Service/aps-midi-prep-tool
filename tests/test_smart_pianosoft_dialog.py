@@ -1,4 +1,4 @@
-"""The beta utility owns its workers and preserves source media through the UI."""
+"""The utility owns its workers and preserves source media through the UI."""
 
 import json
 from itertools import combinations
@@ -24,8 +24,9 @@ from aps_midi_prep_tool_app.floppy_image import (
     GreaseweazleFloppySource,
 )
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
-from aps_midi_prep_tool_app.smart_pianosoft_workflow import LoadedAlbumSource, ListedAlbumTrack
+from aps_midi_prep_tool_app.smart_pianosoft_workflow import AlbumBuildError, LoadedAlbumSource, ListedAlbumTrack
 from test_smart_pianosoft import _pdisk_bytes, _psong_bytes
+from test_smart_pianosoft_sync import _cd_reference_message
 from test_window_menu_behavior import window
 
 
@@ -300,14 +301,13 @@ def test_preparing_for_selects_output_and_explains_playback_route(tmp_path, qt_a
     instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False)
     try:
         assert instance.format_combo.currentData() == expected
-        assert route in instance.format_note.text()
-        assert instance.text("output_beta") in instance.format_note.toolTip()
-        assert instance.format_note.accessibleDescription() == instance.format_note.toolTip()
+        assert route in instance.format_combo.toolTip()
+        assert instance.format_combo.accessibleDescription() == instance.format_combo.toolTip()
         assert instance.target_label.text() == instance.profile.label
         if profile == "enspire":
             instance.format_combo.setCurrentIndex(instance.format_combo.findData("encoded_wav"))
-            assert "External-input playback:" in instance.format_note.text()
-            assert "Direct ENSPIRE USB playback needs paired MIDI/MP3" in instance.format_note.text()
+            assert "External-input playback:" in instance.format_combo.toolTip()
+            assert "Direct ENSPIRE USB playback needs paired MIDI/MP3" in instance.format_combo.toolTip()
     finally:
         instance.close()
 
@@ -436,11 +436,19 @@ def test_immediate_close_prevents_deferred_loaded_scan(source, tmp_path, qt_appl
     assert instance._workspace is None and not instance.is_busy
 
 
-def test_scan_pair_and_clear_leave_sources_untouched(dialog, source, tmp_path, monkeypatch):
+@pytest.mark.parametrize("cd_track", [None, 3])
+def test_scan_pair_and_clear_leave_sources_untouched(dialog, source, tmp_path, monkeypatch, cd_track):
+    if cd_track is not None:
+        midi = mido.MidiFile(source / "song.mid")
+        midi.tracks[0].insert(0, _cd_reference_message(cd_track))
+        midi.save(source / "song.mid")
     originals = {path.name: path.read_bytes() for path in source.iterdir()}
     _scan(dialog, source)
     assert dialog.table.rowCount() == 1
     assert dialog.table.item(0, 1).text() == "Synthetic song"
+    expected = "Match CD track automatically" if cd_track is None else "CD track 3 (disk reference)"
+    assert dialog.table.item(0, 3).text() == expected
+    assert dialog.table.item(0, 3).toolTip() == dialog.text("cd_hint_details")
     assert dialog.pair_button.isEnabled()
     assert dialog.album.source_directory != source
     paired = tmp_path / "music.wav"
@@ -451,7 +459,7 @@ def test_scan_pair_and_clear_leave_sources_untouched(dialog, source, tmp_path, m
     assert dialog.table.item(0, 3).text() == str(paired)
     dialog.clear_pairing()
     assert not dialog.audio_paths
-    assert dialog.table.item(0, 3).text() == dialog.text("cd_hint", number=1)
+    assert dialog.table.item(0, 3).text() == expected
     assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
 
 
@@ -515,6 +523,207 @@ def test_start_scans_and_runs_cd_pipeline_without_blocking_ui(dialog, source, tm
     assert dialog.start_button.text() == dialog.text("start", format="WAV")
     assert dialog.start_button.icon().pixmap(24, 24).toImage() == initial_icon
     assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
+
+
+@pytest.mark.parametrize("scan_first", [False, True])
+@pytest.mark.parametrize("failure_stage", ["toc", "rip"])
+def test_cd_disconnect_retains_album_and_settings_for_fresh_retry(
+    dialog, source, tmp_path, monkeypatch, scan_first, failure_stage,
+):
+    originals = {path.name: path.read_bytes() for path in source.iterdir()}
+    calls = []
+    scans = []
+    scanner = dialogs._scan_source
+    track = media.CDTrack(1, 0, 75)
+
+    def scan(*args, **kwargs):
+        scans.append(args[0])
+        return scanner(*args, **kwargs)
+
+    def toc(device, cancel=None):
+        calls.append(("toc", device))
+        if device == "/dev/disconnected" and failure_stage == "toc":
+            raise media.CDReadError("The CD drive is no longer connected")
+        return (track,)
+
+    def rip(device, selected, destination, cancel=None, progress=None):
+        calls.append(("rip", device))
+        progress(1, 1, "Reading with secure error correction…")
+        if device == "/dev/disconnected":
+            raise media.CDReadError("The CD drive disconnected while reading")
+        _wav(destination)
+        return Path(destination)
+
+    monkeypatch.setattr(dialogs, "_scan_source", scan)
+    monkeypatch.setattr(media, "read_cd_toc", toc)
+    monkeypatch.setattr(media, "rip_cd_track", rip)
+    monkeypatch.setattr(sync, "synchronize", lambda *_a, **_k: sync.Alignment(0, 1, .99, .99, .99))
+    monkeypatch.setattr(media, "discover_cd_drives", lambda: [("/dev/reconnected", "Reconnected CD drive")])
+    dialog.source_edit.setText(str(source))
+    if scan_first:
+        _scan(dialog, source)
+        paired = tmp_path / "manual.wav"
+        _wav(paired)
+        dialog.audio_paths[1] = paired
+    expected_pairs = dict(dialog.audio_paths)
+    dialog.output_edit.setText(str(tmp_path))
+    dialog.cd_combo.setEditText("/dev/disconnected")
+    dialog._completed_cd_device = "/dev/disconnected"
+    dialog._update_controls()
+    progress = []
+    dialog.progress.valueChanged.connect(progress.append)
+    dialog.start_preparation()
+    dialog.start_preparation()  # Repeated activation cannot launch a second worker.
+    _wait(lambda: not dialog.is_busy)
+
+    assert dialog.status.text() == dialog.text("cd_read_failed"), dialog.details.toPlainText()
+    assert dialog.text("cd_read_retry") in dialog.details.toPlainText()
+    assert dialog.album is not None
+    assert dialog.album.source_directory.is_dir()
+    assert len(scans) == 1
+    assert dialog.table.rowCount() == 1
+    assert dialog.audio_paths == expected_pairs
+    assert dialog.output_edit.text() == str(tmp_path)
+    assert dialog.format_combo.currentData() == "encoded_wav"
+    assert dialog._completed_cd_device is None
+    assert dialog.start_button.text() == dialog.text("start", format="WAV")
+    assert dialog.start_button.isEnabled()
+    assert dialog.refresh_button.isEnabled()
+    assert dialog.cd_combo.isEnabled()
+    assert 100 not in progress
+    assert dialog.progress.value() == 0
+    failed_output = dialog.result_folder
+    report = json.loads((failed_output / "manifest.json").read_text())
+    assert report["status"] == "failed"
+    assert report["failure_kind"] == "cd_read"
+    assert calls == ([("toc", "/dev/disconnected")] if failure_stage == "toc" else
+                     [("toc", "/dev/disconnected"), ("rip", "/dev/disconnected")])
+
+    # Refresh may discover a different device path. Start a new attempt from
+    # the retained MIDI snapshot, never from stale ripped audio.
+    dialog.refresh_button.click()
+    _wait(lambda: not dialog.is_busy)
+    assert dialog._cd_device() == "/dev/reconnected"
+    dialog.cd_combo.setCurrentIndex(dialog.cd_combo.findData("/dev/reconnected"))
+    dialog.start_button.click()
+    dialog.start_preparation()
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.status.text() == dialog.text("complete"), dialog.details.toPlainText()
+    assert len(scans) == 1
+    assert calls[-3:] == [("toc", "/dev/reconnected"), ("rip", "/dev/reconnected"),
+                          ("toc", "/dev/reconnected")]
+    assert len(calls) == (4 if failure_stage == "toc" else 5)
+    assert dialog.result_folder != failed_output
+    assert json.loads((dialog.result_folder / "manifest.json").read_text())["status"] == "complete"
+    assert dialog.audio_paths == expected_pairs
+    assert dialog.progress.value() == 100
+    assert dialog._completed_cd_device == "/dev/reconnected"
+    assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
+
+
+def test_failed_cd_attempt_waits_for_worker_before_enabling_retry(dialog, source, tmp_path, monkeypatch):
+    _scan(dialog, source)
+    release = threading.Event()
+    calls = []
+    worker_run = dialogs.SmartPianoSoftWorker.run
+
+    def fail(*_args, **_kwargs):
+        calls.append("prepare")
+        raise AlbumBuildError("The CD drive disconnected", cd_read_error=True)
+
+    def held_worker(worker):
+        worker_run(worker)
+        release.wait(3)
+
+    monkeypatch.setattr(dialogs, "prepare_album", fail)
+    monkeypatch.setattr(dialogs.SmartPianoSoftWorker, "run", held_worker)
+    dialog.output_edit.setText(str(tmp_path))
+    dialog.cd_combo.setEditText("/dev/disconnected")
+    try:
+        dialog.start_preparation()
+        _wait(lambda: dialog.status.text() == dialog.text("cd_read_failed"))
+        assert dialog.is_busy
+        assert not dialog.options.isEnabled()
+        assert not dialog.start_button.isEnabled()
+        dialog.start_preparation()
+        dialog.discover_cd()
+        dialog._progress({"phase": "rip", "completed": 1, "total": 1, "message": "Late read progress"})
+        assert calls == ["prepare"]
+        assert dialog.status.text() == dialog.text("cd_read_failed")
+        assert dialog.progress.value() == 0
+    finally:
+        release.set()
+        _wait(lambda: not dialog.is_busy)
+    assert dialog.options.isEnabled()
+    assert dialog.start_button.isEnabled()
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_output_failure_and_cancel_do_not_offer_cd_reconnect(dialog, source, tmp_path, monkeypatch, cancelled):
+    _scan(dialog, source)
+
+    def fail(*_args, cancel, **_kwargs):
+        if cancelled:
+            cancel.set()
+        raise AlbumBuildError("Cancelled" if cancelled else "The output disk is full", cd_read_error=cancelled)
+
+    monkeypatch.setattr(dialogs, "prepare_album", fail)
+    dialog.output_edit.setText(str(tmp_path))
+    dialog.cd_combo.setEditText("/dev/test-cd")
+    dialog.start_preparation()
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.status.text() == dialog.text("cancelled" if cancelled else "failed")
+    assert dialog.text("cd_read_retry") not in dialog.details.toPlainText()
+    assert dialog.album is not None
+    assert dialog.start_button.isEnabled()
+
+
+@pytest.mark.parametrize("close_window", [False, True])
+def test_cancel_or_close_during_cd_read_waits_for_cleanup(dialog, source, tmp_path, monkeypatch, close_window):
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_k: (media.CDTrack(1, 0, 75),))
+
+    def blocked_rip(_device, _track, _destination, *, cancel, progress):
+        entered.set()
+        if not cancel.wait(3):
+            raise RuntimeError("Test cancellation was not received")
+        release.wait(3)
+        # A reader can report a device error while cancellation is in flight;
+        # the user's cancellation still determines the UI and manifest status.
+        raise media.CDReadError("CD reader stopped")
+
+    monkeypatch.setattr(media, "rip_cd_track", blocked_rip)
+    dialog.source_edit.setText(str(source))
+    dialog.output_edit.setText(str(tmp_path))
+    dialog.cd_combo.setEditText("/dev/test-cd")
+    dialog.start_preparation()
+    _wait(entered.is_set)
+    workspace = Path(dialog._workspace.name)
+    try:
+        if close_window:
+            dialog.close()
+        else:
+            dialog.cancel_or_close()
+        assert dialog.is_busy
+        assert dialog.isVisible()
+        assert not dialog.options.isEnabled()
+        assert workspace.exists()
+        dialog._progress({"phase": "rip", "completed": 1, "total": 1, "message": "Late read progress"})
+        assert dialog.status.text() == dialog.text("cancelling")
+    finally:
+        release.set()
+        _wait(lambda: not dialog.is_busy)
+    assert dialog.status.text() == dialog.text("cancelled")
+    assert dialog.text("cd_read_retry") not in dialog.details.toPlainText()
+    assert json.loads((dialog.result_folder / "manifest.json").read_text())["status"] == "cancelled"
+    if close_window:
+        assert not dialog.isVisible()
+        assert not workspace.exists()
+    else:
+        assert dialog.album is not None
+        assert workspace.exists()
+        assert dialog.options.isEnabled()
 
 
 @pytest.mark.parametrize("song_count", [1, 2])
@@ -629,8 +838,8 @@ def test_immediate_close_prevents_deferred_discovery(tmp_path, qt_application, m
     assert not instance.is_busy
 
 
-def test_utilities_menu_opens_one_modal_beta_dialog_and_respects_busy_guard(monkeypatch, request):
-    # Exercise the retained beta integration without changing the release default.
+def test_utilities_menu_opens_one_modal_dialog_and_respects_busy_guard(monkeypatch, request):
+    # Exercise the utility integration without changing the release default.
     # Enable it before constructing the window, when its menu is assembled.
     monkeypatch.setattr(main_window.MidiTitleWindow, "ENABLE_SMART_PIANOSOFT_UTILITY", True)
     window = request.getfixturevalue("window")
@@ -783,7 +992,7 @@ def test_cd_progress_keeps_disc_track_and_audio_track_count_visible(dialog, lang
             assert dialog.status.text() == f"CD track 3 (2 of 8): {message}"
 
 
-@pytest.mark.parametrize("phase", ["scan", "sync", "encode"])
+@pytest.mark.parametrize("phase", ["scan", "sync", "encode", "export_pairs"])
 def test_progress_preserves_song_titles_when_translating_phase_labels(dialog, phase):
     dialog.language = "es"
     dialog._progress({"phase": phase, "completed": 1, "total": 2, "message": "Help"})
