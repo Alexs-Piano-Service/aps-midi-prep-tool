@@ -5,7 +5,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLabel, QProgressDialog, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QProgressDialog, QPushButton, QWidget
 
 from aps_midi_prep_tool_app.main_window import MidiTitleWindow
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, tr, translate_text
@@ -79,17 +79,20 @@ def test_about_dialog_renders_translated_notice_and_opens_disclaimer(code):
         assert not resize_to_contents
         dialog.show()
         app.processEvents()
-        labels = dialog.findChildren(QLabel)
+        text_widgets = dialog._wrapping_labels
         expected_notice = onboarding_text("notice", code)
-        assert any(expected_notice in label.text() for label in labels)
-        assert any(window._lt("Author") in label.text() and window._lt("License") in label.text() for label in labels)
+        assert any(expected_notice in widget.toPlainText() for widget in text_widgets)
+        assert any(window._lt("Author") in widget.toPlainText() and window._lt("License") in widget.toPlainText()
+                   for widget in text_widgets)
         buttons = dialog.findChild(QDialogButtonBox)
         disclaimer = next(button for button in buttons.buttons() if button.text() == window._lt("Disclaimer"))
         disclaimer.click()
         assert window.disclaimer_opened
-        for label in labels:
-            if label.isVisible() and label.wordWrap():
-                assert label.height() >= label.heightForWidth(label.width())
+        for widget in text_widgets:
+            if widget.isVisible():
+                assert widget.document().size().height() <= widget.viewport().height()
+                assert widget.horizontalScrollBar().maximum() == 0
+                assert widget.verticalScrollBar().maximum() == 0
         inspected.append(True)
         dialog.close()
 

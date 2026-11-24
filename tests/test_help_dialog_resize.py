@@ -93,8 +93,8 @@ def _assert_accessible(dialog):
             QTest.qWait(10)
             assert [_rect_in(dialog, button) for button in buttons] == button_rects
 
-    for label in dialog.findChildren(QLabel):
-        if label.isVisible() and label.wordWrap():
+    for label in (*dialog.findChildren(QLabel), *getattr(dialog, "_wrapping_labels", ())):
+        if label.isVisible() and label.hasHeightForWidth():
             assert label.height() >= label.heightForWidth(label.width()), label.text()
     return button_box
 

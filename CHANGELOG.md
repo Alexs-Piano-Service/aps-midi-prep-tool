@@ -95,7 +95,8 @@ with release sections grouped by version and date.
 - Read complete legacy E-SEQ songs whose header lengths contain block estimates,
   fixing incomplete-event errors and silently shortened MIDI conversions.
   Preserve complete songs after channel merging and continue rejecting damaged
-  events or ambiguous endings.
+  events or ambiguous endings, with translated diagnostics in every supported
+  language.
 - Restore editable descriptive filename options for ENSPIRE, including reading,
   conversion, and bulk extraction. Preserve required short names only for albums
   retaining Yamaha catalogs, without restricting unrelated folders.
@@ -126,7 +127,8 @@ with release sections grouped by version and date.
   start, and size the initial window for the full row when the screen allows.
 - Keep wrapped About dialog text fully readable with large fonts and narrow
   windows, including the administrator confirmation on Windows. Refit text
-  immediately when a scrollbar reduces the available width.
+  immediately when a scrollbar reduces the available width, and wrap long
+  translated words and website links without clipping or horizontal scrolling.
 - Accept cdparanoia's standard `OK` copy-permission flag in CD track lists,
   preventing valid connected CDs from failing with reconnect guidance.
 - Avoid leaving Smart PianoSoft output folders after failed checks or cancelled

@@ -31,6 +31,17 @@ def _eseq_with_invalid_channel_data():
     return bytes(header) + stream
 
 
+def _legacy_eseq_with_ending(ending):
+    header = bytearray(0x77)
+    header[0] = 0xFE
+    header[7:15] = b"COM-ESEQ"
+    header[0x19] = 0x40
+    header[0x1B:0x1F] = (0x50).to_bytes(4, "little")
+    header[0x1F:0x23] = (2048).to_bytes(4, "little")
+    header[3:7] = (0x77 + 2048 - 0x100).to_bytes(4, "little")
+    return bytes(header) + b"\xF1\x00" + b"\xF6" * 2048 + ending
+
+
 def test_parser_error_catalog_covers_every_language_and_preserves_parameters():
     for source, translations in MUSIC_ERROR_TRANSLATIONS.items():
         assert set(translations) == set(LANGUAGES) - {"en"}, source
@@ -66,7 +77,9 @@ def test_every_static_music_parser_diagnostic_has_a_translation():
     (parse_eseq_bytes, b"short"),
     (parse_eseq_bytes, b"\x00" * 160),
     (parse_eseq_bytes, _eseq_with_invalid_channel_data()),
-), ids=("short-midi", "unknown-midi-format", "short-note", "unknown-status", "short-vlq", "nonzero-end-of-track-length", "short-eseq", "missing-eseq-signature", "invalid-eseq-channel-data"))
+    (parse_eseq_bytes, _legacy_eseq_with_ending(b"")),
+    (parse_eseq_bytes, _legacy_eseq_with_ending(b"\xF2\x90\x3C\x40")),
+), ids=("short-midi", "unknown-midi-format", "short-note", "unknown-status", "short-vlq", "nonzero-end-of-track-length", "short-eseq", "missing-eseq-signature", "invalid-eseq-channel-data", "missing-legacy-eseq-end", "trailing-legacy-eseq-data"))
 def test_real_parser_failures_translate_and_preserve_path_context(language, parse, data):
     with pytest.raises(ValueError) as caught:
         parse(data)

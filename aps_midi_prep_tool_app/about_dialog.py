@@ -1,10 +1,14 @@
 """Compact application information with a session-only administrator gesture."""
 
+import math
 import time
 
-from PySide6.QtCore import QEvent, QTimer, Qt, Signal
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QScrollArea, QWidget
+from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
+from PySide6.QtGui import QFont, QTextOption
+from PySide6.QtWidgets import (
+    QDialog, QDialogButtonBox, QFrame, QLabel, QScrollArea, QSizePolicy,
+    QTextBrowser, QWidget,
+)
 
 from .app_info import (
     APP_AUTHOR, APP_COMPANY, APP_COMPANY_ADDRESS, APP_COPYRIGHT_NOTICE,
@@ -16,6 +20,47 @@ from .message_catalog import normalize_language_code, tr, translate_text
 from .onboarding_dialog import onboarding_text
 from .responsive_button_box import ResponsiveDialogButtonBox
 from .ui_utils import is_dark_theme, pixmap_from_base64, resize_dialog_to_screen, scrollable_dialog_layout
+
+
+class _AboutText(QTextBrowser):
+    """Wrap even long words and links, leaving scrolling to the dialog body."""
+
+    def __init__(self, text, parent, *, rich_text=False):
+        super().__init__(parent)
+        self._source_text = text
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.viewport().setAutoFillBackground(False)
+        self.document().setDocumentMargin(0)
+        option = QTextOption(Qt.AlignHCenter)
+        option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.document().setDefaultTextOption(option)
+        if rich_text:
+            self.setHtml(text)
+        else:
+            self.setPlainText(text)
+        policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def text(self):
+        return self._source_text
+
+    def heightForWidth(self, width):
+        # Measure independently: changing the live document's width here would
+        # disturb its layout and scroll position during Qt's size negotiation.
+        document = self.document().clone()
+        document.setTextWidth(max(1, width))
+        return math.ceil(document.size().height())
+
+    def minimumSizeHint(self):
+        return QSize(0, self.fontMetrics().height())
+
+    def sizeHint(self):
+        return QSize(400, self.heightForWidth(400))
 
 
 class AboutDialog(QDialog):
@@ -51,43 +96,31 @@ class AboutDialog(QDialog):
             self.logo_label.setText("APS MIDI Prep Tool")
         content.addWidget(self.logo_label, 0, Qt.AlignHCenter)
 
-        self.title_label = QLabel(APP_TITLE_WITH_VERSION, self)
-        self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setWordWrap(True)
+        self.title_label = _AboutText(APP_TITLE_WITH_VERSION, self)
         font = QFont(self.font())
         font.setBold(True)
         self.title_label.setFont(font)
         content.addWidget(self.title_label)
 
-        self.website_label = QLabel(f'<a href="{APP_WEBSITE}">{APP_WEBSITE}</a>', self)
-        self.website_label.setAlignment(Qt.AlignCenter)
-        self.website_label.setWordWrap(True)
+        self.website_label = _AboutText(f'<a href="{APP_WEBSITE}">{APP_WEBSITE}</a>', self, rich_text=True)
         self.website_label.setOpenExternalLinks(True)
         self.website_label.setToolTip(self.t("Project website."))
         content.addWidget(self.website_label)
 
-        self.info_label = QLabel(
+        self.info_label = _AboutText(
             f"{APP_COPYRIGHT_NOTICE}<br>"
             f"{self.t('Author')}: {APP_AUTHOR}<br>"
             f"{APP_COMPANY}<br>"
             f"{APP_COMPANY_ADDRESS}<br>"
-            f"{self.t('License')}: {APP_LICENSE}", self,
+            f"{self.t('License')}: {APP_LICENSE}", self, rich_text=True,
         )
-        self.info_label.setTextFormat(Qt.RichText)
-        self.info_label.setAlignment(Qt.AlignCenter)
-        self.info_label.setWordWrap(True)
         content.addWidget(self.info_label)
 
-        self.notice_label = QLabel(onboarding_text("notice", self.language_code), self)
-        self.notice_label.setTextFormat(Qt.PlainText)
-        self.notice_label.setAlignment(Qt.AlignCenter)
-        self.notice_label.setWordWrap(True)
+        self.notice_label = _AboutText(onboarding_text("notice", self.language_code), self)
         content.addWidget(self.notice_label)
 
-        self.admin_status = QLabel(tr("about.admin_enabled", self.language_code), self)
+        self.admin_status = _AboutText(tr("about.admin_enabled", self.language_code), self)
         self.admin_status.setObjectName("aboutAdminStatus")
-        self.admin_status.setAlignment(Qt.AlignCenter)
-        self.admin_status.setWordWrap(True)
         self.admin_status.setFont(font)
         self.admin_status.setVisible(self._admin_mode_enabled)
         content.addWidget(self.admin_status)
@@ -123,15 +156,13 @@ class AboutDialog(QDialog):
 
     @staticmethod
     def _fit_wrapped_label(label):
-        # QLabel.heightForWidth includes minimumHeight. Release our old
-        # minimum so text can shrink again after widening or a font change.
-        label.setMinimumHeight(0)
+        # Recompute from the text so a wider window or smaller font can shrink
+        # the previous minimum height again.
         label.setMinimumHeight(max(0, label.heightForWidth(label.width())))
 
     def _fit_wrapped_text(self):
-        # Some Qt styles allocate a wrapped label its unwrapped size-hint
-        # height even when the scroll body has reserved the full wrapped height.
-        # Measure at the assigned width after layout events have finished.
+        # Reserve the complete document height at the assigned width after
+        # layout events have finished. Only the outer body should scroll.
         for label in self._wrapping_labels:
             if label.isHidden():
                 continue

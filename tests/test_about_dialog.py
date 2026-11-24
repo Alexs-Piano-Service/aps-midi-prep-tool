@@ -258,3 +258,69 @@ def test_wrapped_text_fits_when_scrollbar_appears_during_layout(monkeypatch):
         instance.close()
         instance.deleteLater()
         app.processEvents()
+
+
+@pytest.mark.parametrize("point_size", [14, 24])
+def test_long_dutch_words_and_links_wrap_without_clipping(point_size):
+    app = QApplication.instance() or QApplication([])
+    instance = about_dialog.AboutDialog(language_code="nl", admin_mode_enabled=True)
+    # Make the Dutch compound word wider than the viewport on every platform,
+    # including machines without the Windows CI font or display scaling.
+    for label in instance._wrapping_labels:
+        font = QFont(label.font())
+        font.setPointSize(point_size)
+        font.setLetterSpacing(QFont.AbsoluteSpacing, 20)
+        label.setFont(font)
+    instance.resize(500, 400)
+    try:
+        instance.show()
+        app.processEvents()
+        viewport = instance.scroll_area.viewport()
+        assert instance.notice_label.fontMetrics().horizontalAdvance("compatibiliteitsprogramma") > viewport.width()
+        assert instance.scroll_area.horizontalScrollBar().maximum() == 0
+        assert instance.scroll_area.widget().width() == viewport.width()
+        for label in instance._wrapping_labels:
+            assert label.horizontalScrollBar().maximum() == 0
+            assert label.verticalScrollBar().maximum() == 0
+            assert label.document().size().height() <= label.viewport().height()
+            block = label.document().firstBlock()
+            while block.isValid():
+                text_layout = block.layout()
+                for index in range(text_layout.lineCount()):
+                    line = text_layout.lineAt(index)
+                    assert line.naturalTextWidth() <= label.viewport().width()
+                last_line = text_layout.lineAt(text_layout.lineCount() - 1)
+                assert last_line.textStart() + last_line.textLength() == block.length() - 1
+                block = block.next()
+        assert instance.rect().contains(instance.buttons.geometry())
+    finally:
+        instance.close()
+        instance.deleteLater()
+        app.processEvents()
+
+
+def test_wrapped_website_remains_clickable_and_wheel_scrolls_body(dialog):
+    font = QFont(dialog.font())
+    font.setPointSize(24)
+    dialog.setFont(font)
+    dialog.resize(500, 400)
+    QTest.qWait(20)
+    website = dialog.website_label
+    dialog.scroll_area.ensureWidgetVisible(website)
+    # Observe the real link click without launching a browser in the test.
+    website.setOpenExternalLinks(False)
+    website.setOpenLinks(False)
+    clicked = QSignalSpy(website.anchorClicked)
+    cursor = website.textCursor()
+    cursor.setPosition(1)
+    point = website.cursorRect(cursor).center()
+    QTest.mouseClick(website.viewport(), Qt.LeftButton, pos=point)
+    assert clicked.count() == 1
+    assert clicked.at(0)[0].toString() == about_dialog.APP_WEBSITE
+
+    if not hasattr(QTest, "wheelEvent"):
+        pytest.skip("Native wheel-event simulation requires Qt 6.8 or newer.")
+    position = dialog.scroll_area.verticalScrollBar().value()
+    QTest.wheelEvent(dialog.windowHandle(), website.viewport().mapTo(dialog, point), QPoint(0, -120))
+    QApplication.processEvents()
+    assert dialog.scroll_area.verticalScrollBar().value() > position
