@@ -115,7 +115,14 @@ from .preparation_profile_dialog import PreparationProfileDialog
 from .emulator_preview_dialog import EmulatorPreviewDialog, localize_emulator_warning
 from .preparation_profiles import (
     FLOPPY_MEDIA, SETTING_PROFILE, SETTING_MEDIUM, SETTING_IMAGE_FORMAT, SETTING_DISK_FORMAT,
-    get_preparation_profile, get_preparation_medium, proposed_settings,
+    get_preparation_profile, get_preparation_medium, proposed_settings, bulk_title_space_cleanup_default,
+    SETTING_GENERATE_YAMAHA_CATALOGS,
+)
+from .yamaha_catalogs import yamaha_catalog_metadata_from_directory, yamaha_metadata_from_pianodir_bytes
+from .yamaha_catalog_delivery import (
+    catalogs_enabled, catalog_generation_enabled, regular_catalog_source_directories, regular_catalog_names,
+    regular_catalog_payloads, image_catalog_payloads, image_catalog_source_directories,
+    write_catalog_payloads, stage_image_catalogs, catalog_output_path,
 )
 from .long_midi_filename import build_long_midi_filename
 from .smart_pianosoft import (
@@ -6180,10 +6187,11 @@ class FileInspectionDialog(QDialog):
 
     @staticmethod
     def _is_catalog_item(item):
-        from .catalog_inspection import CATALOG_NAMES
+        from .catalog_inspection import INSPECTION_CATALOG_NAMES
 
         return (item.get("kind") == "catalog"
-                or os.path.basename(item.get("path", "")).upper() in CATALOG_NAMES)
+                or any(os.path.basename(item.get(key) or "").upper() in INSPECTION_CATALOG_NAMES
+                       for key in ("path", "source_path", "display_name")))
 
     def _open_catalog(self):
         if self._inspection_edit_busy():
@@ -6191,7 +6199,7 @@ class FileInspectionDialog(QDialog):
         path, _selected_filter = QFileDialog.getOpenFileName(
             self, self.t("Open catalog..."),
             os.path.dirname(self._current_item().get("path", "")),
-            self.t("Yamaha catalogs (*.mng *.MNG);;All files (*)"),
+            self.t("Yamaha catalogs (*.mng *.MNG *.fil *.FIL);;All files (*)"),
         )
         if not path:
             return
@@ -8963,6 +8971,11 @@ def _psr600_conversion_prompt_copy(summary, source_label="", translate=None):
 class BulkExtractionProgressDialog(QDialog):
     """Progress window that can only be dismissed through its Cancel button."""
 
+    def fit_progress_height(self):
+        layout = self.layout()
+        height = max(layout.totalMinimumSize().height(), layout.totalHeightForWidth(self.width()))
+        self.resize(self.width(), height)
+
     def reject(self):
         return
 
@@ -9042,8 +9055,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
     SETTING_BULK_EXTRACTION_PRESERVE_VOLUME = "bulk_extraction_preserve_volume_controls"
     SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES = "bulk_extraction_long_midi_filenames"
     SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES = "bulk_extraction_trim_title_spaces"
-    DEFAULT_BULK_EXTRACTION_TRIM_TITLE_SPACES = True
     SETTING_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES = "bulk_extraction_include_eseq_sources"
+    SETTING_BULK_EXTRACTION_KEEP_ORIGINAL_CATALOGS = "bulk_extraction_keep_original_catalogs"
     DEFAULT_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES = False
     SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES = "bulk_extraction_use_album_names"
     SETTING_BULK_EXTRACTION_LAST_JOB = "bulk_extraction_last_job"
@@ -9166,6 +9179,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self.midiScratchDir = None
         self.listedFileInfo = {}
         self.pendingRegularConversions = {}
+        self.pendingYamahaCatalogPayloads = {}
         self.pendingRegularRenames = {}
         self.regularModeContextPath = ""
         self.regularEseqMode = False
@@ -9750,6 +9764,16 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self._set_static_tooltip(self.fileCreateMetadataSummaryAction, 'When saving MIDI files to a folder, create metadata_summary.txt with each saved MIDI file and its metadata.')
         self.fileCreateMetadataSummaryAction.toggled.connect(self.toggle_metadata_summary_writing)
 
+        self.settingsGenerateYamahaCatalogsAction = QAction(self._lt("Create Missing Yamaha Catalogs"), self)
+        self.settingsGenerateYamahaCatalogsAction.setCheckable(True)
+        self.settingsGenerateYamahaCatalogsAction.setChecked(catalog_generation_enabled(self))
+        self._set_static_tooltip(
+            self.settingsGenerateYamahaCatalogsAction,
+            "Create PSONG.MNG and PDISK.MNG when missing. Uses DOS 8.3 song filenames. "
+            "Existing catalogs and titles converted from PIANODIR.FIL are preserved when this is off.",
+        )
+        self.settingsGenerateYamahaCatalogsAction.toggled.connect(self.toggle_yamaha_catalog_generation)
+
         self.fileSaveAsImageAction = QAction("Save As Image...", self)
         self.fileSaveAsImageAction.triggered.connect(self.save_as_image)
 
@@ -9804,6 +9828,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self.fileSaveOptionsMenu.addSeparator()
         self.fileSaveOptionsMenu.addAction(self.fileCreateTagSidecarsAction)
         self.fileSaveOptionsMenu.addAction(self.fileCreateMetadataSummaryAction)
+        self.fileSaveOptionsMenu.addAction(self.settingsGenerateYamahaCatalogsAction)
 
         self.editMenu = self.menuBar().addMenu(self._lt("&Edit"))
         self.editUndoAction = QAction(self._lt("Undo"), self)
@@ -10956,14 +10981,26 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",
             )
 
-    def _prepare_destination_filenames(self):
-        if not proposed_settings(self._preparation_profile(), self._preparation_medium()).get("use_dos83_filenames"):
-            return
+    def _prepare_destination_filenames(self, *, midi_catalogs_only=False):
+        profile_requires_short_names = proposed_settings(self._preparation_profile(), self._preparation_medium()).get("use_dos83_filenames")
         image_mode = self.is_image_mode()
+        generate_catalogs = catalog_generation_enabled(self)
+        catalog_directories = set()
+        if not profile_requires_short_names and not generate_catalogs:
+            catalog_directories = (image_catalog_source_directories(self) if image_mode
+                                   else regular_catalog_source_directories(self))
+        if not profile_requires_short_names and not generate_catalogs and not catalog_directories:
+            return
         sorting_enabled = self.table.isSortingEnabled()
         self.table.setSortingEnabled(False)
         try:
-            for row, path, _kind, filename in tuple(self._preparation_song_rows()):
+            for row, path, kind, filename in tuple(self._preparation_song_rows()):
+                if kind != "midi" and (midi_catalogs_only or not profile_requires_short_names):
+                    continue
+                directory = (os.path.dirname(self._final_image_path(path)) if image_mode
+                             else os.path.dirname(os.path.abspath(path)))
+                if not profile_requires_short_names and not generate_catalogs and directory not in catalog_directories:
+                    continue
                 if self._validate_image_filename(filename, enforce_dos83=True) is None:
                     continue
                 if image_mode:
@@ -11034,7 +11071,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
     def _prepare_for_destination(self):
         profile = self._preparation_profile()
         target = profile.song_format
-        if not target or getattr(self, "_preparing_destination", False):
+        if getattr(self, "_preparing_destination", False):
+            return
+        if not target:
+            if catalog_generation_enabled(self):
+                self._prepare_destination_filenames(midi_catalogs_only=True)
             return
         self._preparing_destination = True
         MidiTitleWindow._refresh_preparation_state(self)
@@ -11109,22 +11150,26 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
     def _ensure_preparation_ready(self):
         """Do not deliver files that failed the active destination's requirements."""
         profile = MidiTitleWindow._preparation_profile(self)
-        if not profile.song_format:
-            return True
-        if getattr(self, "_destination_preparation_queued", False):
-            self._destination_preparation_queued = False
-            self._prepare_for_destination()
-        incompatible = MidiTitleWindow._preparation_incompatible_files(self, verify_files=True)
-        if incompatible:
-            self._show_error_list(
-                self._lt("Preparation incomplete"),
-                self._lt(
-                    "Some files do not match {profile}. Prepare or remove them, or choose Custom before saving.",
-                    profile=self._lt(profile.label),
-                ),
-                incompatible, warning=True,
-            )
-            return False
+        if profile.song_format:
+            if getattr(self, "_destination_preparation_queued", False):
+                self._destination_preparation_queued = False
+                self._prepare_for_destination()
+            incompatible = MidiTitleWindow._preparation_incompatible_files(self, verify_files=True)
+            if incompatible:
+                self._show_error_list(
+                    self._lt("Preparation incomplete"),
+                    self._lt(
+                        "Some files do not match {profile}. Prepare or remove them, or choose Custom before saving.",
+                        profile=self._lt(profile.label),
+                    ),
+                    incompatible, warning=True,
+                )
+                return False
+        # Required preparation may have been explicitly undone. Validate it
+        # before applying catalog-only names so saving cannot silently redo it.
+        prepare_names = getattr(self, "_prepare_destination_filenames", None)
+        if catalogs_enabled(self) and callable(prepare_names):
+            prepare_names(midi_catalogs_only=True)
         return True
 
     def _preparation_incompatible_files(self, *, verify_files=False):
@@ -11284,6 +11329,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self.settingsRandomOutputSuffixesAction.setText(self._t("output_naming.action"))
             self.settingsRandomOutputSuffixesAction.setToolTip(self._t("output_naming.tooltip"))
             self.settingsRandomOutputSuffixesAction.setChecked(self._random_output_suffixes_enabled())
+        self._refresh_yamaha_catalog_action()
         if hasattr(self, "settingsPianoOverlapAction"):
             self.settingsPianoOverlapAction.setText(self._menu_action_text("Overlapping Piano Notes...", "O"))
         if hasattr(self, "settingsResetHiddenDialogsAction"):
@@ -11345,6 +11391,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             {"id": "file.back_up_before_saving", "category": "Settings", "label": "Back Up Before Saving", "action": "fileBackUpBeforeSavingAction", "default": "Ctrl+Alt+B"},
             {"id": "file.create_tag_sidecars", "category": "Settings", "label": "Create Tag Sidecars When Saving", "action": "fileCreateTagSidecarsAction", "default": "Ctrl+Shift+T"},
             {"id": "file.create_metadata_summary", "category": "Settings", "label": "Create Metadata Summary When Saving", "action": "fileCreateMetadataSummaryAction", "default": "Ctrl+Shift+Y"},
+            {"id": "settings.generate_yamaha_catalogs", "category": "Settings", "label": "Create Missing Yamaha Catalogs", "action": "settingsGenerateYamahaCatalogsAction", "default": ""},
             {"id": "view.long_title_warning", "category": "View", "label": "Long title warning", "action": "viewLongTitleWarningAction", "default": "Ctrl+Alt+W"},
             {"id": "view.format_disklavier_screen", "category": "Settings", "label": "Format for Disklavier screen", "action": "viewFormatDisklavierScreenAction", "default": "Ctrl+Alt+D"},
             {"id": "view.hide_status", "category": "View", "label": "Show Status", "action": "viewShowStatusAction", "default": "Ctrl+Alt+S"},
@@ -11687,8 +11734,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                     source_path = metadata_paths.get(key)
                     if source_path is None:
                         return ""
-                    if key == "psong.mng" and self.pendingSmartPianoSoftCatalogReplacement:
-                        return self.pendingSmartPianoSoftCatalogReplacement
                     return self._pending_or_extracted_image_path(source_path)
             else:
                 directories = {Path(path).absolute().parent for _row, path in rows}
@@ -12050,8 +12095,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         naming_label = QLabel(self._t("bulk.naming.label"))
         naming_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         naming_combo = QComboBox()
-        naming_combo.addItem(self._t("bulk.naming.image"), "image")
         naming_combo.addItem(self._t("bulk.naming.album"), "album")
+        naming_combo.addItem(self._t("bulk.naming.image"), "image")
         naming_combo.setToolTip(
             self._t("bulk.naming.album.tooltip")
         )
@@ -12067,14 +12112,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         form_layout.addWidget(convert_checkbox, 4, 0, 1, 3)
 
         volume_note = QLabel(self._lt(
-            "By default, Yamaha startup volume mutes are removed for MIDI playback (recommended)."
+            "Leave unchecked for normal MIDI playback. This rare expert option keeps Yamaha startup mutes and may make notes silent."
         ))
         volume_note.setWordWrap(True)
         form_layout.addWidget(volume_note, 5, 0, 1, 3)
-        preserve_volume_checkbox = WrappedCheckBox(self._lt("Preserve original volume controls"), dialog)
+        preserve_volume_checkbox = WrappedCheckBox(self._lt("Preserve original volume controls (experts only)"), dialog)
         preserve_volume_checkbox.setObjectName("bulkPreserveOriginalVolumeControls")
         preserve_volume_checkbox.setToolTip(self._lt(
-            "Keep every original volume change, including zero-volume commands and notes played while muted."
+            "Enable only if you specifically need the original zero-volume commands and understand their effect on playback. Otherwise, leave this unchecked."
         ))
         preserve_volume_checkbox.setChecked(self.settings.value(
             self.SETTING_BULK_EXTRACTION_PRESERVE_VOLUME, False, type=bool,
@@ -12095,21 +12140,28 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         )
         form_layout.addWidget(include_sources_checkbox, 8, 0, 1, 3)
 
+        keep_catalogs_checkbox = QCheckBox(self._t("bulk.keep_original_catalogs"))
+        keep_catalogs_checkbox.setToolTip(self._t("bulk.keep_original_catalogs.tooltip"))
+        keep_catalogs_checkbox.setChecked(self.settings.value(
+            self.SETTING_BULK_EXTRACTION_KEEP_ORIGINAL_CATALOGS, False, type=bool,
+        ))
+        form_layout.addWidget(keep_catalogs_checkbox, 9, 0, 1, 3)
+
         retention_hint = QLabel(self._t("bulk.no_overwrite"))
         retention_hint.setWordWrap(True)
-        form_layout.addWidget(retention_hint, 9, 0, 1, 3)
+        form_layout.addWidget(retention_hint, 10, 0, 1, 3)
 
         save_progress_checkbox = QCheckBox(self._lt("Save progress for verified resume"))
         save_progress_checkbox.setToolTip(self._lt(
             "Progress records are removed after successful extraction. Failed or cancelled jobs keep their records for resuming."
         ))
         save_progress_checkbox.setChecked(True)
-        form_layout.addWidget(save_progress_checkbox, 10, 0, 1, 3)
+        form_layout.addWidget(save_progress_checkbox, 11, 0, 1, 3)
         resume_button = QPushButton(self._lt("Resume extraction job..."))
-        form_layout.addWidget(resume_button, 11, 0, 1, 3)
+        form_layout.addWidget(resume_button, 12, 0, 1, 3)
         resume_hint = QLabel("")
         resume_hint.setWordWrap(True)
-        form_layout.addWidget(resume_hint, 12, 0, 1, 3)
+        form_layout.addWidget(resume_hint, 13, 0, 1, 3)
         selected_job = {"path": ""}
 
         source_directory = self._bulk_extraction_default_source_directory()
@@ -12136,7 +12188,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         preparation_hint = QLabel()
         preparation_hint.setWordWrap(True)
         preparation_hint.setVisible(self._preparation_requires_dos83_filenames())
-        form_layout.addWidget(preparation_hint, 13, 0, 1, 3)
+        form_layout.addWidget(preparation_hint, 14, 0, 1, 3)
         if self._preparation_requires_dos83_filenames():
             long_name_checkbox.setChecked(False)
             long_name_checkbox.setEnabled(False)
@@ -12146,7 +12198,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         trim_title_spaces_checkbox.setChecked(
             self.settings.value(
                 self.SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES,
-                self.DEFAULT_BULK_EXTRACTION_TRIM_TITLE_SPACES,
+                bulk_title_space_cleanup_default(self._preparation_profile()),
                 type=bool,
             )
         )
@@ -12167,10 +12219,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             convert_checkbox.toggled.connect(checkbox.setEnabled)
         use_album_names = self.settings.value(
             self.SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES,
-            False,
+            True,
             type=bool,
         )
-        naming_combo.setCurrentIndex(1 if use_album_names else 0)
+        naming_combo.setCurrentIndex(naming_combo.findData("album" if use_album_names else "image"))
 
         def browse_source():
             previous_source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
@@ -12218,6 +12270,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                                     localize_extraction_job_error(exc, self._language_code()))
                 return
             selected_job["path"] = path
+            selected_job["generate_yamaha_catalogs"] = bool(job["options"].get("generate_yamaha_catalogs"))
+            selected_job["preserve_yamaha_catalogs"] = bool(job["options"].get("preserve_yamaha_catalogs"))
             # Resumed jobs retain their recorded options for verified output.
             preparation_hint.hide()
             long_name_checkbox.setToolTip(self._t("bulk.long_filenames.tooltip"))
@@ -12229,12 +12283,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             long_name_checkbox.setChecked(bool(options.get("long_midi_filenames")))
             trim_title_spaces_checkbox.setChecked(bool(options.get("trim_title_spaces")))
             include_sources_checkbox.setChecked(bool(options.get("include_eseq_sources")))
-            naming_combo.setCurrentIndex(1 if options.get("use_album_names") else 0)
+            keep_catalogs_checkbox.setChecked(bool(options.get("keep_original_catalogs")))
+            naming_combo.setCurrentIndex(naming_combo.findData("album" if options.get("use_album_names") else "image"))
             save_progress_checkbox.setChecked(True)
             for widget in (
                 source_edit, output_edit, source_browse, output_browse, naming_combo,
                 convert_checkbox, long_name_checkbox, trim_title_spaces_checkbox,
-                include_sources_checkbox, preserve_volume_checkbox, save_progress_checkbox,
+                include_sources_checkbox, keep_catalogs_checkbox, preserve_volume_checkbox, save_progress_checkbox,
             ):
                 widget.setEnabled(False)
             resume_hint.setText(self._lt(
@@ -12293,6 +12348,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         include_eseq_sources = bool(
             convert_eseq and include_sources_checkbox.isChecked()
         )
+        keep_original_catalogs = keep_catalogs_checkbox.isChecked()
         long_midi_filenames = long_name_checkbox.isChecked()
         trim_title_spaces = bool(
             convert_eseq and trim_title_spaces_checkbox.isChecked()
@@ -12316,6 +12372,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self.SETTING_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES,
             include_sources_checkbox.isChecked(),
         )
+        self.settings.setValue(self.SETTING_BULK_EXTRACTION_KEEP_ORIGINAL_CATALOGS, keep_original_catalogs)
         self.settings.setValue(
             self.SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES,
             use_album_names,
@@ -12324,8 +12381,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             source_directory,
             output_directory,
             convert_eseq=convert_eseq,
+            generate_yamaha_catalogs=selected_job.get("generate_yamaha_catalogs", catalog_generation_enabled(self)),
+            preserve_yamaha_catalogs=selected_job.get("preserve_yamaha_catalogs", catalogs_enabled(self)),
             preserve_volume_controls=preserve_volume_controls,
             include_eseq_sources=include_eseq_sources,
+            keep_original_catalogs=keep_original_catalogs,
             long_midi_filenames=long_midi_filenames,
             trim_title_spaces=trim_title_spaces,
             use_album_names=use_album_names,
@@ -12357,6 +12417,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         preserve_volume_controls=False,
         job_record_path=None,
         resume=False,
+        generate_yamaha_catalogs=None,
+        preserve_yamaha_catalogs=None,
+        keep_original_catalogs=False,
     ):
         if self._disk_worker_busy():
             QMessageBox.information(
@@ -12374,8 +12437,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             source_directory,
             output_directory,
             convert_eseq=convert_eseq,
+            generate_yamaha_catalogs=(catalog_generation_enabled(self) if generate_yamaha_catalogs is None
+                                     else generate_yamaha_catalogs),
+            preserve_yamaha_catalogs=(catalogs_enabled(self) if preserve_yamaha_catalogs is None
+                                     else preserve_yamaha_catalogs),
             preserve_volume_controls=preserve_volume_controls,
             include_eseq_sources=include_eseq_sources,
+            keep_original_catalogs=keep_original_catalogs,
             long_midi_filenames=long_midi_filenames,
             trim_title_spaces=trim_title_spaces,
             use_album_names=use_album_names,
@@ -12401,6 +12469,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             )
             progress_dialog.bulkActivityLabel.setToolTip("")
             progress_dialog.bulkCurrentProgressBar.setRange(0, 0)
+            progress_dialog.fit_progress_height()
             worker.cancel()
 
         cancel_button.clicked.connect(request_cancel)
@@ -12417,8 +12486,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             "source_directory": source_directory,
             "output_directory": output_directory,
             "convert_eseq": bool(convert_eseq),
+            "generate_yamaha_catalogs": (catalog_generation_enabled(self) if generate_yamaha_catalogs is None
+                                         else bool(generate_yamaha_catalogs)),
+            "preserve_yamaha_catalogs": (catalogs_enabled(self) if preserve_yamaha_catalogs is None
+                                         else bool(preserve_yamaha_catalogs)),
             "preserve_volume_controls": bool(preserve_volume_controls),
             "include_eseq_sources": bool(include_eseq_sources),
+            "keep_original_catalogs": bool(keep_original_catalogs),
             "long_midi_filenames": bool(long_midi_filenames),
             "trim_title_spaces": bool(trim_title_spaces),
             "use_album_names": bool(use_album_names),
@@ -12433,6 +12507,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             convert_eseq=bool(convert_eseq),
             preserve_volume_controls=bool(preserve_volume_controls),
             include_eseq_sources=bool(include_eseq_sources),
+            keep_original_catalogs=bool(keep_original_catalogs),
             long_midi_filenames=bool(long_midi_filenames),
             trim_title_spaces=bool(trim_title_spaces),
             use_album_names=bool(use_album_names),
@@ -12446,16 +12521,18 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         dialog.setWindowTitle(self._t("bulk.title"))
         dialog.setWindowModality(Qt.WindowModal)
         dialog.setWindowFlag(Qt.WindowCloseButtonHint, False)
-        dialog.setMinimumWidth(620)
+        screen = dialog.screen() or QApplication.primaryScreen()
+        available_width = max(160, screen.availableGeometry().width() - 40) if screen else 640
+        dialog.setMinimumWidth(min(480, available_width))
 
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
 
         image_label = QLabel(self._t("bulk.progress.scan"), dialog)
+        image_label.setTextFormat(Qt.PlainText)
         image_label.setWordWrap(True)
         image_label.setStyleSheet("font-weight: 600;")
-        image_label.setFixedHeight(image_label.fontMetrics().lineSpacing() * 2 + 6)
         layout.addWidget(image_label)
 
         overall_label = QLabel(self._t("bulk.progress.overall"), dialog)
@@ -12474,10 +12551,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         layout.addWidget(current_bar)
 
         activity_label = QLabel(self._t("bulk.progress.waiting"), dialog)
+        activity_label.setTextFormat(Qt.PlainText)
         activity_label.setWordWrap(True)
         activity_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        activity_label.setFixedHeight(activity_label.fontMetrics().lineSpacing() * 3 + 8)
-        activity_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(activity_label)
 
         button_row = QHBoxLayout()
@@ -12491,7 +12567,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         dialog.bulkCurrentProgressBar = current_bar
         dialog.bulkActivityLabel = activity_label
         dialog.bulkCancelButton = cancel_button
-        dialog.resize(640, dialog.sizeHint().height())
+        dialog.resize(min(640, available_width), dialog.sizeHint().height())
+        dialog.fit_progress_height()
         return dialog
 
     def _apply_bulk_extraction_progress(self, dialog, detail):
@@ -12554,6 +12631,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         message = str(detail.get("message") or "")
         dialog.bulkActivityLabel.setText(message)
         dialog.bulkActivityLabel.setToolTip(message)
+        dialog.fit_progress_height()
         QApplication.processEvents()
 
     def _close_bulk_extraction_progress(self):
@@ -13192,6 +13270,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         disk_layout="fill",
         catalog_number="",
         preserve_catalog_midi=False,
+        generate_yamaha_catalogs=None,
+        preserve_yamaha_catalogs=None,
     ):
         if self._disk_worker_busy():
             QMessageBox.information(self, self._lt("Busy"), self._t("emulator.busy"))
@@ -13208,12 +13288,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self._prepare_progress_dialog(progress_dialog)
         self._stabilize_progress_dialog_width(progress_dialog)
         progress_dialog.setAutoClose(False)
-        self._apply_stage_progress(
-            progress_dialog,
-            0,
-            1,
-            self._t("emulator.progress.preparing"),
-        )
 
         worker = EmulatorImageBuildWorker(
             source_directory,
@@ -13224,6 +13298,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             album_title=album_title,
             catalog_number=catalog_number,
             preserve_catalog_midi=preserve_catalog_midi,
+            generate_yamaha_catalogs=(catalog_generation_enabled(self) if generate_yamaha_catalogs is None
+                                     else generate_yamaha_catalogs),
+            preserve_yamaha_catalogs=(catalogs_enabled(self) if preserve_yamaha_catalogs is None
+                                     else preserve_yamaha_catalogs),
             output_content=output_content,
             require_midi_type0=(
                 output_content == "midi" and self._preparation_profile().midi_types == (0,)
@@ -13291,6 +13369,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             include_song_lists=include_song_lists,
         )
         self._show_centered_progress_dialog(progress_dialog)
+        self._apply_stage_progress(
+            progress_dialog,
+            0,
+            1,
+            self._t("emulator.progress.preparing"),
+        )
         worker.start()
 
     def _on_emulator_preview_requested(self, preview):
@@ -13760,6 +13844,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             ("fileBackUpBeforeSavingAction", "Back Up Before Saving", "B"),
             ("fileCreateTagSidecarsAction", "Create Tag Sidecars When Saving", "G"),
             ("fileCreateMetadataSummaryAction", "Create Metadata Summary When Saving", "D"),
+            ("settingsGenerateYamahaCatalogsAction", "Create Missing Yamaha Catalogs", "Y"),
             ("fileSaveToFloppyAction", "Save Files to Floppy...", "T"),
             ("fileWriteImageToFloppyAction", "Write Current Image to Floppy...", "W"),
             ("fileAutoWriteProtectAction", "Auto Write-Protect", "P"),
@@ -13881,9 +13966,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
     def _center_child_dialog(self, dialog):
         if dialog is None or dialog.isVisible():
             return
-        # Fit before opening; the helper finishes centering synchronously after
-        # Qt finalizes the initial size and frame. Later content and resize
-        # events must not fit or recenter a window through queued callbacks.
+        # Fit before opening; the helper handles the initial show and native
+        # frame. Later content changes, re-shows, and interactive resizing must
+        # preserve the user's geometry.
         center_dialog_on_parent(
             dialog, self,
             adjust_size=isinstance(dialog, (QMessageBox, QProgressDialog))
@@ -13982,7 +14067,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
     def _stabilize_progress_dialog_width(self, dialog, width=640):
         initial_message = dialog.labelText()
-        target_width = self._scaled_int(width, minimum=520)
+        screen = dialog.screen() or QApplication.primaryScreen()
+        target_width = min(width, max(160, screen.availableGeometry().width() - 40)) if screen else width
         dialog.setFixedWidth(target_width)
         label = QLabel(dialog)
         label.setMinimumWidth(0)
@@ -13998,7 +14084,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         label = dialog._aps_stable_progress_label
         label.setTextFormat(Qt.PlainText)
         label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        label.setMinimumHeight(QFontMetrics(label.font()).lineSpacing() * 2)
         dialog.findChild(QProgressBar).setFormat(self._lt("This step: %p%"))
         dialog.setAutoReset(False)
         dialog.setAutoClose(False)
@@ -14006,6 +14091,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         return dialog
 
     def _set_progress_dialog_message(self, dialog, message):
+        # Shrink space previously needed by a longer message, but preserve a
+        # height the user chose by resizing the window themselves.
+        previous_height = dialog.height()
+        fit_height = previous_height == dialog.sizeHint().height()
         full_message = localize_write_message(
             self._lt(str(message or "")),
             self._language_code() if hasattr(self, "_language_code") else None,
@@ -14013,6 +14102,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         label = getattr(dialog, "_aps_stable_progress_label", None)
         if label is None:
             dialog.setLabelText(full_message)
+            if fit_height:
+                dialog.resize(dialog.width(), dialog.sizeHint().height())
+            elif dialog.height() < previous_height:
+                dialog.resize(dialog.width(), previous_height)
             return
         available_width = max(160, dialog.width() - self._scaled_int(64, minimum=48))
         metrics = QFontMetrics(label.font())
@@ -14021,6 +14114,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 metrics.elidedText(line, Qt.ElideMiddle, available_width)
                 for line in full_message.split("\n")
             )
+            label.setMinimumHeight(metrics.lineSpacing() * max(1, len(display_message.splitlines())))
         else:
             display_message = metrics.elidedText(full_message, Qt.ElideMiddle, available_width)
         dialog.setLabelText(display_message)
@@ -14028,6 +14122,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         if tooltip and getattr(dialog, "_aps_floppy_file_progress", False):
             tooltip = "<qt>" + html.escape(tooltip).replace("\n", "<br>") + "</qt>"
         label.setToolTip(tooltip)
+        if fit_height:
+            dialog.resize(dialog.width(), dialog.sizeHint().height())
+        elif dialog.height() < previous_height:
+            # QProgressDialog shrinks itself when its label changes while
+            # hidden for a confirmation. Retain a height chosen by the user.
+            dialog.resize(dialog.width(), previous_height)
 
     def _show_centered_progress_dialog(self, dialog):
         if dialog is None:
@@ -17805,15 +17905,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         layout.addWidget(summary)
 
         volume_note = QLabel(self._lt(
-            "By default, Yamaha startup volume mutes are removed for MIDI playback (recommended)."
+            "Leave unchecked for normal MIDI playback. This rare expert option keeps Yamaha startup mutes and may make notes silent."
         ))
         volume_note.setWordWrap(True)
         layout.addWidget(volume_note)
-        preserve_volume_checkbox = WrappedCheckBox(self._lt("Preserve original volume controls"), dialog)
+        preserve_volume_checkbox = WrappedCheckBox(self._lt("Preserve original volume controls (experts only)"), dialog)
         preserve_volume_checkbox.setObjectName("preserveOriginalVolumeControls")
         preserve_volume_checkbox.setChecked(self._eseq_conversion_cc7_policy == CC7_POLICY_PRESERVE)
         preserve_volume_checkbox.setToolTip(self._lt(
-            "Keep every original volume change, including zero-volume commands and notes played while muted."
+            "Enable only if you specifically need the original zero-volume commands and understand their effect on playback. Otherwise, leave this unchecked."
         ))
         layout.addWidget(preserve_volume_checkbox)
 
@@ -19324,6 +19424,17 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             or self.pendingImageReplacements
             or self._eseq_order_changed()
             or self._image_pianodir_metadata_changed()
+            or (catalogs_enabled(self) and (catalog_generation_enabled(self) or any(
+                os.path.basename(path).upper() in {"PDISK.MNG", "PSONG.MNG", "PIANODIR.FIL"}
+                for path in self.imageEntriesByPath if path not in self.pendingImageDeletes
+            )) and (
+                self._current_image_pianodir_metadata() != self.loadedImagePianodirMetadata
+                or (catalog_generation_enabled(self) and self._image_mode_file_counts()[0] and (
+                    not self.smartPianoSoftCatalogPath or not any(
+                        os.path.basename(path).upper() == "PDISK.MNG" for path in self.imageEntriesByPath
+                    )
+                ))
+            ))
             or self._image_directory_filename_mismatch()
             or self._should_generate_pianodir()
             or self.pendingDeletePianodir
@@ -19734,6 +19845,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 if enabled else
                 "Please wait for the current operation to finish before changing metadata summary output."
             )
+        self._refresh_yamaha_catalog_action()
         if hasattr(self, "fileCreateAlbumSubfolderAction"):
             enabled = self.choose_button.isEnabled()
             album_subfolder_tooltip = self._lt(
@@ -20325,6 +20437,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.pendingEdits.clear()
+        self.pendingYamahaCatalogPayloads = {}
         self.pendingRegularOrderKeyEdits.clear()
         self.listedFileInfo.clear()
         self.regularModeContextPath = ""
@@ -20379,6 +20492,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
     def _regular_export_rows(self):
         rows = self._regular_file_rows()
+        catalog_directories = regular_catalog_source_directories(self)
+        rows = [row for row in rows if not (
+            os.path.basename(self.table.item(row, 1).text()).upper() in {"PSONG.MNG", "PDISK.MNG"}
+            and os.path.dirname(os.path.abspath(self.table.item(row, 1).text())) in catalog_directories
+        )]
         if not self.is_local_eseq_mode() or MidiTitleWindow._preparation_uses_file_output(self):
             return rows
         return [row for row in rows
@@ -20581,6 +20699,26 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         action = getattr(self, "settingsRandomOutputSuffixesAction", None)
         if action is not None and action.isChecked() != bool(enabled):
             action.setChecked(bool(enabled))
+
+    @staged_batch
+    def toggle_yamaha_catalog_generation(self, enabled):
+        self.settings.setValue(SETTING_GENERATE_YAMAHA_CATALOGS, bool(enabled))
+        self._refresh_yamaha_catalog_action()
+        if enabled:
+            self._prepare_destination_filenames(midi_catalogs_only=True)
+        if self.is_image_mode():
+            self._refresh_image_mode_action_state()
+        else:
+            self._refresh_regular_mode_action_state()
+
+    def _refresh_yamaha_catalog_action(self):
+        action = getattr(self, "settingsGenerateYamahaCatalogsAction", None)
+        if action is None:
+            return
+        blocked = action.blockSignals(True)
+        action.setChecked(catalog_generation_enabled(self))
+        action.blockSignals(blocked)
+        action.setEnabled(self.choose_button.isEnabled())
 
     def _random_output_suffixes_enabled(self):
         return random_output_suffixes_enabled(self.settings)
@@ -20806,7 +20944,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         dialog.show()
 
     def _inspection_items(self, *, include_catalogs=False):
-        from .catalog_inspection import CATALOG_NAMES
+        from .catalog_inspection import INSPECTION_CATALOG_NAMES as CATALOG_NAMES
 
         items = []
         rows = self._current_song_rows_for_listing()
@@ -20845,7 +20983,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         return items
 
     def _inspection_catalog_items(self, song_items):
-        from .catalog_inspection import CATALOG_NAMES
+        from .catalog_inspection import INSPECTION_CATALOG_NAMES as CATALOG_NAMES
 
         items = []
         if self.is_image_mode():
@@ -20856,11 +20994,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 name = os.path.basename(source_path)
                 if name.upper() not in CATALOG_NAMES:
                     continue
+                if name.upper() == PIANODIR_FILENAME and getattr(self, "pendingDeletePianodir", False):
+                    continue
                 try:
-                    material_path = (
-                        getattr(self, "pendingSmartPianoSoftCatalogReplacement", "")
-                        if name.upper() == "PSONG.MNG" else ""
-                    ) or self._pending_or_extracted_image_path(source_path)
+                    material_path = self._pending_or_extracted_image_path(source_path)
                 except Exception:
                     continue
                 if material_path and os.path.isfile(material_path):
@@ -20874,6 +21011,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             context = str(getattr(self, "regularModeContextPath", "") or "")
             if context and os.path.isdir(context):
                 folders.add(context)
+            pianodir_source = getattr(self, "regularPianodirSourcePath", "")
+            if pianodir_source and os.path.isfile(pianodir_source):
+                folders.add(os.path.dirname(pianodir_source))
             seen = set()
             table = getattr(self, "table", None)
             if table is not None:
@@ -21919,7 +22059,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         regular_specs = []
         probe_errors = []
         folder_metadata = {
-            directory: smart_pianosoft_metadata_from_directory(directory)
+            directory: yamaha_catalog_metadata_from_directory(directory)
             for directory in {os.path.dirname(os.path.abspath(path)) for path in file_paths}
         }
         album_titles = {metadata.disk_title for metadata in folder_metadata.values() if metadata.disk_title}
@@ -21973,6 +22113,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 continue
             if title_mode == "eseq" and dos_filename_key(os.path.basename(full_path)) in music_dir_order_keys:
                 order_key = music_dir_order_keys[dos_filename_key(os.path.basename(full_path))]
+            metadata = folder_metadata[os.path.dirname(os.path.abspath(full_path))]
+            catalog_song = next((song for song in metadata.songs
+                                 if song.filename.casefold() == os.path.basename(full_path).casefold()), None)
+            if (title_mode == "eseq" or (title_mode == "midi" and catalogs_enabled(self))) and catalog_song is not None and catalog_song.title:
+                title = catalog_song.title
             regular_specs.append(
                 (
                     full_path,
@@ -22371,11 +22516,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self.pendingFloppyReadLongFilenames = False
         if not self.is_image_mode() or self._preparation_requires_dos83_filenames():
             return 0
+        catalog_directories = image_catalog_source_directories(self)
         midi_rows = [
             row for row in range(self.table.rowCount())
             if not self._is_special_pianodir_row(row)
             and self.table.item(row, 1) is not None
             and self._image_path_is_midi(self.table.item(row, 1).text())
+            and os.path.dirname(self._final_image_path(self.table.item(row, 1).text())) not in catalog_directories
         ]
         for number, row in enumerate(midi_rows, start=1):
             source_path = self.table.item(row, 1).text()
@@ -22571,6 +22718,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
     def _export_image_session_files_to_folder(self, dest_dir, progress_callback=None):
         export_rows = []
+        yamaha_payloads = image_catalog_payloads(self)
+        catalog_directories = {os.path.dirname(path) for path in yamaha_payloads}
         order_key_edits = self._image_eseq_order_key_edits()
         for row in range(self.table.rowCount()):
             path_item = self.table.item(row, 1)
@@ -22578,6 +22727,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 continue
             source_path = path_item.text()
             if self._is_special_pianodir_path(source_path) or source_path in self.pendingImageDeletes:
+                continue
+            if yamaha_payloads and os.path.basename(source_path).upper() in {"PSONG.MNG", "PDISK.MNG"}:
                 continue
             if self.imageEseqMode and not MidiTitleWindow._preparation_uses_file_output(self):
                 if self._image_path_title_mode(source_path) != "eseq":
@@ -22597,7 +22748,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
         for index, (row, source_path) in enumerate(export_rows, start=1):
             final_image_path = self._final_image_path(source_path)
-            folder_export_path = self._image_folder_export_path(source_path, final_image_path)
+            folder_export_path = (final_image_path if os.path.dirname(final_image_path) in catalog_directories else
+                                  self._image_folder_export_path(source_path, final_image_path))
             display_name = os.path.basename(final_image_path) or final_image_path
             if progress_callback is not None:
                 progress_callback(index - 1, total_steps, self._lt("Saving {filename}...", filename=display_name))
@@ -22645,6 +22797,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 shutil.copy2(existing_pianodir, pianodir_path)
                 output_paths.append(pianodir_path)
 
+        output_paths.extend(write_catalog_payloads({
+            os.path.join(dest_dir, *self._image_export_relative_parts(path)): payload
+            for path, payload in yamaha_payloads.items()
+        }))
         if progress_callback is not None:
             progress_callback(total_steps, total_steps, "Finalizing exported files...")
 
@@ -22656,15 +22812,25 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         progress_callback=None,
         *,
         metadata_summary_path_label_base_dir=None,
+        export_rows=None,
     ):
         os.makedirs(export_dir, exist_ok=True)
-        export_rows = MidiTitleWindow._regular_export_rows(self)
+        if export_rows is None:
+            export_rows = MidiTitleWindow._regular_export_rows(self)
         row_count = len(export_rows)
         total_steps = max(1, row_count + 3)
         regular_order_key_edits = self._regular_eseq_order_key_edits() if self.is_local_eseq_mode() else {}
         errors = []
         output_paths = []
         output_path_map = {}
+
+        try:
+            yamaha_payloads = regular_catalog_payloads(self, path_remap={
+                self.table.item(row, 1).text(): os.path.join(export_dir, self._regular_row_output_filename(row))
+                for row in export_rows
+            }, base_dir=export_dir)
+        except Exception as exc:
+            return [f"Could not prepare Yamaha catalogs: {exc}"], [], {}, ""
 
         for index, row in enumerate(export_rows, start=1):
             full_path_item = self.table.item(row, 1)
@@ -22704,6 +22870,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 copied_pianodir = os.path.join(export_dir, self._eseq_directory_filename(self.regularEseqVariant))
                 shutil.copy2(existing_pianodir, copied_pianodir)
                 output_paths.append(copied_pianodir)
+
+        if not errors:
+            try:
+                output_paths.extend(write_catalog_payloads(yamaha_payloads))
+            except Exception as exc:
+                errors.append(f"Could not save Yamaha catalogs: {exc}")
 
         if not errors:
             if progress_callback is not None:
@@ -23022,20 +23194,21 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         return self.image_session.extract_file(image_path)
 
     def _stage_smart_pianosoft_catalog_title(self, image_path, new_title):
-        if self.image_session is None or not self.smartPianoSoftCatalogPath:
+        directory = os.path.dirname(image_path).replace("\\", "/").casefold()
+        catalog_path = next((path for path in sorted(set(self.imageEntriesByPath) | set(self.pendingImageAdditions))
+                             if path not in self.pendingImageDeletes
+                             and os.path.basename(path).upper() == SMART_PIANOSOFT_SONG_CATALOG_NAME
+                             and os.path.dirname(path).replace("\\", "/").casefold() == directory), "")
+        if self.image_session is None or not catalog_path:
             raise FloppyImageError("The Smart PianoSoft PSONG.MNG catalog is not available.")
 
-        catalog_path = self.smartPianoSoftCatalogPath
-        source_catalog_path = (
-            self.pendingSmartPianoSoftCatalogReplacement
-            or self.pendingImageReplacements.get(catalog_path)
-            or self.image_session.extract_file(catalog_path)
-        )
+        source_catalog_path = self._pending_or_extracted_image_path(catalog_path)
         title_edits = dict(self.pendingSmartPianoSoftTitleEdits)
         title_edits[image_path] = new_title
         catalog_title_updates = {
             os.path.basename(source_path): title
             for source_path, title in title_edits.items()
+            if os.path.dirname(source_path).replace("\\", "/").casefold() == directory
         }
         replacement_path = os.path.join(
             self.image_session.patched_dir,
@@ -23047,10 +23220,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             catalog_title_updates,
         )
 
-        previous_generated = self.pendingSmartPianoSoftCatalogReplacement
+        previous_generated = (source_catalog_path if source_catalog_path == self.pendingSmartPianoSoftCatalogReplacement else "")
         self.pendingSmartPianoSoftTitleEdits = title_edits
         self.pendingSmartPianoSoftCatalogReplacement = replacement_path
-        self.pendingImageReplacements[catalog_path] = replacement_path
+        if catalog_path in self.pendingImageAdditions:
+            self.pendingImageAdditions[catalog_path] = replacement_path
+        else:
+            self.pendingImageReplacements[catalog_path] = replacement_path
         self.pendingImageTitleEdits.pop(image_path, None)
         if previous_generated and previous_generated != replacement_path:
             try:
@@ -24940,7 +25116,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self._set_disk_write_busy(False)
 
     def _collect_current_image_write_operations(self, *, for_export=False):
-        renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
+        try:
+            renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
+        except Exception as exc:
+            self._show_operation_error("Save Failed", "Some pending changes could not be saved", exc)
+            return
         return {
             "renames": renames,
             "deletes": deletes,
@@ -25372,7 +25552,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
     def _start_write_image_to_floppy_worker(self, target_kind, target, target_name, operations, *, file_level=False,
                                           session=None, temporary_directory=None, verify_after_write=None):
-        if MidiTitleWindow._preparation_uses_file_output(self):
+        if operations is None or MidiTitleWindow._preparation_uses_file_output(self):
             return
         self._reset_gw_sector_report_dedupe()
         if file_level:
@@ -26455,6 +26635,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self._offer_logical_floppy_capture(context)
 
     def _load_image_rows(self, entries):
+        entries = tuple(entries)
+        # Snapshot loaders can call this directly after detaching the source
+        # media. Keep catalog discovery tied to the same supplied listing.
+        self.imageEntriesByPath = {entry.path: entry for entry in entries}
         self.imageFileInfo.clear()
         self.smartPianoSoftCatalogPath = next(
             (
@@ -26469,6 +26653,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self.image_session,
             entries,
         )
+        catalogs_by_directory = {
+            os.path.dirname(entry.path).replace("\\", "/").casefold(): smart_pianosoft_catalog_from_session(
+                self.image_session, [entry],
+            )
+            for entry in entries
+            if os.path.basename(entry.path).upper() == SMART_PIANOSOFT_SONG_CATALOG_NAME
+        }
         self.pendingSmartPianoSoftTitleEdits.clear()
         self.pendingSmartPianoSoftCatalogReplacement = ""
         self.imageHasPianodir = False
@@ -26478,6 +26669,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self.imageTitlesLikelyCentered = False
         loaded_pianodir_metadata = PianodirMetadata()
         image_order_overrides = {}
+        pianodir_songs_by_directory = {}
 
         musicdir_entries = [entry for entry in entries if is_musicdir_path(entry.path)]
         pianodir_entries = [entry for entry in entries if is_pianodir_path(entry.path)]
@@ -26499,10 +26691,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             for entry in pianodir_entries:
                 try:
                     local_path = self.image_session.extract_file(entry.path)
-                    loaded_pianodir_metadata = read_pianodir_metadata_from_file(local_path)
-                    break
+                    source_metadata = yamaha_metadata_from_pianodir_bytes(Path(local_path).read_bytes())
+                    if not pianodir_songs_by_directory:
+                        loaded_pianodir_metadata = read_pianodir_metadata_from_file(local_path)
+                    directory = os.path.dirname(entry.path).replace("\\", "/").casefold()
+                    pianodir_songs_by_directory[directory] = {
+                        song.filename.casefold(): song for song in source_metadata.songs
+                    }
                 except Exception:
-                    loaded_pianodir_metadata = PianodirMetadata()
+                    pass
 
         row_specs = []
         for entry in entries:
@@ -26519,13 +26716,18 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                     entry.size,
                     local_path,
                 )
-                catalog_song = self.smartPianoSoftCatalog.get(entry.name.casefold())
+                directory = os.path.dirname(entry.path).replace("\\", "/").casefold()
+                catalog_song = catalogs_by_directory.get(directory, {}).get(entry.name.casefold())
                 if is_midi and catalog_song is not None and catalog_song.title:
                     title = catalog_song.title
                     info = self._image_info_for_path(entry.path)
                     info["title"] = title
                     info["title_source"] = "smart_pianosoft_catalog"
                     info["smart_pianosoft_track"] = catalog_song.track_number
+                pianodir_song = pianodir_songs_by_directory.get(directory, {}).get(entry.name.casefold())
+                if not is_midi and pianodir_song is not None:
+                    title = pianodir_song.title or title
+                    self._image_info_for_path(entry.path)["title"] = title
                 if dos_filename_key(entry.name) in image_order_overrides:
                     order_key = image_order_overrides[dos_filename_key(entry.name)]
             except Exception:
@@ -28721,6 +28923,71 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         omitted_count = max(0, visible_file_count - len(midi_specs))
         return midi_specs, omitted_count
 
+    def _yamaha_midi_conversion_order(self):
+        """Capture native catalog order without staging changes to E-SEQ files.
+
+        Existing row reordering is an intentional playback edit and takes
+        priority. Apply catalog order only to MIDI rows after conversion, so
+        cancellation cannot reorder the remaining native E-SEQ performances.
+        """
+        if (not catalogs_enabled(self) or self._eseq_order_changed()
+                or getattr(self, "pendingRegularOrderKeyEdits", {})):
+            return []
+        image_mode = self.is_image_mode()
+        order = {}
+        rows = self._image_eseq_rows() if image_mode else self._regular_eseq_rows()
+        if image_mode:
+            paths = set(self.imageEntriesByPath) | set(self.pendingImageAdditions)
+            for path in paths:
+                if path in self.pendingImageDeletes or not is_pianodir_path(path):
+                    continue
+                try:
+                    metadata = yamaha_metadata_from_pianodir_bytes(
+                        Path(self._pending_or_extracted_image_path(path)).read_bytes(),
+                    )
+                except (OSError, ValueError):
+                    continue
+                directory = os.path.dirname(path)
+                order.update({os.path.join(directory, song.filename).replace("\\", "/").casefold(): song.track_number
+                              for song in metadata.songs})
+        else:
+            directories = {os.path.dirname(self.table.item(row, 1).text()) for row in rows}
+            for directory in directories:
+                metadata = yamaha_catalog_metadata_from_directory(directory)
+                order.update({os.path.join(directory, song.filename).replace("\\", "/").casefold(): song.track_number
+                              for song in metadata.songs})
+        if not order:
+            return []
+        items = [self.table.item(row, 1) for row in rows]
+        # Keep separate source folders in their displayed order.
+        directories = {}
+        for item in items:
+            directories.setdefault(os.path.dirname(item.text()).casefold(), len(directories))
+        return sorted(items, key=lambda item: (
+            directories[os.path.dirname(item.text()).casefold()],
+            order.get(item.text().replace("\\", "/").casefold(), 1000), item.row(),
+        ))
+
+    def _apply_yamaha_midi_conversion_order(self, ordered_items):
+        image_mode = self.is_image_mode()
+        selected = [item for item in ordered_items if item.row() >= 0 and (
+            self._image_path_title_mode(item.text()) if image_mode
+            else self._listed_file_title_mode(item.text())) == "midi"]
+        target_rows = sorted(item.row() for item in selected)
+        if [item.row() for item in selected] == target_rows:
+            return
+        signals_blocked = self.table.blockSignals(True)
+        self.table.setSortingEnabled(False)
+        try:
+            source_rows = [item.row() for item in selected]
+            contents = [[self.table.takeItem(row, column)
+                         for column in range(self.table.columnCount())] for row in source_rows]
+            for row, items in zip(target_rows, contents):
+                for column, item in enumerate(items):
+                    self.table.setItem(row, column, item)
+        finally:
+            self.table.blockSignals(signals_blocked)
+
     def _image_eseq_conversion_rows(self):
         rows = []
         if self.image_session is None:
@@ -28767,6 +29034,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
         self.pendingExportPianodirMetadata = self._current_visible_pianodir_metadata()
 
+        midi_catalog_order = self._yamaha_midi_conversion_order()
+
         progressDialog = QProgressDialog(
             "Converting E-SEQ files...",
             "Cancel",
@@ -28806,6 +29075,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             QApplication.processEvents()
 
         progressDialog.close()
+        self._apply_yamaha_midi_conversion_order(midi_catalog_order)
         has_eseq_remaining = False
         for row in range(self.table.rowCount()):
             if self._is_special_pianodir_row(row):
@@ -29061,6 +29331,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self.pendingExportPianodirMetadata = self._current_visible_pianodir_metadata()
         else:
             self.pendingExportPianodirMetadata = PianodirMetadata()
+        midi_catalog_order = (self._yamaha_midi_conversion_order()
+                              if source_kind == "eseq" and target_kind == "midi" else [])
 
         progressDialog = QProgressDialog(
             self._lt("Converting {format} files...", format=localize_music_format(source_kind.upper())),
@@ -29076,6 +29348,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         errors = []
         title_trim_errors = []
         scratch_dir = self._ensure_midi_scratch_dir()
+        catalog_directories = (regular_catalog_source_directories(self, include_eseq=True)
+                               if target_kind == "midi" and use_long_filenames else set())
         for index, full_path in enumerate(applicable_paths):
             if progressDialog.wasCanceled():
                 break
@@ -29095,7 +29369,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 title_trim_errors.extend(trim_errors)
 
             current_title = self._row_raw_title(row)
-            if target_kind == "midi" and use_long_filenames and full_path not in self.pendingRegularRenames:
+            if (target_kind == "midi" and use_long_filenames and full_path not in self.pendingRegularRenames
+                    and os.path.dirname(os.path.abspath(full_path)) not in catalog_directories):
                 target_filename = self._long_midi_filename_for_row(
                     row,
                     index + 1,
@@ -29153,6 +29428,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             QApplication.processEvents()
 
         progressDialog.close()
+        self._apply_yamaha_midi_conversion_order(midi_catalog_order)
 
         if target_kind == "eseq" and converted_count and not self._regular_midi_file_count():
             self._drop_mng_catalog_rows_for_eseq()
@@ -29287,6 +29563,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self.pendingExportPianodirMetadata = self._current_visible_pianodir_metadata()
         else:
             self.pendingExportPianodirMetadata = PianodirMetadata()
+        midi_catalog_order = (self._yamaha_midi_conversion_order()
+                              if source_kind == "eseq" and target_kind == "midi" else [])
 
         progressDialog = QProgressDialog(
             self._lt("Converting {format} files...", format=localize_music_format(source_kind.upper())),
@@ -29301,6 +29579,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         trimmed_title_count = 0
         errors = []
         title_trim_errors = []
+        catalog_directories = (image_catalog_source_directories(self)
+                               if target_kind == "midi" and use_long_filenames else set())
         for index, row in enumerate(applicable_rows):
             if progressDialog.wasCanceled():
                 break
@@ -29315,7 +29595,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                         index + 1,
                         len(applicable_rows),
                     )
-                    if target_kind == "midi" and use_long_filenames
+                    if (target_kind == "midi" and use_long_filenames
+                        and not catalog_generation_enabled(self)
+                        and os.path.dirname(self._final_image_path(self.table.item(row, 1).text())) not in catalog_directories)
                     else ""
                 )
                 converted.append(
@@ -29335,6 +29617,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             QApplication.processEvents()
 
         progressDialog.close()
+        self._apply_yamaha_midi_conversion_order(midi_catalog_order)
         if target_kind == "eseq" and converted and not self._preparation_song_counts().get("midi", 0):
             self._drop_mng_catalog_rows_for_eseq()
         if source_kind == "eseq" and target_kind == "midi":
@@ -31361,11 +31644,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self.table.setCurrentItem(None)
 
     def _collect_image_operations(self):
+        additions = dict(self.pendingImageAdditions)
+        replacements = dict(self.pendingImageReplacements)
+        stage_image_catalogs(self, additions, replacements)
         return (
             dict(self.pendingImageRenames),
             set(self.pendingImageDeletes),
-            dict(self.pendingImageAdditions),
-            dict(self.pendingImageReplacements),
+            additions,
+            replacements,
             dict(self.pendingImageTitleEdits),
             bool(self.pendingDeletePianodir),
         )
@@ -31476,7 +31762,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 )
                 return
 
-        renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
+        try:
+            renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
+        except Exception as exc:
+            self._show_operation_error("Save Failed", "Some pending changes could not be saved", exc)
+            return
         order_key_edits = self._image_eseq_order_key_edits()
         if self.image_session.source_kind == "floppy_usb":
             progress_text = "Saving files to floppy..."
@@ -32658,7 +32948,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         )
         self._reset_gw_sector_report_dedupe()
 
-        renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
+        try:
+            renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
+        except Exception as exc:
+            self._show_operation_error("Save Failed", "Some pending changes could not be saved", exc)
+            return
         order_key_edits = self._image_eseq_order_key_edits()
         progressDialog = QProgressDialog("Exporting floppy image...", None, 0, 5, self)
         self._prepare_progress_dialog(progressDialog)
@@ -32918,6 +33212,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         export_rows = MidiTitleWindow._regular_export_rows(self)
         row_count = len(export_rows)
         file_specs = []
+        catalog_path_map = {}
         used_names = set()
         regular_order_key_edits = self._regular_eseq_order_key_edits() if self.is_local_eseq_mode() else {}
 
@@ -32943,6 +33238,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 enforce_dos83=(True if self.is_local_eseq_mode() else enforce_dos83),
             )
             used_names.add(image_name.upper())
+            catalog_path_map[full_path] = os.path.join(temp_dir, image_name)
             staged_path = os.path.join(
                 temp_dir,
                 f"{index:04d}_{image_name}",
@@ -33019,6 +33315,18 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                         "title_mode": "",
                     }
                 )
+
+        image_catalog_records = {}
+        for path in write_catalog_payloads(regular_catalog_payloads(
+            self, path_remap=catalog_path_map, base_dir=temp_dir,
+            image_record_sink=image_catalog_records,
+        )):
+            file_specs.append({"host_path": path, "image_path": os.path.basename(path),
+                               "display_name": os.path.basename(path), "title_mode": "catalog", "title": ""})
+        for spec in file_specs:
+            record = image_catalog_records.get(os.path.join(temp_dir, spec["image_path"]))
+            if record is not None:
+                spec["yamaha_song_record"] = record
 
         if progress_callback is not None:
             progress_callback(len(file_specs), max(1, len(file_specs)), "Preparing floppy image export...")
@@ -33369,7 +33677,12 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 guidance=self._t("save.retry"),
             )
             return
-        if not any((file_updates, self.pendingRegularRenames, should_write_local_pianodir,
+        try:
+            yamaha_payloads = regular_catalog_payloads(self, retain_unlisted=True)
+        except Exception as exc:
+            self._show_error_list("Save Failed", "Some pending changes could not be saved", [str(exc)])
+            return
+        if not any((file_updates, self.pendingRegularRenames, yamaha_payloads, should_write_local_pianodir,
                     should_write_tag_sidecars, should_write_metadata_summary)):
             QMessageBox.information(self, "No Changes", "There are no pending changes to save.")
             return
@@ -33383,6 +33696,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         if should_write_local_pianodir:
             self.pendingGeneratePianodir = True
         self.pendingRegularOrderKeyEdits = dict(regular_order_key_edits)
+        self.pendingYamahaCatalogPayloads = yamaha_payloads
         backup_created_for = set()
         saved_paths = set()
         output_path_map = {}
@@ -33488,6 +33802,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 self._refresh_regular_pianodir_row()
             except Exception as exc:
                 errors.append(f"Could not write {self._eseq_directory_filename(self.regularEseqVariant)}: {exc}")
+
+        if not errors and not cancelled and yamaha_payloads:
+            try:
+                write_catalog_payloads(yamaha_payloads, backup_callback=self._create_backup_if_enabled)
+                self.pendingYamahaCatalogPayloads = {}
+                self.loadedRegularPianodirMetadata = self._current_regular_pianodir_metadata()
+                self._invalidate_staged_undo()
+            except Exception as exc:
+                errors.append(f"Could not save Yamaha catalogs: {exc}")
 
         if not errors and not cancelled and should_write_tag_sidecars:
             errors.extend(self._write_tag_sidecars_for_regular_rows())
@@ -33666,9 +33989,19 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
+    def _regular_save_as_rows(self):
+        """Folder Save As retains every listed file, including staged conversions."""
+        rows = self._regular_file_rows()
+        catalog_directories = regular_catalog_source_directories(self)
+        rows = [row for row in rows if not (
+            os.path.basename(self.table.item(row, 1).text()).upper() in {"PSONG.MNG", "PDISK.MNG"}
+            and os.path.dirname(os.path.abspath(self.table.item(row, 1).text())) in catalog_directories
+        )]
+        return rows
+
     def _regular_save_as_destination_paths(self, export_dir):
         paths = [os.path.join(export_dir, self._regular_row_output_filename(row))
-                 for row in MidiTitleWindow._regular_export_rows(self)]
+                 for row in MidiTitleWindow._regular_save_as_rows(self)]
         if self._tag_sidecars_enabled():
             paths.extend(self._tag_sidecar_path_for_output(path) for path in tuple(paths)
                          if not is_pianodir_path(path) and os.path.basename(path).upper() not in CATALOG_NAMES)
@@ -33676,6 +34009,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self._should_generate_pianodir(for_export=True) or self.regularHasPianodir
         ):
             paths.append(os.path.join(export_dir, self._eseq_directory_filename(self.regularEseqVariant)))
+        paths.extend(catalog_output_path(export_dir, name) for name in sorted(regular_catalog_names(self)))
         if self._metadata_summary_enabled():
             paths.append(self._metadata_summary_path_for_directory(export_dir))
         return paths
@@ -33700,6 +34034,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 errors, staged_outputs, _path_map, summary_path = self._export_regular_files_to_folder(
                     staging_dir, progress_callback=prepare_progress,
                     metadata_summary_path_label_base_dir=staging_dir,
+                    export_rows=MidiTitleWindow._regular_save_as_rows(self),
                 )
                 progress.hide()
                 if errors:
@@ -33709,7 +34044,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                     )
                     return
                 prepared = [
-                    (str(path), os.path.join(export_dir, str(path.relative_to(staging_dir))))
+                    (str(path), catalog_output_path(export_dir, path.name)
+                     if catalogs_enabled(self) and path.name.upper() in {"PSONG.MNG", "PDISK.MNG"}
+                     else os.path.join(export_dir, str(path.relative_to(staging_dir))))
                     for path in sorted(Path(staging_dir).rglob("*")) if path.is_file()
                 ]
                 existing = [destination for _source, destination in prepared if os.path.lexists(destination)]
@@ -33752,8 +34089,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                         index, total, self._lt("Saving {filename}...", filename=os.path.basename(path)),
                     ),
                 )
-                output_paths = [os.path.join(export_dir, os.path.relpath(path, staging_dir))
-                                for path in staged_outputs]
+                published_paths = dict(prepared)
+                output_paths = [published_paths[str(path)] for path in staged_outputs]
                 summary_name = os.path.basename(summary_path) if summary_path else ""
             progress.close()
         except InterruptedError:
@@ -33907,6 +34244,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             return
         export_dir = self._destination_with_album_subfolder(dest_dir)
         album_subfolder_note = self._save_as_album_subfolder_note(dest_dir, export_dir)
+        export_rows = MidiTitleWindow._regular_save_as_rows(self)
+        try:
+            yamaha_payloads = regular_catalog_payloads(self, path_remap={
+                self.table.item(row, 1).text(): os.path.join(export_dir, self._regular_row_output_filename(row))
+                for row in export_rows
+            }, base_dir=export_dir)
+        except Exception as exc:
+            self._show_error_list("Save As Failed", "Some pending changes could not be saved", [str(exc)])
+            return
         os.makedirs(export_dir, exist_ok=True)
         destinations = self._regular_save_as_destination_paths(export_dir)
         destination_keys = set()
@@ -33943,7 +34289,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         output_paths = []
         output_path_map = {}
         cancelled = False
-        for i, row in enumerate(self._regular_file_rows()):
+        for i, row in enumerate(export_rows):
             if progressDialog.wasCanceled():
                 cancelled = True
                 break
@@ -33988,6 +34334,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 copied_pianodir = os.path.join(export_dir, self._eseq_directory_filename(self.regularEseqVariant))
                 shutil.copy2(existing_pianodir, copied_pianodir)
                 output_paths.append(copied_pianodir)
+        if not errors:
+            try:
+                output_paths.extend(write_catalog_payloads(yamaha_payloads))
+            except Exception as exc:
+                errors.append(f"Could not save Yamaha catalogs: {exc}")
         if not errors:
             errors.extend(
                 self._write_tag_sidecars_for_regular_rows(

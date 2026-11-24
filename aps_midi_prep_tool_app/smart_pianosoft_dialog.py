@@ -1,6 +1,7 @@
 """Smart PianoSoft: insert media, verify pairings, prepare an album."""
 
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 
@@ -9,7 +10,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMenu, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QStyle, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QStyle, QStyleOptionButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .floppy_image import (
@@ -17,13 +18,43 @@ from .floppy_image import (
     GreaseweazleFloppySource,
 )
 from .icon_utils import apply_window_icon
+from .localized_dialogs import QMessageBox
 from .helpers.output_names import random_output_suffixes_enabled
 from .message_catalog import normalize_language_code, tr, translate_text
 from .audio_preparation import audio_playback_note_key, default_audio_output
-from .preparation_profiles import SETTING_PROFILE, get_preparation_profile
+from .preparation_profiles import (
+    SETTING_PROFILE, get_preparation_profile, generate_yamaha_catalogs_enabled, preserves_yamaha_midi_catalogs,
+)
 from .responsive_button_box import ResponsiveDialogButtonBox
 from .smart_pianosoft_workflow import LoadedAlbumSource, scan_album, scan_loaded_album, prepare_album
-from .ui_utils import resize_dialog_to_screen
+from .ui_utils import center_dialog_on_parent, resize_dialog_to_screen
+
+
+class _PreparationButton(QPushButton):
+    """Reserve native button space for both Start and Restart captions."""
+
+    def __init__(self):
+        super().__init__()
+        self._caption_choices = ()
+
+    def set_caption_choices(self, captions):
+        captions = tuple(captions)
+        if captions != self._caption_choices:
+            self._caption_choices = captions
+            self.updateGeometry()
+
+    def sizeHint(self):
+        size = super().sizeHint()
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        for caption in self._caption_choices:
+            option.text = caption
+            contents = self.fontMetrics().size(Qt.TextShowMnemonic, caption)
+            if not option.icon.isNull():
+                contents.setWidth(contents.width() + option.iconSize.width() + 4)
+                contents.setHeight(max(contents.height(), option.iconSize.height()))
+            size = size.expandedTo(self.style().sizeFromContents(QStyle.CT_PushButton, option, contents, self))
+        return size
 
 
 class _WrappingLabel(QLabel):
@@ -84,12 +115,19 @@ class SmartPianoSoftWorker(QThread):
         self.task = task
         self.cancelled = threading.Event()
         self.consent_granted = not require_consent
+        self._preparation_complete = False
 
     def _check_cancel(self):
         if self.cancelled.is_set():
             raise FloppyOperationCancelled("Smart PianoSoft preparation cancelled.")
 
     def _progress(self, detail):
+        if detail.get("phase") == "complete":
+            # The manifest and all outputs are committed. A late Cancel must
+            # not turn this result into an unreported output folder.
+            self._preparation_complete = True
+            self.progressChanged.emit(detail)
+            return
         self._check_cancel()
         smart_track = detail.get("phase") == "scan" and detail.get("completed", 0) > 0
         protected_read = "yamaha copy protection?" in str(detail.get("message", "")).casefold()
@@ -113,7 +151,8 @@ class SmartPianoSoftWorker(QThread):
     def run(self):
         try:
             result = self.task(self.cancelled, self._progress)
-            self._check_cancel()
+            if not self._preparation_complete:
+                self._check_cancel()
             self.succeeded.emit(result)
         except Exception as exc:
             self.failed.emit({"error": str(exc), "cancelled": self.cancelled.is_set(),
@@ -143,6 +182,7 @@ class SmartPianoSoftDialog(QDialog):
         self._closing = False
         self._operation = ""
         self._operation_done = False
+        self._incomplete_output = None
         self._loaded_source = loaded_source
         self._using_loaded_source = loaded_source is not None
         self._loaded_source_consent_granted = loaded_source is not None and bool(
@@ -299,7 +339,7 @@ class SmartPianoSoftDialog(QDialog):
         self.buttons = ResponsiveDialogButtonBox()
         self.open_button = QPushButton(self.text("open"))
         self.open_button.clicked.connect(self.open_output)
-        self.start_button = QPushButton()
+        self.start_button = _PreparationButton()
         self.start_button.setObjectName("smartPianoSoftStart")
         self.start_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         start_font = self.start_button.font()
@@ -321,7 +361,11 @@ class SmartPianoSoftDialog(QDialog):
         self.format_combo.currentIndexChanged.connect(self._update_controls)
         self.table.itemSelectionChanged.connect(self._update_controls)
         self._update_controls()
-        resize_dialog_to_screen(self, width=940, height=700)
+        # Size for the completed footer from the beginning. Smaller screens
+        # keep its stacked layout throughout the run instead of switching at
+        # completion when Restart and Open output folder become available.
+        footer_width = self.buttons.sizeHint().width() + 64
+        resize_dialog_to_screen(self, width=max(940, footer_width), height=700)
         if loaded_source is not None:
             self._discover_after_scan = discover_on_open
             QTimer.singleShot(0, self.start_scan)
@@ -357,6 +401,9 @@ class SmartPianoSoftDialog(QDialog):
         cd_selected = bool(cd_device)
         restarting = cd_selected and cd_device == self._completed_cd_device
         output_format = "MIDI/MP3" if self.format_combo.currentData() == "midi_mp3" else "WAV"
+        self.start_button.set_caption_choices(
+            self.text(key, format=output_format) for key in ("start_files", "start", "restart")
+        )
         self.start_button.setText(self.text(
             "restart" if restarting else "start" if cd_selected else "start_files", format=output_format,
         ))
@@ -370,7 +417,6 @@ class SmartPianoSoftDialog(QDialog):
         self.pair_button.setEnabled(not busy and selected)
         self.automatic_button.setEnabled(not busy and selected)
         self.open_button.setEnabled(not busy and self.result_folder is not None)
-        self.open_button.setVisible(self.result_folder is not None)
         self.cancel_button.setText(translate_text("Cancel" if busy else "Close", self.language))
 
     def _start(self, operation, task):
@@ -467,6 +513,7 @@ class SmartPianoSoftDialog(QDialog):
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
         try:
+            center_dialog_on_parent(dialog, self)
             if dialog.exec() != QDialog.Accepted:
                 return None
             selected = GreaseweazleFloppySource(device.path, drive.currentText(), formats.currentData(),
@@ -579,13 +626,17 @@ class SmartPianoSoftDialog(QDialog):
         album, audio, cd_device = self.album, dict(self.audio_paths), self._cd_device()
         random_suffixes = random_output_suffixes_enabled(self.settings)
         output_format = self.format_combo.currentData()
+        generate_yamaha_catalogs = generate_yamaha_catalogs_enabled(self.settings)
+        preserve_yamaha_catalogs = preserves_yamaha_midi_catalogs(self.settings.value(SETTING_PROFILE, "unsure"))
         target = self._new_scan() if album is None else None
         def prepare(cancel, progress):
             snapshot = album or _scan_source(source, target, cancel=cancel, progress=progress)
             try:
                 output = prepare_album(snapshot, destination, cd_device=cd_device, audio_paths=audio,
                                        output_format=output_format, cancel=cancel, progress=progress,
-                                       random_suffixes=random_suffixes)
+                                       random_suffixes=random_suffixes,
+                                       generate_yamaha_catalogs=generate_yamaha_catalogs,
+                                       preserve_yamaha_catalogs=preserve_yamaha_catalogs)
             except Exception as exc:
                 # Retain the verified snapshot even when Start also performed
                 # the scan, so a CD retry does not need the original floppy.
@@ -708,14 +759,17 @@ class SmartPianoSoftDialog(QDialog):
         self.status.setText(self.text(status))
         self.details.appendPlainText(result["error"])
         if result.get("output"):
-            self.result_folder = Path(result["output"])
-            self.details.appendPlainText(self.text("retained", folder=str(self.result_folder)))
+            self._incomplete_output = Path(result["output"])
         if cd_read_error:
             self.details.appendPlainText(self.text("cd_read_retry"))
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
 
     def _finished(self):
+        # Keep the busy guard during the modal prompt, including when closing.
+        # No worker may still be writing when the user chooses Discard.
+        if self._incomplete_output is not None:
+            self._resolve_incomplete_output()
         worker, self.worker = self.worker, None
         worker.deleteLater()
         self.progress.hide()
@@ -725,6 +779,34 @@ class SmartPianoSoftDialog(QDialog):
         elif self._discover_after_scan:
             self._discover_after_scan = False
             QTimer.singleShot(0, self.discover_cd)
+
+    def _resolve_incomplete_output(self):
+        folder, self._incomplete_output = self._incomplete_output, None
+        box = QMessageBox(self)
+        apply_window_icon(box)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle(self.text("incomplete_title"))
+        box.setTextFormat(Qt.PlainText)
+        box.setText(self.text("incomplete_prompt", folder=str(folder)))
+        box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard)
+        box.button(QMessageBox.Save).setText(self.text("save_incomplete"))
+        box.button(QMessageBox.Discard).setText(self.text("discard_incomplete"))
+        box.setDefaultButton(QMessageBox.Save)
+        box.setEscapeButton(QMessageBox.Save)
+        choice = box.exec()
+        box.deleteLater()
+        if choice == QMessageBox.Discard:
+            try:
+                shutil.rmtree(folder)
+            except OSError as exc:
+                message = self.text("discard_failed", folder=str(folder), error=str(exc))
+                self.details.appendPlainText(message)
+                QMessageBox.warning(self, self.text("incomplete_title"), message)
+            else:
+                self.details.appendPlainText(self.text("discarded"))
+                return
+        self.result_folder = folder
+        self.details.appendPlainText(self.text("retained", folder=str(folder)))
 
     def cancel_or_close(self):
         if self.is_busy:

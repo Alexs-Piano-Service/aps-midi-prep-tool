@@ -22,7 +22,7 @@ TOC = """Table of contents (audio tracks only):
 track        length               begin        copy pre ch
 ===========================================================
   1.       75 [00:01.00]        0 [00:00.00]    no   no  2
-  3.      150 [00:02.00]      300 [00:04.00]   yes  yes  2
+  3.      150 [00:02.00]      300 [00:04.00]    OK  yes  2
 TOTAL 225 [00:03.00] (audio only)
 """
 
@@ -51,10 +51,21 @@ def test_toc_keeps_actual_track_numbers_and_preemphasis_without_inventing_data_t
     )
 
 
+@pytest.mark.parametrize("copy_permission", ["OK", "no", "yes"])
+@pytest.mark.parametrize("pre_emphasis", ["yes", "no"])
+def test_toc_copy_permission_is_independent_of_preemphasis(copy_permission, pre_emphasis):
+    text = (
+        "Table of contents (audio tracks only):\n"
+        f"  1. 16727 [03:43.02] 0 [00:00.00] {copy_permission} {pre_emphasis} 2\n"
+    )
+    assert media._parse_cd_toc(text) == (media.CDTrack(1, 0, 16727, pre_emphasis == "yes"),)
+
+
 @pytest.mark.parametrize("toc", [
     "", TOC.replace("audio tracks only", "all tracks"),
-    TOC.replace("yes  yes  2", "yes  maybe  2"),
-    TOC.replace("yes  yes  2", "yes  yes  4"),
+    TOC.replace("OK  yes  2", "maybe  yes  2"),
+    TOC.replace("OK  yes  2", "OK  maybe  2"),
+    TOC.replace("OK  yes  2", "OK  yes  4"),
     TOC.replace("300 [00:04.00]", "50 [00:04.00]"),
     TOC.replace("3.", "1."),
 ])

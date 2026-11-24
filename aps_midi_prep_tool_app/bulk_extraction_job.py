@@ -129,15 +129,21 @@ def file_digest(path, check_cancelled=None):
 def read_extraction_job(path):
     with open(path, "r", encoding="utf-8") as handle:
         job = json.load(handle)
-    if not isinstance(job, dict) or job.get("version") not in (1, 2) or job.get("kind") != "aps-bulk-extraction":
+    if not isinstance(job, dict) or job.get("version") not in (1, 2, 3, 4, 5) or job.get("kind") != "aps-bulk-extraction":
         raise ValueError("This is not a supported APS extraction job.")
     if not all(isinstance(job.get(key), kind) for key, kind in (
         ("source_directory", str), ("output_directory", str), ("options", dict), ("images", dict),
     )):
         raise ValueError("The extraction job is incomplete or malformed.")
     required_options = {"convert_eseq", "include_eseq_sources", "long_midi_filenames", "trim_title_spaces", "use_album_names"}
-    if job["version"] == 2:
+    if job["version"] >= 2:
         required_options.add("preserve_volume_controls")
+    if job["version"] >= 3:
+        required_options.add("generate_yamaha_catalogs")
+    if job["version"] >= 4:
+        required_options.add("preserve_yamaha_catalogs")
+    if job["version"] >= 5:
+        required_options.add("keep_original_catalogs")
     if set(job["options"]) != required_options or any(type(value) is not bool for value in job["options"].values()):
         raise ValueError("The extraction job has malformed options.")
     if job["version"] == 1:
@@ -145,6 +151,18 @@ def read_extraction_job(path):
         # in memory; a resume retains that policy when it next saves progress.
         job["options"]["preserve_volume_controls"] = False
         job["version"] = 2
+    if job["version"] == 2:
+        job["options"]["generate_yamaha_catalogs"] = False
+        job["version"] = 3
+    if job["version"] == 3:
+        job["options"]["preserve_yamaha_catalogs"] = False
+        job["version"] = 4
+    if job["version"] == 4:
+        # Older jobs always archived replaced MNG files. Keep their output
+        # policy on resume; newly started jobs default to no archive copies.
+        job["options"]["keep_original_catalogs"] = True
+        job["version"] = 5
+    catalogs_enabled = job["options"]["generate_yamaha_catalogs"] or job["options"]["preserve_yamaha_catalogs"]
     owned_paths = set()
     owned_directories = set()
     for name, image in job["images"].items():
@@ -170,7 +188,7 @@ def read_extraction_job(path):
             outputs = entry.get("outputs")
             if not isinstance(outputs, list) or (entry["state"] == "complete" and not outputs):
                 raise ValueError(f"The extraction job is missing verified outputs for {entry_name}")
-            if entry["state"] == "skipped" and (outputs or not _valid_skipped_entry(job, entry_name, entry)):
+            if entry["state"] == "skipped" and (outputs or not _valid_skipped_entry(job, entry_name, entry, image)):
                 raise ValueError(f"The extraction job has an invalid skipped entry: {entry_name}")
             for output in outputs:
                 if not isinstance(output, dict) or not _safe_relative_path(output.get("path")) or not _valid_digest(output.get("sha256")) or type(output.get("converted")) is not bool:
@@ -181,6 +199,39 @@ def read_extraction_job(path):
                 if output_key in owned_paths:
                     raise ValueError(f"More than one extraction entry claims the output {output['path']}")
                 owned_paths.add(output_key)
+        catalogs = image.get("catalogs", [])
+        catalog_sources = image.get("catalog_sources", {})
+        if (not isinstance(catalog_sources, dict)
+                or any(directory != "" and not _safe_relative_path(directory) for directory in catalog_sources)
+                or len({directory.replace("\\", "/").casefold() for directory in catalog_sources}) != len(catalog_sources)
+                or any(not isinstance(names, list) or not names
+                       or any(not isinstance(name, str) or name not in {"PSONG.MNG", "PDISK.MNG", "PIANODIR.FIL"} for name in names)
+                       or len(set(names)) != len(names) for names in catalog_sources.values())):
+            raise ValueError(f"The extraction job has malformed catalog source folders: {name}")
+        if (job["options"]["preserve_yamaha_catalogs"] and image["state"] == "complete"
+                and "catalog_sources" not in image):
+            raise ValueError(f"The extraction job is missing completed image entries: {name}")
+        if not isinstance(catalogs, list) or type(image.get("catalogs_complete", False)) is not bool:
+            raise ValueError(f"The extraction job has a malformed image record: {name}")
+        if catalogs_enabled and image["state"] == "complete" and not image.get("catalogs_complete"):
+            raise ValueError(f"The extraction job is missing completed image entries: {name}")
+        if catalogs and not catalogs_enabled:
+            raise ValueError(f"The extraction job has a malformed image record: {name}")
+        for output in catalogs:
+            if not isinstance(output, dict) or not _safe_relative_path(output.get("path")) or not _valid_digest(output.get("sha256")) or output.get("converted") is not False:
+                raise ValueError(f"The extraction job has a malformed output record for {name}")
+            output_key = output["path"].replace("\\", "/").casefold()
+            if not directory_key or not output_key.startswith(directory_key + "/"):
+                raise ValueError(f"An output is outside its recorded image folder: {output['path']}")
+            if output_key in owned_paths:
+                raise ValueError(f"More than one extraction entry claims the output {output['path']}")
+            if output_key.rsplit("/", 1)[-1] not in {"psong.mng", "pdisk.mng"}:
+                raise ValueError(f"The extraction job has a malformed output record for {name}")
+            owned_paths.add(output_key)
+        if (catalogs_enabled and image["state"] == "complete"
+                and {output["path"].replace("\\", "/").casefold() for output in catalogs}
+                != _expected_catalog_paths(image, job["options"])):
+            raise ValueError(f"The extraction job is missing completed image entries: {name}")
     return job
 
 
@@ -196,16 +247,47 @@ def _valid_digest(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
-def _valid_skipped_entry(job, name, entry):
+def _expected_catalog_paths(image, options):
+    catalog_sources = {
+        directory.replace("\\", "/").casefold(): set(names)
+        for directory, names in image.get("catalog_sources", {}).items()
+    }
+    expected = set()
+    for name, entry in image["entries"].items():
+        source_directory = name.replace("\\", "/").rpartition("/")[0].casefold()
+        source_names = catalog_sources.get(source_directory, set())
+        catalog_names = ({"PSONG.MNG", "PDISK.MNG"}
+                         if options["generate_yamaha_catalogs"] or "PIANODIR.FIL" in source_names
+                         else source_names)
+        for output in entry["outputs"]:
+            if output["path"].lower().endswith((".mid", ".midi")):
+                directory = output["path"].replace("\\", "/").rsplit("/", 1)[0]
+                expected.update(f"{directory}/{catalog}".casefold() for catalog in catalog_names)
+    return expected
+
+
+def _valid_skipped_entry(job, name, entry, image):
+    directory, _, basename = name.replace("\\", "/").rpartition("/")
+    if entry.get("reason") == "original_catalog":
+        sources = image.get("catalog_sources", {})
+        return (
+            basename.upper() in {"PSONG.MNG", "PDISK.MNG"}
+            and not job["options"]["keep_original_catalogs"]
+            and (job["options"]["generate_yamaha_catalogs"]
+                 or job["options"]["preserve_yamaha_catalogs"] and isinstance(sources, dict)
+                 and directory.casefold() in {key.replace("\\", "/").casefold() for key in sources})
+        )
     return (
         entry.get("reason") == "eseq_directory"
-        and name.replace("\\", "/").split("/")[-1].upper() in {"PIANODIR.FIL", "MUSIC.DIR"}
+        and basename.upper() in {"PIANODIR.FIL", "MUSIC.DIR"}
         and job["options"]["convert_eseq"] and not job["options"]["include_eseq_sources"]
     )
 
 
 class ExtractionJob:
     def __init__(self, path, source_directory, output_directory, options, *, resume=False, check_cancelled=None):
+        options = {"generate_yamaha_catalogs": False, "preserve_yamaha_catalogs": False,
+                   "keep_original_catalogs": False, **options}
         self.path = os.path.abspath(os.fspath(path))
         if os.path.islink(self.path):
             raise ValueError("An extraction job cannot be written through a symbolic link.")
@@ -225,7 +307,7 @@ class ExtractionJob:
             if os.path.lexists(self.path):
                 raise ValueError("The extraction job already exists. Resume it or choose a new job path.")
             self.data = {
-                "kind": "aps-bulk-extraction", "version": 2,
+                "kind": "aps-bulk-extraction", "version": 5,
                 "source_directory": source_directory, "output_directory": output_directory,
                 "options": options, "images": {},
             }
@@ -242,6 +324,8 @@ class ExtractionJob:
             image.get("state") != "complete"
             or image.get("entry_count") != len(image["entries"])
             or any(entry.get("state") not in {"complete", "skipped"} for entry in image["entries"].values())
+            or (self.data["options"]["generate_yamaha_catalogs"] or self.data["options"]["preserve_yamaha_catalogs"])
+            and not image.get("catalogs_complete")
             for image in self.data["images"].values()
         ):
             return False
@@ -290,7 +374,7 @@ class ExtractionJob:
     def entry_complete(self, image_name, entry_name):
         entry = self.image(image_name)["entries"].get(entry_name, {})
         if entry.get("state") == "skipped":
-            return _valid_skipped_entry(self.data, entry_name, entry)
+            return _valid_skipped_entry(self.data, entry_name, entry, self.image(image_name))
         if entry.get("state") != "complete":
             return False
         if not entry.get("outputs"):
@@ -306,6 +390,44 @@ class ExtractionJob:
             except (OSError, ValueError, KeyError):
                 return False
         return True
+
+    def catalogs_complete(self, image_name):
+        options = self.data["options"]
+        if not (options["generate_yamaha_catalogs"] or options["preserve_yamaha_catalogs"]):
+            return True
+        image = self.image(image_name)
+        if not image.get("catalogs_complete"):
+            return False
+        if {output["path"].replace("\\", "/").casefold() for output in image.get("catalogs", [])} != _expected_catalog_paths(image, options):
+            return False
+        for output in image.get("catalogs", []):
+            try:
+                path = self.safe_output_path(os.path.join(self.root, output["path"]))
+                if file_digest(path, self.check_cancelled) != output["sha256"]:
+                    return False
+            except (OSError, ValueError):
+                return False
+        return True
+
+    def catalog_matches(self, image_name, path, payload):
+        path = self.safe_output_path(path)
+        expected = hashlib.sha256(payload).hexdigest()
+        for output in self.image(image_name).get("catalogs", []):
+            if os.path.join(self.root, output["path"]) != path:
+                continue
+            try:
+                return output["sha256"] == expected == file_digest(path, self.check_cancelled)
+            except OSError:
+                return False
+        return False
+
+    def checkpoint_catalog(self, image_name, path):
+        output = self._output_record(path, False)
+        image = self.image(image_name)
+        image["catalogs"] = [previous for previous in image.get("catalogs", [])
+                             if previous["path"] != output["path"]] + [output]
+        image["catalogs_complete"] = False
+        self.save()
 
     def verified_source_path(self, image_name, entry_name):
         """Reuse a retained source without considering its conversion complete."""
@@ -355,14 +477,17 @@ class ExtractionJob:
         entry["state"] = "failed"
         self.save()
 
-    def finish_entry(self, image_name, entry_name, paths, *, converted=False, renamed_midi=False, failed=False):
+    def finish_entry(self, image_name, entry_name, paths, *, converted=False, renamed_midi=False,
+                     failed=False, skip_reason="eseq_directory"):
         outputs = [self._output_record(path, is_converted, check_cancelled=self.check_cancelled)
                    for path, is_converted in paths]
-        if not outputs and not _valid_skipped_entry(self.data, entry_name, {"reason": "eseq_directory"}):
+        if not outputs and not _valid_skipped_entry(
+            self.data, entry_name, {"reason": skip_reason}, self.image(image_name),
+        ):
             raise ValueError(f"No output was verified for {entry_name}")
         self.image(image_name)["entries"][entry_name] = {
             "state": "failed" if failed else ("complete" if outputs else "skipped"), "outputs": outputs,
-            "reason": "" if outputs else "eseq_directory",
+            "reason": "" if outputs else skip_reason,
             "converted": converted, "renamed_midi": renamed_midi,
         }
         self.save()

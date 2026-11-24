@@ -19,7 +19,7 @@ from aps_midi_prep_tool_app.floppy_image import (
 )
 from aps_midi_prep_tool_app.preparation_profile_dialog import PreparationProfileDialog
 from aps_midi_prep_tool_app.preparation_profiles import (
-    SETTING_DISK_FORMAT, SETTING_IMAGE_FORMAT,
+    SETTING_DISK_FORMAT, SETTING_GENERATE_YAMAHA_CATALOGS, SETTING_IMAGE_FORMAT,
     get_preparation_medium, get_preparation_profile, proposed_settings,
 )
 
@@ -104,7 +104,10 @@ def test_unsure_keeps_manual_conversion_and_reviews_delivery_and_filename_defaul
         SETTING_IMAGE_FORMAT, "emulator_image_output_format", "emulator_image_prefix", "emulator_image_starting_number",
         "use_dos83_filenames", "long_midi_filenames", "eseq_to_midi_long_filenames",
         "read_floppy_long_filenames", "bulk_extraction_long_midi_filenames", "format_disklavier_screen",
+        "bulk_extraction_trim_title_spaces", SETTING_GENERATE_YAMAHA_CATALOGS,
     }
+    assert changes["bulk_extraction_trim_title_spaces"] is True
+    assert changes[SETTING_GENERATE_YAMAHA_CATALOGS] is False
     dialog = PreparationProfileDialog(window.settings, "unsure", "flashfloppy_hfe")
     try:
         assert dialog.selection()[1].key == "flashfloppy_hfe"

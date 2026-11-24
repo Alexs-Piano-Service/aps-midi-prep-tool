@@ -145,8 +145,12 @@ Unix (LF) line endings are supported. Missing or invalid metadata falls back to
 other available titles.
 
 For **MIDI output**, images include valid `PSONG.MNG` and `PDISK.MNG` catalogs
-when available in the source folders. This does not depend on **Include Song
-Lists**. Catalogs follow each image's actual filenames and playback order,
+when available in the source folders. When **Preparing for** selects a compatible
+Yamaha Disklavier, missing MIDI catalogs are created too, and `PIANODIR.FIL`
+provides album/song titles and order for E-SEQ conversions. This does not depend
+on **Include Song Lists**. ENSPIRE retains existing or PIANODIR-derived catalogs;
+it does not create catalogs for albums without source metadata. Catalogs follow
+each image's actual filenames and playback order,
 including shuffled songs and albums split across disks. When automatic filling
 combines albums, their song catalogs are combined and the compilation's disk
 title uses its image number. The song list retains the source album titles.

@@ -19,11 +19,12 @@ from .conversion_review import ConversionReport, localize_music_error, localize_
 from .drop_table_widget import zip_import_operation
 from .eseq_pianodir import PianodirMetadata
 from .preparation_layer import PREPARATION_ID_ROLE, PreparationLayer
+from .smart_pianosoft import smart_pianosoft_catalog_from_session
 
 
 _STATE_FIELDS = (
     "pendingEdits", "pendingRegularConversions", "pendingRegularRenames",
-    "pendingRegularOrderKeyEdits", "listedFileInfo", "regularEseqMode",
+    "pendingRegularOrderKeyEdits", "pendingYamahaCatalogPayloads", "listedFileInfo", "regularEseqMode",
     "regularEseqVariant", "regularHasPianodir", "regularPianodirPopulated",
     "regularPianodirSourcePath", "loadedRegularEseqPaths", "loadedRegularPianodirMetadata",
     "regularTitlesLikelyCentered",
@@ -214,6 +215,7 @@ class PendingChangesMixin:
             self._pending_song_paths() or self.pendingGeneratePianodir or self.pendingDeletePianodir
             or current_metadata != metadata
             or getattr(self, "pendingSmartPianoSoftCatalogReplacement", "")
+            or getattr(self, "pendingYamahaCatalogPayloads", {})
         )
 
     def _can_undo_all_staged_changes(self):
@@ -652,12 +654,23 @@ class PendingChangesMixin:
 
     def _original_song_order_key(self, path):
         info = (self.imageFileInfo if self.is_image_mode() else self.listedFileInfo).get(path, {})
-        song = getattr(self, "smartPianoSoftCatalog", {}).get(os.path.basename(path).casefold())
+        if self.is_image_mode() and info.get("smart_pianosoft_track"):
+            return (0, int(info["smart_pianosoft_track"]), b"", path.casefold())
+        song = (self._original_image_catalog_song(path) if self.is_image_mode() else
+                getattr(self, "smartPianoSoftCatalog", {}).get(os.path.basename(path).casefold()))
         if song is not None:
             return (0, int(song.track_number), b"", path.casefold())
         mode = info.get("title_mode", "")
         return (1 if mode == "eseq" else 2, 0,
                 info.get("order_key", b"") if mode == "eseq" else b"", path.casefold())
+
+    def _original_image_catalog_song(self, path):
+        directory = os.path.dirname(path).replace("\\", "/").casefold()
+        entries = [entry for entry in self.imageEntriesByPath.values()
+                   if os.path.dirname(entry.path).replace("\\", "/").casefold() == directory
+                   and os.path.basename(entry.path).upper() == "PSONG.MNG"]
+        return smart_pianosoft_catalog_from_session(self.image_session, entries).get(
+            os.path.basename(path).casefold())
 
     def _restore_selected_song_positions(self, paths):
         """Restore selected slots while preserving other songs' relative order."""
@@ -717,16 +730,23 @@ class PendingChangesMixin:
                     self.pendingImageDeletes.discard(path)
                     if path in self.pendingSmartPianoSoftTitleEdits:
                         self.pendingSmartPianoSoftTitleEdits.pop(path)
-                        remaining = dict(self.pendingSmartPianoSoftTitleEdits)
-                        self.pendingSmartPianoSoftTitleEdits.clear()
-                        self.pendingImageReplacements.pop(self.smartPianoSoftCatalogPath, None)
-                        self.pendingSmartPianoSoftCatalogReplacement = ""
+                        directory = os.path.dirname(path).replace("\\", "/").casefold()
+                        remaining = {other: title for other, title in self.pendingSmartPianoSoftTitleEdits.items()
+                                     if os.path.dirname(other).replace("\\", "/").casefold() == directory}
+                        for other in remaining:
+                            self.pendingSmartPianoSoftTitleEdits.pop(other)
+                        for catalog_path in self.imageEntriesByPath:
+                            if (os.path.basename(catalog_path).upper() == "PSONG.MNG"
+                                    and os.path.dirname(catalog_path).replace("\\", "/").casefold() == directory):
+                                removed = self.pendingImageReplacements.pop(catalog_path, None)
+                                if removed == self.pendingSmartPianoSoftCatalogReplacement:
+                                    self.pendingSmartPianoSoftCatalogReplacement = ""
                         for other, title in remaining.items():
                             self._stage_smart_pianosoft_catalog_title(other, title)
                     if row >= 0:
                         self.table.removeRow(row)
                     info = self.imageFileInfo[path]
-                    song = self.smartPianoSoftCatalog.get(os.path.basename(path).casefold())
+                    song = self._original_image_catalog_song(path)
                     if info.get("is_midi") and song is not None and song.title:
                         info["title"] = song.title
                         info["title_source"] = "smart_pianosoft_catalog"

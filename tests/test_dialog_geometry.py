@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEvent, QRect, QSettings, QTimer
+from PySide6.QtCore import QEvent, QRect, QSettings, QTimer, Qt
 from PySide6.QtGui import QFont, QScreen
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from aps_midi_prep_tool_app import main_window
-from aps_midi_prep_tool_app.ui_utils import scrollable_dialog_layout
+from aps_midi_prep_tool_app.ui_utils import center_dialog_on_parent, scrollable_dialog_layout
 
 
 class _CountAdjustments:
@@ -122,6 +122,111 @@ def test_scrollable_dialog_defaults_fit_screen_without_font_scaling(
         assert dialog.geometry() == geometry
 
     _run_dialog(window, dialog, inspect)
+
+
+@pytest.fixture
+def emulator_progress(window, tmp_path, monkeypatch):
+    from aps_midi_prep_tool_app.disk_session_worker import EmulatorImageBuildWorker
+    from aps_midi_prep_tool_app.floppy_image import DISK_FORMAT_BY_KEY
+
+    monkeypatch.setattr(main_window, "QProgressDialog", _ProgressDialog)
+    # Keep the real launch, native dialog, signals, and worker ownership while
+    # avoiding disk output and a background thread in this geometry test.
+    monkeypatch.setattr(EmulatorImageBuildWorker, "start", lambda _worker: None)
+    window._start_emulator_image_build(
+        str(tmp_path / "songs"), str(tmp_path / "images"), prefix="DSKA", starting_number=0,
+        safety_margin_bytes=0, album_title="", output_content="midi",
+        disk_format=DISK_FORMAT_BY_KEY["ibm.1440"], output_ext="img",
+        include_subfolders=False, shuffle=False, include_song_lists=False,
+    )
+    dialog, worker = window.emulatorImageProgressDialog, window.emulatorImageWorker
+    try:
+        yield dialog
+    finally:
+        window._close_emulator_image_progress()
+        worker.finished.emit()
+
+
+def test_emulator_launch_progress_is_centered_and_owned_by_main_window(window, emulator_progress):
+    dialog = emulator_progress
+    assert dialog.isVisible()
+    assert dialog.parentWidget() is window
+    assert dialog.windowModality() == Qt.WindowModal
+    assert dialog.windowHandle().modality() == Qt.WindowModal
+    assert dialog.windowHandle().transientParent() is window.windowHandle()
+    _assert_centered(dialog, window)
+    geometry, adjustments = dialog.geometry(), dialog.adjustments
+    window._apply_stage_progress(dialog, 1, 10, "Building reviewed images")
+    QTest.qWait(50)
+    assert dialog.geometry() == geometry
+    assert dialog.adjustments == adjustments
+
+
+@pytest.mark.parametrize("review", ["preview", "overwrite"])
+def test_emulator_review_reshows_progress_without_resetting_user_geometry(
+        window, emulator_progress, monkeypatch, tmp_path, review):
+    from test_emulator_preview import _preview
+
+    progress = emulator_progress
+    progress.resize(progress.width(), 220)
+    progress.move(22, 31)
+    QTest.qWait(50)
+    geometry, adjustments = progress.geometry(), progress.adjustments
+    execute = window._exec_child_dialog
+    failures = []
+
+    def accept_review(dialog, **kwargs):
+        assert not progress.isVisible()
+
+        def finish():
+            try:
+                assert dialog.isVisible()
+                assert dialog.windowHandle().transientParent() is window.windowHandle()
+                if review == "preview":
+                    dialog.build_button.click()
+                else:
+                    dialog.button(main_window.QMessageBox.Yes).click()
+            except BaseException as exc:
+                failures.append(exc)
+                dialog.reject()
+
+        QTimer.singleShot(50, finish)
+        return execute(dialog, **kwargs)
+
+    monkeypatch.setattr(window, "_exec_child_dialog", accept_review)
+    if review == "preview":
+        window._on_emulator_preview_requested(_preview())
+    else:
+        window._on_emulator_overwrite_requested([str(tmp_path / "DSKA0000.img")])
+    if failures:
+        raise failures[0]
+    QTest.qWait(50)
+    assert progress.isVisible()
+    assert progress.windowHandle().transientParent() is window.windowHandle()
+    assert progress.windowModality() == Qt.WindowModal
+    assert progress.geometry() == geometry
+    assert progress.adjustments == adjustments
+
+
+@pytest.mark.parametrize("parent_position", [(-400, -250), (500, 320)])
+@pytest.mark.parametrize("screen_origin", [(0, 0), (-800, 200)])
+def test_progress_initial_position_stays_on_small_screen_with_offscreen_parent(
+        window, monkeypatch, parent_position, screen_origin):
+    available = QRect(*screen_origin, 600, 400)
+    monkeypatch.setattr(QScreen, "availableGeometry", lambda _self: available)
+    window.move(*parent_position)
+    QApplication.processEvents()
+    progress = _ProgressDialog("Working", "Cancel", 0, 100, window)
+    try:
+        window._prepare_progress_dialog(progress)
+        window._stabilize_progress_dialog_width(progress)
+        window._show_centered_progress_dialog(progress)
+        QTest.qWait(50)
+        assert progress.isVisible()
+        assert available.contains(progress.frameGeometry())
+        assert progress.windowHandle().transientParent() is window.windowHandle()
+    finally:
+        progress.close()
 
 
 @pytest.mark.parametrize("direct", [False, True], ids=["exec", "modeless-helper"])
@@ -280,3 +385,76 @@ def test_progress_stages_and_resizing_preserve_user_geometry(window):
             assert dialog.adjustments == initial_adjustments
 
     _run_dialog(window, dialog, inspect)
+
+
+def test_explicit_dialog_owner_is_native_transient_parent_before_first_show(window):
+    dialog = _Dialog()
+    dialog.resize(360, 180)
+    try:
+        center_dialog_on_parent(dialog, window, adjust_size=False)
+        assert not dialog.isVisible()
+        assert dialog.parentWidget() is None
+        assert dialog.windowHandle().transientParent() is window.windowHandle()
+        dialog.show()
+        QTest.qWait(50)
+        _assert_centered(dialog, window)
+        assert dialog.windowHandle().transientParent() is window.windowHandle()
+        assert dialog.adjustments == 0
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize("platform_name", ["wayland", "wayland-egl"])
+def test_wayland_centering_uses_native_owner_without_manual_coordinates(window, monkeypatch, platform_name):
+    class MoveObservedDialog(_Dialog):
+        def __init__(self):
+            super().__init__()
+            self.manual_moves = []
+
+        def move(self, *args):
+            self.manual_moves.append(args)
+            return super().move(*args)
+
+    # The offscreen backend cannot emulate a compositor's placement. Exercise
+    # the Wayland branch while checking the actual Qt transient relationship.
+    monkeypatch.setattr(QApplication, "platformName", lambda: platform_name)
+    dialog = MoveObservedDialog()
+    dialog.resize(360, 180)
+    try:
+        center_dialog_on_parent(dialog, window, adjust_size=False)
+        assert dialog.windowHandle().transientParent() is window.windowHandle()
+        assert not dialog.isVisible()
+        dialog.show()
+        QTest.qWait(50)
+        assert dialog.manual_moves == []
+        assert dialog.windowHandle().transientParent() is window.windowHandle()
+        dialog.hide()
+        center_dialog_on_parent(dialog, window)
+        dialog.show()
+        QTest.qWait(50)
+        assert dialog.manual_moves == []
+        assert dialog.adjustments == 0
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize("change", ["move", "resize"])
+def test_pending_native_exposure_preserves_geometry_chosen_after_show(window, change):
+    dialog = _Dialog(window)
+    dialog.resize(360, 180)
+    try:
+        center_dialog_on_parent(dialog, window, adjust_size=False)
+        dialog.show()
+        # Choose geometry before pumping events that deliver the native Expose.
+        # An initial frame correction must not undo this explicit user choice.
+        if change == "move":
+            dialog.move(18, 27)
+        else:
+            dialog.resize(500, 260)
+        geometry = dialog.geometry()
+        QTest.qWait(80)
+        assert dialog.geometry() == geometry
+        assert dialog.windowHandle().transientParent() is window.windowHandle()
+        assert dialog.adjustments == 0
+    finally:
+        dialog.close()

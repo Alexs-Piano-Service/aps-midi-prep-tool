@@ -16,6 +16,17 @@ from .helpers.file_batch import FileBatchWriteError, publish_file_batch
 SAMPLE_RATE = 44100
 TICKS_PER_BEAT = 10000
 TEMPO = 1000000
+# Playback timing is already captured in the absolute event timestamps. Live
+# clock/transport/connection messages do not belong in a Standard MIDI File.
+# System Reset is deliberately excluded: dropping it can change musical state.
+_OMITTED_REALTIME_TYPES = {"clock", "start", "continue", "stop", "active_sensing"}
+_SYSTEM_MESSAGE_NAMES = {
+    "quarter_frame": "MIDI Time Code Quarter Frame",
+    "songpos": "Song Position Pointer",
+    "song_select": "Song Select",
+    "tune_request": "Tune Request",
+    "reset": "System Reset",
+}
 
 
 class PairedAudioCancelled(InterruptedError):
@@ -38,6 +49,7 @@ def _mapped_events(events, offset, scale, cancel):
     mapped = []
     previous = -math.inf
     skipped = 0
+    skipped_realtime = 0
     for event in events:
         check_cancel(cancel)
         seconds, data = ((event.time_seconds, event.data) if hasattr(event, "time_seconds") else event)
@@ -50,15 +62,24 @@ def _mapped_events(events, offset, scale, cancel):
             skipped += 1
             continue
         message = mido.Message.from_bytes(data)
+        if message.type in _OMITTED_REALTIME_TYPES:
+            skipped_realtime += 1
+            continue
         if data[0] >= 0xF0 and message.type != "sysex":
-            raise ValueError("Paired MIDI supports channel messages and SysEx, not system-common or realtime messages.")
+            name = _SYSTEM_MESSAGE_NAMES.get(message.type, message.type)
+            kind = "realtime" if message.type == "reset" else "system-common"
+            raise ValueError(
+                f"Cannot export MIDI {kind} message {name} (0x{data[0]:02X}) "
+                f"at {seconds:.6f} seconds to a Standard MIDI File. "
+                "It may change synchronization or instrument state and cannot be safely omitted."
+            )
         prepared_seconds = seconds * scale + offset
         if not math.isfinite(prepared_seconds):
             raise ValueError("The mapped MIDI event time is not finite.")
         mapped.append((prepared_seconds, message))
     if not mapped:
         raise ValueError("There are no musical MIDI events to export.")
-    return mapped, skipped
+    return mapped, skipped, skipped_realtime
 
 
 def _copy_pcm(source, destination, preroll_frames, cancel):
@@ -100,6 +121,8 @@ def export_midi_mp3(events, audio_path, output_stem, *, midi_offset_seconds=0.0,
     objects with ``time_seconds`` and ``data``. Every musical event receives
     the same affine timing map. A sample-aligned shared lead-in protects
     negative mapped events without dropping or clamping notes/controllers.
+    Live clock, transport and active-sensing messages are omitted and counted;
+    system-common and System Reset messages are reported as unsupported.
     Original source files remain untouched. LAME's gapless timing metadata is
     retained; no unverified mechanical or decoder-latency correction is added.
     """
@@ -109,7 +132,8 @@ def export_midi_mp3(events, audio_path, output_stem, *, midi_offset_seconds=0.0,
     for path in (midi_path, mp3_path):
         if os.path.lexists(path):
             raise FileExistsError(f"Output already exists: {path}")
-    mapped, skipped = _mapped_events(events, float(midi_offset_seconds), float(midi_time_scale), cancel)
+    mapped, skipped, skipped_realtime = _mapped_events(
+        events, float(midi_offset_seconds), float(midi_time_scale), cancel)
     preroll_frames = math.ceil(max(0.0, -mapped[0][0]) * SAMPLE_RATE)
     preroll = preroll_frames / SAMPLE_RATE
     identity = _identity(source)
@@ -162,6 +186,7 @@ def export_midi_mp3(events, audio_path, output_stem, *, midi_offset_seconds=0.0,
         try:
             publish_file_batch(
                 [(prepared_midi, midi_path), (prepared_mp3, mp3_path)],
+                recovery_parent=stem.parent,
                 expected_hashes={midi_path: None, mp3_path: None},
                 progress_callback=lambda completed, total, _path: report(0.85 + 0.15 * completed / total),
             )
@@ -175,6 +200,7 @@ def export_midi_mp3(events, audio_path, output_stem, *, midi_offset_seconds=0.0,
         "audio_preroll_seconds": preroll, "midi_advance_seconds": 0.0,
         "duration_seconds": end_tick / TICKS_PER_BEAT,
         "events": len(mapped), "skipped_pianosmart_messages": skipped,
+        "skipped_realtime_messages": skipped_realtime,
         "sample_rate": SAMPLE_RATE, "channels": channels, "mp3_bitrate_kbps": 192,
         "mp3_delay_handling": "LAME Info encoder-delay and padding metadata",
         "hardware_verified": False,

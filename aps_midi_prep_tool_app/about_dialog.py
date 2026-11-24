@@ -2,7 +2,7 @@
 
 import time
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QScrollArea, QWidget
 
@@ -30,6 +30,9 @@ class AboutDialog(QDialog):
         self._admin_mode_enabled = bool(admin_mode_enabled)
         self._background_click_count = 0
         self._last_background_click = None
+        self._text_fit_timer = QTimer(self)
+        self._text_fit_timer.setSingleShot(True)
+        self._text_fit_timer.timeout.connect(self._fit_wrapped_text)
         apply_window_icon(self)
         self.setWindowTitle(tr("dialog.about.title", self.language_code, app=APP_TITLE_WITH_VERSION))
         self.setModal(True)
@@ -88,6 +91,10 @@ class AboutDialog(QDialog):
         self.admin_status.setFont(font)
         self.admin_status.setVisible(self._admin_mode_enabled)
         content.addWidget(self.admin_status)
+        self._wrapping_labels = (
+            self.title_label, self.website_label, self.info_label,
+            self.notice_label, self.admin_status,
+        )
 
         self.buttons = ResponsiveDialogButtonBox(QDialogButtonBox.Close, self)
         self.buttons.button(QDialogButtonBox.Close).setText(self.t("Close"))
@@ -114,8 +121,28 @@ class AboutDialog(QDialog):
         self._background_click_count = 0
         self._last_background_click = None
 
+    def _fit_wrapped_text(self):
+        # Some Qt styles allocate a wrapped label its unwrapped size-hint
+        # height even when the scroll body has reserved the full wrapped height.
+        # Measure at the assigned width after layout events have finished.
+        for label in self._wrapping_labels:
+            if label.isHidden():
+                continue
+            # QLabel.heightForWidth includes minimumHeight. Release our old
+            # minimum so text can shrink again after widening or a font change.
+            label.setMinimumHeight(0)
+            label.setMinimumHeight(max(0, label.heightForWidth(label.width())))
+        self.scroll_area.widget().layout().activate()
+
     def eventFilter(self, watched, event):
-        if event.type() not in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
+        event_type = event.type()
+        if (event_type in (QEvent.FontChange, QEvent.StyleChange, QEvent.Show)
+                or event_type == QEvent.Resize and event.size().width() != event.oldSize().width()):
+            # Do not fit from LayoutRequest or height-only resize events: the
+            # resulting minimum-height updates would otherwise schedule forever.
+            if not self._text_fit_timer.isActive():
+                self._text_fit_timer.start(0)
+        if event_type not in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
             return super().eventFilter(watched, event)
         position = self.mapFromGlobal(event.globalPosition().toPoint())
         target = self.childAt(position) or self

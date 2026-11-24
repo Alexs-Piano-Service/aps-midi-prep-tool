@@ -21,6 +21,10 @@ from aps_midi_prep_tool_app.eseq_converter import convert_midi_bytes_to_eseq_byt
 from aps_midi_prep_tool_app.helpers.file_batch import FileBatchWriteError
 from aps_midi_prep_tool_app.markiv_backup import backup
 from aps_midi_prep_tool_app.markiv_backup.library import scan_library
+from aps_midi_prep_tool_app.smart_pianosoft import (
+    parse_smart_pianosoft_disk_title, parse_smart_pianosoft_song_catalog,
+    update_smart_pianosoft_disk_title,
+)
 
 
 def _source(tmp_path, files):
@@ -99,16 +103,57 @@ def test_audio_split_is_opt_in_and_retains_native_pairs_and_ordinary_music(tmp_p
     assert any(derivatives[1]['destination'] in message for message in backup.verify_backup(result.folder))
 
 
-def test_same_stem_sources_produce_distinct_complete_pairs(tmp_path, fake_decode):
+@pytest.mark.parametrize('preserve_yamaha_catalogs', [False, True])
+def test_same_stem_sources_produce_distinct_complete_pairs(tmp_path, fake_decode, preserve_yamaha_catalogs):
     source = _source(tmp_path, {'songs/user/1/Song.part.WAV': b'encoded WAV',
                                 'songs/user/1/Song.part.MP3': b'encoded MP3'})
-    result = backup.run_backup(scan_library(source), tmp_path / 'backup', split_audio=True)
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup', split_audio=True,
+                               preserve_yamaha_catalogs=preserve_yamaha_catalogs)
     assert result.decoded == 2
     paths = [Path(item['destination']) for item in _manifest(result)['derivatives']]
     assert len({str(path).casefold() for path in paths}) == 4
     assert {path.name for path in paths} == {'Song.part.mid', 'Song.part.mp3',
                                            'Song.part (2).mid', 'Song.part (2).mp3'}
     _assert_originals(result, source)
+
+
+@pytest.mark.parametrize('catalog_option', ['generate_yamaha_catalogs', 'preserve_yamaha_catalogs'])
+def test_compatible_audio_pairs_have_matching_short_names_and_verified_catalogs(tmp_path, fake_decode,
+                                                                              monkeypatch, catalog_option):
+    source = _source(tmp_path, {
+        'songs/user/1/Song with a long name.WAV': b'encoded WAV',
+        'songs/user/1/Song with a long name.MP3': b'encoded MP3',
+    })
+    if catalog_option == 'preserve_yamaha_catalogs':
+        (source / 'songs/user/1/PDISK.MNG').write_bytes(update_smart_pianosoft_disk_title(b'', 'User 1'))
+
+    def export(events, source, stem, **kwargs):
+        midi = mido.MidiFile(type=0)
+        midi.tracks.append(mido.MidiTrack([mido.MetaMessage('end_of_track')]))
+        midi.save(str(stem) + '.mid')
+        Path(str(stem) + '.mp3').write_bytes(b'clean MP3')
+        return {'hardware_verified': False}
+
+    monkeypatch.setattr(paired_audio, 'export_midi_mp3', export)
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup', split_audio=True,
+                               **{catalog_option: True})
+
+    assert result.status == 'complete', result.errors
+    assert result.decoded == 2
+    derivatives = _manifest(result)['derivatives']
+    midis = [Path(record['destination']) for record in derivatives if record['kind'] == 'MIDI']
+    assert {path.name for path in midis} == {'SONGWITH.mid', 'SONGWI~2.mid'}
+    playback = result.folder / midis[0].parent
+    assert parse_smart_pianosoft_disk_title((playback / 'PDISK.MNG').read_bytes()) == 'User 1'
+    if catalog_option == 'generate_yamaha_catalogs':
+        songs = parse_smart_pianosoft_song_catalog((playback / 'PSONG.MNG').read_bytes())
+        assert {song.filename for song in songs} == {path.name for path in midis}
+        assert all(song.title == 'Song with a long name' for song in songs)
+    else:
+        assert not (playback / 'PSONG.MNG').exists()
+    assert all((result.folder / path).with_suffix('.mp3').is_file() for path in midis)
+    _assert_originals(result, source)
+    assert backup.verify_backup(result.folder) == []
 
 
 def test_decoded_backups_without_random_suffixes_preserve_existing_pairs(tmp_path, fake_decode, monkeypatch):

@@ -10,10 +10,10 @@ import wave
 
 import mido
 import pytest
-from PySide6.QtCore import QPoint, QRect, QSettings, Qt
+from PySide6.QtCore import QPoint, QRect, QSettings, QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QFormLayout, QLabel, QPushButton, QWidget
 
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app import smart_pianosoft_dialog as dialogs
@@ -314,8 +314,11 @@ def test_preparing_for_selects_output_and_explains_playback_route(tmp_path, qt_a
 
 @pytest.mark.parametrize("random_suffixes", [False, True])
 @pytest.mark.parametrize("output_format", ["encoded_wav", "midi_mp3"])
+@pytest.mark.parametrize("profile,catalogs,preserve", [
+    ("mark_iii", True, True), ("enspire", False, True), ("midi_export", False, False),
+])
 def test_selected_output_format_is_passed_to_background_preparation(
-    dialog, source, tmp_path, monkeypatch, random_suffixes, output_format,
+    dialog, source, tmp_path, monkeypatch, random_suffixes, output_format, profile, catalogs, preserve,
 ):
     _scan(dialog, source)
     captured = []
@@ -325,13 +328,50 @@ def test_selected_output_format_is_passed_to_background_preparation(
     monkeypatch.setattr(dialogs, "prepare_album", prepare)
     dialog.output_edit.setText(str(tmp_path))
     dialog.settings.setValue("random_output_suffixes", random_suffixes)
+    dialog.settings.setValue(dialogs.SETTING_PROFILE, profile)
     dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(output_format))
     dialog.start_preparation()
     assert not dialog.format_combo.isEnabled()
     _wait(lambda: not dialog.is_busy)
     assert captured[0]["output_format"] == output_format
     assert captured[0]["random_suffixes"] is random_suffixes
+    assert captured[0]["generate_yamaha_catalogs"] is catalogs
+    assert captured[0]["preserve_yamaha_catalogs"] is preserve
     assert isinstance(captured[0]["cancel"], threading.Event)
+
+
+@pytest.mark.parametrize("profile,enabled,preserve", [
+    ("enspire", True, True), ("mark_iii", False, True), ("custom", True, False),
+])
+def test_preparation_uses_persisted_manual_catalog_setting_and_reads_updates(
+        dialog, source, tmp_path, monkeypatch, profile, enabled, preserve):
+    dialog.settings.setValue(dialogs.SETTING_PROFILE, profile)
+    dialog.settings.setValue("generate_yamaha_catalogs", enabled)
+    dialog.settings.sync()
+    settings = QSettings(dialog.settings.fileName(), QSettings.IniFormat)
+    reopened = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False)
+    captured = []
+
+    def prepare(album, destination, **options):
+        captured.append(options)
+        return Path(destination)
+
+    monkeypatch.setattr(dialogs, "prepare_album", prepare)
+    try:
+        _scan(reopened, source)
+        reopened.output_edit.setText(str(tmp_path))
+        reopened.start_preparation()
+        _wait(lambda: not reopened.is_busy)
+        settings.setValue("generate_yamaha_catalogs", not enabled)
+        reopened.start_preparation()
+        _wait(lambda: not reopened.is_busy)
+        assert [options["generate_yamaha_catalogs"] for options in captured] == [enabled, not enabled]
+        assert all(options["preserve_yamaha_catalogs"] is preserve for options in captured)
+    finally:
+        if reopened.is_busy:
+            reopened.cancel_or_close()
+            _wait(lambda: not reopened.is_busy)
+        reopened.close()
 
 
 def test_loaded_list_scans_automatically_before_cd_discovery(source, tmp_path, qt_application, monkeypatch):
@@ -531,6 +571,7 @@ def test_cd_disconnect_retains_album_and_settings_for_fresh_retry(
     dialog, source, tmp_path, monkeypatch, scan_first, failure_stage,
 ):
     originals = {path.name: path.read_bytes() for path in source.iterdir()}
+    monkeypatch.setattr(dialogs.QMessageBox, "exec", lambda _box: pytest.fail("No progress to save"))
     calls = []
     scans = []
     scanner = dialogs._scan_source
@@ -593,9 +634,8 @@ def test_cd_disconnect_retains_album_and_settings_for_fresh_retry(
     assert 100 not in progress
     assert dialog.progress.value() == 0
     failed_output = dialog.result_folder
-    report = json.loads((failed_output / "manifest.json").read_text())
-    assert report["status"] == "failed"
-    assert report["failure_kind"] == "cd_read"
+    assert failed_output is None
+    assert not list(tmp_path.glob("Smart PianoSoft*"))
     assert calls == ([("toc", "/dev/disconnected")] if failure_stage == "toc" else
                      [("toc", "/dev/disconnected"), ("rip", "/dev/disconnected")])
 
@@ -682,6 +722,7 @@ def test_output_failure_and_cancel_do_not_offer_cd_reconnect(dialog, source, tmp
 def test_cancel_or_close_during_cd_read_waits_for_cleanup(dialog, source, tmp_path, monkeypatch, close_window):
     entered = threading.Event()
     release = threading.Event()
+    monkeypatch.setattr(dialogs.QMessageBox, "exec", lambda _box: pytest.fail("No progress to save"))
     monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_k: (media.CDTrack(1, 0, 75),))
 
     def blocked_rip(_device, _track, _destination, *, cancel, progress):
@@ -716,7 +757,8 @@ def test_cancel_or_close_during_cd_read_waits_for_cleanup(dialog, source, tmp_pa
         _wait(lambda: not dialog.is_busy)
     assert dialog.status.text() == dialog.text("cancelled")
     assert dialog.text("cd_read_retry") not in dialog.details.toPlainText()
-    assert json.loads((dialog.result_folder / "manifest.json").read_text())["status"] == "cancelled"
+    assert dialog.result_folder is None
+    assert not list(tmp_path.glob("Smart PianoSoft*"))
     if close_window:
         assert not dialog.isVisible()
         assert not workspace.exists()
@@ -724,6 +766,170 @@ def test_cancel_or_close_during_cd_read_waits_for_cleanup(dialog, source, tmp_pa
         assert dialog.album is not None
         assert workspace.exists()
         assert dialog.options.isEnabled()
+
+
+@pytest.mark.parametrize("ending", ["failure", "cancel", "close"])
+@pytest.mark.parametrize("save", [False, True])
+def test_incomplete_audio_is_saved_or_discarded_after_worker_stops(
+    dialog, source, tmp_path, monkeypatch, ending, save,
+):
+    originals = {path.name: path.read_bytes() for path in source.iterdir()}
+    previous = tmp_path / "Smart PianoSoft - previous completed album"
+    previous.mkdir()
+    (previous / "song.wav").write_bytes(b"previous completed output")
+    dialog.result_folder = previous
+    entered, release = threading.Event(), threading.Event()
+    prompts = []
+    worker_run = dialogs.SmartPianoSoftWorker.run
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_k: (
+        media.CDTrack(1, 0, 75), media.CDTrack(2, 75, 75),
+    ))
+
+    def rip(_device, track, destination, *, cancel, progress):
+        if track.number == 1:
+            _wav(destination)
+            return destination
+        entered.set()
+        if ending != "failure":
+            assert cancel.wait(3)
+        raise media.CDReadError("CD reader stopped on track 2")
+
+    def held_worker(worker):
+        worker_run(worker)
+        release.wait(5)
+
+    def choose(box):
+        assert dialog.is_busy and dialog.worker.isFinished()
+        assert not dialog.start_button.isEnabled()
+        assert box.defaultButton() == box.button(dialogs.QMessageBox.Save)
+        assert box.escapeButton() == box.button(dialogs.QMessageBox.Save)
+        assert box.button(dialogs.QMessageBox.Save).text() == dialog.text("save_incomplete")
+        assert box.button(dialogs.QMessageBox.Discard).text() == dialog.text("discard_incomplete")
+        folder = next(path for path in tmp_path.glob("Smart PianoSoft*") if path != previous)
+        assert str(folder) in box.text()
+        assert (folder / "WAV/CD01.wav").is_file()
+        assert not (folder / "WAV/CD02.wav").exists()
+        assert json.loads((folder / "manifest.json").read_text())["status"] == (
+            "failed" if ending == "failure" else "cancelled"
+        )
+        prompts.append(folder)
+        dialog.start_preparation()  # Modal reentrancy must not start a new run.
+        return dialogs.QMessageBox.Save if save else dialogs.QMessageBox.Discard
+
+    monkeypatch.setattr(media, "rip_cd_track", rip)
+    monkeypatch.setattr(dialogs.SmartPianoSoftWorker, "run", held_worker)
+    monkeypatch.setattr(dialogs.QMessageBox, "exec", choose)
+    dialog.source_edit.setText(str(source))
+    dialog.output_edit.setText(str(tmp_path))
+    dialog.cd_combo.setEditText("/dev/test-cd")
+    try:
+        dialog.start_preparation()
+        _wait(entered.is_set)
+        if ending == "cancel":
+            dialog.cancel_or_close()
+        elif ending == "close":
+            dialog.close()
+        _wait(lambda: dialog._operation_done)
+        assert dialog.is_busy and prompts == []
+    finally:
+        release.set()
+        _wait(lambda: not dialog.is_busy)
+    assert len(prompts) == 1
+    folder = prompts[0]
+    assert folder.exists() == save
+    assert dialog.result_folder == (folder if save else previous)
+    message = dialog.text("retained", folder=str(folder)) if save else dialog.text("discarded")
+    assert message in dialog.details.toPlainText()
+    assert (previous / "song.wav").read_bytes() == b"previous completed output"
+    assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
+    if ending == "close":
+        assert not dialog.isVisible()
+        assert dialog._workspace is None
+    else:
+        assert dialog.album.source_directory.exists()
+        assert dialog.start_button.isEnabled()
+
+
+@pytest.mark.parametrize("close_window", [False, True])
+def test_discard_failure_keeps_output_accessible(dialog, source, tmp_path, monkeypatch, close_window):
+    _scan(dialog, source)
+    folder = tmp_path / "incomplete"
+    folder.mkdir()
+    (folder / "track.wav").write_bytes(b"completed audio")
+    rmtree = dialogs.shutil.rmtree
+
+    def fail(*_args, **_kwargs):
+        raise AlbumBuildError("Read stopped", folder)
+
+    def cannot_remove(path, *args, **kwargs):
+        if Path(path) == folder:
+            raise PermissionError("Output is in use")
+        return rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(dialogs, "prepare_album", fail)
+    monkeypatch.setattr(dialogs.shutil, "rmtree", cannot_remove)
+    monkeypatch.setattr(dialogs.QMessageBox, "exec", lambda _box: dialogs.QMessageBox.Discard)
+    warnings = []
+    monkeypatch.setattr(dialogs.QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+    dialog.output_edit.setText(str(tmp_path))
+    dialog.start_preparation()
+    if close_window:
+        dialog.close()
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.result_folder == folder and folder.is_dir()
+    assert dialog.open_button.isEnabled()
+    assert "Output is in use" in dialog.details.toPlainText()
+    assert len(warnings) == 1 and str(folder) in warnings[0]
+    assert dialog.text("discarded") not in dialog.details.toPlainText()
+    assert dialog.isVisible() != close_window
+
+
+@pytest.mark.parametrize("discard", [False, True])
+def test_real_incomplete_prompt_escape_saves_and_discard_removes(dialog, tmp_path, discard):
+    folder = tmp_path / "incomplete"
+    folder.mkdir()
+    (folder / "track.wav").write_bytes(b"completed audio")
+    dialog._incomplete_output = folder
+    captions = []
+
+    def answer():
+        box = QApplication.activeModalWidget()
+        captions.extend([box.button(dialogs.QMessageBox.Save).text(),
+                         box.button(dialogs.QMessageBox.Discard).text()])
+        if discard:
+            QTest.mouseClick(box.button(dialogs.QMessageBox.Discard), Qt.LeftButton)
+        else:
+            QTest.keyClick(box, Qt.Key_Escape)
+
+    QTimer.singleShot(0, dialog, answer)
+    dialog._resolve_incomplete_output()
+    assert captions == [dialog.text("save_incomplete"), dialog.text("discard_incomplete")]
+    assert folder.exists() != discard
+    assert dialog.result_folder == (None if discard else folder)
+
+
+def test_cancel_after_output_committed_still_reports_success(dialog, source, tmp_path, monkeypatch):
+    _scan(dialog, source)
+    paired = tmp_path / "paired.wav"
+    _wav(paired)
+    dialog.audio_paths[1] = paired
+    dialog.output_edit.setText(str(tmp_path))
+    monkeypatch.setattr(sync, "synchronize", lambda *_a, **_k: sync.Alignment(0, 1, .99, .99, .99))
+    progress = dialogs.SmartPianoSoftWorker._progress
+    prompts = []
+
+    def late_cancel(worker, detail):
+        if detail["phase"] == "complete":
+            worker.cancelled.set()
+        progress(worker, detail)
+
+    monkeypatch.setattr(dialogs.SmartPianoSoftWorker, "_progress", late_cancel)
+    monkeypatch.setattr(dialogs.QMessageBox, "exec", lambda box: prompts.append(box))
+    dialog.start_preparation()
+    _wait(lambda: not dialog.is_busy)
+    assert dialog.status.text() == dialog.text("complete"), dialog.details.toPlainText()
+    assert prompts == []
+    assert json.loads((dialog.result_folder / "manifest.json").read_text())["status"] == "complete"
 
 
 @pytest.mark.parametrize("song_count", [1, 2])
@@ -942,6 +1148,83 @@ def test_album_layout_uses_table_space_without_scrolling_the_dialog(
     finally:
         instance.close()
         qt_application.setFont(original_font)
+        qt_application.processEvents()
+
+
+@pytest.mark.parametrize("style", ["Fusion", "Windows"])
+@pytest.mark.parametrize("point_size", [12, 18])
+@pytest.mark.parametrize("width", [760, 1400])
+@pytest.mark.parametrize("language", ["en", "es"])
+def test_footer_layout_stays_stable_through_scan_rip_and_completion(
+    tmp_path, qt_application, source, monkeypatch, style, point_size, width, language,
+):
+    original_style = qt_application.style().objectName()
+    original_font = QFont(qt_application.font())
+    qt_application.setStyle(style)
+    qt_application.setFont(QFont(original_font.family(), point_size))
+    settings = QSettings(str(tmp_path / "stable-footer.ini"), QSettings.IniFormat)
+    settings.setValue("language", language)
+    settings.setValue("preparation_profile", "enspire")
+    instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False)
+    instance.cd_combo.setEditText("/dev/test-cd")
+    instance.resize(width, 700)
+    instance.show()
+    entered, release = threading.Event(), threading.Event()
+
+    def prepare(_album, _destination, *, progress, **_kwargs):
+        progress({"phase": "rip", "completed": 1, "total": 2, "message": "Reading audio"})
+        entered.set()
+        assert release.wait(5)
+        output = tmp_path / "completed"
+        output.mkdir()
+        return output
+
+    monkeypatch.setattr(dialogs, "prepare_album", prepare)
+    try:
+        QTest.qWait(30)
+        initial_size = instance.size()
+        initial_footer = instance.buttons.geometry()
+        initial_orientation = instance.buttons.orientation()
+        initial_pairing_orientation = instance.pairing_buttons.orientation()
+
+        def wrapped_rows():
+            form = instance.options.layout()
+            return [form.itemAt(row, QFormLayout.FieldRole).geometry().top()
+                    > form.itemAt(row, QFormLayout.LabelRole).geometry().bottom()
+                    for row in range(form.rowCount())]
+
+        initial_rows = wrapped_rows()
+        assert instance.open_button.isVisible() and not instance.open_button.isEnabled()
+
+        def check_footer():
+            QTest.qWait(30)
+            assert instance.size() == initial_size
+            assert instance.buttons.orientation() == initial_orientation
+            assert instance.buttons.geometry() == initial_footer
+            assert instance.pairing_buttons.orientation() == initial_pairing_orientation
+            assert wrapped_rows() == initial_rows
+            _assert_large_font_layout_fits(instance)
+
+        _scan(instance, source)
+        check_footer()
+        instance.output_edit.setText(str(tmp_path))
+        instance.start_preparation()
+        _wait(entered.is_set)
+        check_footer()
+        release.set()
+        _wait(lambda: not instance.is_busy)
+        assert instance.result_folder == tmp_path / "completed", instance.details.toPlainText()
+        assert instance.open_button.isEnabled()
+        assert instance.start_button.text() == instance.text("restart", format="MIDI/MP3")
+        check_footer()
+    finally:
+        release.set()
+        if instance.is_busy:
+            instance.cancel_or_close()
+            _wait(lambda: not instance.is_busy)
+        instance.close()
+        qt_application.setFont(original_font)
+        qt_application.setStyle(original_style)
         qt_application.processEvents()
 
 

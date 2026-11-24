@@ -190,6 +190,33 @@ def application():
     return QApplication.instance() or QApplication([])
 
 
+def test_preservation_only_policy_reaches_real_worker(application, tmp_path):
+    from aps_midi_prep_tool_app.smart_pianosoft import parse_smart_pianosoft_song_catalog
+    from test_emulator_image_builder import _write_eseq_catalog_album
+
+    source = tmp_path / "album"
+    _write_eseq_catalog_album(source)
+    worker = EmulatorImageBuildWorker(
+        source, tmp_path / "output", prefix="DSKA", starting_number=0,
+        safety_margin_bytes=0, album_title="", disk_format=DISK_FORMAT_BY_KEY["ibm.720"],
+        output_ext="img", output_content="midi", preserve_yamaha_catalogs=True,
+    )
+    results, failures = [], []
+    worker.previewRequested.connect(lambda _preview: worker.resolve_preview_request({"action": "build"}))
+    worker.buildFinished.connect(results.append)
+    worker.buildFailed.connect(failures.append)
+    worker.run()
+    assert not failures
+    result, = results
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        songs = parse_smart_pianosoft_song_catalog(Path(session.extract_file("PSONG.MNG")).read_bytes())
+        assert [song.title for song in songs] == ["PIANODIR song 1", "PIANODIR song 2"]
+        assert Path(session.extract_file("PDISK.MNG")).is_file()
+    finally:
+        session.cleanup()
+
+
 @pytest.mark.parametrize("profile_key, expected_type", (
     ("pianodisc_128plus", 0),
     ("pianodisc_228cfx", 0),

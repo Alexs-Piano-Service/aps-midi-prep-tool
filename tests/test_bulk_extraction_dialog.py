@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
+from aps_midi_prep_tool_app.preparation_profiles import SETTING_PROFILE
 
 
 @pytest.fixture
@@ -59,6 +60,7 @@ def _controls(window, dialog):
         "long_names": checkbox("bulk.long_filenames"),
         "trim": checkbox("bulk.trim_titles"),
         "include": checkbox("bulk.include_sources"),
+        "keep_catalogs": checkbox("bulk.keep_original_catalogs"),
         "naming": dialog.findChild(QComboBox),
         "save": next(widget for widget in dialog.findChildren(QCheckBox)
                      if widget.text() == window._lt("Save progress for verified resume")),
@@ -124,6 +126,7 @@ def _resume_job(window, monkeypatch, tmp_path):
             "long_midi_filenames": False,
             "trim_title_spaces": False,
             "include_eseq_sources": True,
+            "keep_original_catalogs": False,
             "use_album_names": True,
         },
     }
@@ -148,7 +151,7 @@ def test_live_bulk_form_keeps_user_geometry_and_options_when_resized_or_resumed(
         assert dialog.font().pointSize() == font_size
         controls["include"].setChecked(True)
         controls["trim"].setChecked(False)
-        controls["naming"].setCurrentIndex(1)
+        controls["naming"].setCurrentIndex(controls["naming"].findData("album"))
         for size in ((1100, 800), (700, 520), (960, 680)):
             dialog.resize(*size)
             dialog.move(20, 30)
@@ -226,17 +229,33 @@ def test_bulk_translated_buttons_fit_at_large_font_and_small_window(window, monk
     _run_dialog(w, monkeypatch, exercise)
 
 
-@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("resume, profile, saved_catalogs, expected_catalogs, saved_preserve, expected_preserve", [
+    pytest.param(False, "mark_iii", False, True, False, True, id="new-yamaha"),
+    pytest.param(False, "enspire", False, False, False, True, id="new-enspire"),
+    pytest.param(False, "midi_export", True, False, True, False, id="new-generic"),
+    pytest.param(True, "mark_iii", False, False, False, False, id="resume-without-catalogs"),
+    pytest.param(True, "midi_export", True, True, False, False, id="resume-with-catalogs"),
+    pytest.param(True, "midi_export", False, False, True, True, id="resume-preserve-only"),
+    pytest.param(True, "mark_iii", None, False, None, False, id="resume-legacy"),
+])
 @pytest.mark.parametrize("preserve_volume", [False, True])
 def test_bulk_extract_submits_selected_or_resumed_options(
-    window, monkeypatch, tmp_path, resume, preserve_volume,
+    window, monkeypatch, tmp_path, resume, profile, saved_catalogs, expected_catalogs,
+    preserve_volume, saved_preserve, expected_preserve,
 ):
     w, source, output = window
+    w.settings.setValue(SETTING_PROFILE, profile)
     job_path, job = _resume_job(w, monkeypatch, tmp_path)
     job["options"]["preserve_volume_controls"] = preserve_volume
+    job["options"]["keep_original_catalogs"] = preserve_volume
+    if saved_catalogs is not None:
+        job["options"]["generate_yamaha_catalogs"] = saved_catalogs
+    if saved_preserve is not None:
+        job["options"]["preserve_yamaha_catalogs"] = saved_preserve
     if resume:
         # The saved job overrides even an opposite remembered preference.
         w.settings.setValue(w.SETTING_BULK_EXTRACTION_PRESERVE_VOLUME, not preserve_volume)
+        w.settings.setValue(w.SETTING_BULK_EXTRACTION_KEEP_ORIGINAL_CATALOGS, not preserve_volume)
     launches = []
     monkeypatch.setattr(w, "_start_bulk_extraction", lambda *args, **kwargs: launches.append((args, kwargs)))
 
@@ -246,11 +265,13 @@ def test_bulk_extract_submits_selected_or_resumed_options(
             controls["resume"].click()
         else:
             assert not controls["preserve_volume"].isChecked()
+            assert not controls["keep_catalogs"].isChecked()
             controls["preserve_volume"].setChecked(preserve_volume)
+            controls["keep_catalogs"].setChecked(preserve_volume)
             controls["long_names"].setChecked(False)
             controls["trim"].setChecked(False)
             controls["include"].setChecked(True)
-            controls["naming"].setCurrentIndex(1)
+            controls["naming"].setCurrentIndex(controls["naming"].findData("album"))
             controls["save"].setChecked(False)
         dialog.resize(700, 520)
         QTest.qWait(130)
@@ -260,9 +281,17 @@ def test_bulk_extract_submits_selected_or_resumed_options(
     _run_dialog(w, monkeypatch, exercise)
     assert launches == [(
         (job["source_directory"], job["output_directory"]) if resume else (str(source), str(output)),
-        {**job["options"], "job_record_path": job_path if resume else None, "resume": resume},
+        {
+            **job["options"],
+            "generate_yamaha_catalogs": expected_catalogs,
+            "preserve_yamaha_catalogs": expected_preserve,
+            "job_record_path": job_path if resume else None,
+            "resume": resume,
+        },
     )]
+    assert launches[0][1]["generate_yamaha_catalogs"] is expected_catalogs
     assert w.settings.value(w.SETTING_BULK_EXTRACTION_PRESERVE_VOLUME, type=bool) is preserve_volume
+    assert w.settings.value(w.SETTING_BULK_EXTRACTION_KEEP_ORIGINAL_CATALOGS, type=bool) is preserve_volume
 
 
 @pytest.mark.parametrize("random_suffixes", [False, True])
@@ -288,3 +317,23 @@ def test_new_extraction_progress_file_obeys_global_naming_setting(window, monkey
         assert path.name == "aps-extraction-job (2).json"
     assert not launches[0]["resume"]
     assert existing.read_text() == "previous job"
+
+
+def test_catalog_archive_choice_is_remembered_without_eseq_conversion(window, monkeypatch):
+    w, _source, _output = window
+    launches = []
+    monkeypatch.setattr(w, "_start_bulk_extraction", lambda *args, **kwargs: launches.append(kwargs))
+    for expected, selected in ((False, True), (True, False), (False, False)):
+        def exercise(dialog):
+            controls = _controls(w, dialog)
+            controls["convert"].setChecked(False)
+            assert controls["keep_catalogs"].isEnabled()
+            assert controls["keep_catalogs"].isChecked() is expected
+            controls["keep_catalogs"].setChecked(selected)
+            controls["save"].setChecked(False)
+            dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).click()
+
+        with monkeypatch.context() as patch:
+            _run_dialog(w, patch, exercise)
+        assert launches[-1]["keep_original_catalogs"] is selected
+        assert w.settings.value(w.SETTING_BULK_EXTRACTION_KEEP_ORIGINAL_CATALOGS, type=bool) is selected

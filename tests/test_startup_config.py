@@ -193,6 +193,7 @@ def test_instrument_uses_its_default_medium_and_clears_old_image_overrides(setti
     apply_startup_config(settings, {"preparation_profile": "enspire"})
     assert settings.value("preparation_medium") == "usb"
     assert settings.value("emulator_image_content") == "midi"
+    assert settings.value("use_dos83_filenames", type=bool) is False
     assert settings.value("long_midi_filenames", type=bool) is True
     assert not settings.contains("preparation_image_format")
     assert not settings.contains("preparation_disk_format")

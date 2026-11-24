@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
 
 from aps_midi_prep_tool_app import smart_pianosoft_dialog
-from aps_midi_prep_tool_app.floppy_image import DISK_FORMAT_BY_KEY, FloppyImageSession
+from aps_midi_prep_tool_app.floppy_image import DISK_FORMAT_BY_KEY, FloppyImageError, FloppyImageSession
 from aps_midi_prep_tool_app.smart_pianosoft import parse_smart_pianosoft_song_catalog
 from aps_midi_prep_tool_app.smart_pianosoft_workflow import scan_loaded_album
 from test_mute_workflows import window
@@ -50,8 +50,8 @@ def _album_payloads():
     }
 
 
-def _load_local_snapshot(window, tmp_path, monkeypatch, *, source_kind="floppy_usb"):
-    payloads = _album_payloads()
+def _load_local_snapshot(window, tmp_path, monkeypatch, *, source_kind="floppy_usb", payloads=None):
+    payloads = _album_payloads() if payloads is None else payloads
     session = FloppyImageSession(
         source_path=str(tmp_path / "disconnected-drive"), source_ext=".img",
         temp_dir=str(tmp_path / "session"), working_img_path=str(tmp_path / "snapshot.img"),
@@ -132,6 +132,27 @@ def test_deleted_catalog_is_not_resurrected_from_session_cache(window, tmp_path,
 
     assert "PSONG.MNG is missing" in loaded.error
     assert not loaded.tracks
+
+
+def test_nested_snapshot_edits_use_the_loaded_catalog_index_without_source_media(window, tmp_path, monkeypatch):
+    payloads = {}
+    for album in ("A", "B"):
+        payloads[f"{album}/FIRST.MID"] = _midi_bytes()
+        payloads[f"{album}/PSONG.MNG"] = _psong_bytes([("FIRST.MID", f"Catalog {album}")])
+        payloads[f"{album}/PDISK.MNG"] = _pdisk_bytes(f"Album {album}")
+    original, session = _load_local_snapshot(window, tmp_path, monkeypatch, payloads=payloads)
+
+    assert set(window.imageEntriesByPath) >= set(payloads)
+    window._stage_image_title_edit("B/FIRST.MID", "Edited B")
+    assert "A/PSONG.MNG" not in window.pendingImageReplacements
+    replacement = window.pendingImageReplacements["B/PSONG.MNG"]
+    assert [song.title for song in parse_smart_pianosoft_song_catalog(Path(replacement).read_bytes())] == ["Edited B"]
+    assert session.virtual_files == original
+
+    window.pendingImageDeletes.add("B/PSONG.MNG")
+    with pytest.raises(FloppyImageError, match="PSONG.MNG catalog is not available"):
+        window._stage_image_title_edit("B/FIRST.MID", "Must not change A")
+    assert "A/PSONG.MNG" not in window.pendingImageReplacements
 
 
 def test_replacement_without_fingerprints_is_rejected_by_worker(window, tmp_path, monkeypatch):

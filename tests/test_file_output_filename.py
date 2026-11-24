@@ -5,6 +5,9 @@ from pathlib import Path
 import pytest
 
 from aps_midi_prep_tool_app import main_window
+from aps_midi_prep_tool_app.smart_pianosoft import (
+    parse_smart_pianosoft_disk_title, parse_smart_pianosoft_song_catalog,
+)
 from test_preparation_file_output import (  # noqa: F401
     _catalog_image, _digest, _load_floppy, _make_image, _settle_import, _song, destination_window,
 )
@@ -20,7 +23,7 @@ def _stage_read_names(window):
 def test_import_rename_replaces_automatic_export_name_and_undo_restores_it(
     destination_window, monkeypatch, tmp_path, eseq,
 ):
-    window = destination_window("enspire")
+    window = destination_window("midi_export")
     source_image, original_digest, _original_song = _catalog_image(tmp_path / "source", eseq=eseq)
     _load_floppy(window, source_image)
     _stage_read_names(window)
@@ -55,7 +58,7 @@ def test_import_rename_replaces_automatic_export_name_and_undo_restores_it(
 def test_import_rename_to_original_filename_clears_automatic_export_name(
     destination_window, monkeypatch, tmp_path,
 ):
-    window = destination_window("enspire")
+    window = destination_window("midi_export")
     source_image, original_digest, _original_song = _catalog_image(tmp_path / "source")
     _load_floppy(window, source_image)
     _stage_read_names(window)
@@ -76,7 +79,7 @@ def test_import_rename_to_original_filename_clears_automatic_export_name(
 def test_import_rename_rejects_another_songs_filename(
     destination_window, monkeypatch, tmp_path, use_export_name,
 ):
-    window = destination_window("enspire")
+    window = destination_window("midi_export")
     songs = [tmp_path / "FIRST.MID", tmp_path / "SECOND.MID"]
     for path in songs:
         path.write_bytes(_song())
@@ -110,7 +113,7 @@ def test_import_rename_rejects_another_songs_filename(
 def test_added_file_cannot_take_an_existing_imports_hidden_source_identity(
     destination_window, monkeypatch, tmp_path,
 ):
-    window = destination_window("enspire")
+    window = destination_window("midi_export")
     source_image, original_digest, original_song = _catalog_image(tmp_path / "source", catalog=False)
     _load_floppy(window, source_image)
     original_row, original_source, _kind, _name = next(window._preparation_song_rows())
@@ -141,4 +144,27 @@ def test_added_file_cannot_take_an_existing_imports_hidden_source_identity(
     assert {Path(path).name for path in exported} == {original_export, added_export}
     assert (tmp_path / "safe-export" / original_export).read_bytes() == original_song
     assert (tmp_path / "safe-export" / added_export).read_bytes() == added_song
+    assert _digest(source_image) == original_digest
+
+
+@pytest.mark.parametrize("eseq", (False, True))
+def test_yamaha_folder_export_keeps_short_names_and_catalog_references(
+    destination_window, tmp_path, eseq,
+):
+    window = destination_window("enspire")
+    source_image, original_digest, _original_song = _catalog_image(tmp_path / "source", eseq=eseq)
+    _load_floppy(window, source_image)
+    window.pendingFloppyReadLongFilenames = True
+    window.pendingFloppyReadConvertToMidi = False
+
+    assert window._apply_pending_floppy_read_long_filenames() == 0
+    assert not window.pendingImageExportFilenames
+    output = tmp_path / "yamaha-export"
+    exported = window._export_image_session_files_to_folder(str(output))
+
+    assert {Path(path).name for path in exported} == {"SONG.MID", "PSONG.MNG", "PDISK.MNG"}
+    songs = parse_smart_pianosoft_song_catalog((output / "PSONG.MNG").read_bytes())
+    assert [(song.filename, song.title) for song in songs] == [("SONG.MID", "Automatic preparation")]
+    assert (output / songs[0].filename).is_file()
+    assert parse_smart_pianosoft_disk_title((output / "PDISK.MNG").read_bytes()) == "Imported album"
     assert _digest(source_image) == original_digest

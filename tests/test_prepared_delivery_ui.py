@@ -183,6 +183,8 @@ def test_undo_required_filename_preparation_reports_attention(window, tmp_path):
     window.editUndoAction.trigger()
     assert any("8.3" in issue for issue in window._preparation_incompatible_files())
     assert not window._ensure_preparation_ready()
+    assert str(source) not in window.pendingRegularRenames
+    assert any("8.3" in issue for issue in window._preparation_incompatible_files())
     assert source.read_bytes() == original
 
 

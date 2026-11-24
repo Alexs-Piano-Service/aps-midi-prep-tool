@@ -25,6 +25,7 @@ PATH_SETTINGS = frozenset({
     "audio_decode_batch_input", "audio_decode_batch_output",
 })
 BOOLEAN_SETTINGS = frozenset({
+    "generate_yamaha_catalogs",
     "random_output_suffixes",
     "show_compat_warning", "store_backups", "use_dos83_filenames", "hide_status",
     "hide_quick_panel", "hide_album_metadata", "show_save_destination",
@@ -43,6 +44,7 @@ BOOLEAN_SETTINGS = frozenset({
     "read_floppy_trim_titles", "bulk_extraction_convert_eseq",
     "bulk_extraction_long_midi_filenames", "bulk_extraction_trim_title_spaces",
     "bulk_extraction_include_eseq_sources", "bulk_extraction_use_album_names",
+    "bulk_extraction_keep_original_catalogs",
     "bulk_extraction_preserve_volume_controls",
     "emulator_image_include_subfolders", "emulator_image_shuffle",
     "emulator_image_include_song_lists", "check_updates_at_startup",

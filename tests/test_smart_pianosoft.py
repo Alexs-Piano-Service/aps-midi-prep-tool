@@ -225,6 +225,9 @@ def test_catalog_backed_image_title_edit_stages_psong_not_midi(tmp_path):
             extract_file=lambda _path: str(catalog_path),
         ),
         smartPianoSoftCatalogPath="PSONG.MNG",
+        imageEntriesByPath={"PSONG.MNG": object()},
+        pendingImageAdditions={},
+        pendingImageDeletes=set(),
         pendingSmartPianoSoftCatalogReplacement="",
         pendingSmartPianoSoftTitleEdits={},
         pendingImageReplacements={},
@@ -234,6 +237,10 @@ def test_catalog_backed_image_title_edit_stages_psong_not_midi(tmp_path):
     )
     window._stage_smart_pianosoft_catalog_title = MethodType(
         MidiTitleWindow._stage_smart_pianosoft_catalog_title,
+        window,
+    )
+    window._pending_or_extracted_image_path = MethodType(
+        MidiTitleWindow._pending_or_extracted_image_path,
         window,
     )
 

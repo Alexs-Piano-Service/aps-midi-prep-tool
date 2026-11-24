@@ -147,6 +147,47 @@ def test_keep_originals_option_follows_conversion_and_remembers_choice(applicati
         reopened.close()
 
 
+@pytest.mark.parametrize('profile,expected,preserve', [
+    ('mark_ii_xg', True, True), ('mark_iii', True, True), ('mark_iv', True, True), ('enspire', False, True),
+    ('midi_export', False, False), ('pianodisc_prodigy', False, False), ('unsure', False, False),
+])
+def test_backup_catalogs_follow_current_preparation_profile(application, dialog, volume,
+                                                          tmp_path, monkeypatch, profile, expected, preserve):
+    calls = []
+    dialog.plan = dialog_module.scan_library(volume[0])
+    dialog.destination_edit.setText(str(tmp_path / 'backup'))
+    dialog.settings.setValue(dialog_module.SETTING_PROFILE, profile)
+    monkeypatch.setattr(dialog, '_start', lambda operation, **kwargs: calls.append((operation, kwargs)))
+    dialog.start_backup()
+    assert calls[0][0] == 'backup'
+    assert calls[0][1]['generate_yamaha_catalogs'] is expected
+    assert calls[0][1]['preserve_yamaha_catalogs'] is preserve
+
+
+@pytest.mark.parametrize('profile,enabled,preserve', [
+    ('enspire', True, True), ('mark_iii', False, True), ('custom', True, False),
+])
+def test_backup_uses_persisted_manual_catalog_setting_and_reads_updates(
+        application, dialog, volume, tmp_path, monkeypatch, profile, enabled, preserve):
+    dialog.settings.setValue(dialog_module.SETTING_PROFILE, profile)
+    dialog.settings.setValue('generate_yamaha_catalogs', enabled)
+    dialog.settings.sync()
+    settings = QSettings(dialog.settings.fileName(), QSettings.IniFormat)
+    reopened = dialog_module.MarkIVBackupDialog(settings, refresh_on_open=False)
+    calls = []
+    monkeypatch.setattr(reopened, '_start', lambda operation, **kwargs: calls.append(kwargs))
+    try:
+        reopened.plan = dialog_module.scan_library(volume[0])
+        reopened.destination_edit.setText(str(tmp_path / 'backup'))
+        reopened.start_backup()
+        settings.setValue('generate_yamaha_catalogs', not enabled)
+        reopened.start_backup()
+        assert [options['generate_yamaha_catalogs'] for options in calls] == [enabled, not enabled]
+        assert all(options['preserve_yamaha_catalogs'] is preserve for options in calls)
+    finally:
+        reopened.close()
+
+
 @pytest.mark.parametrize("saved_suffixes", (None, True, False))
 def test_backup_uses_persisted_global_suffix_preference_and_reads_updates(
         application, dialog, volume, tmp_path, monkeypatch, saved_suffixes):

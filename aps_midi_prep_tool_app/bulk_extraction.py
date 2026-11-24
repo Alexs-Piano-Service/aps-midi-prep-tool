@@ -8,6 +8,9 @@ import tempfile
 from dataclasses import dataclass
 
 from .bulk_extraction_job import ExtractionJob, serialized_extraction
+from .bulk_extraction_catalogs import (
+    CATALOG_NAMES, ExtractedMidiCatalogs, available_yamaha_midi_path,
+)
 from .helpers.atomic_file import atomic_write_bytes
 from .helpers.portable_filename import is_windows_device_name
 
@@ -189,7 +192,10 @@ def bulk_extract_images(
     include_eseq_sources=False,
     long_midi_filenames=False,
     trim_title_spaces=False,
-    use_album_names=False,
+    use_album_names=True,
+    generate_yamaha_catalogs=False,
+    preserve_yamaha_catalogs=False,
+    keep_original_catalogs=False,
     progress_callback=None,
     progress_detail_callback=None,
     cancel_callback=None,
@@ -203,7 +209,8 @@ def bulk_extract_images(
 ):
     """Extract every file from every supported image directly in a folder.
 
-    Each image is written to its own uniquely named subfolder. If requested,
+    Each image is written to its own uniquely named subfolder, using its album
+    title when available and its image filename otherwise. If requested,
     detected E-SEQ files are replaced by MIDI conversions and Yamaha directory
     files are omitted from the output unless source inclusion is requested.
     """
@@ -243,6 +250,9 @@ def bulk_extract_images(
             "long_midi_filenames": bool(long_midi_filenames),
             "trim_title_spaces": bool(trim_title_spaces),
             "use_album_names": bool(use_album_names),
+            "generate_yamaha_catalogs": bool(generate_yamaha_catalogs),
+            "preserve_yamaha_catalogs": bool(preserve_yamaha_catalogs),
+            "keep_original_catalogs": bool(keep_original_catalogs),
         }, resume=resume, check_cancelled=lambda: _raise_if_cancelled(cancel_callback))
         job.prepare_images(image_paths)
         if resume:
@@ -301,7 +311,7 @@ def bulk_extract_images(
             image_record = job.image(image_name)
             if image_record.get("state") == "complete" and all(
                 job.entry_complete(image_name, name) for name in image_record["entries"]
-            ):
+            ) and job.catalogs_complete(image_name):
                 job.verify_image_unchanged(image_path)
                 files_reused += sum(len(entry.get("outputs", [])) for entry in image_record["entries"].values())
                 images_processed += 1
@@ -336,11 +346,21 @@ def bulk_extract_images(
                 session,
                 entries,
             )
+            midi_catalogs = ExtractedMidiCatalogs(
+                session, entries, fallback_title=os.path.splitext(image_name)[0],
+                trim_title_spaces=trim_title_spaces,
+                generate_yamaha_catalogs=generate_yamaha_catalogs,
+            ) if generate_yamaha_catalogs or preserve_yamaha_catalogs else None
+            if job is not None and preserve_yamaha_catalogs:
+                image_record["catalog_sources"] = midi_catalogs.source_catalogs
+                job.save()
             for warning in getattr(session, "conversion_warnings", ()) or ():
                 errors.append(f"{image_name}: {warning}")
             preferred_name = os.path.splitext(image_name)[0] or image_name
             if use_album_names:
-                preferred_name = _album_name_from_image(session, entries) or preferred_name
+                preferred_name = sanitize_output_folder_name(
+                    _album_name_from_image(session, entries), fallback=preferred_name,
+                )
             if job is not None and image_record.get("output_directory"):
                 image_output_directory = job.safe_output_path(os.path.join(output_directory, image_record["output_directory"]))
                 os.makedirs(image_output_directory, exist_ok=True)
@@ -372,12 +392,16 @@ def bulk_extract_images(
                 parts = entry_parts.get(id(entry))
                 if parts is None:
                     continue
+                catalog_entry = midi_catalogs is not None and midi_catalogs.applies_to(entry.path)
                 if job is not None:
                     if job.entry_complete(image_name, entry.path):
                         saved = image_record["entries"][entry.path]
                         converted_song_number += bool(saved.get("converted"))
                         extracted_midi_number += bool(saved.get("renamed_midi"))
                         files_reused += len(saved.get("outputs", []))
+                        if midi_catalogs is not None:
+                            for output in saved.get("outputs", []):
+                                midi_catalogs.add(entry.path, job.safe_output_path(os.path.join(output_directory, output["path"])), index=file_index)
                         continue
                     previous_outputs = image_record["entries"].get(entry.path, {}).get("outputs", [])
                     image_record["entries"][entry.path] = {"state": "failed", "outputs": previous_outputs}
@@ -395,6 +419,14 @@ def bulk_extract_images(
                     path=entry.path,
                 )
                 destination_path = os.path.join(image_output_directory, *parts)
+                if catalog_entry and parts[-1].upper() in CATALOG_NAMES:
+                    # Playback uses rebuilt catalogs. Archive exact source
+                    # copies only when requested, independently of conversion.
+                    if not keep_original_catalogs:
+                        if job is not None:
+                            job.finish_entry(image_name, entry.path, [], skip_reason="original_catalog")
+                        continue
+                    destination_path = os.path.join(image_output_directory, *parts[:-1], "Original catalogs", parts[-1])
                 if job is not None:
                     job.safe_output_path(destination_path)
                 try:
@@ -427,7 +459,7 @@ def bulk_extract_images(
                     converted_song_number += 1
                     source_title = ""
                     title_read_successfully = False
-                    if long_midi_filenames or trim_title_spaces:
+                    if long_midi_filenames or trim_title_spaces or catalog_entry:
                         try:
                             source_title = str(eseq_title_reader(extracted_path) or "")
                             title_read_successfully = True
@@ -435,13 +467,17 @@ def bulk_extract_images(
                             errors.append(
                                 f"{image_name} / {entry.path} (E-SEQ title): {exc}"
                             )
+                    catalog_song = midi_catalogs.song_info(entry.path) if midi_catalogs is not None else None
+                    if catalog_song is not None:
+                        source_title = catalog_song[1]
+                        title_read_successfully = True
                     conversion_title = (
                         normalize_title_spacing(source_title)
                         if trim_title_spaces
                         else source_title
                     )
                     preferred_filename = ""
-                    if long_midi_filenames:
+                    if long_midi_filenames and not catalog_entry:
                         preferred_filename = build_long_midi_filename(
                             converted_song_number,
                             conversion_title,
@@ -451,11 +487,11 @@ def bulk_extract_images(
                         job.verified_midi_path(image_name, entry.path)
                         if job is not None else None
                     )
-                    midi_path = retained_midi or _available_midi_path(
-                        image_output_directory,
-                        parts,
-                        reserved_keys,
-                        preferred_filename=preferred_filename,
+                    midi_path = retained_midi or (
+                        available_yamaha_midi_path(image_output_directory, parts, reserved_keys, counter=file_index)
+                        if catalog_entry else _available_midi_path(
+                            image_output_directory, parts, reserved_keys, preferred_filename=preferred_filename,
+                        )
                     )
                     notify(
                         image_index,
@@ -476,7 +512,7 @@ def bulk_extract_images(
                                     "cc7_policy": (CC7_POLICY_PRESERVE if preserve_volume_controls
                                                    else DEFAULT_ESEQ_TO_MIDI_CC7_POLICY),
                                 }
-                                if trim_title_spaces and title_read_successfully:
+                                if (trim_title_spaces or catalog_entry) and title_read_successfully:
                                     conversion_options["title_override"] = conversion_title
                                 eseq_converter(extracted_path, staged_midi_path, **conversion_options)
                                 with open(staged_midi_path, "rb") as handle:
@@ -500,7 +536,7 @@ def bulk_extract_images(
                             errors.append(f"{image_name} / {entry.path} (output verification): {exc}")
                             continue
 
-                if not convert_entry and long_midi_filenames:
+                if not convert_entry and (long_midi_filenames or catalog_entry):
                     try:
                         rename_midi_entry = is_midi_file(extracted_path)
                     except Exception:
@@ -525,11 +561,11 @@ def bulk_extract_images(
                             parts[-1],
                         )
                         reserved_keys.discard(_relative_key(parts))
-                        destination_path = _available_midi_path(
-                            image_output_directory,
-                            parts,
-                            reserved_keys,
-                            preferred_filename=long_filename,
+                        destination_path = (
+                            available_yamaha_midi_path(image_output_directory, parts, reserved_keys, counter=file_index)
+                            if catalog_entry else _available_midi_path(
+                                image_output_directory, parts, reserved_keys, preferred_filename=long_filename,
+                            )
                         )
 
                 if not convert_entry or include_eseq_sources:
@@ -545,11 +581,16 @@ def bulk_extract_images(
                         else:
                             os.makedirs(os.path.dirname(destination_path), exist_ok=True)
                             if os.path.lexists(destination_path):
-                                stem, extension = os.path.splitext(destination_path)
-                                suffix = 2
-                                while os.path.lexists(f"{stem}_{suffix}{extension}"):
-                                    suffix += 1
-                                destination_path = f"{stem}_{suffix}{extension}"
+                                if catalog_entry and rename_midi_entry:
+                                    destination_path = available_yamaha_midi_path(
+                                        image_output_directory, parts, reserved_keys, counter=file_index,
+                                    )
+                                else:
+                                    stem, extension = os.path.splitext(destination_path)
+                                    suffix = 2
+                                    while os.path.lexists(f"{stem}_{suffix}{extension}"):
+                                        suffix += 1
+                                    destination_path = f"{stem}_{suffix}{extension}"
                             if job is not None:
                                 job.safe_output_path(destination_path)
                             with open(extracted_path, "rb") as handle:
@@ -585,6 +626,13 @@ def bulk_extract_images(
                     except (OSError, ValueError) as exc:
                         errors.append(f"{image_name} / {entry.path} (output verification): {exc}")
 
+                if midi_catalogs is not None:
+                    for path in written_paths:
+                        midi_catalogs.add(entry.path, path, index=file_index)
+
+            if midi_catalogs is not None and len(errors) == image_error_start:
+                midi_catalogs.publish(job=job, image_name=image_name,
+                                      check_cancelled=lambda: _raise_if_cancelled(cancel_callback))
             images_processed += 1
             if job is not None:
                 job.verify_image_unchanged(image_path)

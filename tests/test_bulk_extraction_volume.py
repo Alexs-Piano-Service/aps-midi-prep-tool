@@ -93,7 +93,7 @@ def test_resume_preserves_muted_intro_and_rejects_a_changed_volume_policy(album)
         bulk_extract_images(source, output, **options, progress_detail_callback=_cancel_after_first)
     saved = checkpoint.read_bytes()
     record = json.loads(saved)
-    assert record["version"] == 2
+    assert record["version"] == 5
     assert record["options"]["preserve_volume_controls"] is True
     first = output / "disk" / "FIRST.mid"
     original_first = first.read_bytes()
@@ -120,10 +120,15 @@ def test_legacy_job_keeps_its_startup_mute_removal_policy(album):
     legacy = json.loads(checkpoint.read_bytes())
     legacy["version"] = 1
     del legacy["options"]["preserve_volume_controls"]
+    del legacy["options"]["generate_yamaha_catalogs"]
+    del legacy["options"]["preserve_yamaha_catalogs"]
+    del legacy["options"]["keep_original_catalogs"]
     checkpoint.write_text(json.dumps(legacy), encoding="utf-8")
     unchanged = checkpoint.read_bytes()
     normalized = read_extraction_job(checkpoint)
-    assert normalized["version"] == 2
+    assert normalized["version"] == 5
+    assert normalized["options"]["generate_yamaha_catalogs"] is False
+    assert normalized["options"]["preserve_yamaha_catalogs"] is False
     assert normalized["options"]["preserve_volume_controls"] is False
     assert checkpoint.read_bytes() == unchanged
     result = bulk_extract_images(source, output, **normalized["options"],

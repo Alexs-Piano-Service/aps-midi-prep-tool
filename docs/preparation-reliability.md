@@ -135,10 +135,11 @@ startup channel-volume commands that would otherwise carry a mute into MIDI
 playback. This includes **ENSPIRE and other MIDI preparation profiles**, floppy
 extraction, emulator MIDI output, and MIDI copies made during Mark IV backup.
 Manual E-SEQ-to-MIDI conversion and **Bulk Extraction** offer
-**Preserve original volume controls**.
-Leave it unchecked for the recommended startup-mute correction. Check it when
-the recording intentionally begins with muted notes or when preserving the
-original volume automation matters. Each dialog remembers its own choice;
+**Preserve original volume controls (experts only)**.
+Leave it unchecked for normal MIDI playback and the recommended startup-mute
+correction. This is a rarely needed expert option: enable it only when you
+specifically need the original zero-volume commands and understand that they
+can leave notes silent. Each dialog remembers its own choice;
 manual conversion retains it when the conversion confirmation is hidden.
 Bulk extraction also records it in saved jobs and restores it on resume.
 Older jobs retain their original startup-mute removal behavior. Other automatic
@@ -261,6 +262,25 @@ affected files where the filesystem provides enough evidence. Unread regions
 are identified; zero-filled bytes are not recovered song data.
 
 For drive errors, see [Windows disk troubleshooting](windows-disk-troubleshooting.md).
+
+Bulk Extraction defaults to naming each extracted folder from the album title
+in `PIANODIR.FIL` or `PDISK.MNG`. If neither provides a usable title, it uses
+the image filename. Duplicate album names receive a numeric suffix. You can
+explicitly choose image filenames under **Subfolder names**; saved extraction
+jobs retain their original naming choice and folders when resumed.
+
+For compatible Yamaha MIDI destinations, Bulk Extraction creates `PSONG.MNG`
+and `PDISK.MNG` beside the extracted MIDI files. Song names use DOS 8.3 filenames
+that match the catalogs. Available PIANODIR titles and song order carry through
+E-SEQ conversion. **Keep original catalogs**, off by default, optionally saves
+unchanged source MNG copies in an `Original catalogs` subfolder. The rebuilt
+playback catalogs are saved regardless of this archive option. Saved extraction
+jobs verify generated catalogs as well as songs and
+retain the destination choice when resumed.
+Jobs started before this option was added retain their original archive behavior
+when resumed.
+For ENSPIRE, only existing catalogs or catalogs derived from `PIANODIR.FIL`
+are carried forward. Albums without source catalogs receive none.
 
 ## Resume an interrupted bulk extraction
 

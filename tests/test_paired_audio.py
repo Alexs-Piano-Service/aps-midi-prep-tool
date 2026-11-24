@@ -1,6 +1,8 @@
 """Paired output keeps every musical event on the clean audio timeline."""
 
 from pathlib import Path
+import errno
+import json
 import threading
 import wave
 
@@ -9,7 +11,8 @@ import numpy as np
 import pytest
 
 from aps_midi_prep_tool_app import audio_tools, paired_audio
-from aps_midi_prep_tool_app.disklavier_audio import read_midi_events
+from aps_midi_prep_tool_app.disklavier_audio import encode_disklavier_wav, read_midi_events
+from aps_midi_prep_tool_app.disklavier_audio_decode import decode_disklavier_audio
 from aps_midi_prep_tool_app.midi_type0_converter import _parse_track_events
 from aps_midi_prep_tool_app.smart_pianosoft_sync import TimedMidiEvent
 from aps_midi_prep_tool_app.smf import parse_smf_layout
@@ -113,13 +116,115 @@ def test_silent_audio_tail_is_retained_in_midi_song_length(tmp_path, music, monk
     assert mido.MidiFile(tmp_path / "song.mid").length == pytest.approx(0.1)
 
 
-@pytest.mark.parametrize("status", [b"\xf1\x01", b"\xf2\x00\x00", b"\xf3\x01", b"\xf8"])
-def test_non_smf_system_messages_are_rejected(tmp_path, music, monkeypatch, status):
+def test_pair_exports_with_full_system_temp_using_destination_recovery(tmp_path, music, monkeypatch):
+    source, _pcm = music
+    original = source.read_bytes()
+    _fake_encoder(monkeypatch)
+    destination = tmp_path / "external drive"
+    destination.mkdir()
+    directories = []
+    mkdtemp = paired_audio.tempfile.mkdtemp
+
+    def destination_only(suffix=None, prefix=None, dir=None):
+        if dir is None:
+            raise OSError(errno.ENOSPC, "System temporary storage is full")
+        directory = Path(mkdtemp(suffix=suffix, prefix=prefix, dir=dir))
+        directories.append(directory)
+        return str(directory)
+
+    monkeypatch.setattr(paired_audio.tempfile, "mkdtemp", destination_only)
+    events = [(0, b"\x90\x3c\x50"), (0.05, b"\x80\x3c\x00")]
+    result = paired_audio.export_midi_mp3(events, source, destination / "song")
+
+    assert read_midi_events(destination / result["midi"]) == events
+    assert (destination / result["audio"]).read_bytes() == b"test MP3"
+    recovery = [path for path in directories if path.name.startswith("aps_file_batch_")]
+    assert len(recovery) == 1
+    assert recovery[0].parent == destination
+    assert all(path.parent == destination and not path.exists() for path in directories)
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("status,name", [
+    (b"\xf1\x01", "MIDI Time Code Quarter Frame"),
+    (b"\xf2\x00\x00", "Song Position Pointer"),
+    (b"\xf3\x01", "Song Select"),
+    (b"\xf6", "Tune Request"),
+    (b"\xff", "System Reset"),
+])
+def test_stateful_system_messages_are_reported_before_creating_output(
+    tmp_path, music, monkeypatch, status, name,
+):
+    source, _pcm = music
+    original = source.read_bytes()
+    captured = _fake_encoder(monkeypatch)
+    with pytest.raises(ValueError) as caught:
+        paired_audio.export_midi_mp3(
+            [(0, b"\x90\x3c\x50"), (0.025, status), (0.05, b"\x80\x3c\x00")],
+            source, tmp_path / "song")
+    message = str(caught.value)
+    assert name in message
+    assert f"0x{status[0]:02X}" in message
+    assert "0.025000 seconds" in message
+    assert "cannot be safely omitted" in message
+    assert not captured
+    assert not (tmp_path / "song.mid").exists()
+    assert not (tmp_path / "song.mp3").exists()
+    assert not list(tmp_path.glob(".aps-paired-audio-*"))
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("status", [b"\xf8", b"\xfa", b"\xfb", b"\xfc", b"\xfe"])
+def test_live_realtime_messages_are_omitted_without_changing_musical_times(
+    tmp_path, music, monkeypatch, status,
+):
     source, _pcm = music
     _fake_encoder(monkeypatch)
-    with pytest.raises(ValueError, match="system-common or realtime"):
-        paired_audio.export_midi_mp3([(0, status)], source, tmp_path / "song")
-    assert not (tmp_path / "song.mid").exists()
+    events = [(0, status), (0.01, b"\x90\x3c\x50"), (0.02, status),
+              (0.06, b"\x80\x3c\x00"), (0.09, status)]
+    result = paired_audio.export_midi_mp3(events, source, tmp_path / "song")
+    actual = read_midi_events(tmp_path / result["midi"])
+    assert [data for _, data in actual] == [events[1][1], events[3][1]]
+    assert [time for time, _ in actual] == pytest.approx([0.01, 0.06], abs=0.00005)
+    assert result["skipped_realtime_messages"] == 3
+    assert result["skipped_pianosmart_messages"] == 0
+    assert result["events"] == 2
+    assert (tmp_path / result["audio"]).exists()
+
+
+def test_decoded_control_stream_with_clock_exports_notes_and_pedals_on_original_timeline(
+    tmp_path, monkeypatch,
+):
+    # Exercise the actual encoded waveform and decoder, including clocks before,
+    # between and after musical events. The source fixture contains no library music.
+    samples = np.arange(44100)
+    pcm = np.column_stack((6000 * np.sin(2 * np.pi * 440 * samples / 44100),
+                           4000 * np.sin(2 * np.pi * 660 * samples / 44100)))
+    source, encoded = tmp_path / "source.wav", tmp_path / "encoded.wav"
+    _wav(source, pcm)
+    events = [(0.02, b"\xfa"), (0.04, b"\xf8"), (0.1, b"\x90\x3c\x50"),
+              (0.15, b"\xf8"), (0.2, b"\xb0\x40\x7f"), (0.3, b"\xf8"),
+              (0.4, b"\x80\x3c\x00"), (0.45, b"\xf8"), (0.5, b"\xb0\x40\x00"),
+              (0.6, b"\xf8"), (0.65, b"\xfc")]
+    encode_disklavier_wav(events, source, encoded)
+    original = encoded.read_bytes()
+    decoded = decode_disklavier_audio(encoded, tmp_path / "clean.wav")
+    assert [event.data for event in decoded.events] == [data for _, data in events]
+    captured = _fake_encoder(monkeypatch)
+    result = paired_audio.export_midi_mp3(decoded.events, decoded.music_path, tmp_path / "song")
+    actual = read_midi_events(tmp_path / result["midi"])
+    musical = [event for event in decoded.events if event.data[0] < 0xF0]
+    assert [data for _, data in actual] == [event.data for event in musical]
+    assert [time for time, _ in actual] == pytest.approx(
+        [event.time_seconds for event in musical], abs=0.00005)
+    assert result["events"] == 4
+    assert result["skipped_realtime_messages"] == 7
+    assert result["audio_preroll_seconds"] == 0
+    assert (tmp_path / result["audio"]).exists()
+    with wave.open(str(decoded.music_path), "rb") as clean:
+        assert captured[0][0] == clean.getparams()
+        assert captured[0][1] == clean.readframes(clean.getnframes())
+    assert encoded.read_bytes() == original
 
 
 @pytest.mark.parametrize("note_end", [b"\x80\x3c\x00", b"\x90\x3c\x00"])
@@ -158,12 +263,22 @@ def test_cancel_between_publications_rolls_back_the_pair(tmp_path, music, monkey
                                      cancel=cancel, progress=progress)
     assert caught.value.recovery_directory
     assert caught.value.retained_paths
+    recovery = Path(caught.value.recovery_directory)
+    assert recovery.parent == tmp_path
+    manifest = json.loads((recovery / "manifest.json").read_text())
+    assert not manifest["rollback_errors"]
+    assert all((recovery / record["prepared_file"]).is_file() for record in manifest["files"])
+    assert (recovery / manifest["files"][1]["prepared_file"]).read_bytes() == b"test MP3"
+    assert all(Path(path).is_file() and Path(path).is_relative_to(tmp_path)
+               for path in caught.value.retained_paths)
+    assert not list(tmp_path.glob(".aps-paired-audio-*"))
     assert not (tmp_path / "song.mid").exists()
     assert not (tmp_path / "song.mp3").exists()
 
 
 @pytest.mark.parametrize("events,offset,scale", [
     ([], 0, 1),
+    ([(0, b"\xf8"), (0.1, b"\xfe")], 0, 1),
     ([(0, b"\xf0\x43\x71\x7b\x00\xf7")], 0, 1),
     ([(float("nan"), b"\x90\x3c\x50")], 0, 1),
     ([(1, b"\x90\x3c\x50"), (0, b"\x80\x3c\x00")], 0, 1),
@@ -192,8 +307,12 @@ def test_real_lame_preserves_clean_audio_timeline_and_stereo(tmp_path):
                            9000 * np.sin(2 * np.pi * 660 * seconds) * envelope)).astype(np.int16)
     source = tmp_path / "music.wav"
     _wav(source, pcm)
-    result = paired_audio.export_midi_mp3([(0.35, b"\x90\x3c\x50"), (1.7, b"\x80\x3c\x00")],
+    result = paired_audio.export_midi_mp3([(0, b"\xf8"), (0.35, b"\x90\x3c\x50"),
+                                         (1.0, b"\xf8"), (1.7, b"\x80\x3c\x00")],
                                          source, tmp_path / "song")
+    assert result["skipped_realtime_messages"] == 2
+    assert [time for time, _data in read_midi_events(tmp_path / result["midi"])] == pytest.approx(
+        [0.35, 1.7], abs=0.00005)
     decoded = tmp_path / "decoded.wav"
     audio_tools.decode_mp3(tmp_path / result["audio"], decoded)
     with wave.open(str(decoded), "rb") as audio:

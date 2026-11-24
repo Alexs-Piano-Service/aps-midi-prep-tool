@@ -50,6 +50,14 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Make Bulk Extraction's **Keep original catalogs** option off by default.
+  Enable it to save unchanged source MNG copies in an `Original catalogs`
+  subfolder alongside the rebuilt playback catalogs.
+- Add **Settings → Save Options → Create Missing Yamaha Catalogs** as a
+  remembered override for catalog creation. Preparing for supplies the default;
+  manual changes apply to saving, bulk extraction, emulator sets, Mark IV
+  backups, and paired playback exports.
+
 - Move the Disklavier WAV Player's introductory instructions into tooltips,
   leaving more room for the piano roll and accompaniment waveform.
 - Read Smart PianoSoft's embedded CD track references so songs omitted from
@@ -84,6 +92,41 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Restore editable descriptive filename options for ENSPIRE, including reading,
+  conversion, and bulk extraction. Preserve required short names only for albums
+  retaining Yamaha catalogs, without restricting unrelated folders.
+
+- Keep progress and nested dialogs attached to their owning window, finish
+  initial placement after the native frame appears, and keep them within the
+  available screen. Emulator progress retains its position and size after
+  preview and overwrite dialogs; Wayland placement uses the native owner.
+
+- Fit progress windows to their current messages instead of reserving empty
+  text rows. Tighten Bulk Extraction spacing and keep progress widths within
+  the screen without enlarging them again for larger fonts.
+- Default Bulk Extraction's title-space cleanup to off for Mark II, Mark II XG,
+  and Mark III, including when applying one of these preparation profiles.
+- Clearly label original-volume preservation as a rare expert option in manual
+  E-SEQ conversion and Bulk Extraction, with visible guidance to leave it
+  unchecked for normal playback because preserved startup mutes can silence notes.
+- Save compatible Yamaha MIDI album titles in `PDISK.MNG` and song titles in
+  `PSONG.MNG`, creating missing catalogs and keeping existing extra fields.
+  ENSPIRE preserves existing or PIANODIR-derived catalogs without generating
+  new catalogs for uncataloged songs.
+  Carry PIANODIR titles and order through E-SEQ conversion in regular exports,
+  emulator disk sets, bulk extraction, and converted Mark IV backups. Match
+  catalogs to actual DOS 8.3 filenames and each split disk’s own songs.
+
+- Keep Smart PianoSoft's footer layout stable through scanning, ripping, and
+  completion. Reserve the Restart caption and output-folder action from the
+  start, and size the initial window for the full row when the screen allows.
+- Keep wrapped About dialog text fully readable with large fonts and narrow
+  windows, including the administrator confirmation on Windows.
+- Accept cdparanoia's standard `OK` copy-permission flag in CD track lists,
+  preventing valid connected CDs from failing with reconnect guidance.
+- Avoid leaving Smart PianoSoft output folders after failed checks or cancelled
+  runs without completed audio. After partial progress, ask whether to save or
+  discard this run's files, including when closing the window.
 - Defer responsive dialog button reflow until Qt finishes the current layout
   event, combine repeated requests, and cancel queued reflow on dialog deletion.
 - Show “Exporting paired MIDI/MP3” during Smart PianoSoft paired-file export;
@@ -106,6 +149,12 @@ with release sections grouped by version and date.
   MIDI or E-SEQ companion exists. Recover synchronized MIDI/MP3 pairs without
   changing the originals, and check for LAME before starting a backup that
   requests audio decoding.
+- Export decoded MIDI/MP3 pairs containing MIDI clock, transport, or active-sensing
+  messages by omitting those live-stream markers while preserving musical event
+  timing. Report unsupported system-common and reset messages before publishing
+  a pair.
+- Respect Undo of automatic filename shortening: saving reports incomplete
+  preparation instead of silently shortening the names again.
 - Show the current CD track and reading/checking/saving stage during Smart
   PianoSoft ripping, with progress across the CD instead of restarting per track.
 - Finish the Greaseweazle capture-save flow before offering Smart PianoSoft

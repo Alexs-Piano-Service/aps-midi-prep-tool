@@ -6,7 +6,7 @@ Use **Utilities → Back Up Mark IV Music...** to copy a Disklavier Mark IV
 music library into album folders with recovered names. APS reads the source,
 copies the original files, and checks their contents. An optional conversion
 step converts supported legacy E-SEQ songs to MIDI, with an option to keep the
-originals alongside the MIDI files.
+verified originals in the archive.
 For ENSPIRE delivery, the utility can also decode Yamaha control audio in
 WAV/MP3 files into synchronized MIDI and clean music copies.
 
@@ -80,10 +80,11 @@ always unchanged.
 ## Check the result or verify it later
 
 APS checks each copied original with a SHA-256 checksum, a fingerprint of its
-file contents, and reads back generated MIDI files for the same check.
+file contents, and reads back generated MIDI files and Yamaha catalogs for the
+same check.
 `manifest.json` records original and destination paths, recovered metadata,
-checksums, generated MIDI copies, decoded audio pairs, and any errors. `README.txt` summarizes the
-result.
+checksums, generated MIDI copies, decoded audio pairs, generated catalogs, and
+any errors. `README.txt` summarizes the result.
 
 To check an existing backup:
 
@@ -92,9 +93,13 @@ To check an existing backup:
 3. Review the result and **View report...** for missing, changed, or incomplete
    files.
 
-Verification checks retained originals and both files of each generated pair against the
-manifest. The source drive is not needed. Checksums confirm file integrity;
-audition converted songs to assess their playback on your player.
+Verification checks retained originals, converted MIDI files, both files of
+each generated audio pair, and generated `PDISK.MNG` and `PSONG.MNG` files
+against the manifest. It checks recorded completion status, file sizes, and
+checksums. When an E-SEQ backup copy was intentionally removed, verification
+checks its recorded MIDI replacement. The source drive is not needed.
+Checksums confirm file integrity; audition converted songs to assess their
+playback on your player.
 
 ## If a backup stops or a drive does not respond
 
@@ -103,7 +108,7 @@ does not respond; **Refresh drives** starts a fresh discovery attempt.
 Cancelling an active backup waits for orderly file cleanup and retains its
 partial result.
 
-If copying or conversion fails, APS reports an incomplete backup and keeps
+If copying, conversion, or catalog generation fails, APS reports an incomplete backup and keeps
 the retained originals and MIDI files that finished successfully. **Cancel** also
 keeps completed files. Review **View report...** and the manifest for failures or
 unfinished work; an `.incomplete` marker identifies an unfinished backup.
@@ -121,8 +126,12 @@ it still reports an unfinished backup as incomplete.
 Album and song names come from available Mark IV catalog information, folder
 indexes, and song metadata. When names cannot be recovered, APS uses the
 original folder or filename. Warnings identify missing or unreadable metadata.
-The backup retains available original catalogs and database evidence under
-`_metadata/original/`.
+Folder catalogs, including `PIANODIR.FIL`, `PDISK.MNG`, and `PSONG.MNG`, remain
+unchanged in the archived album folders. Database evidence and catalog schemas
+are retained under `_metadata/original/`.
+
+Valid `PIANODIR.FIL` files supply E-SEQ album titles, song titles, and playback
+order. Available Mark IV database labels take precedence over folder metadata.
 
 APS reads the saved catalog directly. Catalog decoding supports the inspected
 Mark IV PostgreSQL 7.3 format. Other catalog layouts use available folder indexes
@@ -132,11 +141,30 @@ and filenames.
 
 When conversion is selected, APS first copies and verifies the originals,
 then converts supported E-SEQ files from those copies. Each successful
-conversion creates a verified `.mid` file in the same folder. If **Keep the
-verified originals** is unchecked, APS removes the backed-up E-SEQ copy only
+conversion creates a verified `.mid` file. If **Keep the verified originals**
+is unchecked, APS removes the backed-up E-SEQ copy only
 after its MIDI file has been saved and verified. Failed or cancelled conversions
-keep their originals. If the intended MIDI name is already in use, the new copy
-receives a numbered suffix.
+keep their originals.
+
+When **Preparing for** selects a compatible Yamaha MIDI target—DSR1, Mark II XG,
+Mark III, Mark IV / PRO, or E3 / DKC-800 / DKC-850—the converted
+files go into **Yamaha MIDI**, with collection and album subfolders. A numbered
+folder variant is used if necessary. Each playback folder receives `PDISK.MNG`
+for its album title and `PSONG.MNG` for song titles and order. Titles recovered
+from `PIANODIR.FIL` are carried into these MIDI catalogs. Available compatible
+MNG templates retain their other record fields; the archived catalogs remain
+unchanged.
+
+For ENSPIRE / DKC-900, this cataloged playback tree is used only for albums
+with existing MIDI catalogs or `PIANODIR.FIL`. Existing catalogs are updated,
+and PIANODIR titles are converted; uncataloged albums do not acquire catalogs.
+Their converted MIDI files stay beside the archived songs.
+
+Cataloged MIDI files use unique DOS 8.3 names, such as `SONG.mid` and
+`SONG~2.mid`, and the song catalog names the actual output files. This playback
+tree contains the converted songs; existing MIDI originals remain in the
+archive. For other preparation profiles, converted MIDI files stay beside the
+archived songs and filename collisions receive numbered suffixes.
 
 Eligible E-SEQ tracks show a conversion note in the album details when
 conversion is enabled. The note follows the retention choice; ordinary MIDI,
@@ -153,8 +181,10 @@ each song and before writing its actual MIDI output. If another program fills
 the destination meanwhile, failed conversions retain their verified originals.
 
 Audio decoding also reserves space for the MIDI/MP3 copies and temporary PCM
-audio. MP3 files can expand considerably while decoding. These temporary files
-are removed when each song finishes or stops.
+audio. MP3 files can expand considerably while decoding. Audio staging and
+publication recovery copies stay on the destination drive. PCM staging files
+are removed when each song finishes or stops; recovery copies are retained
+when rollback needs them.
 
 ### Optional encoded-audio decoding
 
@@ -167,16 +197,26 @@ the encoded original was used for control data.
 
 Successful pairs are saved separately under **Paired MIDI and MP3**, preserving
 the collection and album organization. If that folder name is occupied, APS
-uses a numbered variant. The two files for a song have the same basename, such
-as `01 - Song.mid` and `01 - Song.mp3`. Duplicate names receive the same numbered
-suffix on both files. Copy the desired album folder to an ENSPIRE USB stick,
-keeping each pair together. Keep the full backup separately.
+uses a numbered variant. The two files for a song have the same basename. With
+a compatible Yamaha MIDI profile selected, pairs use DOS 8.3 names, such as
+`SONG.mid` and `SONG.mp3`, and the playback folder includes album and song titles
+in `PDISK.MNG` and `PSONG.MNG`. Other profiles retain descriptive names such as
+`01 - Song.mid` and `01 - Song.mp3`. Duplicate names receive the same suffix on
+both files. ENSPIRE only carries catalogs for albums with existing MNG or
+PIANODIR metadata; uncataloged albums retain descriptive names. Copy the desired
+album folder to an ENSPIRE USB stick, keeping each
+pair and its catalogs together. Keep the full backup separately.
 
 The MIDI and music retain the encoded recording's shared timeline. APS does
 not run Smart PianoSoft fingerprint matching again on an already synchronized
 control track. It does not add a guessed mechanical-delay correction. MIDI
 completion times are recovered from the signal; exact acoustic alignment and
 the piano's MP3 delay handling still require a playback check.
+
+Paired export omits MIDI clock, transport, and active-sensing messages from the
+recovered stream and records their count. Notes, pedals, and other musical
+events retain their recorded times. System-common and system-reset messages
+produce an error identifying the message and its time before a pair is saved.
 
 APS inspects eligible audio even when a MIDI or E-SEQ file has the same basename;
 the companion alone does not establish that the audio is clean. Audio without
@@ -193,7 +233,8 @@ folder or copying any files. If it is missing, install LAME or turn off the
 encoded-audio option to make an originals-only audio backup.
 
 The manifest records the detected control channel, decoder measurements,
-timing, and separate checksums for both output files. The result counts decoded
+timing, and separate checksums for both output files and any generated catalogs.
+The result counts decoded
 pairs and skipped audio files. A decode failure marks the overall backup
 incomplete but retains all verified originals and any earlier completed pairs.
 Cancelling removes incomplete public pairs while preserving reported recovery

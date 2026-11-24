@@ -14,6 +14,7 @@ SETTING_PROFILE = "preparation_profile"
 SETTING_MEDIUM = "preparation_medium"
 SETTING_IMAGE_FORMAT = "preparation_image_format"
 SETTING_DISK_FORMAT = "preparation_disk_format"
+SETTING_GENERATE_YAMAHA_CATALOGS = "generate_yamaha_catalogs"
 PIANO_PROFILE_CATEGORIES = (
     ("general", "General"),
     ("disklavier", "Disklavier"),
@@ -197,6 +198,28 @@ MEDIA = (
 MEDIA_BY_KEY = {medium.key: medium for medium in MEDIA}
 
 
+def requires_yamaha_midi_catalogs(profile_or_key):
+    """Whether the destination needs newly generated MIDI management files."""
+    profile = (profile_or_key if isinstance(profile_or_key, PianoProfile)
+               else get_preparation_profile(profile_or_key))
+    return profile.key in {"dsr1", "mark_ii_xg", "mark_iii", "mark_iv", "e3_850"}
+
+
+def preserves_yamaha_midi_catalogs(profile_or_key):
+    """Keep source Yamaha catalogs, including translated E-SEQ metadata."""
+    profile = (profile_or_key if isinstance(profile_or_key, PianoProfile)
+               else get_preparation_profile(profile_or_key))
+    return profile.category == "disklavier" and "midi" in profile.supported_song_formats
+
+
+def generate_yamaha_catalogs_enabled(settings):
+    """Use the saved manual choice, or the destination's default if unset."""
+    if settings is None:
+        return False
+    default = requires_yamaha_midi_catalogs(settings.value(SETTING_PROFILE, "unsure"))
+    return settings.value(SETTING_GENERATE_YAMAHA_CATALOGS, default, type=bool)
+
+
 def get_preparation_profile(key):
     return PROFILES_BY_KEY.get(str(key or ""), PROFILES_BY_KEY["unsure"])
 
@@ -211,19 +234,29 @@ def get_preparation_medium(profile, key):
     return MEDIA_BY_KEY[key]
 
 
+def bulk_title_space_cleanup_default(profile):
+    """Keep the original title spacing for these older Disklavier displays."""
+    return profile.key not in {"mark_ii", "mark_ii_xg", "mark_iii"}
+
+
 def proposed_settings(profile, medium):
     """Return only defaults the user can review before applying this profile."""
     if profile.key == "custom":
         return {}
     medium = get_preparation_medium(profile, medium.key)
     floppy = medium.key in FLOPPY_MEDIA
-    use_dos83 = floppy and profile.song_format is not None
+    # Destinations that create MIDI management records need DOS 8.3 names,
+    # including USB delivery. Merely preserving source catalogs (ENSPIRE)
+    # must not lock the filename controls for every album.
+    use_dos83 = (floppy and profile.song_format is not None) or requires_yamaha_midi_catalogs(profile)
     changes = {
         "use_dos83_filenames": use_dos83,
         "long_midi_filenames": not use_dos83,
         "eseq_to_midi_long_filenames": not use_dos83,
         "read_floppy_long_filenames": not use_dos83,
         "bulk_extraction_long_midi_filenames": not use_dos83,
+        "bulk_extraction_trim_title_spaces": bulk_title_space_cleanup_default(profile),
+        SETTING_GENERATE_YAMAHA_CATALOGS: requires_yamaha_midi_catalogs(profile),
         "format_disklavier_screen": profile.key in {"mark_i", "mark_ii", "mark_ii_xg", "mark_iii"},
     }
     if profile.song_format is not None:
@@ -248,6 +281,8 @@ SETTING_LABELS = {
     "eseq_to_midi_long_filenames": "Descriptive E-SEQ to MIDI filenames",
     "read_floppy_long_filenames": "Descriptive floppy MIDI export filenames",
     "bulk_extraction_long_midi_filenames": "Descriptive MIDI export filenames",
+    "bulk_extraction_trim_title_spaces": "Trim Title Spaces",
+    SETTING_GENERATE_YAMAHA_CATALOGS: "Create Missing Yamaha Catalogs",
     "format_disklavier_screen": "Format for Disklavier screen",
     "emulator_image_disk_format": "Disk-set capacity",
     SETTING_DISK_FORMAT: "New image / Save As Image capacity",

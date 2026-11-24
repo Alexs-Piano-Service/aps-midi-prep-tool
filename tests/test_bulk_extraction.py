@@ -116,7 +116,6 @@ def test_bulk_extraction_uses_album_names_and_falls_back_to_image_names(tmp_path
     result = bulk_extract_images(
         source,
         output,
-        use_album_names=True,
         session_loader=session_loader,
     )
 
@@ -141,7 +140,7 @@ def test_bulk_extraction_reads_pdisk_album_titles_with_pianodir_priority(tmp_pat
         "invalid.img": {"PDISK.MNG": b"truncated", "FIRST.MID": _minimal_midi_bytes()},
     }
     result = bulk_extract_images(
-        source, tmp_path / "output", use_album_names=True,
+        source, tmp_path / "output",
         session_loader=lambda path, **kwargs: FakeImageSession(path, files[Path(path).name]),
     )
     assert {Path(path).name for path in result.output_directories} == {
@@ -166,7 +165,7 @@ def test_bulk_extraction_reads_lf_only_catalog_titles_and_album_names(tmp_path):
         "01.MID": _minimal_midi_bytes(), "02.MID": _minimal_midi_bytes(),
     }
     result = bulk_extract_images(
-        source, tmp_path / "output", use_album_names=True, long_midi_filenames=True,
+        source, tmp_path / "output", long_midi_filenames=True,
         session_loader=lambda path, **kwargs: FakeImageSession(path, files),
     )
     assert result.errors == ()

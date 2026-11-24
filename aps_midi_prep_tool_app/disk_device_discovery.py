@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QDialog, QProgressDialog
 from .disk_device_probe import probe_command as _probe_command
 from .floppy_image import FloppyDriveInfo, GreaseweazleDeviceInfo, _terminate_process
 from .subprocess_utils import windows_subprocess_kwargs
+from .ui_utils import center_dialog_on_parent
 
 
 DISCOVERY_TIMEOUT_SECONDS = 10.0
@@ -149,6 +150,8 @@ def discover_floppy_devices(
     try:
         if prepare_dialog is not None:
             prepare_dialog(dialog)
+        else:
+            center_dialog_on_parent(dialog, parent)
         # Always complete inside exec(), including instant empty-device results.
         QTimer.singleShot(0, check_finished)
         timer.start()

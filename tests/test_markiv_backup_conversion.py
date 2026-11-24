@@ -19,6 +19,14 @@ from aps_midi_prep_tool_app.markiv_backup import backup
 from aps_midi_prep_tool_app.markiv_backup.library import safe_name, scan_library
 from aps_midi_prep_tool_app.markiv_backup.metadata import MetadataCatalog
 from aps_midi_prep_tool_app.midi_type0_converter import _parse_track_events
+from aps_midi_prep_tool_app.eseq_pianodir import (
+    PIANODIR_HEADER, PIANODIR_TRACK_SIZE, PianodirTrackEntry, build_pianodir_bytes,
+)
+from aps_midi_prep_tool_app.smart_pianosoft import (
+    build_smart_pianosoft_song_catalog, build_smart_pianosoft_song_record,
+    parse_smart_pianosoft_disk_title, parse_smart_pianosoft_song_catalog,
+    update_smart_pianosoft_disk_title,
+)
 
 
 def _fil(title='Header title'):
@@ -47,6 +55,180 @@ def _source(tmp_path, files):
 
 def _manifest(result):
     return json.loads((result.folder / backup.MANIFEST).read_text())
+
+
+@pytest.mark.parametrize('keep_originals', [True, False])
+@pytest.mark.parametrize('catalog_option', ['generate_yamaha_catalogs', 'preserve_yamaha_catalogs'])
+def test_compatible_conversion_preserves_pianodir_titles_and_catalog_order(tmp_path, keep_originals, catalog_option):
+    originals = {'songs/user/1/FIRST.FIL': _fil('First old header'),
+                 'songs/user/1/SECOND.FIL': _fil('Second old header')}
+    source = _source(tmp_path, originals)
+    album = source / 'songs/user/1'
+    catalog = bytearray(build_pianodir_bytes([
+        PianodirTrackEntry(name, str(album / name), '') for name in ('SECOND.FIL', 'FIRST.FIL')
+    ], disk_title='Recovered Piano Album'))
+    for index, title in enumerate(('Second edited title', 'First edited title')):
+        start = len(PIANODIR_HEADER) + index * PIANODIR_TRACK_SIZE + 0x30
+        catalog[start:start + 32] = title.encode().ljust(32, b' ')
+    originals['songs/user/1/PIANODIR.FIL'] = bytes(catalog)
+    (album / 'PIANODIR.FIL').write_bytes(catalog)
+    plan = scan_library(source)
+
+    result = backup.run_backup(plan, tmp_path / 'backup', convert_eseq=True,
+                               keep_originals=keep_originals, **{catalog_option: True})
+
+    assert result.status == 'complete', result.errors
+    assert result.converted == 2
+    manifest = _manifest(result)
+    midis = [record for record in manifest['derivatives'] if record['kind'] == 'MIDI']
+    playback = result.folder / Path(midis[0]['destination']).parent
+    assert 'Yamaha MIDI' in playback.parts
+    assert parse_smart_pianosoft_disk_title((playback / 'PDISK.MNG').read_bytes()) == 'Recovered Piano Album'
+    songs = parse_smart_pianosoft_song_catalog((playback / 'PSONG.MNG').read_bytes())
+    assert [(song.filename, song.title) for song in songs] == [
+        ('SECOND.mid', 'Second edited title'), ('FIRST.mid', 'First edited title')]
+    for song in songs:
+        assert (playback / song.filename).is_file()
+        assert song.title.encode() in (playback / song.filename).read_bytes()
+    for record in manifest['files']:
+        assert (source / record['source']).read_bytes() == originals[record['source']]
+        retained = result.folder / record['destination']
+        if keep_originals or Path(record['source']).name == 'PIANODIR.FIL':
+            assert retained.read_bytes() == originals[record['source']]
+        else:
+            assert record['status'] == 'replaced' and not retained.exists()
+    assert backup.verify_backup(result.folder) == []
+    (playback / 'PSONG.MNG').write_bytes(b'damaged catalog')
+    assert any('PSONG.MNG' in message for message in backup.verify_backup(result.folder))
+
+
+@pytest.mark.parametrize('catalog_option', ['generate_yamaha_catalogs', 'preserve_yamaha_catalogs'])
+def test_cataloged_conversion_preserves_archived_mng_bytes_and_opaque_fields(tmp_path, monkeypatch, catalog_option):
+    song_record = bytearray(build_smart_pianosoft_song_record('SONG.FIL', 'Earlier title'))
+    song_record[0x90:0x94] = b'KEEP'
+    disk = update_smart_pianosoft_disk_title(b'', 'Earlier album') + b'opaque disk tail'
+    originals = {'songs/user/1/SONG.FIL': _fil(),
+                 'songs/user/1/PSONG.MNG': build_smart_pianosoft_song_catalog(b'', [bytes(song_record)]),
+                 'songs/user/1/PDISK.MNG': disk}
+    source = _source(tmp_path, originals)
+    catalog = MetadataCatalog(
+        albums={'songs/user/1': {'title': 'Updated album'}},
+        tracks={'songs/user/1/SONG.FIL': {'title': 'Updated song', 'track_number': 1,
+                                       'metadata_source': 'postgresql-7.3'}},
+    )
+    monkeypatch.setattr('aps_midi_prep_tool_app.markiv_backup.metadata.load_metadata', lambda source: catalog)
+
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup',
+                               convert_eseq=True, **{catalog_option: True})
+
+    assert result.status == 'complete', result.errors
+    _assert_originals(result, source, originals)
+    midi = next(record for record in _manifest(result)['derivatives'] if record['kind'] == 'MIDI')
+    playback = result.folder / Path(midi['destination']).parent
+    song, = parse_smart_pianosoft_song_catalog((playback / 'PSONG.MNG').read_bytes())
+    assert song.title == 'Updated song'
+    assert song.raw_record[0x90:0x94] == b'KEEP'
+    assert song.filename == Path(midi['destination']).name
+    disk = (playback / 'PDISK.MNG').read_bytes()
+    assert parse_smart_pianosoft_disk_title(disk) == 'Updated album'
+    assert disk.endswith(b'opaque disk tail')
+    assert backup.verify_backup(result.folder) == []
+
+
+@pytest.mark.parametrize('catalog_payload', [None, b'not a Yamaha catalog'])
+def test_preservation_only_conversion_does_not_invent_catalogs_for_uncataloged_album(tmp_path, catalog_payload):
+    files = {'songs/user/1/Descriptive source name.FIL': _fil('Descriptive song title'),
+             'songs/user/2/OTHER.FIL': _fil('Other album song'),
+             'songs/user/2/PDISK.MNG': update_smart_pianosoft_disk_title(b'', 'Existing album')}
+    if catalog_payload is not None:
+        files['songs/user/1/PDISK.MNG'] = catalog_payload
+    source = _source(tmp_path, files)
+
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup',
+                               convert_eseq=True, preserve_yamaha_catalogs=True)
+
+    assert result.status == 'complete', result.errors
+    manifest = _manifest(result)
+    conversions = {record['source']: record for record in manifest['derivatives'] if record['kind'] == 'MIDI'}
+    plain = Path(conversions['songs/user/1/Descriptive source name.FIL']['destination'])
+    assert 'Yamaha MIDI' not in plain.parts
+    assert plain.name == 'Descriptive source name.mid'
+    cataloged = Path(conversions['songs/user/2/OTHER.FIL']['destination'])
+    assert 'Yamaha MIDI' in cataloged.parts
+    catalogs = [record for record in manifest['derivatives'] if record['kind'] == 'Yamaha catalog']
+    assert [Path(record['destination']).name for record in catalogs] == ['PDISK.MNG']
+    assert {record['source'] for record in catalogs} == {'songs/user/2'}
+    assert backup.verify_backup(result.folder) == []
+
+
+def test_preservation_only_conversion_carries_valid_empty_pianodir(tmp_path):
+    source = _source(tmp_path, {
+        'songs/user/1/SONG.FIL': _fil('Recovered song'),
+        'songs/user/1/PIANODIR.FIL': build_pianodir_bytes([], disk_title=''),
+    })
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup',
+                               convert_eseq=True, preserve_yamaha_catalogs=True)
+    assert result.status == 'complete', result.errors
+    assert len([record for record in _manifest(result)['derivatives']
+                if record['kind'] == 'Yamaha catalog']) == 2
+
+
+@pytest.mark.parametrize('catalog_name', ['PDISK.MNG', 'PSONG.MNG'])
+@pytest.mark.parametrize('generate', [False, True])
+def test_partial_catalog_source_only_gets_missing_counterpart_with_generation(tmp_path, catalog_name, generate):
+    templates = {
+        'PDISK.MNG': update_smart_pianosoft_disk_title(b'', 'Source album'),
+        'PSONG.MNG': build_smart_pianosoft_song_catalog(
+            b'', [build_smart_pianosoft_song_record('SONG.FIL', 'Source title')]),
+    }
+    source = _source(tmp_path, {'songs/user/1/SONG.FIL': _fil(),
+                                f'songs/user/1/{catalog_name}': templates[catalog_name]})
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup', convert_eseq=True,
+                               generate_yamaha_catalogs=generate, preserve_yamaha_catalogs=True)
+    assert result.status == 'complete', result.errors
+    catalogs = [record for record in _manifest(result)['derivatives'] if record['kind'] == 'Yamaha catalog']
+    assert {Path(record['destination']).name for record in catalogs} == (
+        {'PDISK.MNG', 'PSONG.MNG'} if generate else {catalog_name})
+    assert backup.verify_backup(result.folder) == []
+
+
+def test_catalog_generation_failure_keeps_verified_music_and_marks_backup_incomplete(tmp_path, monkeypatch):
+    source = _source(tmp_path, {'songs/user/1/SONG.FIL': _fil()})
+    write = backup._write_derivative
+
+    def fail_catalog(path, *args, **kwargs):
+        if path.name == 'PSONG.MNG':
+            raise OSError('Catalog disk write failed')
+        return write(path, *args, **kwargs)
+
+    monkeypatch.setattr(backup, '_write_derivative', fail_catalog)
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup',
+                               convert_eseq=True, generate_yamaha_catalogs=True)
+
+    assert result.status == 'incomplete'
+    assert result.converted == 1
+    assert any('Catalog disk write failed' in error for error in result.errors)
+    assert any(record['kind'] == 'MIDI' and record['status'] == 'verified'
+               for record in _manifest(result)['derivatives'])
+    assert (result.folder / '.incomplete').exists()
+    assert backup.verify_backup(result.folder)
+
+
+def test_unsupported_archived_catalog_gets_valid_playback_copy_from_recovered_titles(tmp_path):
+    originals = {
+        'songs/user/1/SONG.FIL': _fil(),
+        'songs/user/1/PDISK.MNG': b'PDISK   MNG   \r\nP.PLAYER      \r\nVer1.01DMV0.54\r\nLegacy album\r\n',
+    }
+    source = _source(tmp_path, originals)
+    result = backup.run_backup(scan_library(source), tmp_path / 'backup',
+                               convert_eseq=True, generate_yamaha_catalogs=True)
+
+    assert result.status == 'complete', result.errors
+    _assert_originals(result, source, originals)
+    midi = next(record for record in _manifest(result)['derivatives'] if record['kind'] == 'MIDI')
+    playback = result.folder / Path(midi['destination']).parent
+    assert parse_smart_pianosoft_disk_title((playback / 'PDISK.MNG').read_bytes()) == 'Legacy album'
+    assert backup.verify_backup(result.folder) == []
 
 
 @pytest.mark.parametrize('keep_originals', [True, False])
@@ -401,7 +583,9 @@ def test_midi_only_replaces_converted_copies_and_keeps_other_assets(tmp_path):
                                convert_eseq=True, keep_originals=False)
     assert (result.status, result.verified, result.converted) == ('complete', 4, 1)
     manifest = _manifest(result)
-    assert manifest['options'] == {'convert_eseq': True, 'keep_originals': False, 'split_audio': False}
+    assert manifest['options'] == {'convert_eseq': True, 'keep_originals': False,
+                                   'split_audio': False, 'generate_yamaha_catalogs': False,
+                                   'preserve_yamaha_catalogs': False}
     derivative, = manifest['derivatives']
     assert derivative['destination'].endswith('Header title (2).mid')
     for record in manifest['files']:

@@ -208,9 +208,11 @@ def _parse_cd_toc(text):
     if "Table of contents (audio tracks only):" not in text:
         raise SmartPianoSoftMediaError("The drive did not return an audio-CD table of contents.")
     tracks = []
+    # cdparanoia prints copy permission as "OK" or "no". Retain support for
+    # "yes" while keeping this field separate from pre-emphasis below.
     pattern = re.compile(
         r"^\s*(\d+)\.\s+(\d+)\s+\[[^\]]+\]\s+(-?\d+)\s+\[[^\]]+\]"
-        r"\s+(yes|no)\s+(yes|no)\s+(\d+)\s*$"
+        r"\s+(OK|yes|no)\s+(yes|no)\s+(\d+)\s*$"
     )
     table = text.split("Table of contents (audio tracks only):", 1)[1]
     for line in table.splitlines():

@@ -111,6 +111,9 @@ class QMessageBox(QtQMessageBox):
         return super().eventFilter(watched, event)
 
     def showEvent(self, event):
+        # Directly constructed boxes need the same initial placement as the
+        # static helpers, including when their parent is another dialog.
+        center_dialog_on_parent(self, adjust_size=False)
         super().showEvent(event)
         # Qt refreshes standard captions when shown, which can replace the
         # application's wording with a different toolkit translation.

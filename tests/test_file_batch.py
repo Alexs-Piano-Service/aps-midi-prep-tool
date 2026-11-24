@@ -202,7 +202,10 @@ def test_swapped_prepared_inputs_are_frozen_before_any_destination_changes(tmp_p
     assert recovery_locations and not any(path.exists() for path in recovery_locations)
 
 
-def test_later_failure_restores_replacements_removes_created_outputs_and_keeps_backups(tmp_path, monkeypatch, recovery_locations):
+@pytest.mark.parametrize("destination_local", [False, True])
+def test_later_failure_restores_replacements_removes_created_outputs_and_keeps_backups(
+    tmp_path, monkeypatch, recovery_locations, destination_local,
+):
     first = _file(tmp_path, "first.mid", b"original first")
     second = tmp_path / "new.mid"
     third = _file(tmp_path, "third.mid", b"original third")
@@ -224,7 +227,10 @@ def test_later_failure_restores_replacements_removes_created_outputs_and_keeps_b
 
     monkeypatch.setattr(file_batch, "atomic_write_bytes", fail_third)
     with pytest.raises(file_batch.FileBatchWriteError, match="Destination became unavailable") as caught:
-        file_batch.publish_file_batch(zip(inputs, [first, second, third]), backup_callback=backup)
+        file_batch.publish_file_batch(
+            zip(inputs, [first, second, third]), backup_callback=backup,
+            recovery_parent=tmp_path if destination_local else None,
+        )
 
     assert first.read_bytes() == b"original first"
     assert not second.exists()
@@ -234,6 +240,22 @@ def test_later_failure_restores_replacements_removes_created_outputs_and_keeps_b
     assert caught.value.rollback_errors == []
     assert isinstance(caught.value.original_exception, OSError)
     _assert_retained_publications(caught.value, [b"new 0", b"new 1"])
+    if destination_local:
+        assert Path(caught.value.recovery_directory).parent == tmp_path
+
+
+def test_unavailable_recovery_parent_fails_before_destination_changes(tmp_path):
+    original = _file(tmp_path, "song.mid", b"original")
+    staged = _file(tmp_path, "prepared.mid", b"replacement")
+    with pytest.raises(file_batch.FileBatchWriteError) as caught:
+        file_batch.publish_file_batch(
+            [(staged, original)], recovery_parent=tmp_path / "unavailable",
+        )
+    assert isinstance(caught.value.original_exception, FileNotFoundError)
+    assert not caught.value.recovery_directory
+    assert not caught.value.rollback_errors
+    assert original.read_bytes() == b"original"
+    assert staged.read_bytes() == b"replacement"
 
 
 @pytest.mark.parametrize("raised", [False, True])

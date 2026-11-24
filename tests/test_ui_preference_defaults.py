@@ -149,7 +149,8 @@ def test_restored_profile_supplies_missing_title_and_filename_defaults(window, m
 
 @pytest.mark.parametrize("profile_key,medium_key", (
     ("custom", "custom"), ("unsure", "custom"), ("unsure", "flashfloppy_hfe"),
-    ("mark_iv", "usb"), ("e3_850", "usb"), ("enspire", "usb"),
+    ("midi_export", "usb"),
+    ("enspire", "usb"),
 ))
 def test_old_dos83_preferences_do_not_disable_long_names_for_non83_target(
     window, monkeypatch, profile_key, medium_key,
@@ -172,6 +173,7 @@ def test_old_dos83_preferences_do_not_disable_long_names_for_non83_target(
 @pytest.mark.parametrize("profile_key,medium_key", (
     ("mark_i", "original"), ("mark_ii", "original"), ("mark_ii_xg", "original"),
     ("mark_iii", "flashfloppy_img"), ("mark_iv", "original"),
+    ("mark_iv", "usb"), ("e3_850", "usb"),
     ("pianodisc_128plus", "original"),
 ))
 def test_83_target_disables_long_names_even_when_old_preferences_enable_them(
@@ -318,10 +320,12 @@ def test_long_filename_controls_do_not_require_eseq_conversion(window, monkeypat
     assert seen
 
 
+@pytest.mark.parametrize("profile_key", ("custom", "enspire"))
 @pytest.mark.parametrize("long_names", (False, True))
 def test_native_midi_read_includes_all_songs_with_optional_export_names(
-    window, tmp_path, monkeypatch, long_names,
+    window, tmp_path, monkeypatch, long_names, profile_key,
 ):
+    _apply(window, profile_key)
     songs = [("FIRST.MID", "Moon River"), ("SECOND.MID", "Summer Wind"), ("THIRD.MID", "Misty")]
     originals = {}
     for filename, title in songs:
@@ -364,6 +368,36 @@ def test_native_midi_read_includes_all_songs_with_optional_export_names(
         window.undo_last_staged_batch()
         assert not window.pendingImageExportFilenames
         assert image_path.read_bytes() == original
+
+
+def test_enspire_saved_short_name_preference_can_be_changed_and_remembered(window, monkeypatch):
+    _store_old_filename_preferences(window.settings, "enspire", "usb", dos83=True, long_names=False)
+    window.settings.setValue(window.SETTING_FILENAME_DEFAULTS_VERSION, window.FILENAME_DEFAULTS_VERSION)
+    restored = main_window.MidiTitleWindow()
+    try:
+        _assert_filename_dialog_defaults(restored, monkeypatch, enabled=True, checked=False)
+        assert restored.settingsUseDos83FilenamesAction.isEnabled()
+
+        def choose_descriptive_names(dialog):
+            names = next(box for box in dialog.findChildren(QCheckBox)
+                         if box.text() == "Name MIDI files by track number and song title")
+            assert names.isEnabled()
+            names.setChecked(True)
+            return QDialog.Accepted
+
+        monkeypatch.setattr(restored, "_exec_child_dialog", choose_descriptive_names)
+        assert restored._confirm_eseq_to_midi_conversion(title="Convert", message="Convert songs") == (True, True, True)
+        restored.settings.sync()
+    finally:
+        restored.close()
+    restarted = main_window.MidiTitleWindow()
+    try:
+        assert restarted._preparation_profile().key == "enspire"
+        assert restarted._long_midi_filenames_enabled()
+        assert not restarted._dos83_filenames_enabled()
+        assert restarted.settingsUseDos83FilenamesAction.isEnabled()
+    finally:
+        restarted.close()
 
 
 @pytest.mark.parametrize("ending", ("cancelled", "recovery_declined", "recovery_failed", "recovery_cancelled", "new_image"))

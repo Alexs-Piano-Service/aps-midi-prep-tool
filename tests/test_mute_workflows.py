@@ -325,7 +325,8 @@ def _intentional_muted_eseq(container):
 
 
 @pytest.mark.parametrize("route", ["interactive-files", "hidden-files", "interactive-image",
-                                   "hidden-image", "folder-staging", "image-staging", "image-export"])
+                                   "hidden-image", "folder-staging", "folder-staging-overwrite",
+                                   "image-staging", "image-export"])
 @pytest.mark.parametrize("container,extension", [(ESEQ_CONTAINER_DISKLAVIER, "FIL"),
                                                  (ESEQ_CONTAINER_CLAVINOVA_MDA, "MDA")])
 def test_manual_preservation_keeps_muted_notes_and_later_volume_restore(
@@ -360,8 +361,17 @@ def test_manual_preservation_keeps_muted_notes_and_later_volume_restore(
         monkeypatch.setattr(window, "_exec_child_dialog", lambda *_a: pytest.fail("Remembered dialog should stay hidden"))
 
     output = tmp_path / "output"
-    if route == "folder-staging":
-        window._stage_regular_row_conversion(window._find_regular_row_for_path(str(source)), str(source), "midi")
+    overwrite_questions = []
+    if route.startswith("folder-staging"):
+        row = window._find_regular_row_for_path(str(source))
+        window._stage_regular_row_conversion(row, str(source), "midi")
+        if route.endswith("overwrite"):
+            output.mkdir()
+            (output / window._regular_row_output_filename(row)).write_bytes(b"Previous output")
+            def approve_overwrite(*args, **kwargs):
+                overwrite_questions.append(args[2])
+                return main_window.QMessageBox.Yes
+            monkeypatch.setattr(main_window.QMessageBox, "question", approve_overwrite)
     elif route == "image-staging":
         staged = window._stage_image_addition_host_file(str(source), "ADDED.MID", "midi")
         actual = _channel_events(Path(staged).read_bytes())
@@ -380,10 +390,13 @@ def test_manual_preservation_keeps_muted_notes_and_later_volume_restore(
         QTest.qWait(20)
         monkeypatch.setattr(main_window.QFileDialog, "getExistingDirectory", lambda *_a, **_k: str(output))
         window.save_as_changes()
-        outputs = list(output.rglob("*.mid"))
+        assert not window.mute_workflow_errors
+        outputs = [path for path in output.rglob("*") if path.suffix.lower() == ".mid"]
         assert len(outputs) == 1
         actual = _channel_events(outputs[0].read_bytes())
     assert not window.mute_workflow_errors
+    if route.endswith("overwrite"):
+        assert len(overwrite_questions) == 1
     assert actual == expected
     volume = 100
     notes = []
@@ -421,12 +434,12 @@ def test_manual_volume_choice_is_localized_and_cancellation_keeps_previous_choic
     def cancel_changed_choice(dialog):
         checkbox = dialog.findChild(QCheckBox, "preserveOriginalVolumeControls")
         assert checkbox.isChecked()
-        assert checkbox.text() == translate_text("Preserve original volume controls", language)
+        assert checkbox.text() == translate_text("Preserve original volume controls (experts only)", language)
         assert checkbox.toolTip() == translate_text(
-            "Keep every original volume change, including zero-volume commands and notes played while muted.", language,
+            "Enable only if you specifically need the original zero-volume commands and understand their effect on playback. Otherwise, leave this unchecked.", language,
         )
         if language != "en":
-            assert checkbox.text() != "Preserve original volume controls"
+            assert checkbox.text() != "Preserve original volume controls (experts only)"
         checkbox.setChecked(False)
         return QDialog.Rejected
     monkeypatch.setattr(window, "_exec_child_dialog", cancel_changed_choice)

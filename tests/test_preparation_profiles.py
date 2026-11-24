@@ -71,6 +71,7 @@ def test_enspire_profile_excludes_eseq_and_floppy_defaults():
     assert medium.key == "usb"
     assert settings["emulator_image_content"] == "midi"
     assert settings["use_dos83_filenames"] is False
+    assert settings["long_midi_filenames"] is True
     assert SETTING_DISK_FORMAT not in settings
     assert SETTING_IMAGE_FORMAT not in settings
 
@@ -126,6 +127,8 @@ def test_unknown_profiles_reset_filename_and_title_defaults_only(key):
         "use_dos83_filenames": False, "long_midi_filenames": True,
         "eseq_to_midi_long_filenames": True, "read_floppy_long_filenames": True,
         "bulk_extraction_long_midi_filenames": True, "format_disklavier_screen": False,
+        "bulk_extraction_trim_title_spaces": True,
+        "generate_yamaha_catalogs": False,
     }
 
 
@@ -135,6 +138,8 @@ def test_no_profile_implies_hardware_testing_or_changes_musical_data():
         "emulator_image_prefix", "emulator_image_starting_number", "use_dos83_filenames",
         "long_midi_filenames", "eseq_to_midi_long_filenames", "read_floppy_long_filenames",
         "bulk_extraction_long_midi_filenames", "format_disklavier_screen", SETTING_IMAGE_FORMAT, SETTING_DISK_FORMAT,
+        "bulk_extraction_trim_title_spaces",
+        "generate_yamaha_catalogs",
     }
     for profile in PIANO_PROFILES:
         assert profile.evidence_level in {"documented", "unverified"}

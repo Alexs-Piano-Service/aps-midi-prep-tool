@@ -40,6 +40,30 @@ building emulator disk sets, including MIDI Type 0 conversion where required.
 If a song cannot be prepared, saving and export stop until it is prepared or
 removed, or you choose **Custom**. Its original file stays intact.
 
+For Mark II, Mark II XG, and Mark III, **Remove extra spaces from converted song
+titles** defaults to off in Bulk Extraction. Selecting one of these profiles
+turns the option off; you can enable it for a particular extraction if needed.
+
+For Yamaha controllers that use MIDI catalogs (DSR1, Mark II XG, Mark III, Mark IV,
+and E3/DKC-850), saving writes the album title in `PDISK.MNG` and song
+titles in `PSONG.MNG`. Missing catalogs are created; existing catalog fields are
+preserved. E-SEQ conversion carries titles and order from `PIANODIR.FIL` into
+the MIDI catalogs. This applies to Save, folder/ZIP/image exports, emulator disk
+sets, Bulk Extraction, and converted Mark IV backup playback files. Each split
+disk gets a catalog containing only its own songs.
+
+ENSPIRE/DKC-900 preserves and updates existing MIDI catalogs and catalogs
+derived from `PIANODIR.FIL`, but does not create them for songs without source
+catalogs. MIDI playback support alone does not enable new catalog generation.
+If only one MNG file exists, ENSPIRE keeps that file without creating its missing
+companion; a valid `PIANODIR.FIL` conversion may produce both.
+
+Use **Settings → Save Options → Create Missing Yamaha Catalogs** to override
+catalog creation manually. The choice is remembered across restarts. Selecting
+a profile applies its default again; **Custom** keeps your current choice.
+Creating catalogs uses DOS 8.3 song filenames. Turning the option off still
+preserves existing catalogs and PIANODIR-derived titles for Yamaha MIDI output.
+
 **Edit → Undo All** discards all staged changes since the current files were
 loaded or last saved. See [reviewing and saving changes](preparation-reliability.md)
 for the differences between Save, Save As, and Save As Image.
@@ -107,8 +131,12 @@ Disklavier Compatibility Table** for Disklavier and General choices, or the
 ## Filenames and title formatting
 
 Floppy and emulator preparation also stages unique DOS 8.3 names for songs whose
-current filenames are incompatible. Existing valid names remain unchanged;
-USB and app folder preparation keep descriptive filenames.
+current filenames are incompatible. Existing valid names remain unchanged.
+Yamaha destinations that generate MIDI catalogs also use DOS 8.3 names for USB folders,
+so the filenames match the records in `PSONG.MNG`. Other USB and app folder
+destinations keep descriptive filenames. ENSPIRE leaves descriptive filename
+controls editable and enables them by default. Albums retaining Yamaha catalogs
+still use matching short names; this does not restrict other albums in the export.
 **Settings → Use DOS 8.3 Filenames** controls short filenames when the selected
 destination does not require them.
 Long MIDI filenames use the track number and song title and do not require converting

@@ -3,18 +3,24 @@
 import os
 import shutil
 import tempfile
+from dataclasses import replace
 
 from PySide6.QtWidgets import QFileDialog, QProgressDialog
 
 from .dos83_renamer import build_dos83_filename
-from .emulator_image_builder import DEFAULT_SAFETY_MARGIN_BYTES, _catalog_song_matches
+from .emulator_image_builder import (
+    DEFAULT_SAFETY_MARGIN_BYTES, _catalog_song_matches, _preserved_yamaha_catalog_metadata,
+)
+from .eseq_pianodir import PIANODIR_FILENAME
 from .floppy_image import DISK_FORMAT_BY_KEY, FloppyImageError
 from .midi_metadata import probe_midi_file_type
+from .preparation_profiles import generate_yamaha_catalogs_enabled, preserves_yamaha_midi_catalogs
 from .smart_pianosoft import (
     SMART_PIANOSOFT_DISK_CATALOG_NAME, SMART_PIANOSOFT_SONG_CATALOG_NAME,
     build_smart_pianosoft_song_catalog, build_smart_pianosoft_song_record,
-    smart_pianosoft_metadata_from_directory,
+    update_smart_pianosoft_disk_title,
 )
+from .yamaha_catalogs import yamaha_catalog_metadata_from_directory
 
 
 def _prepared_catalog_sources(window, rows, temporary, image_mode):
@@ -34,18 +40,20 @@ def _prepared_catalog_sources(window, rows, temporary, image_mode):
                 name = os.path.basename(path).upper()
                 if os.path.dirname(path) == directory and name in {
                     SMART_PIANOSOFT_SONG_CATALOG_NAME, SMART_PIANOSOFT_DISK_CATALOG_NAME,
+                    PIANODIR_FILENAME,
                 }:
                     os.makedirs(catalog_directory, exist_ok=True)
                     shutil.copyfile(window._pending_or_extracted_image_path(path), os.path.join(catalog_directory, name))
-            source_metadata = smart_pianosoft_metadata_from_directory(catalog_directory)
-            by_name = {song.filename.casefold(): song for song in source_metadata.songs}
-            matches.update({path: by_name[os.path.basename(path).casefold()] for path in sources
-                            if os.path.basename(path).casefold() in by_name})
+            source_metadata = yamaha_catalog_metadata_from_directory(catalog_directory)
         else:
             # Conversion payloads can live in scratch space; the row's original
             # path still identifies its source album and opaque catalog fields.
-            source_metadata = smart_pianosoft_metadata_from_directory(directory)
-            matches.update(_catalog_song_matches(source_metadata.songs, sources))
+            source_metadata = yamaha_catalog_metadata_from_directory(directory)
+        matches.update(_catalog_song_matches(source_metadata.songs, sources, match_identical_files=not image_mode))
+        if not source_metadata.disk_title:
+            source_metadata = replace(source_metadata, disk_title=os.path.basename(directory) or (
+                os.path.splitext(os.path.basename(window.image_session.source_path))[0] if image_mode else ""
+            ))
         metadata[directory] = source_metadata
     return metadata, matches
 
@@ -59,6 +67,8 @@ def create_prepared_disk_images(window):
     """
     profile = window._preparation_profile()
     medium = window._preparation_medium()
+    generate_yamaha_catalogs = generate_yamaha_catalogs_enabled(window.settings)
+    preserve_yamaha_catalogs = preserves_yamaha_midi_catalogs(profile)
     if profile.song_format not in {"midi", "eseq"}:
         return window.save_as_image()
 
@@ -90,7 +100,12 @@ def create_prepared_disk_images(window):
         catalog_metadata, catalog_matches = ({}, {})
         if profile.song_format == "midi":
             catalog_metadata, catalog_matches = _prepared_catalog_sources(window, rows, temporary.name, image_mode)
-        carry_catalogs = any(item.song_catalog or item.disk_catalog for item in catalog_metadata.values())
+            if preserve_yamaha_catalogs:
+                catalog_metadata = {directory: _preserved_yamaha_catalog_metadata(item)
+                                    for directory, item in catalog_metadata.items()}
+        carry_catalogs = any(item.song_catalog or item.disk_catalog or (
+            generate_yamaha_catalogs and item.songs
+        ) for item in catalog_metadata.values())
         catalog_groups = []
         group_origin = None
         for number, (row, source_path, kind, filename) in enumerate(rows, start=1):
@@ -141,14 +156,21 @@ def create_prepared_disk_images(window):
                 ))
 
         for directory, source_metadata, records in catalog_groups:
-            if source_metadata.song_catalog:
+            if source_metadata.song_catalog or generate_yamaha_catalogs:
                 with open(os.path.join(directory, SMART_PIANOSOFT_SONG_CATALOG_NAME), "wb") as handle:
                     handle.write(build_smart_pianosoft_song_catalog(source_metadata.song_catalog, records))
-            if source_metadata.disk_catalog:
+            if source_metadata.disk_catalog or generate_yamaha_catalogs:
                 with open(os.path.join(directory, SMART_PIANOSOFT_DISK_CATALOG_NAME), "wb") as handle:
-                    handle.write(source_metadata.disk_catalog)
+                    handle.write(source_metadata.disk_catalog or update_smart_pianosoft_disk_title(
+                        b"", source_metadata.disk_title,
+                    ))
 
         metadata = window._current_album_metadata_for_preservation()
+        album_title = getattr(metadata, "disk_title", "")
+        if generate_yamaha_catalogs and not album_title and not carry_catalogs:
+            # The builder sees a temporary staging folder. Use a stable source
+            # title when no source catalog travels with these flat staged songs.
+            album_title = next(iter(catalog_metadata.values())).disk_title if len(catalog_metadata) == 1 else ""
         defaults = window._preparation_export_defaults()
         prefix = medium.image_prefix or str(
             window.settings.value(window.SETTING_EMULATOR_IMAGE_PREFIX, "DSKA") or "DSKA"
@@ -156,6 +178,8 @@ def create_prepared_disk_images(window):
         starting_number = int(window.settings.value(
             window.SETTING_EMULATOR_IMAGE_STARTING_NUMBER, medium.starting_number or 0,
         ) or 0)
+        if generate_yamaha_catalogs and not album_title and not carry_catalogs:
+            album_title = f"{prefix}{starting_number:04d}"
         safety_margin = int(window.settings.value(
             window.SETTING_EMULATOR_IMAGE_SAFETY_MARGIN_KIB, DEFAULT_SAFETY_MARGIN_BYTES // 1024,
         ) or 0) * 1024
@@ -172,13 +196,15 @@ def create_prepared_disk_images(window):
             prefix=prefix,
             starting_number=starting_number,
             safety_margin_bytes=safety_margin,
-            album_title=getattr(metadata, "disk_title", ""),
+            album_title=album_title,
             catalog_number=getattr(metadata, "catalog_number", ""),
             output_content=profile.song_format,
             disk_format=DISK_FORMAT_BY_KEY[disk_key],
             output_ext=output_ext,
             include_subfolders=carry_catalogs,
             preserve_catalog_midi=True,
+            generate_yamaha_catalogs=generate_yamaha_catalogs,
+            preserve_yamaha_catalogs=preserve_yamaha_catalogs,
             shuffle=False,
             include_song_lists=False,
             disk_layout="fill",

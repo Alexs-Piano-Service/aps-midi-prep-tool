@@ -61,55 +61,119 @@ class _CenterDialogOnShow(QObject):
     def __init__(self, dialog, parent_widget):
         super().__init__(dialog)
         self.parent_widget = parent_widget
+        self.window_handle = dialog.windowHandle()
+        self.shown = False
+        self.geometry_changed = False
+        if self.window_handle is not None:
+            self.window_handle.installEventFilter(self)
 
-    def eventFilter(self, dialog, event):
-        if event.type() == QEvent.ShowToParent:
+    def _detach(self):
+        dialog = self.parent()
+        dialog.removeEventFilter(self)
+        if self.window_handle is not None:
+            self.window_handle.removeEventFilter(self)
+        dialog._aps_center_on_show = None
+        self.deleteLater()
+
+    def eventFilter(self, watched, event):
+        # Qt owns this filter through the dialog. Keeping a Python reference
+        # back to it would delay native destruction past exec() and can leave
+        # queued window events targeting a deleted parentless message box.
+        dialog = self.parent()
+        if watched is dialog and event.type() == QEvent.ShowToParent:
             # This synchronous event follows showEvent and native window
             # creation, so QMessageBox's final size and frame are available.
-            # Detach before moving; later resizing and showing belong to the user.
-            dialog.removeEventFilter(self)
-            dialog._aps_center_on_show = None
-            center_dialog_on_parent(dialog, self.parent_widget, adjust_size=False)
-            self.deleteLater()
+            _position_dialog_on_parent(dialog, self.parent_widget)
+            dialog._aps_dialog_positioned = True
+            self.shown = True
+        elif watched is dialog and self.shown:
+            if event.type() in (QEvent.Move, QEvent.Resize) and not event.spontaneous():
+                # A caller or user has chosen geometry after opening. Never
+                # override it when the window manager later exposes the window.
+                self.geometry_changed = True
+            elif event.type() == QEvent.Hide:
+                self._detach()
+        elif (watched is self.window_handle and event.type() == QEvent.Expose
+              and self.shown and self.window_handle.isExposed()):
+            # On X11 the window manager supplies the decorated frame after
+            # showEvent. Finish positioning once that native frame is known.
+            self._detach()
+            if not self.geometry_changed:
+                _position_dialog_on_parent(dialog, self.parent_widget)
         return False
 
 
-def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
-    parent_widget = parent or dialog.parentWidget()
+def _dialog_parent_window(dialog, parent_widget):
+    if parent_widget is None:
+        return None
+    parent_window = parent_widget.window()
+    return parent_window if parent_window is not dialog else None
+
+
+def _position_dialog_on_parent(dialog, parent_widget):
+    # Wayland does not expose global window coordinates. Its compositor places
+    # dialogs using the native transient-parent relationship established below.
+    if QApplication.platformName().startswith("wayland"):
+        return
     screen = None
     target_geometry = None
 
     if parent_widget is not None:
-        parent_window = parent_widget.window()
+        parent_window = _dialog_parent_window(dialog, parent_widget)
         if parent_window is not None:
             screen = parent_window.screen()
-            if parent_window.isVisible():
+            if parent_window.isVisible() and not parent_window.isMinimized():
                 target_geometry = parent_window.frameGeometry()
         if screen is None:
             screen = parent_widget.screen()
 
     if target_geometry is None:
-        screen = screen or QApplication.primaryScreen()
+        screen = screen or dialog.screen() or QApplication.primaryScreen()
         if screen is None:
             return
         target_geometry = screen.availableGeometry()
 
-    if adjust_size:
-        dialog.adjustSize()
     dialog_geometry = dialog.frameGeometry()
     if dialog_geometry.width() <= 0 or dialog_geometry.height() <= 0:
         dialog_geometry.setSize(dialog.sizeHint())
     dialog_geometry.moveCenter(target_geometry.center())
+    if screen is not None:
+        available = screen.availableGeometry()
+        dialog_geometry.moveLeft(max(available.left(), min(
+            dialog_geometry.left(), available.right() - dialog_geometry.width() + 1,
+        )))
+        dialog_geometry.moveTop(max(available.top(), min(
+            dialog_geometry.top(), available.bottom() - dialog_geometry.height() + 1,
+        )))
     dialog.move(dialog_geometry.topLeft())
 
-    if not dialog.isVisible():
-        on_show = getattr(dialog, "_aps_center_on_show", None)
-        if on_show is None:
-            on_show = _CenterDialogOnShow(dialog, parent_widget)
-            dialog._aps_center_on_show = on_show
-            dialog.installEventFilter(on_show)
-        else:
-            on_show.parent_widget = parent_widget
+
+def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
+    """Place a dialog once, retaining its owner and later user geometry."""
+    if getattr(dialog, "_aps_dialog_positioned", False):
+        return
+    parent_widget = parent or dialog.parentWidget()
+    parent_window = _dialog_parent_window(dialog, parent_widget)
+    if parent_window is not None:
+        # Make the relationship available before the first native map, including
+        # dialogs given an owner here rather than through their constructor.
+        if dialog.screen() is not parent_window.screen():
+            dialog.setScreen(parent_window.screen())
+        parent_window.winId()
+    dialog.winId()
+    if parent_window is not None:
+        dialog.windowHandle().setTransientParent(parent_window.windowHandle())
+    if adjust_size:
+        dialog.adjustSize()
+    _position_dialog_on_parent(dialog, parent_widget)
+
+    on_show = getattr(dialog, "_aps_center_on_show", None)
+    if on_show is None:
+        on_show = _CenterDialogOnShow(dialog, parent_widget)
+        dialog._aps_center_on_show = on_show
+        dialog.installEventFilter(on_show)
+    else:
+        on_show.parent_widget = parent_widget
 
 
 def resize_dialog_to_screen(dialog, *, width, height):

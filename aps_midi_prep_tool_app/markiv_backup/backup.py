@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import tempfile
@@ -20,6 +21,7 @@ from .library import BackupPlan, CancelledError, check_cancel, is_conversion_can
 from .paths import is_link
 from ..eseq_converter import convert_eseq_bytes_to_midi_bytes
 from ..helpers.output_names import create_output_directory
+from ..helpers.portable_filename import is_windows_device_name
 from ..rename_recovery import sync_directory
 
 CHUNK_SIZE = 1024 * 1024
@@ -329,19 +331,41 @@ def _write_derivative(path: Path, payload: bytes, cancel=None) -> str:
             path.unlink(missing_ok=True)
 
 
-def _audio_pair_root(folder, plan):
+def _audio_pair_root(folder, plan, name='Paired MIDI and MP3'):
     """Reserve a separate playback tree without colliding with original assets."""
     existing = {_path_key(Path(item.destination).parts[0]) for item in plan.files}
-    name, number = 'Paired MIDI and MP3', 1
+    base, number = name, 1
     while _path_key(name) in existing or os.path.lexists(folder / name):
         number += 1
-        name = f'Paired MIDI and MP3 ({number})'
+        name = f'{base} ({number})'
     return Path(name)
 
 
-def _audio_pair_stem(folder, root, original, reserved):
+def _short_playback_stem(folder, parent, filename, reserved, extensions=('.mid',)):
+    """Give cataloged output a matching portable DOS name, including pairs."""
+    ascii_stem = unicodedata.normalize('NFKD', Path(filename).stem).encode('ascii', 'ignore').decode()
+    base = re.sub(r'[^A-Z0-9_-]', '', ascii_stem.upper())[:8] or 'SONG'
+    if is_windows_device_name(base):
+        base = '_' + base[:7]
+    stem, number = base, 1
+    while any(_path_key(parent / (stem + extension)) in reserved
+              or os.path.lexists(folder / parent / (stem + extension))
+              for extension in extensions):
+        number += 1
+        suffix = f'~{number}'
+        if len(suffix) >= 8:
+            raise ValueError('Too many colliding Yamaha MIDI filenames.')
+        stem = base[:8 - len(suffix)] + suffix
+    for extension in extensions:
+        reserved.add(_path_key(parent / (stem + extension)))
+    return parent / stem
+
+
+def _audio_pair_stem(folder, root, original, reserved, *, short_names=False):
     source = Path(original)
     parent = root / source.parent
+    if short_names:
+        return _short_playback_stem(folder, parent, source.name, reserved, ('.mid', '.mp3'))
     base, stem, number = source.stem, source.stem, 1
     while any(_path_key(parent / (stem + extension)) in reserved
               or os.path.lexists(folder / parent / (stem + extension))
@@ -353,7 +377,8 @@ def _audio_pair_stem(folder, root, original, reserved):
     return parent / stem
 
 
-def _split_audio_copies(plan, folder, records, manifest, journal, *, cancel=None, progress=None):
+def _split_audio_copies(plan, folder, records, manifest, journal, *, cancel=None, progress=None,
+                       generate_yamaha_catalogs=False, cataloged_sources=()):
     """Decode verified archival copies; record skipped ordinary audio in place.
 
     The original file's journaled audio_decode entry describes the outcome;
@@ -403,7 +428,9 @@ def _split_audio_copies(plan, folder, records, manifest, journal, *, cancel=None
                 check_cancel(cancel)
                 if _hash(original, cancel) != original_record['sha256']:
                     raise ValueError('Original backup checksum changed during audio decoding')
-                relative_stem = _audio_pair_stem(folder, root, item.destination, reserved)
+                relative_stem = _audio_pair_stem(folder, root, item.destination, reserved,
+                                               short_names=(generate_yamaha_catalogs or
+                                                            Path(item.source).parent.as_posix() in cataloged_sources))
                 paths = [Path(str(relative_stem) + extension) for extension in ('.mid', '.mp3')]
                 destinations = [_contained(folder, relative.as_posix()) for relative in paths]
                 destinations[0].parent.mkdir(parents=True, exist_ok=True)
@@ -478,9 +505,161 @@ def _split_audio_copies(plan, folder, records, manifest, journal, *, cancel=None
     return decoded, skipped, failed
 
 
+def _cataloged_source_folders(folder, records, cancel=None):
+    """Find valid source catalogs in verified archival copies, including empty ones."""
+    from ..smart_pianosoft import parse_smart_pianosoft_disk_title, parse_smart_pianosoft_song_catalog
+    from ..yamaha_catalogs import yamaha_metadata_from_pianodir_bytes
+
+    readers = {'pdisk.mng': parse_smart_pianosoft_disk_title,
+               'psong.mng': parse_smart_pianosoft_song_catalog,
+               'pianodir.fil': yamaha_metadata_from_pianodir_bytes}
+    result = {}
+    for record in records:
+        source = Path(record['source'])
+        reader = readers.get(source.name.casefold())
+        if record['status'] != 'verified' or reader is None:
+            continue
+        payload = _read_conversion_source(
+            _contained(folder, record['destination']), record['sha256'], cancel,
+        )
+        try:
+            reader(payload)
+        except ValueError:
+            continue
+        names = ({'PDISK.MNG', 'PSONG.MNG'} if source.name.casefold() == 'pianodir.fil'
+                 else {source.name.upper()})
+        result.setdefault(source.parent.as_posix(), set()).update(names)
+    return result
+
+
+def _write_yamaha_catalogs(plan, folder, records, manifest, journal, cancel=None, *, cataloged_sources=None):
+    """Catalog only verified playback MIDI files; archive catalogs stay intact."""
+    from collections import defaultdict
+
+    from .tags import read_music_title
+    from ..smart_pianosoft import (
+        build_smart_pianosoft_song_catalog, build_smart_pianosoft_song_record,
+        parse_smart_pianosoft_disk_title, smart_pianosoft_catalog_by_filename,
+        update_smart_pianosoft_disk_title,
+    )
+
+    originals = {item.source: item for item in plan.files}
+    catalogs = defaultdict(dict)
+    for record in records:
+        source = Path(record['source'])
+        if record['status'] == 'verified' and source.name.casefold() in {'pdisk.mng', 'psong.mng'}:
+            catalogs[source.parent.as_posix()][source.name.casefold()] = record
+    groups = defaultdict(list)
+    for record in manifest['derivatives']:
+        if record['status'] == 'verified' and record['kind'] == 'MIDI':
+            if (cataloged_sources is not None
+                    and Path(record['source']).parent.as_posix() not in cataloged_sources):
+                continue
+            groups[Path(record['destination']).parent].append(record)
+
+    failed = False
+    for parent, songs in groups.items():
+        check_cancel(cancel)
+        try:
+            def track_order(record):
+                value = originals[record['source']].metadata.get('track_number')
+                return int(value) if str(value).isdigit() and int(value) > 0 else 1000000
+
+            songs.sort(key=track_order)
+            item = originals[songs[0]['source']]
+            source_parent = Path(item.source).parent.as_posix()
+            catalog_names = ({'PDISK.MNG', 'PSONG.MNG'} if cataloged_sources is None
+                             else cataloged_sources[source_parent])
+            templates = catalogs[source_parent]
+            template_data = {}
+            for name, record in templates.items():
+                template_data[name] = _read_conversion_source(
+                    _contained(folder, record['destination']), record['sha256'], cancel,
+                )
+            source_songs = {}
+            if 'psong.mng' in template_data:
+                try:
+                    source_songs = smart_pianosoft_catalog_by_filename(template_data['psong.mng'])
+                except ValueError:
+                    # An unsupported catalog is still preserved in the archive;
+                    # recovered scan labels can populate a fresh playback copy.
+                    template_data.pop('psong.mng')
+            if 'pdisk.mng' in template_data:
+                try:
+                    parse_smart_pianosoft_disk_title(template_data['pdisk.mng'])
+                except ValueError:
+                    template_data.pop('pdisk.mng')
+            song_records = []
+            for derivative in songs:
+                check_cancel(cancel)
+                item = originals[derivative['source']]
+                path = _contained(folder, derivative['destination'])
+                with path.open('rb') as stream:
+                    header = stream.read(14)
+                if len(header) != 14 or header[:4] != b'MThd':
+                    raise ValueError(f'Prepared file is not MIDI: {path.name}')
+                title = item.metadata.get('title')
+                if item.metadata.get('metadata_source') == 'Original filename':
+                    title = read_music_title(path) or title
+                if _hash(path, cancel) != derivative['sha256']:
+                    raise ValueError(f'Prepared MIDI checksum changed before cataloging: {path.name}')
+                source_song = source_songs.get(Path(item.source).name.casefold())
+                if source_song is None:
+                    # Encoded audio inherits the catalog record of its MIDI
+                    # companion only when that stem has one unambiguous entry.
+                    matching = [song for song in source_songs.values()
+                                if Path(song.filename).stem.casefold() == Path(item.source).stem.casefold()]
+                    if len(matching) == 1:
+                        source_song = matching[0]
+                if 'PSONG.MNG' in catalog_names:
+                    song_records.append(build_smart_pianosoft_song_record(
+                        path.name, title or Path(item.source).stem,
+                        source_record=source_song.raw_record if source_song else b'',
+                        midi_format=int.from_bytes(header[8:10], 'big'),
+                    ))
+            album_title = item.metadata.get('album') or parent.name
+            payloads = {}
+            if 'PSONG.MNG' in catalog_names:
+                payloads['PSONG.MNG'] = build_smart_pianosoft_song_catalog(
+                    template_data.get('psong.mng', b''), song_records)
+            if 'PDISK.MNG' in catalog_names:
+                payloads['PDISK.MNG'] = update_smart_pianosoft_disk_title(
+                    template_data.get('pdisk.mng', b''), album_title)
+            for name, payload in payloads.items():
+                relative = parent / name
+                original_catalog = templates.get(name.casefold(), {})
+                record = {'source': source_parent,
+                          'original': original_catalog.get('destination', ''),
+                          'destination': relative.as_posix(), 'kind': 'Yamaha catalog',
+                          'conversion': 'Yamaha MIDI titles', 'status': 'pending'}
+                index = len(manifest['derivatives'])
+                manifest['derivatives'].append(record)
+                journal.append('derivatives', index, record)
+                try:
+                    checksum = _write_derivative(_contained(folder, relative.as_posix()), payload, cancel)
+                    record.update(status='verified', size=len(payload), sha256=checksum)
+                except CancelledError:
+                    record['status'] = 'cancelled'
+                    raise
+                except Exception as exc:
+                    record.update(status='failed', error=str(exc))
+                    raise
+                finally:
+                    journal.append('derivatives', index, record)
+        except CancelledError:
+            raise
+        except Exception as exc:
+            message = f'{parent}: Yamaha MIDI catalog creation failed: {exc}'
+            manifest['errors'].append(message)
+            manifest['conversion_errors'].append(message)
+            failed = True
+    return failed
+
+
 def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                convert_eseq: bool = False, keep_originals: bool = True,
-               random_suffixes: bool = True, split_audio: bool = False) -> BackupResult:
+               random_suffixes: bool = True, split_audio: bool = False,
+               generate_yamaha_catalogs: bool = False, preserve_yamaha_catalogs: bool = False) -> BackupResult:
     """Create a new uniquely named backup, copying and reading back every file.
 
     Completed files are never overwritten. A manifest and .incomplete marker
@@ -490,7 +669,11 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     is removed from the backup only after its MIDI and progress are saved.
     Failed conversions retain their originals. Optional audio decoding adds
     validated same-basename MIDI/MP3 pairs in a separate playback tree. Encoded
-    audio originals are always kept. Source files are never changed.
+    audio originals are always kept. Compatible Yamaha preparation adds title
+    catalogs beside converted MIDI, with DOS filenames in separate playback
+    trees so archival catalogs retain their original bytes. Preservation-only
+    preparation adds playback catalogs only where valid source catalogs exist.
+    Source files are never changed.
     """
     check_cancel(cancel)
     keep_originals = not convert_eseq or bool(keep_originals)
@@ -516,7 +699,9 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                 'albums': [asdict(album) for album in plan.albums], 'warnings': plan.warnings,
                 'files': records, 'errors': list(plan.scan_errors),
                 'options': {'convert_eseq': bool(convert_eseq), 'keep_originals': keep_originals,
-                            'split_audio': bool(split_audio)},
+                            'split_audio': bool(split_audio),
+                            'generate_yamaha_catalogs': bool(generate_yamaha_catalogs),
+                            'preserve_yamaha_catalogs': bool(preserve_yamaha_catalogs)},
                 'derivatives': [], 'conversion_errors': []}
     errors = manifest['errors']
     copied = verified = bytes_done = converted = conversion_total = 0
@@ -612,6 +797,8 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                     dst.unlink(missing_ok=True)
                 journal.append('files', index, record)
             emit(f'Verified {verified} of {len(records)} files', force=True)
+        cataloged_sources = (_cataloged_source_folders(folder, records, cancel)
+                             if preserve_yamaha_catalogs else set())
         if convert_eseq:
             reserved = {_path_key(item.destination) for item in plan.files}
             reserved.update(_path_key(parent) for item in plan.files
@@ -626,9 +813,17 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                 if is_conversion_candidate(original, item.kind):
                     candidates.append((index, item, record))
             conversion_total = len(candidates)
+            midi_root = (_audio_pair_root(folder, plan, 'Yamaha MIDI')
+                         if generate_yamaha_catalogs or cataloged_sources else None)
             for original_index, item, original_record in candidates:
                 check_cancel(cancel)
-                relative = _derivative_path(folder, item.destination, reserved)
+                if generate_yamaha_catalogs or Path(item.source).parent.as_posix() in cataloged_sources:
+                    stem = _short_playback_stem(
+                        folder, midi_root / Path(item.destination).parent, Path(item.source).name, reserved,
+                    )
+                    relative = stem.with_suffix('.mid')
+                else:
+                    relative = _derivative_path(folder, item.destination, reserved)
                 record = {'source': item.source, 'original': item.destination,
                           'destination': relative.as_posix(), 'kind': 'MIDI',
                           'conversion': 'E-SEQ to MIDI', 'status': 'pending'}
@@ -649,7 +844,9 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                     check_cancel(cancel)
                     if shutil.disk_usage(folder).free < len(payload) + _manifest_allowance(plan):
                         raise ValueError('Not enough free space for the MIDI conversion and manifest.')
-                    checksum = _write_derivative(_contained(folder, relative.as_posix()), payload, cancel)
+                    destination = _contained(folder, relative.as_posix())
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    checksum = _write_derivative(destination, payload, cancel)
                     record.update(status='verified', size=len(payload), sha256=checksum)
                     converted += 1
                 except CancelledError:
@@ -688,9 +885,14 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
         if split_audio:
             decoded, audio_skipped, audio_failed = _split_audio_copies(
                 plan, folder, records, manifest, journal, cancel=cancel, progress=progress,
+                generate_yamaha_catalogs=generate_yamaha_catalogs, cataloged_sources=cataloged_sources,
             )
             if audio_failed:
                 status = 'incomplete'
+        if (generate_yamaha_catalogs or cataloged_sources) and _write_yamaha_catalogs(
+                plan, folder, records, manifest, journal, cancel,
+                cataloged_sources=None if generate_yamaha_catalogs else cataloged_sources):
+            status = 'incomplete'
         check_cancel(cancel)
     except CancelledError:
         status = 'cancelled'
@@ -707,7 +909,9 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                     decoded=decoded, audio_skipped=audio_skipped)
     journal.finish()
     conversion_note = (
-        'Optional E-SEQ conversions are additional MIDI files beside the originals.\n'
+        ('Cataloged E-SEQ conversions are additional MIDI files in Yamaha MIDI; other conversions stay beside the originals.\n'
+         if generate_yamaha_catalogs or preserve_yamaha_catalogs else
+         'Optional E-SEQ conversions are additional MIDI files beside the originals.\n')
         if keep_originals else
         'Successfully converted E-SEQ copies are replaced by verified MIDI files.\n'
         'Unconverted originals and files whose conversion failed are retained.\n'
@@ -721,6 +925,8 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
         + conversion_note +
         'manifest.json records original paths, recovered titles, and SHA-256 checksums.\n'
         'Its derivatives list records converted MIDI files separately from originals.\n'
+        'Yamaha MIDI contains cataloged E-SEQ conversions when compatible preparation is selected.\n'
+        'PDISK.MNG and PSONG.MNG beside playback MIDI preserve recovered album and song titles.\n'
         'Decoded audio pairs are in Paired MIDI and MP3 (or its numbered variant).\n'
         'For ENSPIRE USB playback, copy each desired album folder from that tree;\n'
         'keep the matching .mid and .mp3 filenames together. Audio originals stay in the archive.\n'

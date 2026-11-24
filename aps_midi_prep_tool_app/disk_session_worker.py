@@ -280,7 +280,10 @@ class BulkExtractionWorker(_CancellableDiskWorker):
         include_eseq_sources=False,
         long_midi_filenames=False,
         trim_title_spaces=False,
-        use_album_names=False,
+        use_album_names=True,
+        generate_yamaha_catalogs=False,
+        preserve_yamaha_catalogs=False,
+        keep_original_catalogs=False,
         language_code=None,
         job_record_path=None,
         resume=False,
@@ -295,6 +298,9 @@ class BulkExtractionWorker(_CancellableDiskWorker):
         self.long_midi_filenames = bool(long_midi_filenames)
         self.trim_title_spaces = bool(trim_title_spaces)
         self.use_album_names = bool(use_album_names)
+        self.generate_yamaha_catalogs = bool(generate_yamaha_catalogs)
+        self.preserve_yamaha_catalogs = bool(preserve_yamaha_catalogs)
+        self.keep_original_catalogs = bool(keep_original_catalogs)
         self.language_code = language_code
         self.job_record_path = job_record_path
         self.resume = bool(resume)
@@ -315,6 +321,9 @@ class BulkExtractionWorker(_CancellableDiskWorker):
                 long_midi_filenames=self.long_midi_filenames,
                 trim_title_spaces=self.trim_title_spaces,
                 use_album_names=self.use_album_names,
+                generate_yamaha_catalogs=self.generate_yamaha_catalogs,
+                preserve_yamaha_catalogs=self.preserve_yamaha_catalogs,
+                keep_original_catalogs=self.keep_original_catalogs,
                 language_code=self.language_code,
                 job_record_path=self.job_record_path,
                 resume=self.resume,
@@ -356,6 +365,8 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         catalog_number="",
         require_midi_type0=False,
         preserve_catalog_midi=False,
+        generate_yamaha_catalogs=False,
+        preserve_yamaha_catalogs=False,
         include_subfolders=True,
         disk_layout="fill",
         shuffle=False,
@@ -376,6 +387,8 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         self.output_content = output_content
         self.require_midi_type0 = bool(require_midi_type0)
         self.preserve_catalog_midi = bool(preserve_catalog_midi)
+        self.generate_yamaha_catalogs = bool(generate_yamaha_catalogs)
+        self.preserve_yamaha_catalogs = bool(preserve_yamaha_catalogs)
         self.include_subfolders = bool(include_subfolders)
         self.disk_layout = disk_layout
         self.shuffle = bool(shuffle)
@@ -435,6 +448,8 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
                 output_content=self.output_content,
                 require_midi_type0=self.require_midi_type0,
                 preserve_catalog_midi=self.preserve_catalog_midi,
+                generate_yamaha_catalogs=self.generate_yamaha_catalogs,
+                preserve_yamaha_catalogs=self.preserve_yamaha_catalogs,
                 include_subfolders=self.include_subfolders,
                 disk_layout=self.disk_layout,
                 shuffle=self.shuffle,

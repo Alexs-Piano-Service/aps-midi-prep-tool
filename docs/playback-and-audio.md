@@ -28,13 +28,16 @@ system's sound settings if they are connected but are not the default output.
 
 ## Inspect Yamaha catalogs
 
-**Utilities → File Inspection...** includes `PDISK.MNG` and `PSONG.MNG` from
-the loaded disk or song folder. Select a catalog to see its structured view,
+**Utilities → File Inspection...** includes `PIANODIR.FIL`, `PDISK.MNG`, and
+`PSONG.MNG` from the loaded disk or song folder. Select a catalog to see its structured view,
 drop a catalog into the main list, or use **Open catalog...** to inspect a saved
 catalog directly.
 
 PDISK shows album information and header fields. PSONG shows the ordered song
-list, MIDI filenames, titles, and individual record fields. The raw-data view
+list, MIDI filenames, titles, and individual record fields. PIANODIR shows the
+album label and catalog number, ordered E-SEQ filenames and titles, declared
+durations, arrangement types, write-protection flags, and record offsets.
+Its inspection view is read-only. The raw-data view
 keeps the original contents available for closer inspection. Undocumented
 fields are displayed as stored, without assigning speculative meanings.
 Use **Apply album title** in PDISK to populate the current album name. Use
@@ -49,7 +52,11 @@ titles are applied automatically. Catalogs from separate folders are matched
 to their own songs where possible; conflicting album names require choosing
 one catalog explicitly. Use **Save** to write staged song-title changes, or
 **Undo** to revert them. Applying metadata leaves the catalog's original bytes
-unchanged, including its raw and hexadecimal inspection views.
+unchanged until saving, including its raw and hexadecimal inspection views.
+For compatible Yamaha MIDI destinations, Save also updates `PSONG.MNG` and
+`PDISK.MNG`; exports create or update the catalogs beside the prepared songs.
+ENSPIRE only carries existing catalogs or catalogs derived from `PIANODIR.FIL`;
+it does not generate them for uncataloged songs.
 
 PDISK and PSONG are supported companion files for MIDI collections. A conversion
 to E-SEQ omits them from the prepared output; it does not delete the original
@@ -126,6 +133,11 @@ the shared MIDI/audio timing. Ordinary audio is skipped. Files with damaged or
 ambiguous control data are reported individually, while the remaining files
 continue. Lossy MP3 encoding can destroy control data, so recovery depends on
 the source. LAME must be available before the batch can start.
+
+MIDI clock, transport, and active-sensing messages are omitted from paired
+exports without shifting musical events.
+Unsupported system-common or reset messages are reported with their type and
+time before a pair is saved.
 
 Progress identifies scanning, decoding, and exporting. Cancellation keeps
 completed pairs. The results list and JSON report record successful, skipped,
@@ -239,9 +251,11 @@ name receive `(2)`, `(3)`, and so on. The setting applies to newly created outpu
 When using the current song list, the utility includes its remaining songs and
 staged MIDI and title edits. Sorting the list or removing songs preserves each
 song's original catalog position; audio matching determines its CD track.
-The pairing table displays the current
-filenames; the exported MIDI files retain the filenames from the Smart PianoSoft
-catalog so the catalog continues to identify them correctly.
+The pairing table displays the current filenames. Preserved source MIDI copies
+retain their original catalog filenames. For paired playback on a compatible
+Yamaha destination, the playback folder uses short matching names such as
+`01.mid` and `01.mp3`, with the current song titles in `PSONG.MNG` and album title
+in `PDISK.MNG`. The manifest includes the generated catalogs’ checksums.
 
 Direct USB-floppy and physical CD reading in this dialog require Linux;
 Greaseweazle uses the app's regular floppy-reading backend. Secure CD reading
@@ -298,10 +312,14 @@ every loaded song. Neither the CD reference nor catalog order proves a match.
 Both beginning and ending fingerprints must match unambiguously. They establish the start offset and playback
 speed correction; the source MIDI's complete tempo map is retained. Incorrect,
 silent, ambiguous, or unsupported references stop the operation. All pairings
-are verified before encoding begins. Cancellation or a read error leaves an
-explicitly incomplete report and any verified originals available for recovery;
-partial encoded WAVs or MIDI/MP3 pairs are not published as completed songs.
-Retained WAVs can be paired on a retry; recovery locations are reported if needed.
+are verified before encoding begins. Failed checks and interrupted runs without
+completed audio leave no output folder. If cancellation or a read error leaves
+useful progress, the dialog asks whether to **Save incomplete progress** or
+**Discard** it, including when closing the window. Saving keeps the files and an
+explicitly incomplete report; discarding removes only that run's output folder.
+The scanned MIDI stays available for retries while the dialog remains open.
+Partial encoded WAVs or MIDI/MP3 pairs are not published as completed songs.
+Saved WAVs can be paired on a retry; recovery locations are reported if needed.
 
 Paired export requires the packaged or installed LAME encoder and uses tagged
 192 kbps MP3. LAME delay/padding metadata is retained. APS does not add a guessed

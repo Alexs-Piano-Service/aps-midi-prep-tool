@@ -279,6 +279,7 @@ Notes...** lets users change the mode and whether future merges ask again.
 | `image_export_album_subfolder` | Export disk images into an album subfolder. |
 | `write_tag_sidecars` | Write tag sidecar files. |
 | `write_metadata_summary` | Write a metadata summary. |
+| `generate_yamaha_catalogs` | Create missing `PSONG.MNG` and `PDISK.MNG` files for MIDI output. Overrides the profile default; also available under **Settings → Save Options → Create Missing Yamaha Catalogs**. |
 | `auto_write_protect_on_load` | Automatically protect originals when loaded. |
 | `allow_floppy_save` | Remember permission to save to the original floppy. |
 | `confirm_image_save` | Remember permission to save to the original image. |
@@ -307,7 +308,8 @@ These are booleans; source, output, and job paths are listed above.
 | `bulk_extraction_long_midi_filenames` | Use descriptive MIDI filenames. |
 | `bulk_extraction_trim_title_spaces` | Trim title spaces. |
 | `bulk_extraction_include_eseq_sources` | Include original E-SEQ sources alongside converted songs. |
-| `bulk_extraction_use_album_names` | Use album names for output folders. |
+| `bulk_extraction_keep_original_catalogs` | Archive unchanged copies of replaced Yamaha catalogs in an `Original catalogs` subfolder (default: off). |
+| `bulk_extraction_use_album_names` | Use album titles from `PIANODIR.FIL` or `PDISK.MNG` for output folders, falling back to image filenames when no usable title is available (default: on). |
 
 ### Mark IV music backup
 

@@ -51,11 +51,17 @@ from .eseq_pianodir import (
 from .eseq_converter import _eseq_event_stream_start, is_eseq_file
 from .dos83_renamer import is_dos83_filename
 from .midi_metadata import (
+    read_first_title_from_midi,
     extract_eseq_title_from_file,
     has_eseq_title_metadata,
     is_midi_file,
     update_eseq_title_to_path,
     update_midi_title_to_path,
+)
+from .smart_pianosoft import (
+    SMART_PIANOSOFT_DISK_CATALOG_NAME, SMART_PIANOSOFT_SONG_CATALOG_NAME,
+    build_smart_pianosoft_song_catalog, build_smart_pianosoft_song_record,
+    parse_smart_pianosoft_song_catalog,
 )
 from .additional_formats import electone_mdr_to_midi, pianodisc_system3
 from .subprocess_utils import WindowsProcessTreeWaiter, windows_subprocess_kwargs
@@ -2482,7 +2488,9 @@ def _is_image_capacity_error(exc):
     return "disk full" in message or "no directory slots" in message
 
 
-def _eseq_catalog_references(name, payload):
+def _song_catalog_references(name, payload):
+    if name == SMART_PIANOSOFT_SONG_CATALOG_NAME:
+        return [song.filename for song in parse_smart_pianosoft_song_catalog(payload)]
     if name == MUSICDIR_FILENAME:
         return [entry["filename"] for entry in parse_music_dir(payload)]
     count = int.from_bytes(payload[PIANODIR_COUNT_OFFSET:PIANODIR_COUNT_OFFSET + 2], "little") - 1
@@ -2491,20 +2499,24 @@ def _eseq_catalog_references(name, payload):
     )]
 
 
-def _pack_split_eseq_images(
+def _pack_split_catalog_images(
     file_specs, temp_dir, disk_format, *, volume_label, progress_callback=None,
     cancel_callback=None, capacity_split=False, allow_split=True,
 ):
-    """Split for storage or track limits, reserving each disk's E-SEQ catalogs.
+    """Split for storage or track limits, reserving each disk's Yamaha catalogs.
 
     Leave sets that fit on one disk unchanged, preserving supplied catalog
     bytes exactly when neither storage nor catalog track limits require a split.
     """
     templates = {}
+    explicit_midi_records = {}
+    midi_template_records = {}
+    disk_catalog = None
     files = []
     variants = {
         PIANODIR_FILENAME: (ESEQ_VARIANT_DISKLAVIER, PIANODIR_MAX_TRACKS),
         MUSICDIR_FILENAME: (ESEQ_VARIANT_CLAVINOVA, CLAVINOVA_MUSICDIR_MAX_TRACKS),
+        SMART_PIANOSOFT_SONG_CATALOG_NAME: ("midi", 999),
     }
     for spec in file_specs:
         if isinstance(spec, dict):
@@ -2515,16 +2527,60 @@ def _pack_split_eseq_images(
             display_name = spec[2] if len(spec) > 2 else os.path.basename(image_path)
         image_path = _normalize_image_path(image_path)
         name = dos_filename_key(image_path)
-        if name in variants:
+        if isinstance(spec, dict) and "yamaha_song_record" in spec:
+            # An image collection can exceed one catalog's three-digit count.
+            # Carry each full record beside its song until disks are planned;
+            # the bounded template supplies only the shared header fields.
+            record = spec["yamaha_song_record"]
+            try:
+                songs = parse_smart_pianosoft_song_catalog(
+                    build_smart_pianosoft_song_catalog(b"", [record]),
+                )
+                if len(songs) != 1 or dos_filename_key(songs[0].filename) != name:
+                    raise ValueError("song record does not match its image filename")
+            except (TypeError, ValueError) as exc:
+                raise FloppyImageError(f"Invalid Yamaha catalog record for {image_path}: {exc}") from exc
+            explicit_midi_records[name] = songs[0].raw_record
+        if name == SMART_PIANOSOFT_DISK_CATALOG_NAME:
+            with open(host_path, "rb") as handle:
+                disk_catalog = handle.read()
+            disk_spec = (host_path, image_path, display_name)
+            disk_index = len(files)
+        elif name in variants:
             with open(host_path, "rb") as handle:
                 templates[name] = handle.read()
         else:
             files.append((host_path, image_path, display_name))
     if not templates:
         return None
+    if disk_catalog is not None and SMART_PIANOSOFT_SONG_CATALOG_NAME not in templates:
+        files.insert(disk_index, disk_spec)
+        disk_catalog = None
 
     def build_catalog(name, tracks):
         try:
+            if name == SMART_PIANOSOFT_SONG_CATALOG_NAME:
+                if name not in midi_template_records:
+                    midi_template_records[name] = {
+                        dos_filename_key(song.filename): song.raw_record
+                        for song in parse_smart_pianosoft_song_catalog(templates[name])
+                    }
+                source_records = midi_template_records[name]
+                records = []
+                for track in tracks:
+                    key = dos_filename_key(track.image_path)
+                    record = explicit_midi_records.get(key, source_records.get(key))
+                    if record is not None:
+                        records.append(record)
+                    else:
+                        with open(track.local_path, "rb") as handle:
+                            header = handle.read(14)
+                        title = read_first_title_from_midi(track.local_path)
+                        records.append(build_smart_pianosoft_song_record(
+                            track.image_path, title or os.path.splitext(track.image_path)[0],
+                            midi_format=int.from_bytes(header[8:10], "big"),
+                        ))
+                return build_smart_pianosoft_song_catalog(templates[name], records)
             return build_eseq_directory_subset(name, templates[name], tracks)
         except ValueError as exc:
             raise FloppyImageError(f"Could not prepare {name} for a split export: {exc}") from exc
@@ -2533,7 +2589,8 @@ def _pack_split_eseq_images(
     for host_path, image_path, display_name in files:
         _raise_if_cancelled(cancel_callback)
         catalog = next((name for name in templates
-                        if _host_file_matches_eseq_variant(host_path, variants[name][0])), None)
+                        if (is_midi_file(host_path) if variants[name][0] == "midi"
+                            else _host_file_matches_eseq_variant(host_path, variants[name][0]))), None)
         items.append((host_path, image_path, display_name, os.path.getsize(host_path), catalog))
     if not capacity_split and all(
         sum(item[4] == name for item in items) <= variants[name][1]
@@ -2552,9 +2609,15 @@ def _pack_split_eseq_images(
         build_catalog(name, [])
     for name in templates:
         if not any(item[4] == name for item in items):
-            raise FloppyImageError(f"Cannot split {name}: no matching E-SEQ songs were supplied.")
+            kind = "MIDI" if variants[name][0] == "midi" else "E-SEQ"
+            raise FloppyImageError(f"Cannot split {name}: no matching {kind} songs were supplied.")
+        if name == SMART_PIANOSOFT_SONG_CATALOG_NAME and explicit_midi_records:
+            # Staged records already follow the editor's order, including songs
+            # beyond the bounded template. Sorting by that partial template
+            # would move songs without template entries to the end.
+            continue
         order = {dos_filename_key(path): index for index, path in enumerate(
-            _eseq_catalog_references(name, templates[name])
+            _song_catalog_references(name, templates[name])
         )}
         ordered = iter(sorted(
             (item for item in items if item[4] == name),
@@ -2586,6 +2649,8 @@ def _pack_split_eseq_images(
                 return None
             if tracks:
                 catalogs[name] = build_catalog(name, tracks)
+        if SMART_PIANOSOFT_SONG_CATALOG_NAME in catalogs and disk_catalog is not None:
+            catalogs[SMART_PIANOSOFT_DISK_CATALOG_NAME] = disk_catalog
         used_bytes = sum(allocated_size(item[3], blank.cluster_size) for item in group)
         used_bytes += sum(allocated_size(len(data), blank.cluster_size) for data in catalogs.values())
         used_slots = sum(_mtools_filename_root_slots(item[1]) for item in group) + len(catalogs)
@@ -2602,9 +2667,11 @@ def _pack_split_eseq_images(
             current = []
             catalogs = fitting_catalogs([item])
         if catalogs is None:
+            description = ("its Yamaha MIDI catalogs" if item[4] == SMART_PIANOSOFT_SONG_CATALOG_NAME
+                           else "its E-SEQ directory catalog")
             raise FloppyImageError(
                 f"'{item[2]}' is too large to fit on a {disk_format.label} image "
-                "with its E-SEQ directory catalog."
+                f"with {description}."
             )
         current.append(item)
         current_catalogs = catalogs
@@ -2639,7 +2706,9 @@ def _pack_split_eseq_images(
             payload = _read_fat12_file_bytes(raw_path, name)
             if payload != expected_payload:
                 raise FloppyImageError(f"Generated image verification failed: packed contents differ for {name}.")
-            references = [dos_filename_key(path) for path in _eseq_catalog_references(name, payload)]
+            if name == SMART_PIANOSOFT_DISK_CATALOG_NAME:
+                continue
+            references = [dos_filename_key(path) for path in _song_catalog_references(name, payload)]
             songs = [dos_filename_key(item[1]) for item in group if item[4] == name]
             if references != songs:
                 raise FloppyImageError(
@@ -2748,7 +2817,7 @@ def create_floppy_images_from_files(
         if current_img is not None:
             raw_images.append(current_img)
 
-        catalog_images = _pack_split_eseq_images(
+        catalog_images = _pack_split_catalog_images(
             file_specs, temp_dir, disk_format, volume_label=volume_label,
             progress_callback=progress_callback, cancel_callback=cancel_callback,
             capacity_split=len(raw_images) > 1, allow_split=allow_split,

@@ -171,10 +171,11 @@ def test_activation_remains_visible_when_about_reopens_without_saving_settings(w
 
 
 @pytest.mark.parametrize("language", [item.code for item in SUPPORTED_LANGUAGES])
-def test_admin_confirmation_is_localized_and_large_fonts_remain_accessible(language):
+@pytest.mark.parametrize("point_size", [14, 24])
+def test_admin_confirmation_is_localized_and_large_fonts_remain_accessible(language, point_size):
     app = QApplication.instance() or QApplication([])
     original = QFont(app.font())
-    app.setFont(QFont(original.family(), 14))
+    app.setFont(QFont(original.family(), point_size))
     instance = about_dialog.AboutDialog(language_code=language, admin_mode_enabled=True)
     try:
         instance.resize(500, 400)
@@ -192,3 +193,34 @@ def test_admin_confirmation_is_localized_and_large_fonts_remain_accessible(langu
         instance.deleteLater()
         app.setFont(original)
         app.processEvents()
+
+
+def test_wrapped_text_refits_when_resized_and_font_changes(dialog):
+    font = QFont(dialog.font())
+    font.setPointSize(24)
+    dialog.setFont(font)
+    dialog.resize(500, 400)
+    QTest.qWait(20)
+    for label in (dialog.info_label, dialog.notice_label):
+        assert label.height() >= label.heightForWidth(label.width())
+    narrow_height = dialog.info_label.height()
+    assert dialog.scroll_area.verticalScrollBar().maximum() > 0
+
+    dialog.resize(750, 500)
+    QTest.qWait(20)
+    assert dialog.info_label.height() < narrow_height
+    wide_height = dialog.info_label.height()
+    font.setPointSize(12)
+    dialog.setFont(font)
+    QTest.qWait(20)
+    assert dialog.info_label.height() < wide_height
+    for label in (dialog.info_label, dialog.notice_label):
+        assert label.height() >= label.heightForWidth(label.width())
+    assert dialog.scroll_area.horizontalScrollBar().maximum() == 0
+    assert dialog.rect().contains(dialog.buttons.geometry())
+
+    # Repeated layout requests from minimum-height changes must settle rather
+    # than continuously requeueing fits after the window stops changing.
+    fits = QSignalSpy(dialog._text_fit_timer.timeout)
+    QTest.qWait(30)
+    assert fits.count() == 0

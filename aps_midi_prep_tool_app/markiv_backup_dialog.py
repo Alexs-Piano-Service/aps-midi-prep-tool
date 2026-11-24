@@ -20,7 +20,10 @@ from .markiv_backup.library import CancelledError, check_cancel, scan_library
 from .markiv_backup_diagnostics import localize_backup_diagnostic
 from .markiv_device_discovery import discover_mounted_sources
 from .message_catalog import normalize_language_code, tr, translate_text
-from .preparation_profiles import SETTING_PROFILE, get_preparation_profile
+from .preparation_profiles import (
+    SETTING_PROFILE, get_preparation_profile, generate_yamaha_catalogs_enabled, preserves_yamaha_midi_catalogs,
+)
+from .ui_utils import center_dialog_on_parent
 
 
 SETTING_SOURCE = "markiv_backup_source"
@@ -46,7 +49,7 @@ class MarkIVBackupWorker(QThread):
 
     def __init__(self, operation, *, source="", target="", plan=None,
                  convert_eseq=False, keep_originals=True, random_suffixes=True,
-                 split_audio=False, parent=None):
+                 split_audio=False, generate_yamaha_catalogs=False, preserve_yamaha_catalogs=False, parent=None):
         super().__init__(parent)
         self.operation = operation
         self.source = source
@@ -56,6 +59,8 @@ class MarkIVBackupWorker(QThread):
         self.keep_originals = keep_originals
         self.random_suffixes = random_suffixes
         self.split_audio = split_audio
+        self.generate_yamaha_catalogs = generate_yamaha_catalogs
+        self.preserve_yamaha_catalogs = preserve_yamaha_catalogs
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -75,7 +80,9 @@ class MarkIVBackupWorker(QThread):
                                     convert_eseq=self.convert_eseq,
                                     keep_originals=self.keep_originals,
                                     random_suffixes=self.random_suffixes,
-                                    split_audio=self.split_audio)
+                                    split_audio=self.split_audio,
+                                    generate_yamaha_catalogs=self.generate_yamaha_catalogs,
+                                    preserve_yamaha_catalogs=self.preserve_yamaha_catalogs)
             elif self.operation == "verify":
                 result = verify_backup(Path(self.target),
                                        progress=self.progressChanged.emit, cancel=self._cancel)
@@ -375,6 +382,7 @@ class MarkIVBackupDialog(QDialog):
         close.clicked.connect(child.accept)
         buttons.addWidget(close)
         layout.addLayout(buttons)
+        center_dialog_on_parent(child, self, adjust_size=False)
         child.exec()
         child.deleteLater()
 
@@ -463,7 +471,10 @@ class MarkIVBackupDialog(QDialog):
                         convert_eseq=self.convert_checkbox.isChecked(),
                         keep_originals=self.keep_originals_checkbox.isChecked(),
                         random_suffixes=random_output_suffixes_enabled(self.settings),
-                        split_audio=self.split_audio_checkbox.isChecked())
+                        split_audio=self.split_audio_checkbox.isChecked(),
+                        generate_yamaha_catalogs=generate_yamaha_catalogs_enabled(self.settings),
+                        preserve_yamaha_catalogs=preserves_yamaha_midi_catalogs(
+                            self.settings.value(SETTING_PROFILE, "unsure")))
 
     def verify_existing_backup(self):
         if self.is_busy:

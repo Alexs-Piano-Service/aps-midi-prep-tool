@@ -17,6 +17,7 @@ from typing import BinaryIO
 import zipfile
 
 from .paths import is_link
+from ..yamaha_catalogs import yamaha_metadata_from_pianodir_bytes
 
 _TEXT_LIMIT = 1024 * 1024
 _MIDI_LIMIT = 256 * 1024
@@ -210,6 +211,23 @@ def read_folder_tags(folder: Path) -> tuple[dict, dict[str, dict]]:
     except OSError:
         return album, tracks
     names = {path.name.casefold(): path for path in files}
+    pianodir = names.get("pianodir.fil")
+    if pianodir:
+        try:
+            metadata = yamaha_metadata_from_pianodir_bytes(_small_file(pianodir))
+            if metadata.disk_title:
+                album.update(title=metadata.disk_title, metadata_source="PIANODIR.FIL")
+            for song in metadata.songs:
+                name = song.filename.casefold()
+                if name not in names:
+                    continue
+                values = {"track_number": song.track_number, "metadata_source": "PIANODIR.FIL"}
+                title = " ".join(song.title.split())
+                if title:
+                    values["title"] = title
+                tracks[names[name].name] = values
+        except (OSError, ValueError):
+            pass
     disk = names.get("pdisk.mng")
     if disk:
         try:

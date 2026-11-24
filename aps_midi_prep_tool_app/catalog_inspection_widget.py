@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .catalog_inspection import catalog_hex, catalog_text, read_catalog, song_fields
+from .catalog_inspection import catalog_hex, read_catalog, song_fields, song_playback_descriptor
 from .message_catalog import translate_text
 
 
@@ -34,12 +34,14 @@ class CatalogInspectionWidget(QWidget):
         self.heading.setTextFormat(Qt.PlainText)
         self.heading.setWordWrap(True)
         layout.addWidget(self.heading)
-        self.description = QLabel(self.t("Open a PDISK.MNG or PSONG.MNG catalog to view its contents."))
+        self.description = QLabel(self._empty_description())
         self.description.setTextFormat(Qt.PlainText)
         self.description.setWordWrap(True)
         layout.addWidget(self.description)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
+        self.empty_space = QWidget(self)
+        layout.addWidget(self.empty_space, 1)
         overview = QWidget()
         details = QVBoxLayout(overview)
         details.setContentsMargins(8, 8, 8, 8)
@@ -92,6 +94,9 @@ class CatalogInspectionWidget(QWidget):
         layout.addWidget(self.apply_row)
         self._refresh_apply_button()
 
+    def _empty_description(self):
+        return self.t("Inspect and play MIDI and E-SEQ files, or inspect PIANODIR.FIL, PDISK.MNG, and PSONG.MNG directory files.")
+
     def set_apply_enabled(self, enabled):
         self._apply_enabled = bool(enabled)
         self._refresh_apply_button()
@@ -101,11 +106,12 @@ class CatalogInspectionWidget(QWidget):
 
     def _refresh_apply_button(self):
         inspected = self.inspection
-        self.apply_row.setVisible(inspected is not None)
+        can_apply = inspected is not None and inspected.kind in {"PDISK.MNG", "PSONG.MNG"}
+        self.apply_row.setVisible(can_apply)
         is_disk = inspected is not None and inspected.kind == "PDISK.MNG"
         self.apply_button.setText(self.t("Apply album title" if is_disk else "Apply song titles"))
         has_metadata = inspected is not None and bool(inspected.title if is_disk else inspected.songs)
-        self.apply_button.setEnabled(self._apply_enabled and has_metadata)
+        self.apply_button.setEnabled(self._apply_enabled and can_apply and has_metadata)
 
     def _raw_box(self):
         box = QPlainTextEdit()
@@ -130,7 +136,7 @@ class CatalogInspectionWidget(QWidget):
     def _set_fields(self, tree, fields):
         tree.clear()
         for field in fields:
-            value = field.value or "—"
+            value = (self.t(field.value) if field.translate_value else field.value) or "—"
             offset = f"0x{field.offset:04X} · {field.size} B"
             item = QTreeWidgetItem([self.t(field.label), value, offset])
             item.setToolTip(1, value)
@@ -146,7 +152,7 @@ class CatalogInspectionWidget(QWidget):
         self.inspection = None
         self._raw_populated = False
         self.heading.setText(self.t("Select a file to inspect."))
-        self.description.setText(self.t("Open a PDISK.MNG or PSONG.MNG catalog to view its contents."))
+        self.description.setText(self._empty_description())
         self.description.setToolTip("")
         self.fields.clear()
         self.songs.setRowCount(0)
@@ -154,6 +160,7 @@ class CatalogInspectionWidget(QWidget):
         self.raw_text.clear()
         self.hex_text.clear()
         self.tabs.hide()
+        self.empty_space.show()
         self.set_apply_status("")
         self._refresh_apply_button()
 
@@ -164,6 +171,7 @@ class CatalogInspectionWidget(QWidget):
         self._raw_populated = False
         self.raw_text.clear()
         self.hex_text.clear()
+        self.fields.clear()
         self.songs.setRowCount(0)
         self.song_details.clear()
         self.heading.setText(display_name or Path(path).name)
@@ -174,6 +182,7 @@ class CatalogInspectionWidget(QWidget):
             self.description.setText(self.t("Could not inspect {filename}.").format(
                 filename=display_name or Path(path).name) + "\n" + self.t(str(exc)))
             self.tabs.hide()
+            self.empty_space.show()
             return
         self.inspection = inspected
         if inspected.title:
@@ -181,13 +190,13 @@ class CatalogInspectionWidget(QWidget):
         self.description.setText(self.t("{name} · {size} bytes · Read-only").format(
             name=inspected.kind, size=len(inspected.raw)))
         self._set_fields(self.fields, inspected.fields)
-        self.songs.setVisible(inspected.kind == "PSONG.MNG")
+        self.songs.setVisible(inspected.kind in {"PSONG.MNG", "PIANODIR.FIL"})
         self.song_group.setVisible(bool(inspected.songs))
         self.offset_note.setVisible(inspected.normalized_line_endings)
         self.songs.setRowCount(len(inspected.songs))
         for row, song in enumerate(inspected.songs):
             values = (str(song.track_number), song.title, song.filename,
-                      catalog_text(song.raw_record[0x50:0x5e]))
+                      self.t(song_playback_descriptor(song)))
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
@@ -195,6 +204,7 @@ class CatalogInspectionWidget(QWidget):
         if inspected.songs:
             self.songs.selectRow(0)
         self.tabs.setCurrentIndex(0)
+        self.empty_space.hide()
         self.tabs.show()
         self.set_apply_status(self.t("Use Save to write applied changes, or Undo to revert."))
         self._refresh_apply_button()

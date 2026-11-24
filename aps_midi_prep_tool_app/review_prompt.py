@@ -2,8 +2,9 @@
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
+from .localized_dialogs import QMessageBox
 from .message_catalog import tr
 
 

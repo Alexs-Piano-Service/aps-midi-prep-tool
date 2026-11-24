@@ -377,8 +377,8 @@ def test_image_catalogs_inspect_staged_psong_and_skip_deleted_catalog(tmp_path):
     window = SimpleNamespace(is_image_mode=lambda: True,
                              imageEntriesByPath={"PSONG.MNG": object(), "PDISK.MNG": object()},
                              pendingImageAdditions={}, pendingImageDeletes={"PDISK.MNG"},
-                             pendingSmartPianoSoftCatalogReplacement=str(staged),
-                             _pending_or_extracted_image_path=lambda _: str(original),
+                             pendingSmartPianoSoftCatalogReplacement=str(original),
+                             _pending_or_extracted_image_path=lambda _: str(staged),
                              image_session=object())
     items = main_window.MidiTitleWindow._inspection_catalog_items(window, [])
     assert len(items) == 1

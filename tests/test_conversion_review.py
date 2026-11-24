@@ -386,7 +386,10 @@ def test_startup_cleanup_is_automatic_even_when_conversion_prompt_is_hidden(tmp_
 
         def _exec_child_dialog(self, dialog):
             self.shown = True
-            assert any("recommended" in label.text() for label in dialog.findChildren(QLabel))
+            assert any(
+                "Leave unchecked" in label.text() and "rare expert option" in label.text()
+                for label in dialog.findChildren(QLabel)
+            )
             preservation = dialog.findChild(QCheckBox, "preserveOriginalVolumeControls")
             assert preservation is not None
             assert not preservation.isChecked()

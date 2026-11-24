@@ -24,6 +24,9 @@ from aps_midi_prep_tool_app.floppy_image import (
 )
 from aps_midi_prep_tool_app.midi_metadata import extract_eseq_title_from_file
 from aps_midi_prep_tool_app.preparation_profiles import get_preparation_medium, get_preparation_profile
+from aps_midi_prep_tool_app.smart_pianosoft import (
+    parse_smart_pianosoft_disk_title, parse_smart_pianosoft_song_catalog,
+)
 
 
 def _song(title, note=60):
@@ -123,6 +126,7 @@ def test_stages_current_conversion_edits_and_order_until_worker_finishes(window,
     assert options["output_ext"] == "img"
     assert options["output_content"] == "midi"
     assert options["include_subfolders"] is False
+    assert options["generate_yamaha_catalogs"] is True
     assert options["shuffle"] is False
     assert options["disk_layout"] == "fill"
     assert {path: path.read_bytes() for path in sources} == originals
@@ -283,7 +287,8 @@ def test_real_worker_reviews_staged_songs_and_releases_temporary_input(window, m
     assert window.choose_button.isEnabled()
     session = FloppyImageSession.load(tmp_path / "output" / "DSKA0000.img")
     try:
-        songs = [entry for entry in session.list_entries().entries if entry.path != PIANODIR_FILENAME]
+        songs = [entry for entry in session.list_entries().entries
+                 if entry.path not in {PIANODIR_FILENAME, "PSONG.MNG", "PDISK.MNG"}]
         assert len(songs) == 1
         if eseq:
             metadata = read_pianodir_metadata_from_file(session.extract_file(PIANODIR_FILENAME))
@@ -292,6 +297,9 @@ def test_real_worker_reviews_staged_songs_and_releases_temporary_input(window, m
             assert extract_eseq_title_from_file(session.extract_file(songs[0].path)) == "Ready for review"
         else:
             assert Path(session.extract_file(songs[0].path)).read_bytes() == original
+            catalog = parse_smart_pianosoft_song_catalog(Path(session.extract_file("PSONG.MNG")).read_bytes())
+            assert [(song.filename, song.title) for song in catalog] == [(songs[0].path, "Ready for review")]
+            assert parse_smart_pianosoft_disk_title(Path(session.extract_file("PDISK.MNG")).read_bytes()) == "Prepared album"
     finally:
         session.cleanup()
     assert source.read_bytes() == original

@@ -73,9 +73,9 @@ from .smart_pianosoft import (
     build_smart_pianosoft_song_catalog,
     build_smart_pianosoft_song_record,
     parse_smart_pianosoft_song_catalog,
-    smart_pianosoft_metadata_from_directory,
     update_smart_pianosoft_disk_title,
 )
+from .yamaha_catalogs import yamaha_catalog_metadata_from_directory
 
 
 EMULATOR_IMAGE_EXTENSIONS = {"img", "hfe"}
@@ -453,9 +453,10 @@ def _load_index_title_overrides(
     return overrides
 
 
-def _catalog_song_matches(catalog_songs, song_paths, *, cancel_callback=None):
+def _catalog_song_matches(catalog_songs, song_paths, *, cancel_callback=None, match_identical_files=True):
     """Match local originals and extraction-generated names without guessing."""
     songs_by_stem = {}
+    songs_by_name = {}
     for song in catalog_songs:
         for filename in (
             song.filename,
@@ -466,6 +467,7 @@ def _catalog_song_matches(catalog_songs, song_paths, *, cancel_callback=None):
                 song.track_number, os.path.splitext(song.filename)[0], song.filename,
             ),
         ):
+            _set_unique_title(songs_by_name, filename.casefold(), song)
             _set_unique_title(
                 songs_by_stem,
                 os.path.splitext(filename)[0].casefold(),
@@ -474,12 +476,13 @@ def _catalog_song_matches(catalog_songs, song_paths, *, cancel_callback=None):
     matches = {}
     for path in song_paths:
         _raise_if_cancelled(cancel_callback)
-        stem = os.path.splitext(os.path.basename(path))[0].casefold()
-        song = songs_by_stem.get(stem)
+        filename = os.path.basename(path).casefold()
+        stem = os.path.splitext(filename)[0]
+        song = songs_by_name.get(filename) or songs_by_stem.get(stem)
         if song is not None:
             matches[path] = song
     unmatched = [path for path in song_paths if path not in matches]
-    if matches and unmatched:
+    if match_identical_files and matches and unmatched:
         # Manually renamed copies can still be identified by exact contents.
         # Limit this lookup to the same source folder and reject conflicting
         # catalog identities, including identical recordings listed twice.
@@ -541,6 +544,7 @@ def _prepare_song_files(
     output_content,
     require_midi_type0=False,
     preserve_catalog_midi=False,
+    generate_yamaha_catalogs=False,
     title_overrides=None,
     title_sources=None,
     folder_metadata=None,
@@ -560,9 +564,9 @@ def _prepare_song_files(
     title_sources = dict(title_sources or {})
     folder_metadata = dict(folder_metadata or {})
     catalog_songs = dict(catalog_songs or {})
-    include_song_catalog = output_content == "midi" and any(
+    include_song_catalog = output_content == "midi" and (generate_yamaha_catalogs or any(
         item.song_catalog for item in folder_metadata.values()
-    )
+    ))
 
     for index, source_path in enumerate(song_paths, start=1):
         _raise_if_cancelled(cancel_callback)
@@ -611,7 +615,7 @@ def _prepare_song_files(
                         "The source contains [BAD SECTOR] recovery filler. "
                         "Missing MIDI data cannot be converted to E-SEQ."
                     )
-                if title_override is not None and not source_metadata.song_catalog:
+                if title_override is not None and not (source_metadata.song_catalog or generate_yamaha_catalogs):
                     raise FloppyImageError(
                         "The source contains [BAD SECTOR] recovery filler. "
                         "Its title cannot be updated without a PSONG.MNG catalog."
@@ -681,7 +685,7 @@ def _prepare_song_files(
                 try:
                     write_midi_title_to_path(source_path, title_override, local_path)
                 except MidiTitleFormatError as exc:
-                    if not source_metadata.song_catalog:
+                    if not (source_metadata.song_catalog or generate_yamaha_catalogs):
                         raise
                     # A catalog can carry the title without rewriting a MIDI
                     # event stream that the title editor cannot safely parse.
@@ -898,8 +902,21 @@ def _verify_raw_image(
             )
 
 
-def _midi_catalogs_for_songs(songs, image_stem):
-    """Carry source catalogs into this image with its actual names and order."""
+def _preserved_yamaha_catalog_metadata(metadata):
+    """Translate PIANODIR metadata, retaining only existing MNG file types."""
+    if not metadata.has_source_catalog:
+        return metadata
+    return replace(
+        metadata,
+        song_catalog=(metadata.song_catalog or build_smart_pianosoft_song_catalog(b"", [])
+                      if SMART_PIANOSOFT_SONG_CATALOG_NAME in metadata.source_catalog_names else b""),
+        disk_catalog=(metadata.disk_catalog or update_smart_pianosoft_disk_title(b"", metadata.disk_title)
+                      if SMART_PIANOSOFT_DISK_CATALOG_NAME in metadata.source_catalog_names else b""),
+    )
+
+
+def _midi_catalogs_for_songs(songs, image_stem, *, generate_yamaha_catalogs=False, album_title=""):
+    """Build this image's catalogs with its actual names, titles and order."""
     catalogs = {}
     song_template = next(
         (song.smart_pianosoft.song_catalog for song in songs if song.smart_pianosoft.song_catalog),
@@ -909,15 +926,19 @@ def _midi_catalogs_for_songs(songs, image_stem):
         (song.smart_pianosoft.disk_catalog for song in songs if song.smart_pianosoft.disk_catalog),
         b"",
     )
-    if song_template:
+    if song_template or generate_yamaha_catalogs:
         catalogs[SMART_PIANOSOFT_SONG_CATALOG_NAME] = build_smart_pianosoft_song_catalog(
             song_template, [song.catalog_record for song in songs],
         )
-    if disk_template:
+    if disk_template or generate_yamaha_catalogs:
         # A pooled image can contain several albums. Give that compilation its
         # own slot title; the combined song list retains all source albums.
-        if len({os.path.dirname(song.source_path) for song in songs}) > 1:
-            disk_template = update_smart_pianosoft_disk_title(disk_template, image_stem)
+        pooled = len({os.path.dirname(song.source_path) for song in songs}) > 1
+        if album_title or pooled or not disk_template:
+            title = album_title or (image_stem if pooled else (
+                songs[0].album_title or os.path.basename(os.path.dirname(songs[0].source_path))
+            ))
+            disk_template = update_smart_pianosoft_disk_title(disk_template, title)
         catalogs[SMART_PIANOSOFT_DISK_CATALOG_NAME] = disk_template
     return catalogs
 
@@ -933,6 +954,7 @@ def _pack_raw_images(
     metadata,
     output_content,
     disk_layout="fill",
+    generate_yamaha_catalogs=False,
     progress_callback=None,
     cancel_callback=None,
     language_code=None,
@@ -1000,6 +1022,7 @@ def _pack_raw_images(
     def current_midi_catalogs(songs):
         return _midi_catalogs_for_songs(
             songs, _numbered_image_stem(image_prefix, starting_number + len(raw_images)),
+            generate_yamaha_catalogs=generate_yamaha_catalogs, album_title=metadata.disk_title,
         )
 
     def too_large_message(song):
@@ -1411,6 +1434,8 @@ def build_emulator_disk_images(
     output_content="eseq",
     require_midi_type0=False,
     preserve_catalog_midi=False,
+    generate_yamaha_catalogs=False,
+    preserve_yamaha_catalogs=False,
     include_subfolders=True,
     disk_layout="fill",
     shuffle=False,
@@ -1437,6 +1462,10 @@ def build_emulator_disk_images(
     preserving musical channels and instruments.
     ``preserve_catalog_midi`` keeps catalog-backed MIDI bytes unchanged while
     retaining reviewed titles in PSONG.MNG; prepared delivery uses this mode.
+    ``generate_yamaha_catalogs`` supplies PSONG.MNG and PDISK.MNG for MIDI
+    destinations that require Yamaha catalogs, even without source MNG files.
+    ``preserve_yamaha_catalogs`` keeps existing MNG file types and derives
+    both from valid PIANODIR metadata; plain MIDI albums stay without catalogs.
     """
     source_directory = os.path.abspath(os.fspath(source_directory))
     output_directory = os.path.abspath(os.fspath(output_directory))
@@ -1486,12 +1515,13 @@ def build_emulator_disk_images(
     catalog_songs = {}
     for folder, folder_songs in folders.items():
         _raise_if_cancelled(cancel_callback)
-        folder_metadata[folder] = smart_pianosoft_metadata_from_directory(folder)
+        folder_metadata[folder] = yamaha_catalog_metadata_from_directory(folder)
         catalog_songs.update(_catalog_song_matches(
             folder_metadata[folder].songs, folder_songs, cancel_callback=cancel_callback,
         ))
     title_overrides.update({path: song.title for path, song in catalog_songs.items() if song.title})
-    title_sources = {path: "MNG catalog" for path in title_overrides}
+    title_sources = {path: "MNG catalog" if catalog_songs[path].raw_record else "PIANODIR.FIL"
+                     for path in title_overrides}
 
     # Explicit index edits take precedence over catalog and embedded titles.
     index_titles = _load_index_title_overrides(
@@ -1561,12 +1591,16 @@ def build_emulator_disk_images(
                     disk_catalog=(update_smart_pianosoft_disk_title(existing.disk_catalog, title)
                                   if existing.disk_catalog else b""),
                 )
+            if output_content == "midi" and preserve_yamaha_catalogs:
+                active_metadata = {folder: _preserved_yamaha_catalog_metadata(value)
+                                   for folder, value in active_metadata.items()}
             prepared_songs, converted_count = _prepare_song_files(
                 song_paths,
                 preparation_directory,
                 output_content=output_content,
                 require_midi_type0=require_midi_type0,
                 preserve_catalog_midi=preserve_catalog_midi,
+                generate_yamaha_catalogs=generate_yamaha_catalogs,
                 title_overrides={**title_overrides, **reviewed_song_titles},
                 title_sources={**title_sources, **{path: "Preview edit" for path in reviewed_song_titles}},
                 folder_metadata=active_metadata,
@@ -1588,6 +1622,7 @@ def build_emulator_disk_images(
                           if reviewed_album_titles and disk_layout == "folders" else metadata),
                 output_content=output_content,
                 disk_layout=disk_layout,
+                generate_yamaha_catalogs=generate_yamaha_catalogs,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
                 language_code=language_code,
@@ -1609,7 +1644,8 @@ def build_emulator_disk_images(
                     len(folders[folder]), folder in included_folders,
                     "Preview edit" if folder in reviewed_album_titles else (
                         "Build option" if album_title else (
-                            "MNG catalog" if folder_metadata[folder].disk_title else "Folder name"
+                            ("MNG catalog" if folder_metadata[folder].disk_catalog else "PIANODIR.FIL")
+                            if folder_metadata[folder].disk_title else "Folder name"
                         )
                     ),
                 ) for folder in album_order),

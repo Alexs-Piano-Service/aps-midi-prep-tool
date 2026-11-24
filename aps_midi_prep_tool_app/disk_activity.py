@@ -4,8 +4,9 @@ import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QTimer
-from PySide6.QtWidgets import QMessageBox, QProgressDialog, QPushButton
+from PySide6.QtWidgets import QProgressDialog, QPushButton
 
+from .localized_dialogs import QMessageBox
 from .write_safety_messages import localize_write_message
 
 

@@ -24,6 +24,10 @@ from aps_midi_prep_tool_app.eseq_converter import (
 from aps_midi_prep_tool_app.eseq_pianodir import (
     PIANODIR_COUNT_OFFSET,
     PIANODIR_FILENAME,
+    PIANODIR_HEADER,
+    PIANODIR_TRACK_SIZE,
+    PianodirTrackEntry,
+    build_pianodir_bytes,
     read_pianodir_metadata_from_file,
 )
 from aps_midi_prep_tool_app.floppy_image import (
@@ -73,6 +77,25 @@ def _midi_bytes(title):
         + len(track).to_bytes(4, "big")
         + track
     )
+
+
+def _write_eseq_catalog_album(directory):
+    """Make E-SEQ song headers deliberately differ from their catalog titles."""
+    directory.mkdir(parents=True, exist_ok=True)
+    tracks = []
+    for index, name in enumerate(("FIRST.FIL", "SECOND.FIL"), start=1):
+        midi = directory / "source.mid"
+        midi.write_bytes(_midi_bytes(f"Embedded {index}"))
+        path = directory / name
+        convert_midi_file_to_eseq_path(midi, path)
+        midi.unlink()
+        tracks.append(PianodirTrackEntry(name, str(path), f"Embedded {index}"))
+    payload = bytearray(build_pianodir_bytes(tracks, disk_title="PIANODIR album"))
+    for index in range(2):
+        offset = len(PIANODIR_HEADER) + index * PIANODIR_TRACK_SIZE + 0x30
+        payload[offset:offset + 0x20] = f"PIANODIR song {index + 1}".encode().ljust(0x20, b" ")
+    (directory / PIANODIR_FILENAME).write_bytes(payload)
+    return tracks
 
 
 def _vlq(value):
@@ -1698,16 +1721,18 @@ def test_midi_compilation_catalogs_cover_all_songs_and_local_title_edits(
     assert _image_songs_and_metadata(result.output_paths[0], "midi")[0] == [song.title for song in catalog]
 
 
-def test_midi_catalog_space_forces_split_before_using_safety_reserve(tmp_path, monkeypatch):
+@pytest.mark.parametrize("generate_catalogs", [False, True])
+def test_midi_catalog_space_forces_split_before_using_safety_reserve(tmp_path, monkeypatch, generate_catalogs):
     source = tmp_path / "Album"
     source.mkdir()
     records = [("FIRST.MID", "First"), ("SECOND.MID", "Second")]
     for filename, title in records:
         (source / filename).write_bytes(_large_midi_bytes(title, 5000))
-    _write_mng_catalogs(source, "Album title", records)
-    # Retain the smaller observed PDISK variant byte-for-byte on both parts.
-    disk_catalog = (source / "PDISK.MNG").read_bytes()[:114]
-    (source / "PDISK.MNG").write_bytes(disk_catalog)
+    if not generate_catalogs:
+        _write_mng_catalogs(source, "Album title", records)
+        # Retain the smaller observed PDISK variant byte-for-byte on both parts.
+        disk_catalog = (source / "PDISK.MNG").read_bytes()[:114]
+        (source / "PDISK.MNG").write_bytes(disk_catalog)
     blank = tmp_path / "blank.img"
     create_blank_floppy_image(blank, _disk_format())
     listing = read_image_listing(blank)
@@ -1719,6 +1744,7 @@ def test_midi_catalog_space_forces_split_before_using_safety_reserve(tmp_path, m
     result = build_emulator_disk_images(
         source, tmp_path / "images", disk_layout="folders", output_ext="img", output_content="midi",
         safety_margin_bytes=margin, shuffle=True, include_song_lists=False,
+        generate_yamaha_catalogs=generate_catalogs,
     )
     assert result.images_created == 2
     for path, expected_title in zip(result.output_paths, ["Second", "First"]):
@@ -1726,20 +1752,26 @@ def test_midi_catalog_space_forces_split_before_using_safety_reserve(tmp_path, m
         song, = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
         assert song.title == expected_title
         assert song.filename in files
-        assert files["PDISK.MNG"] == disk_catalog
+        if generate_catalogs:
+            assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == "Album"
+        else:
+            assert files["PDISK.MNG"] == disk_catalog
         assert read_image_listing(path).free_space >= margin
 
 
-def test_midi_catalogs_reserve_root_directory_slots(tmp_path):
+@pytest.mark.parametrize("generate_catalogs", [False, True])
+def test_midi_catalogs_reserve_root_directory_slots(tmp_path, generate_catalogs):
     source = tmp_path / "Album"
     source.mkdir()
     records = [(f"SONG{index:03d}.MID", f"Song {index}") for index in range(110)]
     for filename, title in records:
         (source / filename).write_bytes(_midi_bytes(title))
-    _write_mng_catalogs(source, "Full directory", records)
+    if not generate_catalogs:
+        _write_mng_catalogs(source, "Full directory", records)
     result = build_emulator_disk_images(
         source, tmp_path / "images", disk_layout="folders", output_ext="img", output_content="midi",
         disk_format=_disk_format(),
+        generate_yamaha_catalogs=generate_catalogs,
     )
     assert result.images_created == 2
     counts = []
@@ -1748,9 +1780,119 @@ def test_midi_catalogs_reserve_root_directory_slots(tmp_path):
         songs = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
         counts.append(len(songs))
         assert {song.filename for song in songs} == {name for name in files if name.endswith(".MID")}
-        assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == "Full directory"
+        assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == ("Album" if generate_catalogs else "Full directory")
     # 112 FAT root entries: one label, two catalogs, and 109 songs.
     assert counts == [109, 1]
+
+
+@pytest.mark.parametrize("output_ext", ["img", "hfe"])
+@pytest.mark.parametrize("revise", [False, True])
+@pytest.mark.parametrize("catalog_policy", ["generate", "preserve"])
+def test_generated_midi_catalogs_convert_pianodir_titles_and_apply_review_edits(tmp_path, output_ext, revise, catalog_policy):
+    source = tmp_path / "Source folder"
+    _write_eseq_catalog_album(source)
+    originals = {path.name: path.read_bytes() for path in source.iterdir()}
+    previews = []
+
+    def review(preview):
+        previews.append(preview)
+        if len(previews) == 1:
+            assert preview.albums[0].title == "PIANODIR album"
+            assert preview.albums[0].title_source == "PIANODIR.FIL"
+            assert [song.title for song in preview.disks[0].songs] == ["PIANODIR song 1", "PIANODIR song 2"]
+            assert all(song.title_source == "PIANODIR.FIL" for song in preview.disks[0].songs)
+            if revise:
+                return {
+                    "action": "revise", "included_folders": [str(source)],
+                    "album_titles": {str(source): "Edited album"},
+                    "title_overrides": {str(source / "FIRST.FIL"): "Edited song"},
+                }
+        return {"action": "build"}
+
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", output_ext=output_ext, output_content="midi",
+        disk_layout="folders", generate_yamaha_catalogs=catalog_policy == "generate",
+        preserve_yamaha_catalogs=catalog_policy == "preserve", review_callback=review,
+    )
+    assert result.converted_files == 2
+    files = _image_files(result.output_paths[0])
+    catalog = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
+    assert [song.title for song in catalog] == ["Edited song" if revise else "PIANODIR song 1", "PIANODIR song 2"]
+    assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == ("Edited album" if revise else "PIANODIR album")
+    assert {song.filename for song in catalog} == {name for name in files if name.endswith(".MID")}
+    assert all(len(song.filename.split(".")[0]) <= 8 and b"SMF0" in song.raw_record for song in catalog)
+    assert PIANODIR_FILENAME not in files
+    assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
+
+
+def test_preserve_only_catalogs_follow_valid_metadata_in_each_source_album(tmp_path):
+    source = tmp_path / "Collection"
+    mng = source / "01-MNG"
+    mng.mkdir(parents=True)
+    (mng / "SONG.MID").write_bytes(_midi_bytes("Embedded MIDI"))
+    _write_mng_catalogs(mng, "MNG album", [("SONG.MID", "MNG song")])
+    _write_eseq_catalog_album(source / "02-PIANODIR")
+    for folder in ("03-plain", "04-invalid", "05-empty-PIANODIR"):
+        album = source / folder
+        album.mkdir()
+        (album / "SONG.MID").write_bytes(_midi_bytes(folder))
+    for name in ("PSONG.MNG", "PDISK.MNG", "PIANODIR.FIL"):
+        (source / "04-invalid" / name).write_bytes(b"truncated")
+    # A valid empty source catalog is still metadata provenance; an incidental
+    # folder or song title cannot serve as that signal.
+    (source / "05-empty-PIANODIR" / PIANODIR_FILENAME).write_bytes(build_pianodir_bytes([]))
+    originals = {path: path.read_bytes() for path in source.rglob('*') if path.is_file()}
+
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", output_content="midi", output_ext="img",
+        disk_layout="folders", preserve_yamaha_catalogs=True,
+    )
+
+    assert len(result.output_paths) == 5
+    for index, output in enumerate(result.output_paths):
+        files = _image_files(output)
+        expected = {"PSONG.MNG", "PDISK.MNG"} if index in {0, 1, 4} else set()
+        assert {name for name in files if name.endswith('.MNG')} == expected
+        if expected:
+            songs = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
+            assert {song.filename for song in songs} == {name for name in files if name.endswith('.MID')}
+        if index == 0:
+            assert [song.title for song in songs] == ["MNG song"]
+            assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == "MNG album"
+        if index == 1:
+            assert [song.title for song in songs] == ["PIANODIR song 1", "PIANODIR song 2"]
+            assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == "PIANODIR album"
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+@pytest.mark.parametrize("source_catalog", ["PSONG.MNG", "PDISK.MNG"])
+@pytest.mark.parametrize("generate", [False, True])
+def test_midi_builder_preserves_exact_source_catalog_types_unless_generation_is_enabled(tmp_path, source_catalog, generate):
+    source = tmp_path / "album"
+    source.mkdir()
+    (source / "SONG.MID").write_bytes(_midi_bytes("Embedded title"))
+    _write_mng_catalogs(source, "Original album", [("SONG.MID", "Catalog title")])
+    missing = "PDISK.MNG" if source_catalog == "PSONG.MNG" else "PSONG.MNG"
+    (source / missing).unlink()
+    original = (source / source_catalog).read_bytes()
+
+    result = build_emulator_disk_images(
+        source, tmp_path / "output", output_content="midi", output_ext="img",
+        preserve_yamaha_catalogs=True, generate_yamaha_catalogs=generate,
+    )
+
+    files = _image_files(result.output_paths[0])
+    assert {name for name in files if name.endswith('.MNG')} == (
+        {"PSONG.MNG", "PDISK.MNG"} if generate else {source_catalog}
+    )
+    if source_catalog == "PDISK.MNG":
+        assert files[source_catalog] == original
+    else:
+        song, = parse_smart_pianosoft_song_catalog(files[source_catalog])
+        assert song.title == "Catalog title"
+        assert song.filename in files
+    assert (source / source_catalog).read_bytes() == original
+    assert not (source / missing).exists()
 
 
 def _damaged_midi_bytes(kind):

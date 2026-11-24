@@ -16,14 +16,18 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import tempfile
 import wave
 
 from .smart_pianosoft import (
+    build_smart_pianosoft_song_catalog, build_smart_pianosoft_song_record,
     parse_smart_pianosoft_disk_title, parse_smart_pianosoft_song_catalog,
+    smart_pianosoft_metadata_from_directory, update_smart_pianosoft_disk_title,
     update_smart_pianosoft_song_catalog,
 )
 from .dos83_renamer import is_dos83_filename
 from .helpers.output_names import create_output_directory
+from .yamaha_catalogs import yamaha_catalog_metadata_from_directory
 
 
 class AlbumBuildError(RuntimeError):
@@ -354,13 +358,15 @@ def _guard_output_source(source, output_parent, *, source_device=None):
 
 
 def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
-                  output_format="encoded_wav", cancel=None, progress=None, random_suffixes=True):
+                  output_format="encoded_wav", cancel=None, progress=None, random_suffixes=True,
+                  generate_yamaha_catalogs=False, preserve_yamaha_catalogs=False):
     """Rip, fingerprint-match and encode an album, retaining truthful completion status.
 
     Explicit per-song audio choices are verified too. Catalog order is only a
     search hint; a failed fingerprint match never becomes an assumed pairing.
-    An interrupted output remains available for recovery with an incomplete
-    manifest. Only a successful return represents a completed album.
+    Interrupted output with finished audio remains available for a keep/discard
+    decision with an incomplete manifest. Runs without useful progress leave no
+    output folder. Only a successful return represents a completed album.
     """
     from .disklavier_audio import encode_disklavier_wav
     from .audio_tools import find_lame_command
@@ -387,24 +393,43 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
         raise ValueError("Select an existing output folder.")
     if output_format == "midi_mp3" and not find_lame_command():
         raise RuntimeError("LAME is required to export paired MIDI/MP3 files. Install LAME or use a package that includes it before ripping the CD.")
-    # A unique directory also makes concurrent runs and retries non-destructive.
-    folder = create_output_directory(
-        output_parent, f"Smart PianoSoft - {_safe_title(album.title)}",
-        random_suffixes=random_suffixes, separator=" - ",
-    )
+    catalog_names = ({'PDISK.MNG', 'PSONG.MNG'} if generate_yamaha_catalogs else
+                     yamaha_catalog_metadata_from_directory(album.source_directory).source_catalog_names
+                     if preserve_yamaha_catalogs else set())
+    write_catalogs = bool(catalog_names)
+    folder = None
+    has_progress = False
     report = {"schema": 1, "album": album.title, "status": "incomplete",
               "hardware_verified": False, "output_format": output_format,
               "format": ("PianoSoft PlusAudio: left music, right piano data" if output_format == "encoded_wav"
                          else "Synchronized MIDI/MP3 pair: matching names in one folder"),
               "source": str(album.original_source), "tracks": [], "audio": []}
     try:
+        # Reject unavailable media and insufficient space before claiming a name.
+        for track in album.tracks:
+            _check_cancel(cancel)
+            if _digest(track.midi_path) != track.midi_sha256:
+                raise ValueError(f"The MIDI source changed after scanning: {track.filename}")
+        if cd_device:
+            _emit(progress, "rip", 0, 0, "Checking CD track list…")
+        toc = read_cd_toc(cd_device, cancel=cancel) if cd_device else ()
+        cd_bytes = sum(t.sectors * 2352 for t in toc)
+        required_bytes = cd_bytes * 2 + sum(p.stat().st_size for p in audio_paths.values()) * 2
+        if shutil.disk_usage(output_parent).free < required_bytes + 64 * 1024 * 1024:
+            raise ValueError("There is not enough free space for the source audio and prepared music files.")
+        _check_cancel(cancel)
+        # A unique directory also makes concurrent runs and retries non-destructive.
+        folder = create_output_directory(
+            output_parent, f"Smart PianoSoft - {_safe_title(album.title)}",
+            random_suffixes=random_suffixes, separator=" - ",
+        )
         delivery_name = "Disklavier" if output_format == "encoded_wav" else "ENSPIRE"
         midi_folder, wav_folder, encoded_folder = [folder / name for name in ("MIDI", "WAV", delivery_name)]
         for child in (midi_folder, wav_folder, encoded_folder):
             child.mkdir()
         _save_report(folder, report)
         for path in album.source_directory.iterdir():
-            if path.name.casefold() in {"psong.mng", "pdisk.mng"}:
+            if path.name.casefold() in {"psong.mng", "pdisk.mng", "pianodir.fil"}:
                 shutil.copyfile(path, midi_folder / path.name)
         for track in album.tracks:
             _check_cancel(cancel)
@@ -417,14 +442,6 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
                 raise ValueError(f"MIDI copy verification failed: {track.filename}")
 
         audio_candidates, explicit = {}, {}
-        if cd_device:
-            _emit(progress, "rip", 0, 0, "Checking CD track list…")
-        toc = read_cd_toc(cd_device, cancel=cancel) if cd_device else ()
-        cd_bytes = sum(t.sectors * 2352 for t in toc)
-        required_bytes = cd_bytes * 2
-        required_bytes += sum(p.stat().st_size for p in audio_paths.values()) * 2
-        if shutil.disk_usage(folder).free < required_bytes + 64 * 1024 * 1024:
-            raise ValueError("There is not enough free space for the source audio and prepared music files.")
         ripped_bytes = 0
         for index, track in enumerate(toc):
             _check_cancel(cancel)
@@ -437,8 +454,14 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
                 _emit(progress, "rip", offset + round(size * fraction), cd_bytes, message,
                       cd_track=track.number, track_index=index + 1, track_count=len(toc))
 
-            rip_cd_track(cd_device, track, destination, cancel=cancel,
-                         progress=rip_progress)
+            try:
+                rip_cd_track(cd_device, track, destination, cancel=cancel,
+                             progress=rip_progress)
+            finally:
+                # The reader publishes only validated audio. Its final progress
+                # callback can observe cancellation after publication, before
+                # returning here. Offer to save that track as well.
+                has_progress = has_progress or os.path.lexists(destination)
             rip_progress(track_bytes, track_bytes, "Calculating audio checksum…")
             audio_candidates[track.number] = destination
             report["audio"].append({"cd_track": track.number, "file": f"WAV/{destination.name}",
@@ -453,6 +476,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
             _check_cancel(cancel)
             destination = wav_folder / f"Paired{number:02d}.wav"
             _copy_wav(source, destination, cancel=cancel)
+            has_progress = True
             explicit[number] = destination
             report["audio"].append({"paired_song": number, "file": f"WAV/{destination.name}",
                                     "sha256": _digest(destination)})
@@ -506,7 +530,9 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
             _check_cancel(cancel)
             if _digest(audio) != audio_hashes[audio]:
                 raise ValueError(f"Audio changed after synchronization: {audio.name}")
-            stem = encoded_folder / f"{track.number:02d} - {_safe_title(track.title)}"
+            stem_name = (f"{track.number:02d}" if write_catalogs and output_format == "midi_mp3"
+                         else f"{track.number:02d} - {_safe_title(track.title)}")
+            stem = encoded_folder / stem_name
             events = [(event.time_seconds, event.data) for event in track.metadata.events]
             options = dict(midi_offset_seconds=alignment.offset_seconds,
                            midi_time_scale=alignment.time_scale, cancel=cancel,
@@ -543,6 +569,50 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
         for audio, expected in audio_hashes.items():
             if _digest(audio) != expected:
                 raise ValueError(f"The preserved audio copy changed: {audio.name}")
+        _check_cancel(cancel)
+        if write_catalogs and output_format == "midi_mp3":
+            from .helpers.file_batch import publish_file_batch
+
+            metadata = yamaha_catalog_metadata_from_directory(midi_folder)
+            source_songs = {song.filename.casefold(): song for song in metadata.songs}
+            records = []
+            for track, prepared in zip(album.tracks, report["tracks"]):
+                midi = folder / prepared["prepared_midi"]
+                if _digest(midi) != prepared["prepared_midi_sha256"]:
+                    raise ValueError(f"The prepared MIDI copy changed: {midi.name}")
+                with midi.open("rb") as stream:
+                    header = stream.read(14)
+                if len(header) != 14 or header[:4] != b"MThd":
+                    raise ValueError(f"The prepared file is not MIDI: {midi.name}")
+                source_song = source_songs.get(track.filename.casefold())
+                if "PSONG.MNG" in catalog_names:
+                    records.append(build_smart_pianosoft_song_record(
+                        midi.name, track.title, source_record=source_song.raw_record if source_song else b"",
+                        midi_format=int.from_bytes(header[8:10], "big"),
+                    ))
+            payloads = {}
+            if "PSONG.MNG" in catalog_names:
+                payloads["PSONG.MNG"] = build_smart_pianosoft_song_catalog(metadata.song_catalog, records)
+            if "PDISK.MNG" in catalog_names:
+                payloads["PDISK.MNG"] = update_smart_pianosoft_disk_title(metadata.disk_catalog, album.title)
+            with tempfile.TemporaryDirectory(prefix=".catalogs-", dir=folder) as staging:
+                outputs = []
+                for name, payload in payloads.items():
+                    staged = Path(staging) / name
+                    staged.write_bytes(payload)
+                    outputs.append((str(staged), str(encoded_folder / name)))
+                publish_file_batch(
+                    outputs, expected_hashes={destination: None for _staged, destination in outputs},
+                    recovery_parent=encoded_folder,
+                    progress_callback=lambda *_args: _check_cancel(cancel),
+                )
+            report["catalogs"] = []
+            for name, payload in payloads.items():
+                checksum = hashlib.sha256(payload).hexdigest()
+                if _digest(encoded_folder / name) != checksum:
+                    raise ValueError(f"The prepared catalog changed: {name}")
+                report["catalogs"].append({"file": f"{delivery_name}/{name}", "sha256": checksum})
+        _check_cancel(cancel)
         report["status"] = "complete"
         _save_report(folder, report)
         _emit(progress, "complete", len(pairs), len(pairs), str(folder))
@@ -554,8 +624,17 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
         if cd_read_error:
             report["failure_kind"] = "cd_read"
             report["cd_device"] = str(cd_device)
-        try:
-            _save_report(folder, report)
-        except OSError:
-            pass
+        if folder is not None:
+            try:
+                _save_report(folder, report)
+            except OSError:
+                pass
+            if not has_progress:
+                try:
+                    shutil.rmtree(folder)
+                except OSError:
+                    # Let the caller offer cleanup again and expose its path.
+                    pass
+                else:
+                    folder = None
         raise AlbumBuildError(str(exc), folder, cd_read_error=cd_read_error) from exc

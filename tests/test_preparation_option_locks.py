@@ -141,14 +141,17 @@ def test_descriptive_rename_cannot_override_prepared_regular_filenames(window, m
     assert action.text().replace("&", "") == "Name MIDI Files from Song Titles"
 
 
-@pytest.mark.parametrize("profile_key", ("mark_iii", "midi_export", "e3_850", "enspire"))
+@pytest.mark.parametrize("profile_key, force_short_names, force_trim", (
+    ("mark_iii", True, False),
+    ("midi_export", False, True),
+    ("e3_850", True, True),
+    ("enspire", False, True),
+))
 @pytest.mark.parametrize("skip_dialog", (False, True))
 def test_conversion_prompt_uses_forced_options_without_overwriting_preferences(
-    window, monkeypatch, profile_key, skip_dialog,
+    window, monkeypatch, profile_key, force_short_names, force_trim, skip_dialog,
 ):
     _apply(window, profile_key)
-    force_short_names = profile_key == "mark_iii"
-    force_trim = not force_short_names
     # These preferences remain available when preparation is disengaged.
     for key in (window.SETTING_LONG_MIDI_FILENAMES,
                 window.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES,

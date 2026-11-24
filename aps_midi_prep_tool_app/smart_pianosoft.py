@@ -33,6 +33,19 @@ class SmartPianoSoftMetadata:
     songs: tuple[SmartPianoSoftSong, ...] = ()
     song_catalog: bytes = field(default=b"", repr=False)
     disk_catalog: bytes = field(default=b"", repr=False)
+    pianodir_source: bool = field(default=False, repr=False, compare=False)
+
+    @property
+    def has_source_catalog(self):
+        return bool(self.song_catalog or self.disk_catalog or self.pianodir_source)
+
+    @property
+    def source_catalog_names(self):
+        """MIDI companions present in the source or derived from PIANODIR."""
+        return frozenset(name for name, present in (
+            (SMART_PIANOSOFT_SONG_CATALOG_NAME, self.song_catalog),
+            (SMART_PIANOSOFT_DISK_CATALOG_NAME, self.disk_catalog),
+        ) if present or self.pianodir_source)
 
 
 def _canonical_catalog_bytes(data):
@@ -182,7 +195,10 @@ def build_smart_pianosoft_song_record(filename, title, *, source_record=b"", mid
 def build_smart_pianosoft_song_catalog(template, records):
     """Build an image-local catalog in playback order without stale records."""
     template = _canonical_catalog_bytes(template)
-    parse_smart_pianosoft_song_catalog(template)
+    if template:
+        parse_smart_pianosoft_song_catalog(template)
+    else:
+        template = b"PSONG   MNG   \r\n" + (b" " * 14 + b"\r\n") * 7
     records = tuple(records)
     if len(records) > 999 or any(len(record) != _CATALOG_RECORD_SIZE for record in records):
         raise ValueError("PSONG.MNG has invalid song records.")
@@ -195,7 +211,11 @@ def build_smart_pianosoft_song_catalog(template, records):
 def update_smart_pianosoft_disk_title(data, title):
     """Update the album field in a catalog with canonical CRLF delimiters."""
     data = _canonical_catalog_bytes(data)
-    parse_smart_pianosoft_disk_title(data)
+    if data:
+        parse_smart_pianosoft_disk_title(data)
+    else:
+        data = (b"PDISK   MNG   \r\nP.PLAYER      \r\nVer1.01DMV0.53\r\n"
+                + b" " * 64 + b"\r\n" + b" " * 14)
     patched = bytearray(data)
     patched[0x30:0x70] = str(title).encode("cp1252", errors="replace")[:64].ljust(64, b" ")
     return bytes(patched)

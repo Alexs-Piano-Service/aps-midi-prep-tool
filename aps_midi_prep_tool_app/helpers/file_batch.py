@@ -97,7 +97,7 @@ def _checked_file_hash(path):
 
 
 def publish_file_batch(prepared_files, *, backup_callback=None, progress_callback=None,
-                       delete_files=(), expected_hashes=None):
+                       delete_files=(), expected_hashes=None, recovery_parent=None):
     """Publish (staged_path, destination) pairs, or undo earlier writes.
 
     Staged files must already contain the complete output and remain available
@@ -105,6 +105,11 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
     storage before backups or publication. The backup callback runs for every
     existing target and may return an error string or raise. Progress receives
     a one-based completed count, total, and the caller's destination.
+
+    ``recovery_parent`` selects an existing parent directory for private
+    recovery storage; None uses the system temporary directory. Use a durable
+    destination directory when recovery must share its available space and
+    survive cleanup of the caller's staging directory.
 
     Destination symlinks keep their existing meaning. New targets are created
     exclusively so that a file appearing during publication is never replaced.
@@ -215,7 +220,10 @@ def publish_file_batch(prepared_files, *, backup_callback=None, progress_callbac
             published.append(record)
             check_captured_retirement(record)
 
-        recovery_directory = tempfile.mkdtemp(prefix="aps_file_batch_")
+        recovery_directory = tempfile.mkdtemp(
+            prefix="aps_file_batch_",
+            dir=os.path.abspath(os.fsdecode(recovery_parent)) if recovery_parent is not None else None,
+        )
         for index, record in enumerate(records):
             check_expected(record)
             # Freeze prepared input too: callers may prepare a rename swap

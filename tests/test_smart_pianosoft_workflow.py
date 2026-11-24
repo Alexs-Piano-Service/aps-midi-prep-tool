@@ -1,6 +1,7 @@
 """Complete album preparation with original synthetic MIDI/CD music."""
 
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -15,6 +16,9 @@ from aps_midi_prep_tool_app import smart_pianosoft_media as media
 from aps_midi_prep_tool_app import audio_tools
 from aps_midi_prep_tool_app.disklavier_audio import read_midi_events
 from aps_midi_prep_tool_app.smart_pianosoft_workflow import AlbumBuildError, prepare_album, scan_album
+from aps_midi_prep_tool_app.smart_pianosoft import (
+    parse_smart_pianosoft_disk_title, parse_smart_pianosoft_song_catalog,
+)
 from test_smart_pianosoft import _psong_bytes, _pdisk_bytes
 from test_smart_pianosoft_sync import (
     _cd_reference_message, _fingerprint_message, _reference_envelope, _wav, original_phrase,
@@ -145,6 +149,107 @@ def test_paired_album_reuses_fingerprint_alignment_and_delivers_matching_midi_mp
                                 for event in album.tracks[0].metadata.events], atol=0.00005)
 
 
+@pytest.mark.parametrize("catalog_option", ["generate_yamaha_catalogs", "preserve_yamaha_catalogs"])
+def test_compatible_paired_album_writes_current_titles_and_retains_opaque_catalog_fields(tmp_path, album_files,
+                                                                                     catalog_option):
+    if not audio_tools.find_lame_command():
+        pytest.skip("LAME is unavailable")
+    source, audio, _pcm = album_files
+    catalog = bytearray((source / "PSONG.MNG").read_bytes())
+    catalog[0x80 + 0x90:0x80 + 0x94] = b"KEEP"
+    (source / "PSONG.MNG").write_bytes(catalog)
+    originals = {path.name: path.read_bytes() for path in source.iterdir()}
+    album = _scan(tmp_path, source)
+    album = replace(album, title="Updated album", tracks=(replace(album.tracks[0], title="Updated song"),))
+
+    folder = prepare_album(album, tmp_path, audio_paths={1: audio}, output_format="midi_mp3",
+                           **{catalog_option: True})
+
+    report = json.loads((folder / "manifest.json").read_text())
+    assert report["status"] == "complete"
+    playback = folder / "ENSPIRE"
+    assert {path.name for path in playback.iterdir()} == {"01.mid", "01.mp3", "PSONG.MNG", "PDISK.MNG"}
+    song, = parse_smart_pianosoft_song_catalog((playback / "PSONG.MNG").read_bytes())
+    assert (song.filename, song.title) == ("01.mid", "Updated song")
+    assert song.raw_record[0x90:0x94] == b"KEEP"
+    assert parse_smart_pianosoft_disk_title((playback / "PDISK.MNG").read_bytes()) == "Updated album"
+    assert {item["file"] for item in report["catalogs"]} == {"ENSPIRE/PSONG.MNG", "ENSPIRE/PDISK.MNG"}
+    assert all(hashlib.sha256((folder / item["file"]).read_bytes()).hexdigest() == item["sha256"]
+               for item in report["catalogs"])
+    assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
+    assert (folder / "MIDI/PSONG.MNG").read_bytes() == originals["PSONG.MNG"]
+
+
+@pytest.mark.parametrize("catalog_source", ["absent", "invalid", "empty_pianodir", "PDISK.MNG", "PSONG.MNG"])
+def test_preservation_only_paired_output_requires_valid_source_catalog(tmp_path, album_files, catalog_source):
+    if not audio_tools.find_lame_command():
+        pytest.skip("LAME is unavailable")
+    from aps_midi_prep_tool_app.eseq_pianodir import build_pianodir_bytes
+
+    source, audio, _pcm = album_files
+    album = _scan(tmp_path, source)
+    for path in album.source_directory.iterdir():
+        if path.suffix.casefold() == ".mng":
+            path.unlink()
+    if catalog_source == "invalid":
+        (album.source_directory / "PSONG.MNG").write_bytes(b"not a Yamaha catalog")
+    elif catalog_source == "empty_pianodir":
+        (album.source_directory / "PIANODIR.FIL").write_bytes(build_pianodir_bytes([], disk_title=""))
+    elif catalog_source in {"PDISK.MNG", "PSONG.MNG"}:
+        (album.source_directory / catalog_source).write_bytes((source / catalog_source).read_bytes())
+
+    folder = prepare_album(album, tmp_path, audio_paths={1: audio}, output_format="midi_mp3",
+                           preserve_yamaha_catalogs=True)
+
+    report = json.loads((folder / "manifest.json").read_text())
+    assert report["status"] == "complete"
+    playback = folder / "ENSPIRE"
+    expected = ({"PSONG.MNG", "PDISK.MNG"} if catalog_source == "empty_pianodir" else
+                {catalog_source} if catalog_source in {"PDISK.MNG", "PSONG.MNG"} else set())
+    assert {path.name for path in playback.glob("*.MNG")} == expected
+    assert {Path(item["file"]).name for item in report.get("catalogs", [])} == expected
+    midi, = playback.glob("*.mid")
+    if expected:
+        assert midi.name == "01.mid"
+    else:
+        assert "Original test phrase" in midi.name
+
+
+@pytest.mark.parametrize("failure", ["write", "competing_file"])
+def test_paired_catalog_failure_retains_music_and_does_not_report_complete(tmp_path, album_files,
+                                                                        monkeypatch, failure):
+    if not audio_tools.find_lame_command():
+        pytest.skip("LAME is unavailable")
+    from aps_midi_prep_tool_app.helpers import file_batch
+
+    source, audio, _pcm = album_files
+    publish = file_batch.atomic_write_bytes
+
+    def fail_second_catalog(path, *args, **kwargs):
+        if Path(path).name == "PDISK.MNG":
+            if failure == "competing_file":
+                Path(path).write_bytes(b"Another writer's catalog")
+            else:
+                raise OSError("Catalog write failed")
+        return publish(path, *args, **kwargs)
+
+    monkeypatch.setattr(file_batch, "atomic_write_bytes", fail_second_catalog)
+    with pytest.raises(AlbumBuildError) as caught:
+        prepare_album(_scan(tmp_path, source), tmp_path, audio_paths={1: audio}, output_format="midi_mp3",
+                      generate_yamaha_catalogs=True)
+
+    folder = caught.value.output_directory
+    report = json.loads((folder / "manifest.json").read_text())
+    assert report["status"] == "failed"
+    assert (folder / "ENSPIRE/01.mid").is_file()
+    assert (folder / "ENSPIRE/01.mp3").is_file()
+    assert not (folder / "ENSPIRE/PSONG.MNG").exists()
+    if failure == "competing_file":
+        assert (folder / "ENSPIRE/PDISK.MNG").read_bytes() == b"Another writer's catalog"
+    else:
+        assert not (folder / "ENSPIRE/PDISK.MNG").exists()
+
+
 def test_ordinary_cataloged_midi_is_not_mistaken_for_smart_pianosoft(tmp_path, album_files):
     source, _audio, _pcm = album_files
     midi = mido.MidiFile()
@@ -167,9 +272,11 @@ def test_changed_snapshot_refuses_to_encode(tmp_path, album_files):
     source, audio, _pcm = album_files
     album = _scan(tmp_path, source)
     album.tracks[0].midi_path.write_bytes(b"changed")
+    before = set(tmp_path.iterdir())
     with pytest.raises(AlbumBuildError, match="changed after scanning") as error:
         prepare_album(album, tmp_path, audio_paths={1: audio})
-    assert not list((error.value.output_directory / "Disklavier").iterdir())
+    assert error.value.output_directory is None
+    assert set(tmp_path.iterdir()) == before
 
 
 def test_wrong_manual_pairing_retains_originals_but_never_encodes_a_guess(tmp_path, album_files):
@@ -386,24 +493,31 @@ def test_cd_read_failure_retains_verified_files_and_restarts_from_reconnected_dr
                       random_suffixes=False)
     assert caught.value.cd_read_error
     failed_folder = caught.value.output_directory
-    report = json.loads((failed_folder / "manifest.json").read_text())
-    assert report["status"] == "failed" and report["failure_kind"] == "cd_read"
-    assert report["cd_device"] == "old-cd"
-    assert len(report["audio"]) == {"toc": 0, "second_track": 1, "final_toc": 2}[failure_stage]
     delivery = "ENSPIRE" if output_format == "midi_mp3" else "Disklavier"
-    assert not list((failed_folder / delivery).iterdir())
-    retained = {path.relative_to(failed_folder): path.read_bytes()
-                for path in failed_folder.rglob("*") if path.is_file()}
+    if failure_stage == "toc":
+        assert failed_folder is None
+        assert not list(tmp_path.glob("Smart PianoSoft*"))
+    else:
+        report = json.loads((failed_folder / "manifest.json").read_text())
+        assert report["status"] == "failed" and report["failure_kind"] == "cd_read"
+        assert report["cd_device"] == "old-cd"
+        assert len(report["audio"]) == {"second_track": 1, "final_toc": 2}[failure_stage]
+        assert not list((failed_folder / delivery).iterdir())
+        retained = {path.relative_to(failed_folder): path.read_bytes()
+                    for path in failed_folder.rglob("*") if path.is_file()}
 
     failing = False
     result = prepare_album(album, tmp_path, cd_device="reconnected-cd", output_format=output_format,
                            random_suffixes=False)
     assert result != failed_folder
+    assert result.name == ("Smart PianoSoft - Original test album" +
+                           ("" if failure_stage == "toc" else " (2)"))
     assert ripped[-2:] == [("reconnected-cd", 1), ("reconnected-cd", 2)]
     assert json.loads((result / "manifest.json").read_text())["status"] == "complete"
     assert list((result / delivery).iterdir())
-    assert {path.relative_to(failed_folder): path.read_bytes()
-            for path in failed_folder.rglob("*") if path.is_file()} == retained
+    if failed_folder is not None:
+        assert {path.relative_to(failed_folder): path.read_bytes()
+                for path in failed_folder.rglob("*") if path.is_file()} == retained
     assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
 
 
@@ -421,12 +535,111 @@ def test_cd_storage_failure_or_cancellation_is_not_reported_as_drive_failure(
         raise OSError("The output disk is full.")
 
     monkeypatch.setattr(media, "rip_cd_track", fail)
+    album = _scan(tmp_path, source)
+    before = set(tmp_path.iterdir())
     with pytest.raises(AlbumBuildError) as caught:
-        prepare_album(_scan(tmp_path, source), tmp_path, cd_device="fake-cd", cancel=cancel)
+        prepare_album(album, tmp_path, cd_device="fake-cd", cancel=cancel)
     assert not caught.value.cd_read_error
-    report = json.loads((caught.value.output_directory / "manifest.json").read_text())
-    assert report["status"] == ("cancelled" if cancelled else "failed")
-    assert "failure_kind" not in report
+    assert caught.value.output_directory is None
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_insufficient_space_fails_before_creating_output_or_ripping(tmp_path, album_files, monkeypatch):
+    source, _audio, _pcm = album_files
+    album = _scan(tmp_path, source)
+    before = set(tmp_path.iterdir())
+    toc = (media.CDTrack(1, 0, 1050),)
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_kw: toc)
+    usage_type = type(shutil.disk_usage(tmp_path))
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: usage_type(100, 100, 0))
+    monkeypatch.setattr(media, "rip_cd_track", lambda *_a, **_kw: pytest.fail("Ripping must not start"))
+
+    with pytest.raises(AlbumBuildError, match="not enough free space") as caught:
+        prepare_album(album, tmp_path, cd_device="fake-cd")
+
+    assert caught.value.output_directory is None
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_failed_first_audio_copy_removes_only_new_output(tmp_path, album_files, monkeypatch):
+    from aps_midi_prep_tool_app import smart_pianosoft_workflow as workflow
+
+    source, audio, _pcm = album_files
+    album = _scan(tmp_path, source)
+    previous = tmp_path / "Smart PianoSoft - Original test album"
+    previous.mkdir()
+    (previous / "finished.wav").write_bytes(b"previous completed output")
+    originals = {path.name: path.read_bytes() for path in source.iterdir()}
+    before = set(tmp_path.iterdir())
+
+    def fail_copy(_source, destination, **_kwargs):
+        destination.write_bytes(b"unfinished audio")
+        raise OSError("The output disk is full.")
+
+    monkeypatch.setattr(workflow, "_copy_wav", fail_copy)
+    with pytest.raises(AlbumBuildError, match="output disk is full") as caught:
+        prepare_album(album, tmp_path, audio_paths={1: audio}, random_suffixes=False)
+
+    assert caught.value.output_directory is None
+    assert set(tmp_path.iterdir()) == before
+    assert (previous / "finished.wav").read_bytes() == b"previous completed output"
+    assert {path.name: path.read_bytes() for path in source.iterdir()} == originals
+
+
+def test_cleanup_failure_reports_remaining_folder_for_user_decision(tmp_path, album_files, monkeypatch):
+    from aps_midi_prep_tool_app import smart_pianosoft_workflow as workflow
+
+    source, audio, _pcm = album_files
+    album = _scan(tmp_path, source)
+
+    def fail_copy(*_args, **_kwargs):
+        raise OSError("The output disk is full.")
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise PermissionError("The output folder could not be removed.")
+
+    monkeypatch.setattr(workflow, "_copy_wav", fail_copy)
+    monkeypatch.setattr(shutil, "rmtree", fail_cleanup)
+    with pytest.raises(AlbumBuildError, match="output disk is full") as caught:
+        prepare_album(album, tmp_path, audio_paths={1: audio})
+
+    folder = caught.value.output_directory
+    assert folder.is_dir()
+    assert json.loads((folder / "manifest.json").read_text())["status"] == "failed"
+    assert (folder / "MIDI/01.MID").read_bytes() == (source / "01.MID").read_bytes()
+
+
+@pytest.mark.parametrize("cancel_message", ["Audio track saved.", "Calculating audio checksum…"])
+def test_cancel_after_first_cd_track_is_saved_keeps_finished_audio(
+        tmp_path, album_files, monkeypatch, cancel_message):
+    source, audio, _pcm = album_files
+    album = _scan(tmp_path, source)
+    cancel = threading.Event()
+    monkeypatch.setattr(media, "_linux_required", lambda: None)
+    monkeypatch.setattr(media, "_device_identity", lambda _device: ("drive", 1))
+    monkeypatch.setattr(media, "_cdparanoia", lambda: "cdparanoia")
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_kw: (media.CDTrack(1, 0, 1050),))
+
+    def reader(args, **_options):
+        shutil.copyfile(audio, args[-1])
+        return ""
+
+    # Exercise the real reader's validation and publication, including its final
+    # callback before it returns the completed destination to the workflow.
+    monkeypatch.setattr(media, "_run_command", reader)
+
+    def progress(detail):
+        if detail["message"] == cancel_message:
+            cancel.set()
+            raise InterruptedError("Operation cancelled.")
+
+    with pytest.raises(AlbumBuildError) as caught:
+        prepare_album(album, tmp_path, cd_device="fake-cd", cancel=cancel, progress=progress)
+
+    folder = caught.value.output_directory
+    assert (folder / "WAV/CD01.wav").read_bytes() == audio.read_bytes()
+    assert json.loads((folder / "manifest.json").read_text())["status"] == "cancelled"
+    assert not list((folder / "Disklavier").iterdir())
 
 
 def test_output_cannot_be_inside_original_source_and_pairings_must_be_complete(tmp_path, album_files):
