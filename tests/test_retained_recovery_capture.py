@@ -11,7 +11,10 @@ def _capture_directory_in(tmp_path, monkeypatch):
     real_mkdtemp = floppy_image.tempfile.mkdtemp
 
     def make_directory(*args, **kwargs):
-        kwargs.setdefault("dir", tmp_path)
+        # tempfile treats an explicit None like an omitted directory. Keep
+        # both forms inside this test, while honoring destination-local paths.
+        if kwargs.get("dir") is None:
+            kwargs["dir"] = tmp_path
         return real_mkdtemp(*args, **kwargs)
 
     monkeypatch.setattr(floppy_image.tempfile, "mkdtemp", make_directory)

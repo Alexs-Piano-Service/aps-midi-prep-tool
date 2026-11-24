@@ -121,6 +121,13 @@ class AboutDialog(QDialog):
         self._background_click_count = 0
         self._last_background_click = None
 
+    @staticmethod
+    def _fit_wrapped_label(label):
+        # QLabel.heightForWidth includes minimumHeight. Release our old
+        # minimum so text can shrink again after widening or a font change.
+        label.setMinimumHeight(0)
+        label.setMinimumHeight(max(0, label.heightForWidth(label.width())))
+
     def _fit_wrapped_text(self):
         # Some Qt styles allocate a wrapped label its unwrapped size-hint
         # height even when the scroll body has reserved the full wrapped height.
@@ -128,16 +135,20 @@ class AboutDialog(QDialog):
         for label in self._wrapping_labels:
             if label.isHidden():
                 continue
-            # QLabel.heightForWidth includes minimumHeight. Release our old
-            # minimum so text can shrink again after widening or a font change.
-            label.setMinimumHeight(0)
-            label.setMinimumHeight(max(0, label.heightForWidth(label.width())))
+            self._fit_wrapped_label(label)
         self.scroll_area.widget().layout().activate()
 
     def eventFilter(self, watched, event):
         event_type = event.type()
+        width_changed = (event_type == QEvent.Resize
+                         and event.size().width() != event.oldSize().width())
+        if width_changed and watched in self._wrapping_labels and not watched.isHidden():
+            # A vertical scrollbar can narrow labels during the queued fit.
+            # Apply the new height immediately at that assigned width instead
+            # of leaving clipped text until another timer callback runs.
+            self._fit_wrapped_label(watched)
         if (event_type in (QEvent.FontChange, QEvent.StyleChange, QEvent.Show)
-                or event_type == QEvent.Resize and event.size().width() != event.oldSize().width()):
+                or width_changed):
             # Do not fit from LayoutRequest or height-only resize events: the
             # resulting minimum-height updates would otherwise schedule forever.
             if not self._text_fit_timer.isActive():

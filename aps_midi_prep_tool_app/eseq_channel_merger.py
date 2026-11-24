@@ -16,6 +16,7 @@ from .eseq_converter import (
     _detect_eseq_container,
     _encode_vlq,
     _eseq_event_stream_start,
+    _has_legacy_block_lengths,
 )
 from .midi_channel_merger import (
     _acoustic_grand_program_event,
@@ -207,6 +208,9 @@ def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename="", *, overlap_mo
 
     delta = len(stream) - (stream_end - stream_start)
     header = bytearray(data[:stream_start])
+    legacy_block_lengths = _has_legacy_block_lengths(
+        data, stream_start, container_variant=container_variant,
+    )
     # MDA's first seven bytes are a fixed signature, not a length field.
     length_fields = [0x1F] if is_mda else [3, 0x1F]
     for offset in length_fields:
@@ -216,7 +220,9 @@ def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename="", *, overlap_mo
             # Adjust it only when it demonstrably records the used length.
             continue
         if value:
-            updated = value + delta
+            # Legacy block counts are not exact lengths. Adding a delta can
+            # make them look exact and truncate the song when it is reopened.
+            updated = len(stream) if offset == 0x1F and legacy_block_lengths else value + delta
             if not 0 <= updated <= 0xFFFFFFFF:
                 raise EseqConversionError("E-SEQ output length is out of range.")
             header[offset:offset + 4] = updated.to_bytes(4, "little")

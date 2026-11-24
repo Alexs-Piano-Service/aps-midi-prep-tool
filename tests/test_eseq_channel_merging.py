@@ -203,6 +203,36 @@ def test_factory_length_control_word_is_preserved_when_it_is_not_a_length():
     assert parse_eseq_bytes(merged).end_tick == parse_eseq_bytes(source).end_tick
 
 
+@pytest.mark.parametrize("stream_size", [2000, 2100], ids=["before-block-boundary", "after-block-boundary"])
+@pytest.mark.parametrize("used_length_offset", [0x100, 0x200])
+def test_legacy_block_lengths_are_replaced_with_exact_lengths_after_merge(stream_size, used_length_offset):
+    prelude = bytes.fromhex("F1 00 C5 29 B5 00 01 95 3C 64 F3 30 85 3C 40")
+    ending = bytes.fromhex("F3 30 95 43 60 F3 60 85 43 40 F4 05 00 F2")
+    stream = prelude + b"\xF6" * (stream_size - len(prelude) - len(ending)) + ending
+    source = bytearray(_eseq(stream, suffix=b""))
+    source[3:7] = (0x77 + 2048 - used_length_offset).to_bytes(4, "little")
+    source[0x1F:0x23] = (2048).to_bytes(4, "little")
+    source.extend(b"\xF6" * (-len(source) % 2048))
+    source = bytes(source)
+
+    merged, changed = merge_eseq_channels_to_channel0_bytes(source)
+
+    assert changed
+    assert _events(merged) == [
+        (0, b"\xC0\x00"),
+        (0, b"\x90\x3C\x64"), (48, b"\x80\x3C\x40"),
+        (96, b"\x90\x43\x60"), (192, b"\x80\x43\x40"),
+    ]
+    assert parse_eseq_bytes(merged).end_tick == parse_eseq_bytes(source).end_tick == 197
+    stream_end = merged.index(b"\xF2", 0x77) + 1
+    assert int.from_bytes(merged[0x1F:0x23], "little") == stream_end - 0x77
+    assert stream_end - 0x77 != stream_size  # Removed bank selection changes its size.
+    assert merged[3:7] == source[3:7]  # Preserve the original opaque control word.
+    assert len(merged) % 2048 == 0
+    assert set(merged[stream_end:]) == {0xF6}
+    assert merge_eseq_channels_to_channel0_bytes(merged) == (merged, False)
+
+
 @pytest.mark.parametrize("unfamiliar_layout", [False, True])
 def test_unestablished_header_bits_are_preserved(unfamiliar_layout):
     source = bytearray(_eseq(b"\xF1\x00\x92\x3C\x64\xF3\x60\x82\x3C\x00\xF2"))

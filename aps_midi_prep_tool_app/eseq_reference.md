@@ -278,7 +278,7 @@ The following table is written for implementation. Some fields are fully interpr
 | `0x07` | 8 | Signature | Expect `COM-ESEQ`. | Write `COM-ESEQ`. |
 | `0x0F` | 8 | Variant/version area | Blank/zero in the 21 personal files; factory files may contain values such as `714003`, `714007 C`; Q11 files contain `Q11V1.00`. | Preserve or write a known-good normal variant template. |
 | `0x17..0x1E` | 8 | Opaque normal-header constants/flags | Preserve. | Copy from template. |
-| `0x1F` | 4 | Event-stream length | Often equals `F2_offset + 1 - 0x77` for normal files; more reliable than `0x03` in the disk corpus. | Write `F2_offset + 1 - 0x77`. |
+| `0x1F` | 4 | Event-stream length or legacy block estimate | Exact in generated files; some factory files instead store a block estimate. See the compatibility rule below before treating it as a boundary. | Write `F2_offset + 1 - 0x77`. |
 | `0x23` | 1 | Constant/flag | Often `01` in generated personal files. | Copy template or set `01`. |
 | `0x24` | 1 | Tempo mirror / variant tempo byte | Mirrors `0x33` in the tested normal personal files; used as tempo byte in Q11-style `PIANODIR` records. | For normal generated files, mirror `0x33`. |
 | `0x27..0x31` | 11 | DOS 8.3 filename bytes without dot | Used by `PIANODIR` construction. | Write uppercase 8-byte name + 3-byte extension, space padded. |
@@ -304,15 +304,40 @@ The following table is written for implementation. Some fields are fully interpr
 
 ### 5.3 Important length-field warning
 
-Do not parse normal E-SEQ files by trusting only the 32-bit field at `0x03`. In the 21 personal recording files, `0x03..0x06` equals `F2_offset + 1`. In the larger disk-image corpus, many factory files have a different value while the stream-length field at `0x1F` and the actual `F2` marker remain usable.
+Do not parse normal E-SEQ files by trusting either length word unconditionally.
+In the 21 personal recording files, `0x03..0x06` equals `F2_offset + 1`.
+Factory files can have different values in both length words. An in-file
+offset alone does not establish a trustworthy stream boundary.
+
+A compatibility rule covers the observed normal FIL block estimates: the
+program marker is `0x40`, its header length is `0x50`, the word at `0x1F` is a
+positive multiple of 2048, and the word at `0x03` equals
+`min(0x77 + block_estimate - adjustment, 0xFFFF)`, with adjustment `0x100` or
+`0x200`. These are observed relationships, not an established interpretation of
+the original writer's accounting. Neither word is used as an event boundary.
+The reader validates commands from `0x77` through an opcode-aligned `F2`, within
+the physical file, and requires only zero or `F6` padding afterward. It rejects
+missing terminators, incomplete/invalid commands, and ambiguous trailing bytes
+instead of falling back to a shorter, apparently valid song. Searching for a
+raw `F2` byte is insufficient because command operands can contain it.
+
+This rule also applies when the block estimate exceeds physical EOF but the
+total/control word falls inside the stream. It fixes both incomplete-event
+errors and silent shortening when an estimate happens to fall between commands.
+Conversion, inspection, visible tail-delay metadata, and native channel merging
+share this boundary resolution. After a merge changes a recognized legacy
+stream, `0x1F` is written as its exact new length; the opaque `0x03` control word
+is preserved. The rule does not apply to Clavinova MDA or Q11 containers.
 
 Recommended reader policy:
 
 1. Locate and verify `COM-ESEQ`.
 2. Detect known variant.
 3. Choose event start (`0x77` for normal, `0x0200` for Q11, `0x57` for Clavinova/CVP `.MDA`).
-4. Parse until opcode `F2` or a sane declared stream end, whichever comes first.
-   The declared end is authoritative even without `F2`: bytes after it are
+4. For the recognized legacy block estimates above, require a fully validated
+   stream and stop opcode. Otherwise parse until opcode `F2` or a sane declared
+   stream end, whichever comes first. The declared end is authoritative even
+   without `F2`: bytes after it are
    opaque trailing data, regardless of whether they resemble commands or padding.
    Command payloads and SysEx must fit wholly within that boundary. Only scan
    to physical EOF when no declared length resolves to a valid in-file boundary.

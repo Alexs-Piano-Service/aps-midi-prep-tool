@@ -362,9 +362,94 @@ def _encode_15(value):
     return bytes([value & 0x7F, (value >> 7) & 0x7F])
 
 
+def _has_legacy_block_lengths(data, stream_start, *, container_variant=None):
+    """Recognize the inconsistent block estimates found on legacy FIL disks.
+
+    These normal headers store a 2048-byte multiple at 0x1F and a total/control
+    word 256 or 512 bytes short of that implied end (saturated at 0xFFFF).
+    Neither word bounds the musical events, even when it falls inside the file.
+    Keep this exception separate from exact lengths and other containers.
+    """
+    if container_variant is None:
+        container_variant = _detect_eseq_container(data)
+    if (container_variant != ESEQ_CONTAINER_DISKLAVIER
+            or stream_start != ESEQ_HEADER_SIZE or len(data) < ESEQ_HEADER_SIZE
+            or data[0] != 0xFE or data[0x19] != 0x40
+            or int.from_bytes(data[0x1B:0x1F], "little") != 0x50):
+        return False
+    stream_length = int.from_bytes(data[0x1F:0x23], "little")
+    used_length = int.from_bytes(data[3:7], "little")
+    return stream_length > 0 and stream_length % 2048 == 0 and used_length in {
+        min(stream_start + stream_length - adjustment, 0xFFFF)
+        for adjustment in (0x100, 0x200)
+    }
+
+
+def _legacy_eseq_stream_end(data, stream_start):
+    """Validate a legacy stream through its stop opcode, within physical EOF.
+
+    A raw F2 search could stop inside a command operand. Apply the same command
+    and payload rules as the parser, and require padding only after the stop.
+    A damaged continuation must fail, never fall back to a plausible short song.
+    """
+    pos = stream_start
+
+    def require(size):
+        if pos + size > len(data):
+            raise EseqConversionError("Encountered an incomplete E-SEQ event.")
+
+    while pos < len(data):
+        status = data[pos]
+        pos += 1
+        if status < 0x80 or status == _ESEQ_PADDING_BYTE:
+            continue
+        if status == 0xF2:
+            if any(value not in (0, _ESEQ_PADDING_BYTE) for value in data[pos:]):
+                raise EseqConversionError("Unexpected trailing data after the legacy E-SEQ end marker.")
+            return pos
+        if status == 0xF0:
+            while pos < len(data):
+                value = data[pos]
+                pos += 1
+                if value in (0xF3, 0xF4):
+                    size = 1 if value == 0xF3 else 2
+                    if pos + size > len(data):
+                        raise EseqConversionError("Encountered an incomplete delay inside E-SEQ SysEx.")
+                    pos += size
+                elif value == 0xF7:
+                    break
+                elif value >= 0x80:
+                    raise EseqConversionError(
+                        f"Cannot safely preserve embedded E-SEQ SysEx status 0x{value:02X} in MIDI."
+                    )
+            else:
+                raise EseqConversionError("Encountered an unterminated E-SEQ SysEx event.")
+            continue
+        if status == 0xF7:
+            raise EseqConversionError(
+                "Unexpected standalone F7 in E-SEQ; cannot safely identify the following song events."
+            )
+        if status in (0xF1, 0xF3, 0xFF):
+            size = 1
+        elif status in (0xF4, 0xF9, 0xFB):
+            size = 2
+        elif 0x80 <= status <= 0xEF:
+            size = 1 if status & 0xF0 in (0xC0, 0xD0) else 2
+        else:
+            raise EseqConversionError(f"Unsupported E-SEQ opcode 0x{status:02X}.")
+        require(size)
+        if status < 0xF0 and any(value >= 0x80 for value in data[pos:pos + size]):
+            raise EseqConversionError("Invalid data byte in an E-SEQ channel event.")
+        pos += size
+
+    raise EseqConversionError("Missing end marker in an E-SEQ file with legacy block length fields.")
+
+
 def _declared_stream_end(data, stream_start, *, container_variant=None):
     if container_variant is None:
         container_variant = _detect_eseq_container(data)
+    if _has_legacy_block_lengths(data, stream_start, container_variant=container_variant):
+        return _legacy_eseq_stream_end(data, stream_start)
     if container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA and len(data) >= 0x23:
         used_length = int.from_bytes(data[0x1F:0x23], "little")
         if stream_start < used_length <= len(data):
@@ -599,8 +684,9 @@ def _effective_initial_mpqn(tempo_events):
 def parse_eseq_bytes(eseq_bytes, filename=""):
     """Parse a complete stream using the logical source name for MDA variants.
 
-    A sane declared length bounds the stream, including command payloads;
-    otherwise physical EOF is used. Incomplete commands are rejected. Without
+    Exact declared lengths bound command payloads. Recognized legacy block
+    estimates require a validated stop opcode; otherwise the existing length
+    or physical-EOF fallback applies. Incomplete commands are rejected. Without
     a filename, container detection retains the byte-only behavior.
     """
     if len(eseq_bytes) < CLAVINOVA_MDA_HEADER_SIZE:

@@ -224,3 +224,37 @@ def test_wrapped_text_refits_when_resized_and_font_changes(dialog):
     fits = QSignalSpy(dialog._text_fit_timer.timeout)
     QTest.qWait(30)
     assert fits.count() == 0
+
+
+def test_wrapped_text_fits_when_scrollbar_appears_during_layout(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    original_fit = about_dialog.AboutDialog._fit_wrapped_text
+
+    def fit_then_show_scrollbar(instance):
+        original_fit(instance)
+        # Some styles add the scrollbar only after the first height fit. Make
+        # that event ordering deterministic, with enough width reduction to
+        # force another line regardless of the platform's font metrics.
+        instance.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        instance.scroll_area.widget().layout().activate()
+
+    monkeypatch.setattr(about_dialog.AboutDialog, "_fit_wrapped_text", fit_then_show_scrollbar)
+    instance = about_dialog.AboutDialog(admin_mode_enabled=True)
+    font = QFont(instance.font())
+    font.setPointSize(14)
+    instance.setFont(font)
+    instance.resize(500, 400)
+    instance.scroll_area.verticalScrollBar().setStyleSheet("QScrollBar:vertical { width: 200px; }")
+    instance.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    try:
+        instance.show()
+        app.processEvents()
+        assert instance.scroll_area.verticalScrollBar().isVisible()
+        for label in instance._wrapping_labels:
+            assert label.height() >= label.heightForWidth(label.width())
+        assert instance.scroll_area.horizontalScrollBar().maximum() == 0
+        assert instance.rect().contains(instance.buttons.geometry())
+    finally:
+        instance.close()
+        instance.deleteLater()
+        app.processEvents()
