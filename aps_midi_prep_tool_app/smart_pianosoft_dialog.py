@@ -242,7 +242,9 @@ class SmartPianoSoftDialog(QDialog):
         self.format_combo = QComboBox()
         self.format_combo.setObjectName("smartPianoSoftOutputFormat")
         self.format_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.format_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # Native font metrics can make a caption wider than the whole viewport.
+        # Let the closed selector shrink; its popup retains the full choices.
+        self.format_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         for key in ("encoded_wav", "midi_mp3"):
             self.format_combo.addItem(self.text("output_" + key), key)
         self.format_combo.setCurrentIndex(self.format_combo.findData(default_audio_output(self.profile.key)))

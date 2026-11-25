@@ -13,7 +13,9 @@ import pytest
 from PySide6.QtCore import QPoint, QRect, QSettings, QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QFormLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QComboBox, QDialog, QFormLayout, QLabel, QProxyStyle, QPushButton, QStyle, QWidget,
+)
 
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app import smart_pianosoft_dialog as dialogs
@@ -1230,6 +1232,50 @@ def test_footer_layout_stays_stable_through_scan_rip_and_completion(
 
 
 @pytest.mark.parametrize("style", ["Fusion", "Windows"])
+def test_wide_format_captions_fit_without_horizontal_scrolling(
+    tmp_path, qt_application, large_dialog_font, style,
+):
+    class WideFormatStyle(QProxyStyle):
+        def sizeFromContents(self, kind, option, size, widget=None):
+            result = super().sizeFromContents(kind, option, size, widget)
+            if (kind == QStyle.CT_ComboBox and widget is not None
+                    and widget.objectName() == "smartPianoSoftOutputFormat"):
+                result.setWidth(max(1100, result.width()))
+            return result
+
+    original_style = qt_application.style().objectName()
+    # Windows font metrics can make these captions wider than the viewport.
+    # Reproduce that native size hint without requiring a specific font family.
+    qt_application.setStyle(WideFormatStyle(style))
+    settings = QSettings(str(tmp_path / "wide-format.ini"), QSettings.IniFormat)
+    settings.setValue("preparation_profile", "enspire")
+    instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False)
+    instance.resize(760, 700)
+    instance.show()
+    try:
+        QTest.qWait(30)
+        caption_width = instance.format_combo.sizeHint().width()
+        assert caption_width > instance.scroll_area.viewport().width()
+        narrow = instance.width()
+        wide = caption_width + instance.options.layout().sizeHint().width() + 60
+        for width in (narrow, wide, narrow):
+            instance.resize(width, 700)
+            QTest.qWait(30)
+            assert instance.size().toTuple() == (width, 700)
+            for index in range(instance.format_combo.count()):
+                instance.format_combo.setCurrentIndex(index)
+                QTest.qWait(10)
+                _assert_large_font_layout_fits(instance)
+                assert instance.scroll_area.viewport().width() >= instance.format_combo.width()
+                if width == wide:
+                    assert instance.format_combo.width() >= caption_width
+    finally:
+        instance.close()
+        qt_application.setStyle(original_style)
+        qt_application.processEvents()
+
+
+@pytest.mark.parametrize("style", ["Fusion", "Windows"])
 def test_pairing_row_reserves_scrollbar_width_before_content_grows(tmp_path, qt_application, style):
     original_style = qt_application.style().objectName()
     qt_application.setStyle(style)
@@ -1336,11 +1382,13 @@ def test_large_font_translations_reflow_and_scroll_after_repeated_resizes(
     try:
         _wait(lambda: instance.album is not None and not instance.is_busy)
         assert instance.font().pointSize() == 18
-        # Ensure the growing case can accommodate the full translated rows,
-        # including platforms whose native font metrics produce wider buttons.
+        # Respect the widest individual action when choosing the narrow case;
+        # native font metrics can make one translated button wider than 760.
+        narrow = max(760, instance.minimumSizeHint().width())
+        # The growing case must accommodate the full translated button rows.
         wide = max(1400, instance.pairing_buttons.sizeHint().width() + 60,
                    instance.buttons.sizeHint().width() + 60)
-        for width in (760, wide, 760, wide, 760):
+        for width in (narrow, wide, narrow, wide, narrow):
             instance.resize(width, 700)
             QTest.qWait(30)
             assert instance.size().toTuple() == (width, 700)

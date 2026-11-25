@@ -92,6 +92,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Keep Smart PianoSoft's output-format selector within the scrollable body at
+  large font sizes, preventing horizontal overflow in narrow Windows dialogs.
 - Make Disklavier companion-selection regression fixtures respect filesystem
   case sensitivity, avoiding overwritten audio fixtures and false ambiguity
   failures on Windows.
