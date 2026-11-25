@@ -57,6 +57,28 @@ class _PreparationButton(QPushButton):
         return size
 
 
+class _PairingButtonBox(ResponsiveDialogButtonBox):
+    """Choose a row layout that still fits when progress adds a scrollbar."""
+
+    def __init__(self, scroll_area):
+        super().__init__()
+        self._scroll_area = scroll_area
+
+    def sizeHint(self):
+        size = super().sizeHint()
+        size.setWidth(size.width() + self._scroll_area.verticalScrollBar().sizeHint().width())
+        return size
+
+    def _fit_width(self, width):
+        area = self._scroll_area
+        # The viewport already gives up this width when the bar is present.
+        # Reserve only the remainder, so showing/hiding it cannot change the
+        # row's orientation at an otherwise unchanged window size.
+        reserved = area.contentsRect().width() - area.viewport().width()
+        remaining = max(0, area.verticalScrollBar().sizeHint().width() - reserved)
+        super()._fit_width(max(0, width - remaining))
+
+
 class _WrappingLabel(QLabel):
     """Use the actual wrapped height, without retaining a narrow size hint."""
 
@@ -305,7 +327,7 @@ class SmartPianoSoftDialog(QDialog):
             header.setSectionResizeMode(column, QHeaderView.Stretch)
         self.table.cellDoubleClicked.connect(lambda _row, _column: self.pair_audio())
         layout.addWidget(self.table, 1)
-        self.pairing_buttons = ResponsiveDialogButtonBox()
+        self.pairing_buttons = _PairingButtonBox(self.scroll_area)
         self.scan_button = QPushButton(self.text("scan"))
         self.scan_button.clicked.connect(self.start_scan)
         self.pair_button = QPushButton(self.text("pair"))

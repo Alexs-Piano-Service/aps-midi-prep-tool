@@ -59,13 +59,13 @@ def test_mixed_drop_calls_apply_after_all_rows_are_loaded(window, tmp_path, monk
     calls = []
     def applied(catalogs, *, song_paths):
         assert len(_listed(window)) == 4
-        calls.append((set(catalogs), set(song_paths)))
+        calls.append(({Path(path) for path in catalogs}, {Path(path) for path in song_paths}))
         return "Catalog titles applied"
     monkeypatch.setattr(window, "_apply_imported_catalogs", applied, raising=False)
     paths = list(files.values())
     _drop(window.table, *(reversed(paths) if catalogs_first else paths))
-    assert calls == [({str(files["PDISK.MNG"]), str(files["PSONG.MNG"])},
-                     {str(files["FIRST.MID"]), str(files["SECOND.MID"])})]
+    assert calls == [({files["PDISK.MNG"], files["PSONG.MNG"]},
+                     {files["FIRST.MID"], files["SECOND.MID"]})]
     assert "Catalog titles applied" in window.status_label.text()
     assert len(window._current_song_rows_for_listing()) == 2
     assert len(tuple(window._preparation_song_rows())) == 2
@@ -154,10 +154,20 @@ def test_image_drop_applies_only_successfully_imported_songs_and_catalogs(window
     files = _album(tmp_path)
     image, original = _image(window, tmp_path, [files["FIRST.MID"]])
     calls = []
-    monkeypatch.setattr(window, "_apply_imported_catalogs", lambda catalogs, **kwargs: calls.append((catalogs, kwargs)) or "Applied", raising=False)
+    apply_catalogs = window._apply_imported_catalogs
+
+    def applied(catalogs, *, song_paths):
+        # Qt supplies forward slashes on Windows; compare host paths by path
+        # identity while preserving the exact image-relative song names.
+        calls.append(([Path(path) for path in catalogs], {"song_paths": song_paths}))
+        return apply_catalogs(catalogs, song_paths=song_paths)
+
+    monkeypatch.setattr(window, "_apply_imported_catalogs", applied)
     _drop(window.table, files["PDISK.MNG"], files["SECOND.MID"], files["PSONG.MNG"])
-    assert calls == [([str(files["PDISK.MNG"]), str(files["PSONG.MNG"])], {"song_paths": ["SECOND.MID"]})]
+    assert calls == [([files["PDISK.MNG"], files["PSONG.MNG"]], {"song_paths": ["SECOND.MID"]})]
     assert set(window.pendingImageAdditions) == {"PDISK.MNG", "PSONG.MNG", "SECOND.MID"}
+    assert window.imagePianodirTitleEdit.text() == "An original album"
+    assert window.pendingImageTitleEdits == {"SECOND.MID": "First in catalog"}
     assert image.read_bytes() == original
 
 
@@ -224,7 +234,11 @@ def test_redropped_existing_catalog_still_applies_to_new_songs(window, tmp_path,
     files = _album(tmp_path)
     _drop(window.table, files["PSONG.MNG"])
     calls = []
-    monkeypatch.setattr(window, "_apply_imported_catalogs", lambda catalogs, **kwargs: calls.append((catalogs, kwargs)) or "Applied")
+    def applied(catalogs, *, song_paths):
+        calls.append(([Path(path) for path in catalogs], {"song_paths": [Path(path) for path in song_paths]}))
+        return "Applied"
+
+    monkeypatch.setattr(window, "_apply_imported_catalogs", applied)
     _drop(window.table, files["PSONG.MNG"], files["SECOND.MID"])
-    assert calls == [([str(files["PSONG.MNG"])], {"song_paths": [str(files["SECOND.MID"])]})]
+    assert calls == [([files["PSONG.MNG"]], {"song_paths": [files["SECOND.MID"]]})]
     assert set(_listed(window)) == {"PSONG.MNG", "SECOND.MID"}

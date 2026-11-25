@@ -125,6 +125,8 @@ with release sections grouped by version and date.
 - Keep Smart PianoSoft's footer layout stable through scanning, ripping, and
   completion. Reserve the Restart caption and output-folder action from the
   start, and size the initial window for the full row when the screen allows.
+  Account for the scroll bar before arranging the pairing controls, so revealing
+  scan or rip progress does not make their row switch to a column.
 - Keep wrapped About dialog text fully readable with large fonts and narrow
   windows, including the administrator confirmation on Windows. Refit text
   immediately when a scrollbar reduces the available width, and wrap long

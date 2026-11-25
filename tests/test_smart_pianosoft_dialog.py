@@ -24,6 +24,7 @@ from aps_midi_prep_tool_app.floppy_image import (
     GreaseweazleFloppySource,
 )
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES
+from aps_midi_prep_tool_app.responsive_button_box import ResponsiveDialogButtonBox
 from aps_midi_prep_tool_app.smart_pianosoft_workflow import AlbumBuildError, LoadedAlbumSource, ListedAlbumTrack
 from test_smart_pianosoft import _pdisk_bytes, _psong_bytes
 from test_smart_pianosoft_sync import _cd_reference_message
@@ -1224,6 +1225,47 @@ def test_footer_layout_stays_stable_through_scan_rip_and_completion(
             _wait(lambda: not instance.is_busy)
         instance.close()
         qt_application.setFont(original_font)
+        qt_application.setStyle(original_style)
+        qt_application.processEvents()
+
+
+@pytest.mark.parametrize("style", ["Fusion", "Windows"])
+def test_pairing_row_reserves_scrollbar_width_before_content_grows(tmp_path, qt_application, style):
+    original_style = qt_application.style().objectName()
+    qt_application.setStyle(style)
+    settings = QSettings(str(tmp_path / "pairing-scrollbar.ini"), QSettings.IniFormat)
+    settings.setValue("language", "es")
+    instance = dialogs.SmartPianoSoftDialog(settings, discover_on_open=False)
+    scrollbar = instance.scroll_area.verticalScrollBar()
+    scrollbar.setStyleSheet("QScrollBar:vertical { width: 40px; }")
+    instance.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    instance.ensurePolished()
+    # Choose a width where the row fits only without a scrollbar. Deriving it
+    # from the native buttons reproduces CI's font-dependent boundary on every
+    # platform, without requiring its exact font family or display DPI.
+    row_width = ResponsiveDialogButtonBox.sizeHint(instance.pairing_buttons).width()
+    margins = instance.layout().contentsMargins() + instance.scroll_area.widget().layout().contentsMargins()
+    gutter = scrollbar.sizeHint().width()
+    narrow_width = row_width + margins.left() + margins.right() + gutter // 2
+    instance.resize(narrow_width, 700)
+    instance.show()
+    try:
+        QTest.qWait(30)
+        assert instance.pairing_buttons.width() >= row_width
+        assert instance.pairing_buttons.width() - gutter < row_width
+        for width, orientation in ((narrow_width, Qt.Vertical), (narrow_width + gutter, Qt.Horizontal)):
+            instance.resize(width, 700)
+            QTest.qWait(30)
+            footer = instance.buttons.geometry()
+            for policy in (Qt.ScrollBarAlwaysOn, Qt.ScrollBarAlwaysOff, Qt.ScrollBarAlwaysOn):
+                instance.scroll_area.setVerticalScrollBarPolicy(policy)
+                QTest.qWait(30)
+                assert instance.size().toTuple() == (width, 700)
+                assert instance.pairing_buttons.orientation() == orientation
+                assert instance.buttons.geometry() == footer
+                _assert_large_font_layout_fits(instance)
+    finally:
+        instance.close()
         qt_application.setStyle(original_style)
         qt_application.processEvents()
 
