@@ -39,12 +39,16 @@ class _DelayedRead:
 
     def __call__(self, _source, *, progress_callback, cancel_callback):
         self.entered.set()
-        while not cancel_callback():
-            progress_callback(14, 80, "Reading cylinder 14 of 80")
-            if self.release_cleanup.wait(.02):
-                break
-        self.cleaning.set()
-        self.release_cleanup.wait(3)
+        try:
+            while not cancel_callback():
+                progress_callback(14, 80, "Reading cylinder 14 of 80")
+                if self.release_cleanup.wait(.02):
+                    break
+        finally:
+            # The real progress callback can also raise cancellation. Model
+            # connection cleanup even when cancellation interrupts that call.
+            self.cleaning.set()
+            self.release_cleanup.wait(3)
         raise FloppyOperationCancelled("Read cancelled after closing the floppy connection.")
 
 

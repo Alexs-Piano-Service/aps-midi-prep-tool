@@ -125,10 +125,13 @@ def test_scrollable_dialog_defaults_fit_screen_without_font_scaling(
 
 
 @pytest.fixture
-def emulator_progress(window, tmp_path, monkeypatch):
+def emulator_progress(window, tmp_path, monkeypatch, request):
     from aps_midi_prep_tool_app.disk_session_worker import EmulatorImageBuildWorker
     from aps_midi_prep_tool_app.floppy_image import DISK_FORMAT_BY_KEY
 
+    if hasattr(request, "param"):
+        available = QRect(*request.param)
+        monkeypatch.setattr(QScreen, "availableGeometry", lambda _self: available)
     monkeypatch.setattr(main_window, "QProgressDialog", _ProgressDialog)
     # Keep the real launch, native dialog, signals, and worker ownership while
     # avoiding disk output and a background thread in this geometry test.
@@ -147,7 +150,11 @@ def emulator_progress(window, tmp_path, monkeypatch):
         worker.finished.emit()
 
 
+@pytest.mark.parametrize("emulator_progress", [(0, 0, 2560, 1440)], indirect=True)
 def test_emulator_launch_progress_is_centered_and_owned_by_main_window(window, emulator_progress):
+    # Native font metrics can make the main window wider than the offscreen
+    # backend's default screen. Exact centering needs room for the whole dialog;
+    # otherwise keeping it on screen correctly takes precedence.
     dialog = emulator_progress
     assert dialog.isVisible()
     assert dialog.parentWidget() is window
@@ -160,6 +167,26 @@ def test_emulator_launch_progress_is_centered_and_owned_by_main_window(window, e
     QTest.qWait(50)
     assert dialog.geometry() == geometry
     assert dialog.adjustments == adjustments
+
+
+@pytest.mark.parametrize("emulator_progress", [
+    (0, 0, 600, 400),
+    (-800, 200, 600, 400),
+], indirect=True)
+def test_emulator_launch_progress_stays_visible_when_centering_would_clip_it(
+        window, emulator_progress):
+    dialog = emulator_progress
+    available = window.screen().availableGeometry()
+    centered = dialog.frameGeometry()
+    centered.moveCenter(window.frameGeometry().center())
+    assert centered.right() > available.right()
+
+    assert dialog.isVisible()
+    assert dialog.parentWidget() is window
+    assert dialog.windowModality() == Qt.WindowModal
+    assert dialog.windowHandle().transientParent() is window.windowHandle()
+    assert available.contains(dialog.frameGeometry())
+    assert dialog.frameGeometry().right() == available.right()
 
 
 @pytest.mark.parametrize("review", ["preview", "overwrite"])

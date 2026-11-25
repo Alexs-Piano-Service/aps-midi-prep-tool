@@ -92,6 +92,10 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Make disk activity timing tests independent of runner uptime and distinguish
+  centered emulator progress from placement constrained by screen edges in
+  dialog regression tests. Ensure simulated floppy-reader cleanup also runs
+  when cancellation interrupts a progress callback.
 - Read complete legacy E-SEQ songs whose header lengths contain block estimates,
   fixing incomplete-event errors and silently shortened MIDI conversions.
   Preserve complete songs after channel merging and continue rejecting damaged

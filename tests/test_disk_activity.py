@@ -2,6 +2,7 @@
 
 import threading
 import time
+from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QLabel, QProgressDialog, QPushButton, QWidget
@@ -20,6 +21,15 @@ class FakeWorker:
 
     def cancel(self):
         self.cancel_calls += 1
+
+
+@pytest.fixture
+def activity_clock(monkeypatch):
+    # Start before attaching the worker, with exactly representable timestamps.
+    # Adding seconds to an arbitrary real clock can round below the boundary.
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(disk_activity, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    return clock
 
 
 class ActivityWindow(QWidget):
@@ -72,7 +82,7 @@ def test_running_and_unstarted_workers_keep_controls_locked(qt_application, oper
     assert "MIDI processing" not in window.status_label.text()
 
 
-def test_cancel_reopens_progress_disables_cancel_and_preserves_last_stage(qt_application, monkeypatch):
+def test_cancel_reopens_progress_disables_cancel_and_preserves_last_stage(qt_application, activity_clock):
     window = ActivityWindow()
     worker = FakeWorker()
     dialog = attach(window, worker)
@@ -92,8 +102,7 @@ def test_cancel_reopens_progress_disables_cancel_and_preserves_last_stage(qt_app
     assert not window.choose_button.isEnabled()
 
     monitor = window._disk_activity_monitor
-    cancelled = monitor.activities["diskLoadWorker"].cancelled
-    monkeypatch.setattr(disk_activity.time, "monotonic", lambda: cancelled + 12)
+    activity_clock.now += 12
     disk_activity.update_disk_activity(window, dialog, "Closing the floppy connection")
     monitor.refresh()
     assert "(12s)" in dialog.labelText()
@@ -102,12 +111,10 @@ def test_cancel_reopens_progress_disables_cancel_and_preserves_last_stage(qt_app
     assert window.unlocks == 0
 
 
-def test_long_silent_operation_explains_holdup(qt_application, monkeypatch):
+def test_long_silent_operation_explains_holdup(qt_application, activity_clock):
     window = ActivityWindow()
     dialog = attach(window, FakeWorker())
-    monitor = window._disk_activity_monitor
-    start = monitor.activities["diskLoadWorker"].updated
-    monkeypatch.setattr(disk_activity.time, "monotonic", lambda: start + 25)
+    activity_clock.now += 25
 
     assert disk_activity.show_busy_operation(window)
 
@@ -132,7 +139,7 @@ def test_stale_disabled_controls_recover_without_busy_warning(qt_application, mo
     assert not window._disk_activity_monitor.timer.isActive()
 
 
-def test_finished_worker_reconciles_once_through_its_handler(qt_application, monkeypatch):
+def test_finished_worker_reconciles_once_through_its_handler(qt_application, activity_clock):
     window = ActivityWindow()
     worker = FakeWorker()
     dialog = attach(window, worker)
@@ -148,12 +155,10 @@ def test_finished_worker_reconciles_once_through_its_handler(qt_application, mon
     window._on_disk_load_finished = finish
     worker.finished = True
     monitor = window._disk_activity_monitor
-    now = time.monotonic()
-    monkeypatch.setattr(disk_activity.time, "monotonic", lambda: now)
     monitor.refresh()
     assert not finished_calls
     assert not window.choose_button.isEnabled()
-    monkeypatch.setattr(disk_activity.time, "monotonic", lambda: now + 1)
+    activity_clock.now += 1
     monitor.refresh()
     monitor.refresh()
 
