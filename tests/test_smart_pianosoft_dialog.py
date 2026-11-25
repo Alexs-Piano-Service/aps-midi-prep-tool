@@ -579,6 +579,7 @@ def test_cd_disconnect_retains_album_and_settings_for_fresh_retry(
     scans = []
     scanner = dialogs._scan_source
     track = media.CDTrack(1, 0, 75)
+    retry_entered, release_retry = threading.Event(), threading.Event()
 
     def scan(*args, **kwargs):
         scans.append(args[0])
@@ -588,6 +589,9 @@ def test_cd_disconnect_retains_album_and_settings_for_fresh_retry(
         calls.append(("toc", device))
         if device == "/dev/disconnected" and failure_stage == "toc":
             raise media.CDReadError("The CD drive is no longer connected")
+        if device == "/dev/reconnected":
+            retry_entered.set()
+            assert release_retry.wait(5)
         return (track,)
 
     def rip(device, selected, destination, cancel=None, progress=None):
@@ -641,15 +645,30 @@ def test_cd_disconnect_retains_album_and_settings_for_fresh_retry(
     assert not list(tmp_path.glob("Smart PianoSoft*"))
     assert calls == ([("toc", "/dev/disconnected")] if failure_stage == "toc" else
                      [("toc", "/dev/disconnected"), ("rip", "/dev/disconnected")])
+    previous_details = dialog.details.toPlainText()
 
     # Refresh may discover a different device path. Start a new attempt from
     # the retained MIDI snapshot, never from stale ripped audio.
     dialog.refresh_button.click()
     _wait(lambda: not dialog.is_busy)
     assert dialog._cd_device() == "/dev/reconnected"
+    assert dialog.details.toPlainText() == previous_details
     dialog.cd_combo.setCurrentIndex(dialog.cd_combo.findData("/dev/reconnected"))
-    dialog.start_button.click()
-    dialog.start_preparation()
+    dialog.details.verticalScrollBar().setValue(0)
+    try:
+        dialog.start_button.click()
+        # Acknowledge the new attempt before any queued worker progress arrives.
+        assert dialog.status.text() == dialog.text("starting")
+        assert dialog.details.toPlainText() == previous_details + "\n\n" + dialog.text("starting")
+        assert dialog.progress.isVisible()
+        assert dialog.progress.maximum() == 0
+        dialog.start_preparation()
+        _wait(retry_entered.is_set)
+        assert dialog.details.toPlainText() == previous_details + "\n\n" + dialog.text("starting")
+        assert dialog.status.text() != dialog.text("cd_read_failed")
+        assert dialog.details.verticalScrollBar().value() == dialog.details.verticalScrollBar().maximum()
+    finally:
+        release_retry.set()
     _wait(lambda: not dialog.is_busy)
     assert dialog.status.text() == dialog.text("complete"), dialog.details.toPlainText()
     assert len(scans) == 1

@@ -92,6 +92,10 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Use a valid simulated Windows floppy drive in capture-consent regression tests
+  and exercise both platform paths, retaining the destination safety check.
+- Acknowledge each new Smart PianoSoft attempt immediately in the status and
+  existing diagnostic log, so an earlier read error does not look current.
 - Compare normalized source paths in the Smart PianoSoft disconnected-controller
   regression test, covering Unix device paths and Windows COM-port names.
 - Keep Smart PianoSoft's output-format selector within the scrollable body at

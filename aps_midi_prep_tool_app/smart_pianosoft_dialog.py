@@ -449,7 +449,15 @@ class SmartPianoSoftDialog(QDialog):
         self._operation = operation
         self._operation_done = False
         if operation != "discover":
+            message = self.text("starting")
+            self.status.setText(message)
             self.status.show()
+            if self.details.toPlainText():
+                # Retain diagnostics, but make the new attempt the latest entry
+                # even while the reader has not yet emitted any progress.
+                self.details.appendPlainText("\n" + message)
+                scrollbar = self.details.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
         self.progress.show()
         self.progress.setRange(0, 0)
         require_consent = (operation != "discover" and not self._source_consent_granted

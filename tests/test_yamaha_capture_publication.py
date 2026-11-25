@@ -1,6 +1,8 @@
 """Consent is resolved before a capture replaces its selected output file."""
 
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,17 +30,24 @@ def catalog_image(tmp_path):
     return make
 
 
+# Exercise the Windows guard on POSIX runners too, but keep Windows file
+# synchronization native: it requires a writable handle.
 @pytest.mark.parametrize("source_kind", ["floppy_usb", "floppy_usb_recovery", "floppy_gw", "image_convert"])
 @pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize("platform", sorted({os.name, "nt"}))
 def test_protected_capture_waits_before_replacing_output(
-    qt_application, tmp_path, monkeypatch, catalog_image, source_kind, approve,
+    qt_application, tmp_path, monkeypatch, catalog_image, source_kind, approve, platform,
 ):
     source, clean = catalog_image(protected=True)
+    monkeypatch.setattr(image, "os", SimpleNamespace(**{**vars(os), "name": platform}))
     original = source.read_bytes()
     output = tmp_path / ("capture.scp" if source_kind == "floppy_gw" else "capture.img")
     output.write_bytes(b"previous good image")
     disk_format = image.DISK_FORMAT_BY_KEY["ibm.720"]
-    selected_source = image.FloppyDriveInfo(str(source), disk_format.size_bytes)
+    # Readers are mocked, but Windows still requires a drive-letter source
+    # separate from the temporary output volume.
+    device_path = "A:" if platform == "nt" else str(source)
+    selected_source = image.FloppyDriveInfo(device_path, disk_format.size_bytes)
 
     def read_usb(_source, stage, _size, **_kwargs):
         Path(stage).write_bytes(original)
@@ -84,8 +93,8 @@ def test_protected_capture_waits_before_replacing_output(
 
     worker.run()
 
+    assert not failures, failures
     assert len(requests) == 1
-    assert not failures
     assert source.read_bytes() == original
     assert not list(tmp_path.glob(".aps_capture_*"))
     if approve:
