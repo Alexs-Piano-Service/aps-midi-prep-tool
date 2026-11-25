@@ -118,7 +118,10 @@ def test_plain_wav_selects_case_insensitive_midi_companion(tmp_path, workspace):
 def test_exact_stem_is_preferred_over_case_insensitive_companion(tmp_path, workspace):
     midi = _midi(tmp_path / "Song.mid")
     exact = _audio(tmp_path / "Song.WAV", channels=1)
-    _audio(tmp_path / "song.wav", channels=2)
+    other = tmp_path / "song.wav"
+    if other.exists():
+        pytest.skip("Requires a case-sensitive filesystem")
+    _audio(other, channels=2)
     result = prepare_playback_source(midi, workspace)
     assert result["source_audio_path"] == str(exact)
 
@@ -128,7 +131,10 @@ def test_ambiguous_companions_are_rejected_without_outputs(tmp_path, workspace, 
     if select_midi:
         selected = _midi(tmp_path / "Song.mid")
         _audio(tmp_path / "SONG.wav")
-        _audio(tmp_path / "song.WAV")
+        other = tmp_path / "song.WAV"
+        if other.exists():
+            pytest.skip("Requires a case-sensitive filesystem")
+        _audio(other)
     else:
         selected = _audio(tmp_path / "Song.wav")
         _midi(tmp_path / "Song.mid")
@@ -356,7 +362,10 @@ def test_midi_prefers_wav_but_direct_mp3_uses_explicit_audio(tmp_path, workspace
 
 def test_exact_stem_mp3_is_preferred_over_case_insensitive_mp3(tmp_path, workspace, mp3_pair):
     midi, mp3, _samples = mp3_pair
-    (tmp_path / "SONG.MP3").write_bytes(b"not the selected audio")
+    other = tmp_path / "SONG.MP3"
+    if other.exists():
+        pytest.skip("Requires a case-sensitive filesystem")
+    other.write_bytes(b"not the selected audio")
     result = prepare_playback_source(midi, workspace)
     assert result["source_audio_path"] == str(mp3)
 
@@ -364,7 +373,10 @@ def test_exact_stem_mp3_is_preferred_over_case_insensitive_mp3(tmp_path, workspa
 def test_ambiguous_mp3_companions_are_rejected_before_conversion(tmp_path, workspace, monkeypatch):
     midi = _midi(tmp_path / "Song.mid")
     (tmp_path / "SONG.mp3").write_bytes(b"first")
-    (tmp_path / "song.MP3").write_bytes(b"second")
+    other = tmp_path / "song.MP3"
+    if other.exists():
+        pytest.skip("Requires a case-sensitive filesystem")
+    other.write_bytes(b"second")
     monkeypatch.setattr(audio_tools, "decode_mp3", lambda *a, **k: pytest.fail("Ambiguous audio decoded"))
     with pytest.raises(ValueError, match="More than one matching companion"):
         prepare_playback_source(midi, workspace)

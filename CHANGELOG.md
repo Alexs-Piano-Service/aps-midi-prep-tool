@@ -92,6 +92,9 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Make Disklavier companion-selection regression fixtures respect filesystem
+  case sensitivity, avoiding overwritten audio fixtures and false ambiguity
+  failures on Windows.
 - Make disk activity timing tests independent of runner uptime and distinguish
   centered emulator progress from placement constrained by screen edges in
   dialog regression tests. Ensure simulated floppy-reader cleanup also runs
