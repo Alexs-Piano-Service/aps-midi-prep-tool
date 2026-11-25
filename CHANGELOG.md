@@ -92,6 +92,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Compare normalized source paths in the Smart PianoSoft disconnected-controller
+  regression test, covering Unix device paths and Windows COM-port names.
 - Keep Smart PianoSoft's output-format selector within the scrollable body at
   large font sizes, preventing horizontal overflow in narrow Windows dialogs.
 - Make Disklavier companion-selection regression fixtures respect filesystem

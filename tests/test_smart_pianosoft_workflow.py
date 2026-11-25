@@ -94,12 +94,14 @@ def test_clean_album_output_names_preserve_previous_completed_album(tmp_path, al
     assert json.loads((second / "manifest.json").read_text())["status"] == "complete"
 
 
-def test_greaseweazle_snapshot_can_encode_after_controller_disconnected(tmp_path, album_files, monkeypatch):
+@pytest.mark.parametrize("device_path", ["/dev/serial/by-id/disconnected-greaseweazle", "COM42"])
+def test_greaseweazle_snapshot_can_encode_after_controller_disconnected(
+    tmp_path, album_files, monkeypatch, device_path,
+):
     from aps_midi_prep_tool_app.floppy_image import DISK_FORMAT_BY_KEY, GreaseweazleFloppySource
 
     folder, audio, _pcm = album_files
-    source = GreaseweazleFloppySource("/dev/serial/by-id/disconnected-greaseweazle", "A",
-                                    DISK_FORMAT_BY_KEY["ibm.720"])
+    source = GreaseweazleFloppySource(device_path, "A", DISK_FORMAT_BY_KEY["ibm.720"])
     reads = []
 
     def copy_source(selected, destination, **_kwargs):
@@ -109,12 +111,15 @@ def test_greaseweazle_snapshot_can_encode_after_controller_disconnected(tmp_path
     monkeypatch.setattr(media, "read_floppy_source", copy_source)
     album = _scan(tmp_path, source)
     assert album.title == "Original test album"
-    assert album.original_source == Path(source.device_path)
+    # Snapshots store absolute paths; Windows adds a drive to rooted /dev paths.
+    assert album.original_source == Path(source.device_path).absolute()
     assert album.source_kind == "floppy_gw"
     result = prepare_album(album, tmp_path, audio_paths={1: audio})
     assert len(list((result / "Disklavier").glob("*.wav"))) == 1
     assert json.loads((result / "manifest.json").read_text())["status"] == "complete"
     assert reads == [source]
+
+
 def test_paired_album_reuses_fingerprint_alignment_and_delivers_matching_midi_mp3(tmp_path, album_files):
     if not audio_tools.find_lame_command():
         pytest.skip("LAME is unavailable")
