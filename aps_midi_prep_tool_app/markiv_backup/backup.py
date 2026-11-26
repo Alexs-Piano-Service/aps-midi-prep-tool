@@ -3,7 +3,7 @@
 """Verified copy engine. The source is opened only for reading."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -39,6 +39,7 @@ class BackupResult:
     converted: int = 0
     decoded: int = 0
     audio_skipped: int = 0
+    warnings: list[str] = field(default_factory=list)
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -210,7 +211,7 @@ def _audio_candidates(plan):
     return [item for item in plan.files
             if Path(item.source).suffix.lower() in {'.wav', '.mp3'}
             and item.kind not in {'Metadata', 'PianoSoft package'}
-            and Path(item.source).parts[:2] != ('songs', 'pspg')]
+            and Path(item.original_source or item.source).parts[:2] != ('songs', 'pspg')]
 
 
 def _audio_working_allowance(item):
@@ -226,7 +227,8 @@ def _audio_headroom(plan):
     return retained_pairs + max((_audio_working_allowance(item) for item in candidates), default=0)
 
 
-def _validate_target(plan: BackupPlan, target: Path, *, convert_eseq=False, split_audio=False) -> Path:
+def _validate_target(plan: BackupPlan, target: Path, *, convert_eseq=False, split_audio=False,
+                     prepare_midi=False) -> Path:
     source = plan.source.resolve(strict=True)
     target = target.expanduser().resolve()
     if _within(target, source):
@@ -239,13 +241,15 @@ def _validate_target(plan: BackupPlan, target: Path, *, convert_eseq=False, spli
     # Catch a second mount/bind alias of the source data filesystem too.
     if os.path.ismount(source) and ancestor.stat().st_dev == source.stat().st_dev:
         raise ValueError('The backup destination must be on a different filesystem from the source drive.')
-    required = plan.total_bytes + _manifest_allowance(plan)
+    required = (0 if plan.source_backup else plan.total_bytes) + _manifest_allowance(plan)
     if convert_eseq:
         # All originals coexist with derivatives until each conversion is
         # verified, including when the user requests MIDI-only output.
         required += _conversion_headroom(plan)
     if split_audio:
         required += _audio_headroom(plan)
+    if prepare_midi:
+        required += sum(item.size + 64 * 1024 for item in plan.files if item.kind == 'MIDI')
     if shutil.disk_usage(ancestor).free < required:
         if split_audio:
             raise ValueError('Not enough free space for the backup, decoded audio pairs, and temporary PCM files.')
@@ -361,18 +365,19 @@ def _short_playback_stem(folder, parent, filename, reserved, extensions=('.mid',
     return parent / stem
 
 
-def _audio_pair_stem(folder, root, original, reserved, *, short_names=False):
+def _audio_pair_stem(folder, root, original, reserved, *, short_names=False,
+                     extensions=('.mid', '.mp3')):
     source = Path(original)
     parent = root / source.parent
     if short_names:
-        return _short_playback_stem(folder, parent, source.name, reserved, ('.mid', '.mp3'))
+        return _short_playback_stem(folder, parent, source.name, reserved, extensions)
     base, stem, number = source.stem, source.stem, 1
     while any(_path_key(parent / (stem + extension)) in reserved
               or os.path.lexists(folder / parent / (stem + extension))
-              for extension in ('.mid', '.mp3')):
+              for extension in extensions):
         number += 1
         stem = f'{base} ({number})'
-    for extension in ('.mid', '.mp3'):
+    for extension in extensions:
         reserved.add(_path_key(parent / (stem + extension)))
     return parent / stem
 
@@ -517,7 +522,7 @@ def _cataloged_source_folders(folder, records, cancel=None):
     for record in records:
         source = Path(record['source'])
         reader = readers.get(source.name.casefold())
-        if record['status'] != 'verified' or reader is None:
+        if record['status'] not in {'verified', 'referenced'} or reader is None:
             continue
         payload = _read_conversion_source(
             _contained(folder, record['destination']), record['sha256'], cancel,
@@ -532,7 +537,8 @@ def _cataloged_source_folders(folder, records, cancel=None):
     return result
 
 
-def _write_yamaha_catalogs(plan, folder, records, manifest, journal, cancel=None, *, cataloged_sources=None):
+def _write_yamaha_catalogs(plan, folder, records, manifest, journal, cancel=None, *,
+                           cataloged_sources=None, original_root=None):
     """Catalog only verified playback MIDI files; archive catalogs stay intact."""
     from collections import defaultdict
 
@@ -543,11 +549,12 @@ def _write_yamaha_catalogs(plan, folder, records, manifest, journal, cancel=None
         update_smart_pianosoft_disk_title,
     )
 
+    original_root = original_root or folder
     originals = {item.source: item for item in plan.files}
     catalogs = defaultdict(dict)
     for record in records:
         source = Path(record['source'])
-        if record['status'] == 'verified' and source.name.casefold() in {'pdisk.mng', 'psong.mng'}:
+        if record['status'] in {'verified', 'referenced'} and source.name.casefold() in {'pdisk.mng', 'psong.mng'}:
             catalogs[source.parent.as_posix()][source.name.casefold()] = record
     groups = defaultdict(list)
     for record in manifest['derivatives']:
@@ -574,7 +581,7 @@ def _write_yamaha_catalogs(plan, folder, records, manifest, journal, cancel=None
             template_data = {}
             for name, record in templates.items():
                 template_data[name] = _read_conversion_source(
-                    _contained(folder, record['destination']), record['sha256'], cancel,
+                    _contained(original_root, record['destination']), record['sha256'], cancel,
                 )
             source_songs = {}
             if 'psong.mng' in template_data:
@@ -659,16 +666,19 @@ def _write_yamaha_catalogs(plan, folder, records, manifest, journal, cancel=None
 def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                convert_eseq: bool = False, keep_originals: bool = True,
                random_suffixes: bool = True, split_audio: bool = False,
-               generate_yamaha_catalogs: bool = False, preserve_yamaha_catalogs: bool = False) -> BackupResult:
-    """Create a new uniquely named backup, copying and reading back every file.
+               generate_yamaha_catalogs: bool = False, preserve_yamaha_catalogs: bool = False,
+               audio_output: str | None = None) -> BackupResult:
+    """Create a new archive or prepare playback files from an existing archive.
 
     Completed files are never overwritten. A manifest and .incomplete marker
     distinguish a cancelled, failed, or interrupted run from a complete backup.
     Optional E-SEQ conversion runs after every original has been copied, adding
     verified MIDI siblings. If keep_originals is false, a converted E-SEQ copy
     is removed from the backup only after its MIDI and progress are saved.
-    Failed conversions retain their originals. Optional audio decoding adds
-    validated same-basename MIDI/MP3 pairs in a separate playback tree. Encoded
+    Failed conversions retain their originals. Playback preparation resolves
+    catalog companions and exports MIDI/MP3 pairs or encoded WAVs. Existing
+    archives are verified in place and only new playback files are written.
+    Legacy audio decoding adds MIDI/MP3 pairs in a separate tree. Encoded
     audio originals are always kept. Compatible Yamaha preparation adds title
     catalogs beside converted MIDI, with DOS filenames in separate playback
     trees so archival catalogs retain their original bytes. Preservation-only
@@ -676,19 +686,32 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     Source files are never changed.
     """
     check_cancel(cancel)
-    keep_originals = not convert_eseq or bool(keep_originals)
-    target = _validate_target(plan, Path(target), convert_eseq=convert_eseq, split_audio=split_audio)
-    if split_audio and _audio_candidates(plan):
+    from ..audio_preparation import AUDIO_OUTPUT_FORMATS, MIDI_MP3
+
+    if plan.source_backup and split_audio and audio_output is None:
+        audio_output = MIDI_MP3
+    if audio_output is not None and audio_output not in AUDIO_OUTPUT_FORMATS:
+        raise ValueError('Choose paired MIDI/MP3 or encoded WAV playback output.')
+    prepare_audio = audio_output is not None
+    keep_originals = plan.source_backup or not convert_eseq or bool(keep_originals)
+    target = _validate_target(plan, Path(target), convert_eseq=convert_eseq,
+                              split_audio=split_audio or prepare_audio, prepare_midi=prepare_audio)
+    candidates = _audio_candidates(plan)
+    requires_lame = (audio_output == MIDI_MP3 or split_audio
+                     or (prepare_audio and any(Path(item.source).suffix.lower() == '.mp3'
+                                               for item in candidates)))
+    if requires_lame and candidates:
         from ..audio_tools import find_lame_command
 
         if not find_lame_command():
             raise ValueError(
-                'LAME is required to create paired MIDI/MP3 files. Install LAME or turn off '
-                '"Create paired MIDI + MP3 files from encoded WAV/MP3" before starting the backup.')
+                'LAME is required to prepare MP3 audio. Install LAME before starting the backup.')
     target.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    folder = create_output_directory(target, f'MarkIV-Backup-{stamp}',
+    prefix = 'MarkIV-Prepared' if plan.source_backup else 'MarkIV-Backup'
+    folder = create_output_directory(target, f'{prefix}-{stamp}',
                                      random_suffixes=random_suffixes)
+    original_root = plan.source if plan.source_backup else folder
     (folder / '.incomplete').write_text(
         'Backup has not completed. Verify Backup reads manifest.json and any\n'
         'manifest.journal.jsonl to recover saved progress.\n', encoding='utf-8')
@@ -696,13 +719,17 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     manifest = {'schema_version': 1, 'application': {'name': APP_NAME, 'version': __version__},
                 'created_at': datetime.now(timezone.utc).isoformat(),
                 'source': str(plan.source), 'status': 'in_progress', 'total_bytes': plan.total_bytes,
-                'albums': [asdict(album) for album in plan.albums], 'warnings': plan.warnings,
+                'albums': [asdict(album) for album in plan.albums], 'warnings': list(plan.warnings),
                 'files': records, 'errors': list(plan.scan_errors),
                 'options': {'convert_eseq': bool(convert_eseq), 'keep_originals': keep_originals,
                             'split_audio': bool(split_audio),
                             'generate_yamaha_catalogs': bool(generate_yamaha_catalogs),
                             'preserve_yamaha_catalogs': bool(preserve_yamaha_catalogs)},
                 'derivatives': [], 'conversion_errors': []}
+    if prepare_audio:
+        manifest['options']['audio_output'] = audio_output
+    if plan.source_backup:
+        manifest['options']['source_backup'] = True
     errors = manifest['errors']
     copied = verified = bytes_done = converted = conversion_total = 0
     decoded = audio_skipped = 0
@@ -714,7 +741,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
         if progress and (force or now - last_emit > 0.1):
             progress({'event': event, 'message': message, 'completed': verified,
                       'total': len(records), 'bytes_done': bytes_done,
-                      'bytes_total': plan.total_bytes * 2,
+                      'bytes_total': plan.total_bytes * (1 if plan.source_backup else 2),
                       'converted': converted, 'conversion_total': conversion_total})
             last_emit = now
 
@@ -732,6 +759,17 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
             reserved_destination = False
             try:
                 src = _contained(plan.source, item.source)
+                if plan.source_backup:
+                    # Existing archives are immutable inputs. Validate their
+                    # recorded bytes and create only new playback derivatives.
+                    if src.stat().st_size != item.size:
+                        raise ValueError('Archive source size changed since the scan')
+                    checksum = _hash(src, cancel, read_chunk)
+                    if not item.expected_sha256 or checksum != item.expected_sha256:
+                        raise ValueError('Archive source SHA-256 checksum does not match its manifest')
+                    record.update(status='referenced', sha256=checksum)
+                    verified += 1
+                    continue
                 dst = _contained(folder, item.destination)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 fd = os.open(src, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
@@ -764,6 +802,8 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                             before.st_size != after.st_size or before.st_ctime_ns != after.st_ctime_ns):
                         raise ValueError('Source changed while it was being copied')
                 expected = digest.hexdigest()
+                if item.expected_sha256 and expected != item.expected_sha256:
+                    raise ValueError('Source SHA-256 checksum does not match the archive manifest')
                 if _hash(partial, cancel, read_chunk) != expected:
                     raise ValueError('SHA-256 read-back verification failed')
                 if dst.exists() or is_link(dst):
@@ -797,8 +837,34 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                     dst.unlink(missing_ok=True)
                 journal.append('files', index, record)
             emit(f'Verified {verified} of {len(records)} files', force=True)
-        cataloged_sources = (_cataloged_source_folders(folder, records, cancel)
+        cataloged_sources = (_cataloged_source_folders(original_root, records, cancel)
                              if preserve_yamaha_catalogs else set())
+        if prepare_audio:
+            from .playback import resolve_playback_pairs
+            from .playback_export import prepare_playback_copies
+            from .solo_export import prepare_solo_midi_copies
+
+            if progress:
+                progress({'event': 'audio_prepare', 'completed': 0, 'total': 0, 'audio_total': 0})
+            resolution = resolve_playback_pairs(
+                plan, cancel=cancel,
+                source_paths={item.source: _contained(original_root, item.destination) for item in plan.files},
+            )
+            decoded, audio_skipped, audio_failed = prepare_playback_copies(
+                plan, folder, original_root, records, manifest, journal, audio_output,
+                cancel=cancel, progress=progress, generate_yamaha_catalogs=generate_yamaha_catalogs,
+                cataloged_sources=cataloged_sources, resolution=resolution,
+            )
+            if audio_failed:
+                status = 'incomplete'
+            solos, solo_failed = prepare_solo_midi_copies(
+                plan, folder, original_root, records, manifest, journal,
+                cancel=cancel, progress=progress, generate_yamaha_catalogs=generate_yamaha_catalogs,
+                cataloged_sources=cataloged_sources, resolution=resolution,
+            )
+            decoded += solos
+            if solo_failed:
+                status = 'incomplete'
         if convert_eseq:
             reserved = {_path_key(item.destination) for item in plan.files}
             reserved.update(_path_key(parent) for item in plan.files
@@ -806,9 +872,9 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
             candidates = []
             for index, (item, record) in enumerate(zip(plan.files, records)):
                 check_cancel(cancel)
-                if record['status'] != 'verified' or Path(item.source).suffix.lower() == '.pspg':
+                if record['status'] not in {'verified', 'referenced'} or Path(item.source).suffix.lower() == '.pspg':
                     continue
-                original = _contained(folder, item.destination)
+                original = _contained(original_root, item.destination)
                 # Recheck the verified copy instead of trusting the scan flag.
                 if is_conversion_candidate(original, item.kind):
                     candidates.append((index, item, record))
@@ -833,7 +899,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                     check_cancel(cancel)
                     if shutil.disk_usage(folder).free < _midi_conversion_allowance(item) + _manifest_allowance(plan):
                         raise ValueError('Not enough free space for the MIDI conversion and manifest.')
-                    original = _contained(folder, item.destination)
+                    original = _contained(original_root, item.destination)
                     data = _read_conversion_source(original, original_record['sha256'], cancel)
                     title = item.metadata.get('title')
                     if item.metadata.get('metadata_source') == 'Original filename':
@@ -882,7 +948,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                         journal.append('files', original_index, original_record)
                 emit(f'Converted {converted} of {conversion_total} E-SEQ files',
                      event='conversion', force=True)
-        if split_audio:
+        if split_audio and not prepare_audio:
             decoded, audio_skipped, audio_failed = _split_audio_copies(
                 plan, folder, records, manifest, journal, cancel=cancel, progress=progress,
                 generate_yamaha_catalogs=generate_yamaha_catalogs, cataloged_sources=cataloged_sources,
@@ -891,7 +957,8 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
                 status = 'incomplete'
         if (generate_yamaha_catalogs or cataloged_sources) and _write_yamaha_catalogs(
                 plan, folder, records, manifest, journal, cancel,
-                cataloged_sources=None if generate_yamaha_catalogs else cataloged_sources):
+                cataloged_sources=None if generate_yamaha_catalogs else cataloged_sources,
+                original_root=original_root):
             status = 'incomplete'
         check_cancel(cancel)
     except CancelledError:
@@ -901,7 +968,10 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
         errors.append(str(exc))
     # The audio helper can be interrupted after completing earlier pairs.
     # Recover counts from the journaled per-original outcomes in that case.
-    if split_audio:
+    if prepare_audio:
+        decoded = sum(record.get('playback_prepare', {}).get('status') == 'prepared' for record in records)
+        audio_skipped = sum(record.get('playback_prepare', {}).get('status') == 'skipped' for record in records)
+    elif split_audio:
         decoded = sum(record.get('audio_decode', {}).get('status') == 'decoded' for record in records)
         audio_skipped = sum(record.get('audio_decode', {}).get('status') == 'skipped' for record in records)
     manifest.update(status=status, completed_at=datetime.now(timezone.utc).isoformat(),
@@ -920,14 +990,19 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
         f'{APP_NAME} {__version__}\nCreated by a tool from {COMPANY_NAME}.\n\n'
         f'Status: {status}\nVerified originals: {verified}/{len(records)}\n'
         f'Converted MIDI copies: {converted}\n'
-        f'Decoded MIDI/MP3 pairs: {decoded}; audio files left unchanged: {audio_skipped}\n\n'
+        f'Playback format: {audio_output or (MIDI_MP3 if split_audio else "originals")}\n'
+        f'Prepared playback songs: {decoded}; audio files left unchanged: {audio_skipped}\n\n'
+        + (f'Originals remain in the source archive: {plan.source}\n'
+           'This folder contains new playback files and a record of their verified sources.\n'
+           if plan.source_backup else '') +
         'Retained original-format files have unchanged contents.\n'
         + conversion_note +
         'manifest.json records original paths, recovered titles, and SHA-256 checksums.\n'
         'Its derivatives list records converted MIDI files separately from originals.\n'
         'Yamaha MIDI contains cataloged E-SEQ conversions when compatible preparation is selected.\n'
         'PDISK.MNG and PSONG.MNG beside playback MIDI preserve recovered album and song titles.\n'
-        'Decoded audio pairs are in Paired MIDI and MP3 (or its numbered variant).\n'
+        'Playback files are in Paired MIDI and MP3 or Encoded WAV (or a numbered variant).\n'
+        'Standalone MIDI performances are in MIDI, with the same album organization.\n'
         'For ENSPIRE USB playback, copy each desired album folder from that tree;\n'
         'keep the matching .mid and .mp3 filenames together. Audio originals stay in the archive.\n'
         'The control channel is removed only from successfully decoded music copies.\n'
@@ -939,7 +1014,8 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
     if status == 'complete':
         (folder / '.incomplete').unlink()
     emit(f'Backup {status}: {verified} files verified', event=status, force=True)
-    return BackupResult(folder, status, copied, verified, errors, converted, decoded, audio_skipped)
+    return BackupResult(folder, status, copied, verified, errors, converted, decoded, audio_skipped,
+                        manifest['warnings'])
 
 
 def verify_backup(folder: Path, progress=None, cancel=None) -> list[str]:
@@ -958,7 +1034,13 @@ def verify_backup(folder: Path, progress=None, cancel=None) -> list[str]:
         try:
             path = _contained(folder, rel)
             replacement_status = record.get('status') in {'replaced', 'replacement_pending'}
-            if index < len(manifest['files']) and replacement_status:
+            if index < len(manifest['files']) and record.get('status') == 'referenced':
+                if (manifest.get('options', {}).get('source_backup') is not True
+                        or not re.fullmatch(r'[0-9a-fA-F]{64}', str(record.get('sha256', '')))):
+                    raise ValueError('Invalid original archive reference')
+                # Portable playback exports record original provenance. Verify
+                # their local derivatives below without requiring the archive.
+            elif index < len(manifest['files']) and replacement_status:
                 replacement = replacements.get(record.get('replacement'), {})
                 options = manifest.get('options', {})
                 if (options.get('convert_eseq') is not True

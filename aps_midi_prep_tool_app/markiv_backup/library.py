@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import stat
 import unicodedata
@@ -33,6 +33,8 @@ class PlannedFile:
     metadata: dict = field(default_factory=dict)
     mtime_ns: int = 0
     convertible_eseq: bool = False
+    original_source: str = ''
+    expected_sha256: str = ''
 
 
 @dataclass
@@ -54,6 +56,8 @@ class BackupPlan:
     warnings: list[str]
     total_bytes: int
     scan_errors: list[str] = field(default_factory=list)
+    sync_links: list[dict] = field(default_factory=list)
+    source_backup: bool = False
 
 
 def check_cancel(cancel):
@@ -127,6 +131,141 @@ def is_conversion_candidate(path: Path, kind: str) -> bool:
             and is_eseq_file(str(path)))
 
 
+def _archive_relative(value: object) -> str:
+    """Validate portable manifest paths before any filesystem access."""
+    if not isinstance(value, str) or not value or '\\' in value or '\x00' in value:
+        raise ValueError(f'Unsafe backup manifest path: {value!r}')
+    path = PurePosixPath(value)
+    if path.is_absolute() or not path.parts or '..' in path.parts or PureWindowsPath(value).drive:
+        raise ValueError(f'Unsafe backup manifest path: {value!r}')
+    return path.as_posix()
+
+
+def _scan_archive(source: Path, progress, cancel) -> BackupPlan:
+    """Plan from verified archival originals, retaining their original identities."""
+    from .backup import _contained, _load_manifest
+    from .metadata import load_metadata
+
+    try:
+        manifest = _load_manifest(source)
+    except (AttributeError, TypeError) as exc:
+        raise ValueError('Unrecognized backup manifest') from exc
+    if not isinstance(manifest.get('albums', []), list):
+        raise ValueError('Unrecognized backup album records')
+    metadata_root = _contained(source, '_metadata/original')
+    catalog = load_metadata(metadata_root) if metadata_root.is_dir() else None
+    warnings = list(catalog.warnings) if catalog else ['No archived Mark IV database found; using backup metadata.']
+    scan_errors = []
+    files = []
+    seen_sources, seen_destinations, selected_destinations = set(), set(), set()
+    replacements = {}
+    for record in manifest.get('derivatives', []):
+        if not isinstance(record, dict):
+            raise ValueError('Unrecognized backup derivative record')
+        destination = _archive_relative(record.get('destination'))
+        if destination in replacements:
+            raise ValueError(f'Duplicate backup derivative destination: {destination}')
+        replacements[destination] = record
+    for record in manifest['files']:
+        check_cancel(cancel)
+        if not isinstance(record, dict) or not isinstance(record.get('metadata', {}), dict):
+            raise ValueError('Unrecognized backup file record')
+        original = _archive_relative(record.get('original_source') or record.get('source'))
+        destination = _archive_relative(record.get('destination'))
+        if original in seen_sources or destination.casefold() in seen_destinations:
+            raise ValueError(f'Ambiguous duplicate backup file record: {original}')
+        seen_sources.add(original)
+        seen_destinations.add(destination.casefold())
+        # Reject paths that escape the archive or pass through links even when
+        # a missing original might otherwise be replaced by a derivative.
+        path = _contained(source, destination)
+        chosen = record
+        if not path.exists() and record.get('status') in {'replaced', 'replacement_pending'}:
+            replacement = replacements.get(record.get('replacement'), {})
+            options = manifest.get('options', {})
+            if (not isinstance(options, dict) or options.get('convert_eseq') is not True
+                    or options.get('keep_originals') is not False
+                    or replacement.get('original') != destination
+                    or replacement.get('source') != record.get('source')
+                    or replacement.get('status') != 'verified'):
+                scan_errors.append(f'{destination}: Original has no verified MIDI replacement')
+                continue
+            chosen = replacement
+            destination = _archive_relative(chosen.get('destination'))
+            path = _contained(source, destination)
+        try:
+            if chosen.get('status') not in {'verified', 'replaced', 'replacement_pending'}:
+                raise ValueError('File was not verified during backup')
+            digest = chosen.get('sha256')
+            if not isinstance(digest, str) or re.fullmatch(r'[0-9a-fA-F]{64}', digest) is None:
+                raise ValueError('File has no valid archived SHA-256 checksum')
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError('Not a regular backup file')
+            if info.st_size != chosen.get('size'):
+                raise ValueError('Size does not match the backup manifest')
+        except (OSError, ValueError) as exc:
+            scan_errors.append(f'{destination}: {exc}')
+            continue
+        if destination.casefold() in selected_destinations:
+            raise ValueError(f'Ambiguous shared backup original: {destination}')
+        selected_destinations.add(destination.casefold())
+        tags = dict(record.get('metadata', {}))
+        if catalog:
+            tags.update({k: v for k, v in catalog.tracks.get(original, {}).items() if v not in (None, '')})
+            original_album = str(PurePosixPath(original).parent)
+            while original_album != '.':
+                album_tags = catalog.albums.get(original_album)
+                if album_tags:
+                    if not tags.get('cd_id'):
+                        tags['cd_id'] = album_tags.get('cd_id', '')
+                    break
+                original_album = str(PurePosixPath(original_album).parent)
+        kind = chosen.get('kind') or _kind(path)
+        files.append(PlannedFile(destination, destination, info.st_size, kind, tags,
+                                 info.st_mtime_ns, is_conversion_candidate(path, kind),
+                                 original, digest.lower()))
+    if not any(item.kind != 'Metadata' for item in files):
+        raise ValueError('No verified music or album assets were found in this backup.')
+    albums = []
+    assigned = set()
+    for record in manifest.get('albums', []):
+        check_cancel(cancel)
+        if not isinstance(record, dict) or not isinstance(record.get('metadata', {}), dict):
+            raise ValueError('Unrecognized backup album record')
+        folder = _archive_relative(record.get('destination'))
+        original = _archive_relative(record.get('metadata', {}).get('original_source') or record.get('source'))
+        members = [item for item in files if item.kind != 'Metadata'
+                   and (item.original_source == original or item.original_source.startswith(original + '/'))]
+        if not members:
+            continue
+        tags = dict(record.get('metadata', {}))
+        if catalog:
+            tags.update({k: v for k, v in catalog.albums.get(original, {}).items() if v not in (None, '')})
+        tags['original_source'] = original
+        for item in members:
+            if not item.metadata.get('cd_id'):
+                item.metadata['cd_id'] = tags.get('cd_id', '')
+        albums.append(Album(str(record.get('name') or Path(folder).name),
+                            str(record.get('category') or Path(folder).parts[0]),
+                            len(members), sum(item.size for item in members), folder, folder, tags))
+        assigned.update(item.source for item in members)
+    # Older manifests may lack album summaries. Keep every verified original.
+    remaining = defaultdict(list)
+    for item in files:
+        if item.kind != 'Metadata' and item.source not in assigned:
+            remaining[Path(item.destination).parent.as_posix()].append(item)
+    for folder, members in sorted(remaining.items()):
+        albums.append(Album(Path(folder).name, Path(folder).parts[0], len(members),
+                            sum(item.size for item in members), folder, folder))
+    warnings.extend(scan_errors)
+    links = list(catalog.sync_links) if catalog else []
+    if progress:
+        progress({'event': 'scan_complete', 'message': f'Found {len(albums)} albums and {len(files)} files.',
+                  'completed': len(files), 'total': len(files)})
+    return BackupPlan(source, files, albums, warnings, sum(item.size for item in files), scan_errors, links, True)
+
+
 def scan_library(source: Path, progress=None, cancel=None) -> BackupPlan:
     """Read every songs/ file, known music elsewhere, and original metadata.
 
@@ -137,8 +276,13 @@ def scan_library(source: Path, progress=None, cancel=None) -> BackupPlan:
     from .tags import read_folder_tags, read_music_title
 
     source = Path(source).expanduser().resolve(strict=True)
+    check_cancel(cancel)
+    if source.is_dir() and not (source / 'songs').exists() and (source / 'manifest.json').exists():
+        if progress:
+            progress({'event': 'scan', 'message': 'Reading the archived music catalog…'})
+        return _scan_archive(source, progress, cancel)
     if not source.is_dir() or not (source / 'songs').is_dir():
-        raise ValueError('Select the Mark IV data volume containing the songs folder.')
+        raise ValueError('Select a Mark IV data volume containing the songs folder, or an existing Mark IV backup.')
     if is_link(source / 'songs'):
         raise ValueError('The songs folder must be a real directory, not a symbolic link.')
     check_cancel(cancel)
@@ -271,9 +415,11 @@ def scan_library(source: Path, progress=None, cancel=None) -> BackupPlan:
             destination = _unique(destination, used)
             tags.update(album=str(album_name), category=category, title=str(title),
                         original_filename=rel.name)
+            if not tags.get('cd_id'):
+                tags['cd_id'] = db_album.get('cd_id', '')
             files.append(PlannedFile(rel.as_posix(), destination.as_posix(), st.st_size,
                                      _kind(rel), tags, st.st_mtime_ns,
-                                     is_conversion_candidate(source / rel, _kind(rel))))
+                                     is_conversion_candidate(source / rel, _kind(rel)), rel.as_posix()))
         albums.append(Album(str(album_name), category, len(members),
                             sum(st.st_size for _, st in members), dest_folder.as_posix(),
                             album_dir.as_posix(), {**side_album, **{
@@ -281,8 +427,9 @@ def scan_library(source: Path, progress=None, cancel=None) -> BackupPlan:
                             }}))
     for rel, st in sorted(metadata_files):
         dest = _unique(Path('_metadata/original') / rel, used)
-        files.append(PlannedFile(rel.as_posix(), dest.as_posix(), st.st_size, 'Metadata', {}, st.st_mtime_ns))
+        files.append(PlannedFile(rel.as_posix(), dest.as_posix(), st.st_size, 'Metadata', {}, st.st_mtime_ns,
+                                 original_source=rel.as_posix()))
     if progress:
         progress({'event': 'scan_complete', 'message': f'Found {len(albums)} albums and {len(files)} files.',
                   'completed': len(files), 'total': len(files)})
-    return BackupPlan(source, files, albums, warnings, sum(f.size for f in files), scan_errors)
+    return BackupPlan(source, files, albums, warnings, sum(f.size for f in files), scan_errors, list(catalog.sync_links))

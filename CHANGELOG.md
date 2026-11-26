@@ -9,6 +9,14 @@ with release sections grouped by version and date.
 
 ### Added
 
+- Prepare Mark IV playback files directly from an existing APS backup, without
+  duplicating or modifying the archive. Recover separately stored MIDI/audio
+  associations from the saved catalog and validate Smart PianoSoft timing with
+  both audio fingerprints. Report missing or ambiguous companions, and retain
+  source checksums and pairing evidence in the prepared output's manifest.
+- Include standalone Mark IV MIDI performances in a separate album-organized
+  playback folder, with verified byte-for-byte copies. Exclude metadata-only
+  MIDI and songs whose required accompaniment is missing.
 - Let the Disklavier WAV Player open a MIDI file with its same-name WAV or MP3
   accompaniment automatically. Detect encoded audio or existing pairs, show the
   loaded format, and preserve stereo audio, timing, waveform, and balance controls.
@@ -41,15 +49,19 @@ with release sections grouped by version and date.
 - Smart PianoSoft opens automatically for a loaded MIDI folder containing
   validated synchronization fingerprints. Disk reads retain the existing offer
   after capture-save and recovery dialogs; generic catalogs do not trigger it.
-- Mark IV backup optionally decodes recoverable Yamaha-encoded WAV/MP3 into
-  matching MIDI and clean music files in a separate playback folder. ENSPIRE
-  selects this option automatically. Originals and existing native pairs are
-  retained; failed decoding is reported without guessing MIDI data. Both files
-  participate in backup verification. Physical playback timing remains
-  unverified.
+- Mark IV backup prepares recoverable Yamaha-encoded audio and associated
+  MIDI/audio performances as paired MIDI + MP3 or encoded WAV in separate
+  playback folders. Verified originals are preserved according to the existing
+  E-SEQ retention choice; source files remain unchanged. Prepared files
+  participate in verification. Physical playback timing remains unverified.
 
 ### Changed
 
+- Replace Mark IV backup's audio-decoding checkbox with an explicit playback
+  format choice. **Preparing for** defaults to MIDI + MP3 for ENSPIRE and encoded
+  WAV for other targets. Existing backups show **Prepare playback files** and
+  keep their originals in place; prepared exports can be verified independently
+  of the source archive.
 - Make Bulk Extraction's **Keep original catalogs** option off by default.
   Enable it to save unchanged source MNG copies in an `Original catalogs`
   subfolder alongside the rebuilt playback catalogs.
@@ -92,6 +104,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Accept a complete Yamaha control stream followed by an isolated brief noise
+  spike, while continuing to reject sustained or damaged control data.
 - Use a valid simulated Windows floppy drive in capture-consent regression tests
   and exercise both platform paths, retaining the destination safety check.
 - Acknowledge each new Smart PianoSoft attempt immediately in the status and

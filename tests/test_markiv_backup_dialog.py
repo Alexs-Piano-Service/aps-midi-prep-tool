@@ -15,6 +15,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPlainTextEdit
 
 from aps_midi_prep_tool_app import markiv_backup_dialog as dialog_module
+from aps_midi_prep_tool_app.audio_preparation import ENCODED_WAV, MIDI_MP3, audio_playback_note_key
 from aps_midi_prep_tool_app.eseq_converter import convert_midi_bytes_to_eseq_bytes
 from aps_midi_prep_tool_app.message_catalog import SUPPORTED_LANGUAGES, tr
 
@@ -28,7 +29,8 @@ def _wait(application, condition, *, timeout=5):
     deadline = time.monotonic() + timeout
     while not condition() and time.monotonic() < deadline:
         application.processEvents()
-        QTest.qWait(10)
+        # Release the GIL while Python workers import or process audio modules.
+        time.sleep(0.01)
     application.processEvents()
     assert condition(), "The Mark IV worker did not finish in time"
 
@@ -225,53 +227,56 @@ def test_backup_uses_persisted_global_suffix_preference_and_reads_updates(
 
 
 @pytest.mark.parametrize("profile,expected", (
-    ("enspire", True), ("mark_iv", False), ("mark_iii", False),
-    ("e3_850", False), ("midi_export", False), ("custom", False),
-    ("pianodisc_prodigy", False), ("unknown-profile", False),
+    ("enspire", MIDI_MP3), ("mark_iv", ENCODED_WAV), ("mark_iii", ENCODED_WAV),
+    ("e3_850", ENCODED_WAV), ("midi_export", ENCODED_WAV), ("custom", ENCODED_WAV),
+    ("pianodisc_prodigy", ENCODED_WAV), ("unknown-profile", ENCODED_WAV),
 ))
-def test_audio_split_default_follows_target_on_open(application, tmp_path, profile, expected):
+def test_playback_format_default_follows_target_on_open(application, tmp_path, profile, expected):
     settings = QSettings(str(tmp_path / "audio-target.ini"), QSettings.IniFormat)
     settings.setValue("preparation_profile", profile)
     # A prior global preference must never override a new destination default.
-    settings.setValue("markiv_backup_split_audio", not expected)
+    settings.setValue("markiv_backup_split_audio", expected != MIDI_MP3)
+    settings.setValue("markiv_backup_audio_output", ENCODED_WAV if expected == MIDI_MP3 else MIDI_MP3)
     instance = dialog_module.MarkIVBackupDialog(settings, refresh_on_open=False)
     try:
-        assert instance.split_audio_checkbox.isChecked() is expected
-        assert instance.split_audio_checkbox.isEnabled()
-        assert instance.split_audio_checkbox.toolTip() == instance._t("markiv.split_audio_tooltip")
+        assert instance.format_combo.count() == 2
+        assert instance.format_combo.currentData() == expected
+        assert instance.format_combo.isEnabled()
+        assert instance.format_combo.toolTip() == instance._t(
+            "sps." + audio_playback_note_key(instance.profile.key, expected))
     finally:
         instance.close()
 
 
-def test_audio_split_manual_override_is_separate_from_eseq_and_resets_for_new_target(application, dialog):
-    assert not dialog.split_audio_checkbox.isChecked()
-    dialog.split_audio_checkbox.setChecked(True)
+def test_playback_override_is_separate_from_eseq_and_resets_for_new_target(application, dialog):
+    assert dialog.format_combo.currentData() == ENCODED_WAV
+    dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(MIDI_MP3))
     dialog.convert_checkbox.setChecked(True)
     dialog.keep_originals_checkbox.setChecked(False)
     dialog.convert_checkbox.setChecked(False)
-    assert dialog.split_audio_checkbox.isEnabled()
-    assert dialog.split_audio_checkbox.isChecked()
+    assert dialog.format_combo.isEnabled()
+    assert dialog.format_combo.currentData() == MIDI_MP3
     dialog._save_settings()
     dialog.settings.setValue("preparation_profile", "mark_iv")
     reopened = dialog_module.MarkIVBackupDialog(dialog.settings, refresh_on_open=False)
     try:
-        assert not reopened.split_audio_checkbox.isChecked()
+        assert reopened.format_combo.currentData() == ENCODED_WAV
     finally:
         reopened.close()
     dialog.settings.setValue("preparation_profile", "enspire")
     reopened = dialog_module.MarkIVBackupDialog(dialog.settings, refresh_on_open=False)
     try:
-        assert reopened.split_audio_checkbox.isChecked()
+        assert reopened.format_combo.currentData() == MIDI_MP3
         assert not reopened.convert_checkbox.isChecked()
         assert not reopened.keep_originals_checkbox.isChecked()
     finally:
         reopened.close()
 
 
-@pytest.mark.parametrize("split_audio", (False, True))
+@pytest.mark.parametrize("audio_output", (ENCODED_WAV, MIDI_MP3))
 @pytest.mark.parametrize("random_suffixes", (False, True))
-def test_audio_split_option_reaches_backup_worker(application, dialog, volume, tmp_path,
-                                                monkeypatch, split_audio, random_suffixes):
+def test_playback_format_reaches_backup_worker(application, dialog, volume, tmp_path,
+                                              monkeypatch, audio_output, random_suffixes):
     source, _song, _original = volume
     dialog.source_combo.setEditText(str(source))
     dialog.destination_edit.setText(str(tmp_path / "backups"))
@@ -282,48 +287,103 @@ def test_audio_split_option_reaches_backup_worker(application, dialog, volume, t
     def backup(plan, target, **kwargs):
         calls.append((plan, target, kwargs))
         return SimpleNamespace(folder=target, status="complete", copied=1, verified=1,
-                               converted=0, decoded=int(split_audio), audio_skipped=0, errors=[])
+                               converted=0, decoded=1, audio_skipped=0, errors=[])
 
     monkeypatch.setattr(dialog_module, "run_backup", backup)
     dialog.settings.setValue("random_output_suffixes", random_suffixes)
-    dialog.split_audio_checkbox.setChecked(split_audio)
+    dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(audio_output))
     dialog.start_backup()
+    assert not dialog.format_combo.isEnabled()
     _wait(application, lambda: not dialog.is_busy)
     assert len(calls) == 1
     plan, target, options = calls[0]
     assert plan is dialog.plan
     assert target == tmp_path / "backups"
-    assert options["split_audio"] is split_audio
+    assert options["audio_output"] == audio_output
     assert options["random_suffixes"] is random_suffixes
     assert options["convert_eseq"] is False
     assert options["keep_originals"] is True
-    assert dialog.split_audio_checkbox.isEnabled()
-    summary = dialog._t("markiv.audio_summary", decoded=int(split_audio), skipped=0)
-    assert (summary in dialog.status_label.text()) is split_audio
+    assert dialog.format_combo.isEnabled()
+    assert dialog._t("markiv.audio_summary", decoded=1, skipped=0) in dialog.status_label.text()
 
 
-def test_audio_decode_progress_counts_attempts_including_skips(application, dialog):
-    dialog._progress({"event": "audio_decode", "completed": 3, "audio_total": 4,
+@pytest.mark.parametrize("event", ("audio_decode", "audio_prepare"))
+def test_audio_decode_progress_counts_attempts_including_skips(application, dialog, event):
+    dialog._progress({"event": event, "completed": 3, "audio_total": 4,
                       "decoded": 1, "audio_skipped": 2})
     assert dialog.status_label.text() == dialog._t("markiv.decoding_audio")
     assert dialog.progress_label.text() == dialog._t("markiv.file_progress", completed=3, total=4)
     assert dialog.progress_bar.value() == 750
 
 
+def test_pairing_phase_replaces_finished_verification_progress(application, dialog):
+    dialog._progress({"event": "progress", "completed": 4, "total": 4})
+    assert dialog.progress_bar.value() == 1000
+    dialog._progress({"event": "audio_prepare", "completed": 0, "audio_total": 0})
+    assert dialog.status_label.text() == dialog._t("markiv.decoding_audio")
+    assert dialog.progress_label.text() == ""
+    assert dialog.progress_bar.minimum() == dialog.progress_bar.maximum() == 0
+
+
 @pytest.mark.parametrize("language", [language.code for language in SUPPORTED_LANGUAGES])
 @pytest.mark.parametrize("status", ("complete", "incomplete", "cancelled"))
-def test_audio_split_result_summary_is_localized(application, dialog, tmp_path, language, status):
+@pytest.mark.parametrize("source_backup", (False, True))
+def test_playback_result_summary_is_localized(application, dialog, tmp_path, language, status, source_backup):
     dialog.language_code = language
     dialog._operation = "backup"
-    dialog.plan = SimpleNamespace(warnings=[])
-    dialog.split_audio_checkbox.setChecked(True)
+    dialog.plan = SimpleNamespace(warnings=[], source_backup=source_backup)
+    dialog.format_combo.setCurrentIndex(dialog.format_combo.findData(MIDI_MP3))
     result = SimpleNamespace(folder=tmp_path, status=status, verified=5, converted=1,
                              decoded=2, audio_skipped=3, errors=[])
     dialog._succeeded(result)
     summary = dialog.status_label.text()
-    assert summary == (dialog._t("markiv." + status, verified=5, converted=1) + " "
+    key = "prepared_" + status if source_backup and status != "cancelled" else status
+    assert summary == (dialog._t("markiv." + key, verified=5, converted=1) + " "
                        + dialog._t("markiv.audio_summary", decoded=2, skipped=3))
     assert "{" not in summary
+
+
+def test_existing_backup_scan_switches_to_preparation_flow(application, dialog, tmp_path, monkeypatch):
+    source = tmp_path / "existing-backup"
+    source.mkdir()
+    plan = SimpleNamespace(source=source, source_backup=True, albums=[], files=[],
+                           warnings=[], total_bytes=0)
+    monkeypatch.setattr(dialog_module, "resolve_source", lambda path: Path(path))
+    monkeypatch.setattr(dialog_module, "scan_library", lambda *_args, **_kwargs: plan)
+    dialog.source_combo.setEditText(str(source))
+    dialog.destination_edit.setText(str(tmp_path / "prepared"))
+    dialog.convert_checkbox.setChecked(True)
+    dialog.keep_originals_checkbox.setChecked(False)
+    dialog.start_scan()
+    _wait(application, lambda: not dialog.is_busy)
+    assert dialog.plan is plan
+    assert dialog.backup_button.text() == dialog._t("markiv.prepare")
+    assert dialog.backup_button.isEnabled()
+    assert dialog.keep_originals_checkbox.isHidden()
+    assert not dialog.keep_originals_checkbox.isEnabled()
+    dialog.source_combo.setEditText(str(tmp_path / "different-source"))
+    assert dialog.backup_button.text() == dialog._t("markiv.backup")
+    assert not dialog.keep_originals_checkbox.isHidden()
+    assert dialog.keep_originals_checkbox.isEnabled()
+
+
+@pytest.mark.parametrize("language", [language.code for language in SUPPORTED_LANGUAGES])
+def test_playback_choices_and_source_guidance_are_localized(application, tmp_path, language):
+    settings = QSettings(str(tmp_path / "playback-language.ini"), QSettings.IniFormat)
+    settings.setValue("language", language)
+    instance = dialog_module.MarkIVBackupDialog(settings, refresh_on_open=False)
+    try:
+        assert instance.playback_note.text() == tr("markiv.playback_note", language)
+        assert instance.playback_note.toolTip() == tr("markiv.solo_note", language)
+        assert instance.source_combo.toolTip() == tr("markiv.source_note", language)
+        assert "manifest.json" in instance.source_combo.toolTip()
+        for output_format in (ENCODED_WAV, MIDI_MP3):
+            instance.format_combo.setCurrentIndex(instance.format_combo.findData(output_format))
+            assert instance.format_combo.currentText() == tr("sps.output_" + output_format, language)
+            assert instance.format_combo.toolTip() == tr(
+                "sps." + audio_playback_note_key(instance.profile.key, output_format), language)
+    finally:
+        instance.close()
 
 
 def test_album_selection_shows_matching_files_even_with_duplicate_album_names(
@@ -490,6 +550,19 @@ def test_warnings_and_errors_open_report_without_replacing_album_details(applica
     assert dialog.details.toPlainText() == details
 
 
+def test_completed_preparation_shows_result_warnings_without_mutating_scan(application, dialog, tmp_path):
+    dialog._operation = "backup"
+    scan_warnings = ["An original catalog is unavailable"]
+    dialog.plan = SimpleNamespace(warnings=scan_warnings.copy(), source_backup=True)
+    result = SimpleNamespace(folder=tmp_path, status="incomplete", verified=5, converted=0,
+                             decoded=2, audio_skipped=1, errors=["A fingerprint did not match"],
+                             warnings=[*scan_warnings, "A required audio companion is missing"])
+    dialog._succeeded(result)
+    assert dialog.plan.warnings == scan_warnings
+    assert dialog._report_messages == [*result.warnings, *result.errors]
+    assert not dialog.report_button.isHidden()
+
+
 def test_editing_source_discards_previous_scan(application, dialog, volume, tmp_path):
     source, _song, _original = volume
     dialog.source_combo.setEditText(str(source))
@@ -530,7 +603,7 @@ def test_closing_waits_for_worker_cancellation(application, dialog, volume, monk
         assert not dialog.source_combo.isEnabled()
         assert not dialog.convert_checkbox.isEnabled()
         assert not dialog.keep_originals_checkbox.isEnabled()
-        assert not dialog.split_audio_checkbox.isEnabled()
+        assert not dialog.format_combo.isEnabled()
         assert not dialog.backup_button.isEnabled()
         if close_method == "close":
             dialog.close()

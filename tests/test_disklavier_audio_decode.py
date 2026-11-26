@@ -127,6 +127,67 @@ def test_finds_control_after_a_long_quiet_intro_and_keeps_absolute_timing(tmp_pa
     assert progress == sorted(progress)
 
 
+@pytest.mark.parametrize("edge", ["leading", "trailing", "both"])
+def test_isolated_noncarrier_edge_impulses_preserve_complete_music_and_midi(tmp_path, edge):
+    source, expected = _encoded(tmp_path)
+    original = _read(source)
+    # The leading second shifts the complete performance; the final second is
+    # still part of the accompaniment and must never be removed from output.
+    samples = np.r_[np.zeros((SAMPLE_RATE, 2), dtype="<i2"), original,
+                    np.zeros((SAMPLE_RATE, 2), dtype="<i2")]
+    for position in ([1000, len(samples) - 1000] if edge == "both" else
+                     [1000 if edge == "leading" else len(samples) - 1000]):
+        # Two isolated active symbol blocks, neither resembling the carrier.
+        samples[position, 1] = 30000
+        samples[position + 14, 1] = -30000
+    _write(source, samples)
+    before = source.read_bytes()
+    result = decode_disklavier_audio(source, tmp_path / "clean.wav")
+    assert [event.data for event in result.events] == [data for _, data in expected]
+    for actual, (seconds, _) in zip(result.events, expected):
+        assert actual.time_seconds == pytest.approx(seconds + 1.5, abs=1 / 3150)
+    assert np.array_equal(_read(result.music_path)[:, 0], samples[:, 0])
+    assert result.source_duration_seconds == len(samples) / SAMPLE_RATE
+    assert source.read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", ["second_performance", "short_carrier", "interior_gap",
+                                    "last_note_missing", "near_edge_noise", "long_edge_noise"])
+def test_edge_noise_tolerance_never_discards_possible_control_or_incomplete_notes(tmp_path, damage):
+    source, _ = _encoded(tmp_path)
+    original = _read(source)
+    samples = np.r_[original, np.zeros((SAMPLE_RATE, 2), dtype="<i2")]
+    # A trailing impulse must not distract from validating all control data.
+    samples[-1000, 1] = 30000
+    if damage == "second_performance":
+        samples = np.r_[samples, original]
+    elif damage == "short_carrier":
+        # Even one clean carrier symbol beyond the ending is possible data,
+        # and cannot be reclassified as a noncarrier impulse.
+        start = ((len(original) + SAMPLE_RATE // 2) // 14) * 14
+        samples[start:start + 14, 1] = (8000 * np.cos(2 * np.pi * np.arange(14) / 7)).astype("<i2")
+    elif damage == "interior_gap":
+        samples[round(1.4 * 3150) * 14:round(1.4 * 3150) * 14 + 140, 1] = 0
+    elif damage == "last_note_missing":
+        # Cut during idle after the final note-on, before its release. Intact
+        # idle symbols at the cut must not make that incomplete note acceptable.
+        samples[2 * SAMPLE_RATE:, 1] = 0
+        samples[-1000, 1] = 30000
+    elif damage == "near_edge_noise":
+        first = int(np.flatnonzero(samples[:, 1])[0]) // 14
+        samples[(first - 4) * 14, 1] = 30000
+    else:
+        samples[-2000:-1900, 1] = 30000
+    _write(source, samples)
+    before = source.read_bytes()
+    destination = tmp_path / "clean.wav"
+    with pytest.raises(DisklavierDecodeError):
+        decode_disklavier_audio(source, destination)
+    assert not destination.exists()
+    assert source.read_bytes() == before
+    assert not list(tmp_path.glob(".aps-decode-audio-*"))
+
+
 @pytest.mark.parametrize("rate,width", [(48000, 2), (44100, 3), (48000, 3)])
 def test_unsupported_ordinary_pcm_is_skipped_without_a_failed_decode(tmp_path, rate, width):
     source, destination = tmp_path / "ordinary.wav", tmp_path / "music.wav"

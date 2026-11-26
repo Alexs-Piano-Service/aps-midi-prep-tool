@@ -47,9 +47,11 @@ def test_markiv_descriptive_messages_are_translated(language):
         "markiv.convert", "markiv.conversion_note", "markiv.complete", "markiv.incomplete", "markiv.tooltip",
         "markiv.split_audio", "markiv.split_audio_tooltip", "markiv.audio_target_enabled",
         "markiv.audio_target_disabled", "markiv.split_audio_note", "markiv.decoding_audio",
-        "markiv.audio_summary",
+        "markiv.audio_summary", "markiv.playback_format", "markiv.playback_note", "markiv.prepare",
+        "markiv.prepared_complete", "markiv.prepared_incomplete", "markiv.solo_note",
     ):
         assert tr(message_id, language) != tr(message_id, "en")
     assert "songs/" in tr("markiv.source_note", language)
+    assert "manifest.json" in tr("markiv.source_note", language)
     assert "E-SEQ" in tr("markiv.convert", language)
     assert "MIDI" in tr("markiv.convert", language)

@@ -109,9 +109,10 @@ class MetadataTests(unittest.TestCase):
     def test_album_paths_order_and_unsafe_paths(self):
         catalog = MetadataCatalog()
         tables = {
-            "user_album": [{"album_id": 1, "path": "/home/songs/user/1/", "title": "My performances"}],
+            "user_album": [{"album_id": 1, "path": "/home/songs/user/1/", "title": "My performances", "cd_id": "DISC"}],
             "user_song": [
-                {"album_id": 1, "filename": "PIANO001.MID", "display_order": 4, "title": "Evening", "add_file": "VOICE.WAV"},
+                {"album_id": 1, "filename": "PIANO001.MID", "display_order": 4, "title": "Evening", "add_file": "VOICE.WAV",
+                 "cd_id": "DISC", "type": "SPS", "length": 123000, "audio_volume": 0, "audio_pitch": -2, "sync_id": "SYNC"},
                 {"album_id": 1, "filename": "../../../outside.MID", "title": "unsafe"},
             ],
             "usb_album": [{"album_id": 2, "path": "/mnt/usb/elsewhere", "title": "External"}],
@@ -121,6 +122,9 @@ class MetadataTests(unittest.TestCase):
         track = catalog.tracks["songs/user/1/PIANO001.MID"]
         self.assertEqual((track["title"], track["track_number"], track["album"]), ("Evening", 4, "My performances"))
         self.assertEqual(catalog.tracks["songs/user/1/VOICE.WAV"], track)
+        self.assertEqual(catalog.albums["songs/user/1"]["cd_id"], "DISC")
+        self.assertEqual({key: track[key] for key in ("cd_id", "type", "length", "audio_volume", "audio_pitch", "sync_id")},
+                         {"cd_id": "DISC", "type": "SPS", "length": 123000, "audio_volume": 0, "audio_pitch": -2, "sync_id": "SYNC"})
         self.assertEqual(len(catalog.warnings), 1)
 
     def test_unsupported_version_keeps_database_evidence(self):
@@ -149,6 +153,13 @@ class MetadataTests(unittest.TestCase):
                 _Attribute("filename", 25, -1, 2, "i"),
                 _Attribute("title", 25, -1, 3, "i"),
                 _Attribute("display_order", 21, 2, 4, "s"),
+            ]),
+            "sps_offset": (702, 902, [
+                _Attribute("miditoc", 25, -1, 1, "i"),
+                _Attribute("cdtoc", 25, -1, 2, "i"),
+                _Attribute("offsets", 25, -1, 3, "i"),
+                _Attribute("midi_path", 25, -1, 4, "i"),
+                _Attribute("wave_path", 25, -1, 5, "i"),
             ]),
         }
         classes, columns = [], []
@@ -183,11 +194,14 @@ class MetadataTests(unittest.TestCase):
 
         (database / "900").write_bytes(heap_page(record(schemas["user_album"][2], [15, "/home/songs/user/15/", "Recital"])))
         (database / "901").write_bytes(heap_page(record(schemas["user_song"][2], [15, "PIANO001.MID", "Sonata", 7])))
+        link = ["MIDI-TOC", "CD-TOC", "-35 -31", "/home/songs/user/15/PIANO001.MID", "/home/songs/audio/4/track-02.WAV"]
+        (database / "902").write_bytes(heap_page(record(schemas["sps_offset"][2], link)))
         catalog = load_metadata(self.root)
         self.assertEqual(catalog.warnings, [])
         self.assertEqual(catalog.albums["songs/user/15"]["title"], "Recital")
         self.assertEqual(catalog.tracks["songs/user/15/PIANO001.MID"]["title"], "Sonata")
         self.assertEqual(catalog.tracks["songs/user/15/PIANO001.MID"]["track_number"], 7)
+        self.assertEqual(catalog.sync_links, [dict(zip((attr.name for attr in schemas["sps_offset"][2]), link))])
 
     def test_symlinked_cluster_and_storage_are_not_followed(self):
         outside = self.root / "outside"

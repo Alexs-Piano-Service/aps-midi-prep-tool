@@ -1,27 +1,30 @@
-# Back up a Mark IV music library
+# Back up and prepare a Mark IV music library
 
 [All user guides](README.md) · [Getting started](getting-started.md)
 
-Use **Utilities → Back Up Mark IV Music...** to copy a Disklavier Mark IV
-music library into album folders with recovered names. APS reads the source,
-copies the original files, and checks their contents. An optional conversion
-step converts supported legacy E-SEQ songs to MIDI, with an option to keep the
-verified originals in the archive.
-For ENSPIRE delivery, the utility can also decode Yamaha control audio in
-WAV/MP3 files into synchronized MIDI and clean music copies.
+Use **Utilities → Back Up Mark IV Music...** to back up a Disklavier Mark IV
+music drive or prepare playback files from an existing APS Mark IV backup.
+Choose paired MIDI + MP3 for ENSPIRE USB playback or encoded WAV for a compatible
+audio playback route. APS can use separately stored MIDI and accompaniment,
+including Smart PianoSoft songs, as well as recoverable Yamaha-encoded audio.
 
-The result is a music archive. Restoring a piano and creating a bootable drive
-clone are outside this utility's scope.
+A drive backup copies and verifies the originals into named album folders.
+Preparing an existing backup reads those originals and writes a separate
+playback folder, without copying the entire archive again. An optional step
+also converts supported legacy E-SEQ songs to MIDI.
 
 ## Before you start
 
-- Make the Mark IV data partition available as a readable, mounted folder,
-  or use an existing copy of its data folder. You need the folder containing
-  **`songs/`**, rather than `songs/` itself.
+- For a music drive or a copy of its data partition, select the folder
+  containing **`songs/`**, rather than `songs/` itself.
+- For an existing APS backup, select its **`MarkIV-Backup-...`** folder
+  containing **`manifest.json`**. Keep its album folders and
+  **`_metadata/original/`** together so the saved catalog can identify
+  separately stored performances and accompaniment.
 - Use an offline data volume or a stable copy while scanning and backing up.
   APS does not connect to a running piano database.
 - Choose a destination outside the source. For a mounted music drive, use a
-  separate destination filesystem with room for the backup and any MIDI copies.
+  separate destination filesystem with room for the backup and playback files.
 
 Mounted-drive discovery is available on Linux and Windows. APS does not mount
 partitions or install filesystem drivers; the operating system must already
@@ -32,9 +35,9 @@ that at the operating-system level.
 ## Choose and scan the source
 
 1. Open **Utilities → Back Up Mark IV Music...**.
-2. Choose the source folder containing **`songs/`** from the
-   drive list or use **Browse...** to select its folder. **Refresh drives**
-   updates the list of mounted drives.
+2. Under **Music drive or backup folder**, choose a drive or use **Browse...**
+   to select a data folder or existing backup. **Refresh drives** updates the
+   list of mounted drives.
 3. Choose **Scan music**. Review the album names, collection, file counts, and
    sizes. Select an album to see its track list, file types, sizes, and available
    album information in **Details**. Check **View report...** for scan warnings
@@ -43,31 +46,43 @@ that at the operating-system level.
 Double-click an album to open a larger view with track metadata, source and
 backup paths, and supporting files. Drag the divider above **Details** to
 resize it relative to the album list. Selecting an album shows its details;
-the backup includes the scanned library.
+the operation uses the scanned library.
 
-## Make the backup
+## Choose the playback format and start
 
-1. Select a **Backup destination** outside the source. For a mounted music
+| Playback format | Result |
+| --- | --- |
+| **Paired MIDI + MP3 (ENSPIRE USB)** | Piano performance and clean accompaniment with matching filenames in one album folder. |
+| **Encoded WAV (music + piano control)** | Music and Yamaha control audio in one stereo WAV. The format tooltip describes the route for the selected **Preparing for** target. |
+
+1. Select an **Output destination** outside the source. For a mounted music
    drive, use a separate destination filesystem.
-2. Optionally select **Also convert legacy E-SEQ files to MIDI**. This is off
-   by default, and APS remembers the choice.
+2. Choose **Playback format**. ENSPIRE / DKC-900 selects paired MIDI + MP3 by
+   default; other targets select
+   encoded WAV. The default is refreshed whenever the utility opens, and you
+   can change it for this operation.
+3. Optionally select **Also convert legacy E-SEQ files to MIDI**. This is off
+   by default, and APS remembers the choice. For a drive backup,
    **Keep the verified originals and save MIDI copies alongside them** becomes
    available when conversion is on and is checked by default. Uncheck it to
    keep only the MIDI version of successfully converted E-SEQ songs in the
-   backup. APS remembers this choice too.
-3. Review **Create paired MIDI + MP3 files from encoded WAV/MP3**. It is selected
-   automatically when **Preparing for** is ENSPIRE / DKC-900 and starts off for
-   other targets. You can change it for this backup. This option always keeps
-   the original audio, independently of the E-SEQ retention option.
-4. Choose **Back up music**. Progress shows the copying, verification, and
-   optional conversion stages. When it finishes, check the result and any
-   **View report...** messages. Use **Open backup folder** to view the files.
+   new backup. Preparing an existing backup always leaves its originals in
+   place, so that retention control is hidden.
+4. Choose **Back up music** for a drive/data folder, or **Prepare playback files**
+   after scanning an existing backup. Progress covers verification and playback
+   preparation, plus copying when making a new archive. Check the result and
+   **View report...** for unavailable companions or other failures. Use
+   **Open output folder** to view the files.
 
-Each run creates a new, uniquely named `MarkIV-Backup-...` folder in the
-destination. Existing backups are kept. By default, album folders contain
+Drive backups create a new, uniquely named `MarkIV-Backup-...` folder in the
+destination. Existing backups are kept. By default, its album folders contain
 original-format music with unchanged file contents, including audio and
 supporting assets. Portable filenames and suffixes handle names that would
 otherwise collide.
+
+Preparing an existing backup creates **`MarkIV-Prepared-...`** instead. It
+contains playback output, optional E-SEQ-to-MIDI copies, and a manifest recording
+the verified source files. It does not duplicate or modify the original archive.
 
 Turn off **Settings → Save Options → Add Random Suffixes to Output Names**
 to keep the backup folder's timestamp without a random suffix. If that name
@@ -76,48 +91,54 @@ already exists, APS adds `(2)`, `(3)`, and so on, preserving previous backups.
 Protected PianoSoft packages and supporting assets are retained as originals;
 the conversion option does not unlock protected packages. Source files are
 always unchanged.
+The archive is a music backup; it does not restore a piano or create a bootable
+drive clone.
 
 ## Check the result or verify it later
 
-APS checks each copied original with a SHA-256 checksum, a fingerprint of its
-file contents, and reads back generated MIDI files and Yamaha catalogs for the
-same check.
+APS checks copied originals with SHA-256 checksums, fingerprints of their file
+contents. When preparing an existing backup, it verifies the source files
+against the archive's recorded checksums. Generated playback files and Yamaha
+catalogs receive their own checksums.
 `manifest.json` records original and destination paths, recovered metadata,
-checksums, generated MIDI copies, decoded audio pairs, generated catalogs, and
-any errors. `README.txt` summarizes the result.
+checksums, pairing evidence, timing validation, generated files, and any errors.
+`README.txt` summarizes the result.
 
 To check an existing backup:
 
 1. Open **Utilities → Back Up Mark IV Music...** and choose **Verify backup...**.
-2. Select the `MarkIV-Backup-...` folder containing `manifest.json`.
+2. Select the `MarkIV-Backup-...` or `MarkIV-Prepared-...` folder containing
+   `manifest.json`.
 3. Review the result and **View report...** for missing, changed, or incomplete
    files.
 
 Verification checks retained originals, converted MIDI files, both files of
-each generated audio pair, and generated `PDISK.MNG` and `PSONG.MNG` files
-against the manifest. It checks recorded completion status, file sizes, and
+each generated MIDI/MP3 pair, encoded WAVs, and generated `PDISK.MNG` and
+`PSONG.MNG` files against the manifest. It checks recorded completion status, file sizes, and
 checksums. When an E-SEQ backup copy was intentionally removed, verification
-checks its recorded MIDI replacement. The source drive is not needed.
+checks its recorded MIDI replacement. A prepared export can be verified without
+the original archive: verification checks its output files, while the manifest
+retains the checksums and locations of the source files verified during preparation.
 Checksums confirm file integrity; audition converted songs to assess their
 playback on your player.
 
-## If a backup stops or a drive does not respond
+## If an operation stops or a drive does not respond
 
 Drive discovery has a ten-second limit. Cancel or close the utility if a drive
 does not respond; **Refresh drives** starts a fresh discovery attempt.
 Cancelling an active backup waits for orderly file cleanup and retains its
 partial result.
 
-If copying, conversion, or catalog generation fails, APS reports an incomplete backup and keeps
-the retained originals and MIDI files that finished successfully. **Cancel** also
+If copying, playback preparation, conversion, or catalog generation fails, APS
+reports an incomplete result and keeps files that finished successfully. **Cancel** also
 keeps completed files. Review **View report...** and the manifest for failures or
-unfinished work; an `.incomplete` marker identifies an unfinished backup.
+unfinished work; an `.incomplete` marker identifies an unfinished result.
 Verification continues to report that incomplete status. Starting another
-backup creates a new folder.
+operation creates a new folder.
 
 Keep `manifest.json` and `manifest.journal.jsonl` together if a journal remains
 after interruption. **Verify backup...** uses both to check the saved progress;
-it still reports an unfinished backup as incomplete.
+it still reports an unfinished result as incomplete.
 
 ## How files and metadata are handled
 
@@ -139,12 +160,14 @@ and filenames.
 
 ### Optional MIDI conversion
 
-When conversion is selected, APS first copies and verifies the originals,
-then converts supported E-SEQ files from those copies. Each successful
-conversion creates a verified `.mid` file. If **Keep the verified originals**
-is unchecked, APS removes the backed-up E-SEQ copy only
+When conversion is selected, APS converts supported E-SEQ files from verified
+originals. A drive backup uses its newly copied files; preparation from an
+existing backup reads its verified files in place. Each successful conversion
+creates a verified `.mid` file in the new output folder. If **Keep the verified
+originals** is unchecked, APS removes the backed-up E-SEQ copy only
 after its MIDI file has been saved and verified. Failed or cancelled conversions
-keep their originals.
+keep their originals. This retention choice applies only to the new drive
+backup; an existing archive is always kept unchanged.
 
 When **Preparing for** selects a compatible Yamaha MIDI target—DSR1, Mark II XG,
 Mark III, Mark IV / PRO, or E3 / DKC-800 / DKC-850—the converted
@@ -158,13 +181,15 @@ unchanged.
 For ENSPIRE / DKC-900, this cataloged playback tree is used only for albums
 with existing MIDI catalogs or `PIANODIR.FIL`. Existing catalogs are updated,
 and PIANODIR titles are converted; uncataloged albums do not acquire catalogs.
-Their converted MIDI files stay beside the archived songs.
+Their converted MIDI files use the same album organization as the archived songs.
 
 Cataloged MIDI files use unique DOS 8.3 names, such as `SONG.mid` and
 `SONG~2.mid`, and the song catalog names the actual output files. This playback
 tree contains the converted songs; existing MIDI originals remain in the
-archive. For other preparation profiles, converted MIDI files stay beside the
-archived songs and filename collisions receive numbered suffixes.
+archive. For other preparation profiles, converted MIDI files use the archive’s
+album organization, and filename collisions receive numbered suffixes. When
+preparing an existing backup, these copies are written under the new
+`MarkIV-Prepared-...` folder.
 
 Eligible E-SEQ tracks show a conversion note in the album details when
 conversion is enabled. The note follows the retention choice; ordinary MIDI,
@@ -180,69 +205,100 @@ coexist until each MIDI copy is verified. APS rechecks space before converting
 each song and before writing its actual MIDI output. If another program fills
 the destination meanwhile, failed conversions retain their verified originals.
 
-Audio decoding also reserves space for the MIDI/MP3 copies and temporary PCM
-audio. MP3 files can expand considerably while decoding. Audio staging and
+Playback preparation also reserves space for output and temporary PCM audio.
+Preparing an existing backup does not reserve space for a second archive copy.
+MP3 files can expand considerably while decoding. Audio staging and
 publication recovery copies stay on the destination drive. PCM staging files
 are removed when each song finishes or stops; recovery copies are retained
 when rollback needs them.
 
-### Optional encoded-audio decoding
+### How piano and accompaniment are matched
 
-With **Create paired MIDI + MP3 files from encoded WAV/MP3** selected, APS
-processes verified backup copies after copying the entire source library. It
-checks both channels for Yamaha's phase-encoded control signal, validates the
-MIDI stream, and writes the other channel as clean music. Swapped channels are
-detected automatically. The recovered music is mono because one channel of
-the encoded original was used for control data.
+A Mark IV library can store an ordinary stereo CD recording separately from its
+piano performance. The WAV does not need an encoded control channel for those
+songs to be prepared. APS uses the original catalog identities retained in the
+backup to find these associations, even when the files are in different album
+folders.
 
-Successful pairs are saved separately under **Paired MIDI and MP3**, preserving
-the collection and album organization. If that folder name is occupied, APS
-uses a numbered variant. The two files for a song have the same basename. With
-a compatible Yamaha MIDI profile selected, pairs use DOS 8.3 names, such as
-`SONG.mid` and `SONG.mp3`, and the playback folder includes album and song titles
-in `PDISK.MNG` and `PSONG.MNG`. Other profiles retain descriptive names such as
-`01 - Song.mid` and `01 - Song.mp3`. Duplicate names receive the same suffix on
-both files. ENSPIRE only carries catalogs for albums with existing MNG or
-PIANODIR metadata; uncataloged albums retain descriptive names. Copy the desired
-album folder to an ENSPIRE USB stick, keeping each
-pair and its catalogs together. Keep the full backup separately.
+Existing same-name MIDI/audio companions and explicit catalog companions retain
+their shared timeline. Smart PianoSoft associations use recorded MIDI/audio
+paths or an exact catalog CD identity and the CD track reference inside the
+MIDI. Album names, song titles, and displayed track order are not used to guess
+a match. Both embedded audio fingerprints must pass before APS applies the
+alignment to the performance.
 
-The MIDI and music retain the encoded recording's shared timeline. APS does
-not run Smart PianoSoft fingerprint matching again on an already synchronized
-control track. It does not add a guessed mechanical-delay correction. MIDI
-completion times are recovered from the signal; exact acoustic alignment and
-the piano's MP3 delay handling still require a playback check.
+Saved synchronization records, including `sps_offset`, are retained in the
+report as evidence. APS verifies the timing again against the audio instead of
+assuming those stored values have a universal meaning. Missing performances,
+missing accompaniment, conflicting associations, and failed fingerprint checks
+are reported. APS does not create a substitute performance for those songs.
 
-Paired export omits MIDI clock, transport, and active-sensing messages from the
-recovered stream and records their count. Notes, pedals, and other musical
-events retain their recorded times. System-common and system-reset messages
-produce an error identifying the message and its time before a pair is saved.
+### Encoded audio and skipped files
 
-APS inspects eligible audio even when a MIDI or E-SEQ file has the same basename;
-the companion alone does not establish that the audio is clean. Audio without
-a control signal is kept without creating derivatives. Encoded audio receives
-a new MIDI/MP3 pair without replacing the archived audio or companion files.
-Metadata, protected packages, and presentation dependencies are also preserved.
-An unreadable, ambiguous, or damaged control stream is reported without creating
-a guessed performance. Lossy MP3 encoding can destroy control symbols even
-when the music sounds normal, so not every MP3 can be recovered. WAV input must
-be 44.1 kHz, 16-bit stereo PCM; MP3 input must decode to that format. LAME is
-required to decode MP3 and create the clean MP3 output. When decoding is selected
-and eligible audio files exist, APS checks for LAME before creating the backup
-folder or copying any files. If it is missing, install LAME or turn off the
-encoded-audio option to make an originals-only audio backup.
+APS also examines WAV/MP3 files for Yamaha's phase-encoded piano control signal.
+It checks both channels, validates the recovered MIDI stream, and separates the
+music from the control channel. Swapped channels are detected automatically.
+Recovered music is mono because one channel of the original was used for
+control data. Ordinary paired recordings retain stereo accompaniment when
+exported as MIDI + MP3; new encoded WAVs mix the music to mono to leave a channel
+for piano control.
 
-The manifest records the detected control channel, decoder measurements,
-timing, and separate checksums for both output files and any generated catalogs.
-The result counts decoded
-pairs and skipped audio files. A decode failure marks the overall backup
-incomplete but retains all verified originals and any earlier completed pairs.
-Cancelling removes incomplete public pairs while preserving reported recovery
-copies when needed.
+An audio file with neither a valid control stream nor an available associated
+MIDI performance is skipped. Its original remains in the archive. A skipped
+ordinary WAV is therefore not evidence that its corresponding piano recording
+was lost; check the pairing report for a separately stored or missing MIDI.
+
+An unreadable, ambiguous, or damaged control stream is reported. Lossy MP3
+encoding can destroy control symbols even when the music sounds normal, so not
+every encoded MP3 can be recovered. Encoded audio must be 44.1 kHz, 16-bit stereo
+PCM WAV, or MP3 that decodes to that format. Ordinary paired accompaniment can
+be 44.1 kHz, 16-bit mono or stereo PCM WAV, or suitable MP3. LAME is required to
+read MP3 or create MIDI/MP3 output. APS checks for it before starting an operation
+that needs it; install or restore LAME if that check fails.
+
+When a standalone encoded WAV supplies the piano performance and encoded WAV
+output is selected, APS validates and copies its original bytes. MIDI/MP3 output
+uses the recovered performance and clean music on their existing shared timeline.
+No Smart PianoSoft fingerprint matching is needed for that standalone control
+stream. When a separate MIDI performance is associated with the audio, that
+MIDI supplies the performance; any embedded control audio is removed before the
+music is used.
+
+### Where playback files go
+
+Prepared songs keep their collection and album organization under **Paired MIDI
+and MP3** or **Encoded WAV**. A numbered folder variant is used when necessary.
+Each MIDI/MP3 pair has matching filenames, such as `01 - Song.mid` and
+`01 - Song.mp3`. Duplicate names receive the same suffix on both files.
+
+Standalone MIDI performances are copied byte for byte into a separate **MIDI**
+tree with the same album organization, for either playback format. These copies
+are checksum-verified and included in the prepared-song count. Catalog wrappers
+and MIDI files containing no played notes are omitted. A MIDI whose required
+accompaniment is missing remains in the pairing report rather than being
+presented as a complete standalone performance.
+
+Compatible Yamaha MIDI profiles use DOS 8.3 names and album/song catalogs beside
+paired output and standalone MIDI. ENSPIRE carries existing MNG or PIANODIR-derived catalogs;
+uncataloged albums retain descriptive names. Keep each pair and any catalogs
+together when copying its album folder to an ENSPIRE USB stick. Keep the source
+backup separately.
+
+The manifest records pairing evidence, alignment checks, decoder measurements
+where applicable, and checksums for the generated files. The result counts
+prepared songs and skipped audio files. A preparation failure marks the result
+incomplete while retaining completed output. Cancellation removes incomplete
+public pairs and retains any recovery copies identified in the report.
+
+Paired export omits live MIDI clock, transport, and active-sensing messages,
+and records their count. Musical events retain their timing or receive the
+validated Smart PianoSoft alignment. Unsupported system messages produce an
+error before a pair is saved. File validation does not establish physical piano
+compatibility or acoustic timing; check playback on the intended instrument.
 
 ### Saved progress after interruption
 
-During a backup, durable per-file updates are stored in
+During a backup or playback preparation, durable per-file updates are stored in
 `manifest.journal.jsonl`, with periodic compact snapshots. This avoids rewriting
 the entire library manifest for every song. An orderly finish consolidates the
 manifest and removes the journal. After interruption, **Verify backup...**
@@ -253,5 +309,5 @@ write is ignored.
 
 Source, destination, last backup folder, and the conversion and retention choices can be
 preset for deployments using the [startup configuration](startup-configuration.md).
-The audio-decoding default follows the current **Preparing for** profile each
-time the dialog opens; it is not a remembered global switch.
+The playback-format default follows the current **Preparing for** profile each
+time the dialog opens; a manual format choice applies to that dialog session.

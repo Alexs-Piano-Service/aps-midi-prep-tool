@@ -163,7 +163,9 @@ def _read_symbols(reader, channel, offset, threshold, cancel, report):
         # symbol by guessing which of two MIDI messages looks more plausible.
         reliable = adjacent & (fit >= 0.82) & (error <= 0.45) & (values == inner_values)
         symbols.append(values)
-        flags.append(active.astype(np.uint8) | (reliable.astype(np.uint8) << 1))
+        possible_carrier = active & (fit >= 0.82)
+        flags.append(active.astype(np.uint8) | (reliable.astype(np.uint8) << 1)
+                     | (possible_carrier.astype(np.uint8) << 2))
         if np.any(adjacent):
             minimum_fit = min(minimum_fit, float(np.min(fit[adjacent])))
             maximum_error = max(maximum_error, float(np.max(error[adjacent])))
@@ -173,6 +175,20 @@ def _read_symbols(reader, channel, offset, threshold, cancel, report):
         report(0.15 + 0.55 * completed / total)
     values, quality = np.concatenate(symbols), np.concatenate(flags)
     active_indices = np.flatnonzero(quality & 1)
+    carrier_indices = np.flatnonzero(quality & 4)
+    if len(carrier_indices):
+        # Some transfers contain a brief click in the silence outside a valid
+        # performance. Amplitude alone must not extend the control interval to
+        # that click. Tolerate at most two noncarrier blocks per edge, separated
+        # from every possible carrier by sixteen symbols. Keep nearby damage,
+        # all interior gaps and even very short additional carrier bursts inside
+        # the strict validation below; no musical data is guessed or repaired.
+        leading = np.count_nonzero(active_indices < carrier_indices[0] - 16)
+        trailing = np.count_nonzero(active_indices > carrier_indices[-1] + 16)
+        if 0 < leading <= 2:
+            active_indices = active_indices[leading:]
+        if 0 < trailing <= 2:
+            active_indices = active_indices[:-trailing]
     if len(active_indices) < 32:
         raise DisklavierDecodeError("The control signal is too short to validate.")
     # Discard only acquisition/termination transients, then require intact
@@ -180,7 +196,7 @@ def _read_symbols(reader, channel, offset, threshold, cancel, report):
     first, last = int(active_indices[0]) + 2, int(active_indices[-1]) - 1
     if last - first < 16 or np.any(values[first:first + 8] != 15) or np.any(values[last - 8:last] != 15):
         raise DisklavierDecodeError("The control signal has no intact acquisition or ending idle interval.")
-    if np.any(quality[first:last] != 3):
+    if np.any((quality[first:last] & 3) != 3):
         raise DisklavierDecodeError("The control signal is damaged or uncertain; no MIDI was extracted.")
     return values[first:last], first, minimum_fit, maximum_error
 

@@ -30,6 +30,7 @@ class MetadataCatalog:
     albums: dict[str, dict] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     evidence_files: list[str] = field(default_factory=list)
+    sync_links: list[dict] = field(default_factory=list)
 
 
 class MetadataError(ValueError):
@@ -169,7 +170,7 @@ class _PG73:
             if len(value) < 104 or not struct.unpack_from("<H", row, 20)[0] & 0x10:
                 raise MetadataError("Unrecognized pg_class catalog layout")
             name = decode_text(value[:64].split(b"\0", 1)[0])
-            if value[102:103] != b"r" or not name.endswith(("_song", "_album")):
+            if value[102:103] != b"r" or not (name.endswith(("_song", "_album")) or name == "sps_offset"):
                 continue
             oid = struct.unpack_from("<I", row, start - 4)[0]
             node = struct.unpack_from("<I", value, 80)[0]
@@ -283,6 +284,9 @@ def _source_directory(value: object, category: str, album_id: object) -> str | N
 
 
 def _import_tables(catalog: MetadataCatalog, tables: dict[str, list[dict]]) -> None:
+    # Preserve the piano's exact associations and calibration values. Resolving
+    # these against actual files belongs to playback planning, not catalog naming.
+    catalog.sync_links.extend(dict(row) for row in tables.get("sps_offset", []))
     for table, rows in tables.items():
         if not table.endswith("_album"):
             continue
@@ -299,6 +303,7 @@ def _import_tables(catalog: MetadataCatalog, tables: dict[str, list[dict]]) -> N
             metadata = {
                 "title": title, "category": category, "album_id": album_id,
                 "subtitle": row.get("subtitle") or "", "metadata_source": "postgresql-7.3",
+                "cd_id": row.get("cd_id") or "",
             }
             catalog.albums[directory] = metadata
             albums[album_id] = (directory, title)
@@ -320,6 +325,9 @@ def _import_tables(catalog: MetadataCatalog, tables: dict[str, list[dict]]) -> N
                 "metadata_source": "postgresql-7.3", "original_filename": filename,
                 "format": row.get("format") or "", "copyright": row.get("copyright") or "",
                 "your_record": row.get("your_record") or "", "add_file": row.get("add_file") or "",
+                "cd_id": row.get("cd_id") or "", "type": row.get("type") or "",
+                "length": row.get("length"), "audio_volume": row.get("audio_volume"),
+                "audio_pitch": row.get("audio_pitch"), "sync_id": row.get("sync_id") or "",
             }
             catalog.tracks[f"{directory}/{filename_path.as_posix()}"] = track
             # Most synchronized audio shares the MIDI stem. Explicit add_file
