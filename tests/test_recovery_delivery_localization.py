@@ -7,6 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtCore import QSettings
 
 from aps_midi_prep_tool_app import main_window
 from aps_midi_prep_tool_app.dynamic_dialog_translations import DYNAMIC_DIALOG_TRANSLATIONS
@@ -117,6 +118,7 @@ def test_retained_capture_dialog_and_save_filter_are_localized(
     application, monkeypatch, tmp_path, language,
 ):
     window = _RecoveryHarness(language)
+    window.settings = QSettings(str(tmp_path / "capture.ini"), QSettings.IniFormat)
     capture = tmp_path / "Save {path}.img"
     capture.write_bytes(b"partial image")
     window.lastDiskRecoveryDiagnostics = {"partial_capture_path": str(capture)}
@@ -137,6 +139,7 @@ def test_retained_capture_dialog_and_save_filter_are_localized(
     picker_calls = []
 
     def choose_path(_parent, caption, _initial, file_filter):
+        assert os.path.isabs(_initial)
         picker_calls.append((caption, file_filter))
         return "", ""
 

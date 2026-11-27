@@ -25,7 +25,7 @@ from .build_info import build_identity
 SMOKE_ARGUMENT = "--aps-package-smoke"
 SMART_PIANOSOFT_ARGUMENT = "--include-smart-pianosoft"
 REPORT_FILENAME = "package-smoke.json"
-CASE_NAMES = ("ui", "img", "image_source_changes", "hfe", "mp3", "smart_pianosoft")
+CASE_NAMES = ("ui", "img", "disk_loading", "image_source_changes", "hfe", "mp3", "smart_pianosoft")
 
 
 def _sha256(path):
@@ -148,6 +148,71 @@ def _check_img(directory, state):
         _assert_payloads(session, expected)
     state.update(img=img, expected=expected)
     return {"files_verified": len(expected), "sha256": _sha256(img)}
+
+
+def _check_disk_loading(directory, state):
+    """Use the ordinary reader on a synthetic protected block-device fixture."""
+    from unittest.mock import patch
+    from . import floppy_image as image
+    from .capture_save import capture_save_path
+    from .disk_session_worker import DiskSessionLoadWorker
+    from .smart_pianosoft import build_smart_pianosoft_song_catalog, build_smart_pianosoft_song_record
+    from PySide6.QtCore import QSettings
+
+    if "img" not in state:
+        raise RuntimeError("IMG creation must pass before disk loading can be checked.")
+    source = directory / "Protected ordinary read.img"
+    shutil.copy2(state["img"], source)
+    catalog = directory / "PSONG.MNG"
+    catalog.write_bytes(build_smart_pianosoft_song_catalog(b"", [
+        build_smart_pianosoft_song_record(name, "Package song") for name in state["expected"]
+    ]))
+    image._copy_host_file_into_image(str(source), str(catalog), "PSONG.MNG")
+    with source.open("r+b") as handle:
+        handle.write(bytes(512))
+    before = _sha256(source)
+
+    class ReadOnlyDevice:
+        def read_at(self, offset, size, _label):
+            with source.open("rb") as handle:
+                handle.seek(offset)
+                return handle.read(size)
+
+        def close(self):
+            pass
+
+    worker = DiskSessionLoadWorker("floppy_usb", image.FloppyDriveInfo(str(source), source.stat().st_size))
+    worker.yamaha_consent_required = True
+    consents, successes, failures = [], [], []
+
+    def approve(request):
+        consents.append(request)
+        request.resolve(True)
+
+    worker.yamahaConsentRequested.connect(approve)
+    worker.sessionLoaded.connect(lambda session, listing: successes.append((session, listing)))
+    worker.loadFailedWithDetails.connect(failures.append)
+    worker.loadFailed.connect(failures.append)
+    with patch.object(image, "_open_block_device_for_read", lambda _path: ReadOnlyDevice()):
+        worker.run()
+    if failures or len(successes) != 1:
+        raise RuntimeError(f"Ordinary protected load failed: {failures}")
+    session, listing = successes[0]
+    try:
+        if len(consents) != 1 or not session.source_boot_sector_repaired:
+            raise RuntimeError("Protected ordinary load did not reconstruct the boot sector and require consent.")
+        _assert_payloads(session, {**state["expected"], "PSONG.MNG": catalog.read_bytes()})
+    finally:
+        session.cleanup()
+    if _sha256(source) != before:
+        raise RuntimeError("Ordinary reading changed the source image.")
+    settings = QSettings(str(directory / "settings" / "capture-default.ini"), QSettings.IniFormat)
+    default = Path(capture_save_path(settings, "partial-recovery.img"))
+    if not default.is_absolute():
+        raise RuntimeError("Capture save default is relative to the working directory.")
+    return {"ordinary_reader_verified": True, "consent_requests": len(consents),
+            "songs_and_catalog_preserved": True, "source_preserved": True,
+            "capture_default": str(default), "hardware_verified": False}
 
 
 def _check_image_source_changes(directory, state):
@@ -564,7 +629,7 @@ def run_package_smoke(output_directory, *, include_smart_pianosoft=False):
     _isolate_user_state(directory)
     state = {}
     checks = {
-        "ui": _check_ui, "img": _check_img,
+        "ui": _check_ui, "img": _check_img, "disk_loading": _check_disk_loading,
         "image_source_changes": _check_image_source_changes,
         "hfe": _check_hfe, "mp3": _check_mp3,
         "smart_pianosoft": _check_smart_pianosoft,

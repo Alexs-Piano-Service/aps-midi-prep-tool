@@ -78,6 +78,10 @@ class FloppyImageError(Exception):
             self.winerror = int(winerror)
 
 
+class FloppyDependencyError(FloppyImageError):
+    """A required application helper is unavailable; media recovery cannot fix it."""
+
+
 class FloppyWorkingCopyError(FloppyImageError):
     """Acquired bytes could not be saved locally; rereading sectors cannot fix it."""
 
@@ -2032,7 +2036,7 @@ def list_greaseweazle_devices():
 def _require_command(command_name):
     path = shutil.which(command_name) or _find_bundled_command(command_name)
     if not path:
-        raise FloppyImageError(_dependency_command_message(command_name))
+        raise FloppyDependencyError(_dependency_command_message(command_name))
     return path
 
 
@@ -3227,7 +3231,7 @@ def _gw_recovery_sector_note(sector_map, disk_format):
 def _gw_convert(input_path, output_path, disk_format, cancel_callback=None, *, allow_sector_failures=False):
     gw = _find_gw()
     if not gw:
-        raise FloppyImageError(_missing_greaseweazle_message("convert this image format"))
+        raise FloppyDependencyError(_missing_greaseweazle_message("convert this image format"))
     if os.path.exists(output_path):
         os.remove(output_path)
     try:
@@ -3551,7 +3555,7 @@ def _gw_reset_device(gw, source, progress_callback=None, cancel_callback=None, *
 def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback=None):
     gw = _find_gw()
     if not gw:
-        raise FloppyImageError(_missing_greaseweazle_message("read from a floppy drive"))
+        raise FloppyDependencyError(_missing_greaseweazle_message("read from a floppy drive"))
     if os.path.exists(output_path):
         os.remove(output_path)
     _gw_reset_device(gw, source, progress_callback, cancel_callback, operation_label="read")
@@ -3615,7 +3619,7 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
 def _gw_write_floppy(source, input_path, progress_callback=None, cancel_callback=None):
     gw = _find_gw()
     if not gw:
-        raise FloppyImageError(_missing_greaseweazle_message("write to a floppy drive"))
+        raise FloppyDependencyError(_missing_greaseweazle_message("write to a floppy drive"))
     _gw_reset_device(gw, source, progress_callback, cancel_callback, operation_label="write")
 
     args = [

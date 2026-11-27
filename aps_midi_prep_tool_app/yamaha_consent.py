@@ -22,9 +22,6 @@ class YamahaConsentRequest:
 
 def session_requires_yamaha_consent(session, listing):
     """Recognize protection or complete Smart fingerprints before handing off a read."""
-    from .smart_pianosoft import parse_smart_pianosoft_song_catalog
-    from .smart_pianosoft_sync import parse_sps_midi
-
     if any((report.get("sector_map") or {}).get("expected_yamaha_protection", 0)
            for report in (getattr(session, "gw_sector_reports", ()) or ())):
         return True
@@ -35,6 +32,9 @@ def session_requires_yamaha_consent(session, listing):
         return True
     if "psong.mng" not in entries:
         return False
+    from .smart_pianosoft import parse_smart_pianosoft_song_catalog
+    from .smart_pianosoft_midi import parse_sps_midi
+
     try:
         with open(session.extract_file(entries["psong.mng"]), "rb") as source:
             songs = parse_smart_pianosoft_song_catalog(source.read())
@@ -45,6 +45,6 @@ def session_requires_yamaha_consent(session, listing):
             if path is None:
                 return False
             parse_sps_midi(session.extract_file(path))
-    except (ValueError, OSError):
+    except ValueError:
         return False
     return True

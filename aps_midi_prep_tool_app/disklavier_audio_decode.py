@@ -23,7 +23,7 @@ import numpy as np
 
 from .audio_tools import decode_mp3
 from .helpers.atomic_file import publish_new_file
-from .smart_pianosoft_sync import TimedMidiEvent
+from .smart_pianosoft_midi import TimedMidiEvent
 
 
 SAMPLE_RATE = 44100

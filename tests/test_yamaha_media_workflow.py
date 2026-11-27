@@ -343,7 +343,7 @@ def test_capture_save_finishes_before_smart_pianosoft_offer(
 
         def copy_capture(source, destination, *args, **kwargs):
             if source == str(capture_path):
-                return export(source, destination)
+                export(source, destination)
             return copy2(source, destination, *args, **kwargs)
 
         monkeypatch.setattr(main_window.shutil, "copy2", copy_capture)

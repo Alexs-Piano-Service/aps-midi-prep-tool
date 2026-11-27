@@ -81,6 +81,7 @@ from PySide6.QtWidgets import (
 )
 
 from .catalog_inspection import CATALOG_NAMES
+from .capture_save import capture_save_path, remember_capture_directory
 
 from .midi_metadata import (
     extract_eseq_title_from_file,
@@ -16583,43 +16584,51 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
         self.reviewPrompt.record_successful_read("floppy_gw")
         drive_name = gw_source.drive.lower()
-        default_path = os.path.join(
-            os.path.expanduser("~"),
-            f"gw_drive_{drive_name}_raw.scp",
-        )
-        output_path, _ = QFileDialog.getSaveFileName(
-            self,
-            self._lt("Save Raw SCP Capture"),
-            default_path,
-            f"{self._lt('SCP flux capture')} (*.scp *.SCP)",
-        )
-        if not output_path:
-            capture.cleanup()
-            self.pendingFloppyReadConvertToMidi = False
-            self.pendingFloppyReadLongFilenames = False
-            self.pendingFloppyReadTrimTitles = False
-            self.status_label.setText(self._lt("Greaseweazle capture was not saved; opening cancelled."))
-            return
-        if image_extension(output_path) != "scp":
-            output_path = f"{output_path}.scp"
+        from .floppy_image import _save_greaseweazle_capture_copy
 
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-            shutil.copy2(capture_path, output_path)
-        except Exception as exc:
-            capture.cleanup()
-            self.pendingFloppyReadConvertToMidi = False
-            self.pendingFloppyReadLongFilenames = False
-            self.pendingFloppyReadTrimTitles = False
-            self._show_operation_error(
-                "SCP Save Failed",
-                self._lt("Could not save the raw Greaseweazle capture to {filename}", filename=os.path.basename(output_path)),
-                exc,
+        # This loop owns the acquired bytes until a verified save or an explicit
+        # discard. A failed destination never forces another physical read.
+        while True:
+            default_path = capture_save_path(self.settings, f"gw_drive_{drive_name}_raw.scp")
+            output_path, _ = QFileDialog.getSaveFileName(
+                self, self._lt("Save Raw SCP Capture"), default_path,
+                f"{self._lt('SCP flux capture')} (*.scp *.SCP)",
             )
-            return
-        finally:
-            if os.path.abspath(output_path) != os.path.abspath(capture_path):
+            if not output_path:
+                discard = QMessageBox.question(
+                    self, self._lt("Discard capture?"),
+                    self._lt("The captured floppy has not been saved. Discard the captured data?"),
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                )
+                if discard != QMessageBox.Yes:
+                    continue
                 capture.cleanup()
+                self.pendingFloppyReadConvertToMidi = False
+                self.pendingFloppyReadLongFilenames = False
+                self.pendingFloppyReadTrimTitles = False
+                self.status_label.setText(self._lt("Greaseweazle capture was not saved; opening cancelled."))
+                return
+            if image_extension(output_path) != "scp":
+                output_path = f"{output_path}.scp"
+            try:
+                temporary_directory = os.path.realpath(capture.temp_dir)
+                destination = os.path.realpath(output_path)
+                # Saving inside the owned scratch directory would delete the
+                # saved copy at cleanup (including aliases to the source).
+                if Path(destination).is_relative_to(temporary_directory):
+                    raise OSError("Choose a destination outside the temporary capture folder.")
+                _save_greaseweazle_capture_copy(capture_path, output_path)
+            except Exception as exc:
+                self._show_operation_error(
+                    "SCP Save Failed",
+                    self._lt("Could not save the raw Greaseweazle capture to {filename}", filename=os.path.basename(output_path)),
+                    exc,
+                    guidance="The capture is retained. Choose another destination without reading the floppy again",
+                )
+                continue
+            remember_capture_directory(self.settings, output_path)
+            capture.cleanup()
+            break
 
         self._show_greaseweazle_sector_reports(
             [
@@ -16808,10 +16817,31 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             "Disk",
             "Read failed with details",
             type=details.get("type"),
+            stage=details.get("failure_stage"),
+            exception=details.get("exception_type"),
             reason=details.get("reason"),
             source=self._log_source_label(details.get("source") or self.diskLoadContext.get("source")),
             message=message,
         )
+        if (details.get("recoverable") is False
+                or details.get("type") in {"dependency", "local_storage", "application"}
+                or (details.get("read_diagnostics") or {}).get("failure_scope") == "local_working_copy"):
+            self.pendingDiskRecoveryRequest = None
+            self.pendingGwConversionDetails = None
+            self.pendingFloppyReadConvertToMidi = False
+            self.pendingFloppyReadLongFilenames = False
+            self.pendingFloppyReadTrimTitles = False
+            self._show_operation_error(
+                "Application Error",
+                "The application could not finish opening the disk",
+                "\n".join(filter(None, [
+                    f"Stage: {details.get('failure_stage', 'unknown')}",
+                    f"{details.get('exception_type', details.get('type', 'Error'))}: {message}",
+                    details.get("traceback", ""),
+                ])),
+                guidance="Check the application installation and local storage. Disk recovery cannot fix this error",
+            )
+            return
         if details.get("type") == "blank_disk_image":
             self.pendingGwConversionDetails = details
             return
@@ -16856,10 +16886,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             return
 
         default_name = f"{os.path.splitext(os.path.basename(capture_path))[0]}_{disk_format.key.replace('.', '_')}.img"
-        archive_path = MidiTitleWindow._zip_source_for_path(self, capture_path)
-        default_path = os.path.join(
-            os.path.dirname(os.path.abspath(archive_path or capture_path)), default_name,
-        )
+        default_path = capture_save_path(self.settings, default_name)
         output_path, _selected_filter = QFileDialog.getSaveFileName(
             self,
             self._lt("Save Converted Image"),
@@ -17174,7 +17201,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             QMessageBox.information(self, self._lt("Partial capture"), self._lt("No retained partial capture is available."))
             return
         output_path, _filter = QFileDialog.getSaveFileName(
-            self, self._lt("Save partial capture..."), "partial-recovery.img", self._lt("Raw floppy image (*.img)"),
+            self, self._lt("Save partial capture..."),
+            capture_save_path(self.settings, "partial-recovery.img"), self._lt("Raw floppy image (*.img)"),
         )
         if not output_path:
             return
@@ -17183,6 +17211,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         except Exception as exc:
             self._show_operation_error("Save Failed", "Could not save the partial capture", exc)
             return
+        remember_capture_directory(self.settings, image_path)
         self.status_label.setText(self._lt("Saved partial capture and sector coverage: {path}", path=image_path))
         QMessageBox.information(self, self._lt("Partial capture saved"), image_path + "\n" + report_path)
 
@@ -24385,7 +24414,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         default_ext = (default_ext or "img").lower().lstrip(".")
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = f"floppy_image_{timestamp}.{default_ext}"
-        default_path = os.path.join(os.path.expanduser("~"), default_name)
+        default_path = capture_save_path(self.settings, default_name)
         if default_ext == "scp":
             filters = f"{self._lt('SCP flux capture')} (*.scp);;{self._lt('All Files')} (*)"
             title = self._lt("Save Raw SCP Capture")
@@ -25805,10 +25834,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             default_stem = self._catalog_filename_stem(self.loadedImagePianodirMetadata)
             if not default_stem:
                 default_stem = f"gw_drive_{drive_name}_raw"
-            default_path = os.path.join(
-                os.path.expanduser("~"),
-                f"{default_stem}.scp",
-            )
+            default_path = capture_save_path(self.settings, f"{default_stem}.scp")
             output_path, _ = QFileDialog.getSaveFileName(
                 self,
                 self._lt("Save Raw SCP Capture"),
@@ -25820,7 +25846,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             if image_extension(output_path) != "scp":
                 output_path = f"{output_path}.scp"
             try:
-                shutil.copy2(capture_path, output_path)
+                from .floppy_image import _save_greaseweazle_capture_copy
+                _save_greaseweazle_capture_copy(capture_path, output_path)
+                remember_capture_directory(self.settings, output_path)
                 self._fill_blank_image_catalog_from_source(output_path)
                 QMessageBox.information(
                     self,
@@ -25849,8 +25877,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         if self.image_session.gw_source is not None:
             drive_name = str(getattr(self.image_session.gw_source, "drive", "") or "1").lower()
         source_stem = self._catalog_filename_stem() or f"gw_drive_{drive_name}"
-        source_dir = self._last_save_as_location(os.path.expanduser("~"))
-        default_path = os.path.join(source_dir, f"{source_stem}.{preferred_ext or fallback_ext}")
+        default_path = capture_save_path(self.settings, f"{source_stem}.{preferred_ext or fallback_ext}")
         output_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             self._lt("Save As Image"),
@@ -25894,6 +25921,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             progress_callback(5, 5, "Finalizing floppy export...")
             progressDialog.close()
             self._remember_save_as_location(selected_output_path)
+            remember_capture_directory(self.settings, output_path)
             catalog_filled = self._fill_blank_image_catalog_from_source(output_path)
             if catalog_filled:
                 self._refresh_pianodir_row()
@@ -26440,6 +26468,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self.diskImageCaptureProgressDialog = None
         payload = dict(payload or {})
         output_path = payload.get("output_path") or self.diskImageCaptureContext.get("output_path", "")
+        if output_path:
+            remember_capture_directory(self.settings, output_path)
         source_name = self.diskImageCaptureContext.get("source_name", "the selected floppy")
         source_kind = payload.get("source_kind") or self.diskImageCaptureContext.get("source_kind", "")
         output_ext = (

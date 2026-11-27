@@ -194,10 +194,9 @@ def test_failed_read_keeps_open_session_and_staged_changes(window, acquisition, 
     assert len(failures) == 1
     monkeypatch.setattr(window, "_show_operation_error", lambda *args, **kwargs: shown.append(args))
     window._on_disk_load_failure_with_details(failures[0])
-    request = window.pendingDiskRecoveryRequest
-    assert request["failure_scope"] == "local_working_copy"
-    # The normal finished handler schedules this after releasing the worker.
-    window._offer_disk_recovery(request)
+    assert window.pendingDiskRecoveryRequest is None
+    assert failures[0]["type"] == "local_storage"
+    assert failures[0]["recoverable"] is False
     assert len(shown) == 1
     assert "temporary working folder" in shown[0][2]
     assert window.image_session is previous

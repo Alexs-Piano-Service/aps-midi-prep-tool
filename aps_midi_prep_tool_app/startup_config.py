@@ -17,7 +17,7 @@ CONFIG_FILENAME = "aps-midi-prep-tool.json"
 
 # Paths to user files/directories, excluding hardware identifiers such as COM3.
 PATH_SETTINGS = frozenset({
-    "open_folder_location", "open_image_location", "save_as_location",
+    "open_folder_location", "open_image_location", "save_as_location", "capture_save_location",
     "bulk_extraction_source", "bulk_extraction_output", "bulk_extraction_last_job",
     "emulator_image_source", "emulator_image_output", "disk_recovery_image_path",
     "markiv_backup_source", "markiv_backup_output", "markiv_backup_last_folder",

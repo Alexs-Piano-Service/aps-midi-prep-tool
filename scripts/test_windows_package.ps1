@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [ValidateRange(10, 1800)][int]$TimeoutSeconds = 240,
     [string]$ExpectedVersion = '',
+    [string]$WorkingDirectory = '',
     [switch]$IncludeSmartPianoSoft
 )
 
@@ -33,8 +34,13 @@ if ([IO.Path]::GetExtension($exe) -ne '.exe') { throw 'Select the final packaged
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $output) { throw "Choose a new results directory: $output" }
 $expectedHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-$working = Join-Path ([IO.Path]::GetTempPath()) ('aps-package-smoke-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $working | Out-Null
+$ownsWorkingDirectory = !$WorkingDirectory
+if ($ownsWorkingDirectory) {
+    $working = Join-Path ([IO.Path]::GetTempPath()) ('aps-package-smoke-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $working | Out-Null
+} else {
+    $working = (Resolve-Path -LiteralPath $WorkingDirectory).Path
+}
 $process = New-Object System.Diagnostics.Process
 $process.StartInfo.FileName = $exe
 # Windows filenames cannot contain a quote; the full output directory has no trailing slash.
@@ -93,7 +99,7 @@ try {
         throw 'The smoke report application version does not match the expected release.'
     }
     if ($report.status -ne 'passed') { throw 'The package smoke report does not show a complete pass.' }
-    $requiredCases = @('ui', 'img', 'image_source_changes', 'hfe', 'mp3', 'smart_pianosoft')
+    $requiredCases = @('ui', 'img', 'disk_loading', 'image_source_changes', 'hfe', 'mp3', 'smart_pianosoft')
     foreach ($name in $requiredCases) {
         if ($report.cases.$name.status -ne 'passed') { throw "Package smoke case did not pass: $name" }
     }
@@ -104,5 +110,5 @@ try {
         $process.WaitForExit(10000) | Out-Null
     }
     $process.Dispose()
-    Remove-Item -LiteralPath $working -Recurse -Force
+    if ($ownsWorkingDirectory) { Remove-Item -LiteralPath $working -Recurse -Force }
 }
