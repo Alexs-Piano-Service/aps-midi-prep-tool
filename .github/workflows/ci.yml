@@ -17,8 +17,9 @@ jobs:
   tests:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Include tool installation and both suites; Windows needs more than 20 minutes.
-    timeout-minutes: 40
+    # The full Windows suite reached 96% at the previous 40-minute limit.
+    # Include installation, both suites, and upload time without skipping checks.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
