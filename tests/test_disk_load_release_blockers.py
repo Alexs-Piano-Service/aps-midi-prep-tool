@@ -15,6 +15,23 @@ from test_smart_pianosoft_loaded_list import _midi_bytes
 from test_save_as_overwrite import window
 
 
+def test_malformed_midi_does_not_masquerade_as_a_storage_error(tmp_path):
+    from aps_midi_prep_tool_app.smart_pianosoft_midi import parse_sps_midi, SynchronizationError
+    from aps_midi_prep_tool_app.yamaha_consent import session_requires_yamaha_consent
+    (tmp_path / 'PSONG.MNG').write_bytes(_psong_bytes([('SONG.MID', 'Ordinary song')]))
+    song = tmp_path / 'SONG.MID'
+    song.write_bytes(b'Not a Standard MIDI File')
+    with pytest.raises(SynchronizationError):
+        parse_sps_midi(song)
+    session = SimpleNamespace(extract_file=lambda name: str(tmp_path / name))
+    listing = SimpleNamespace(entries=[SimpleNamespace(path=name, is_directory=False, directory='')
+                                       for name in ['PSONG.MNG', 'SONG.MID']])
+    assert session_requires_yamaha_consent(session, listing) is False
+    song.unlink()
+    with pytest.raises(FileNotFoundError):
+        session_requires_yamaha_consent(session, listing)
+
+
 @pytest.mark.parametrize('smart,protected', [(False, False), (False, True), (True, False)])
 def test_disk_consent_and_protected_normal_reader_without_numpy(tmp_path, smart, protected):
     payloads = {'PSONG.MNG': _psong_bytes([('SONG.MID', 'Synthetic song')]),

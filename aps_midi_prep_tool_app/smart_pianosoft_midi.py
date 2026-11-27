@@ -90,10 +90,16 @@ def parse_sps_midi(path):
     sequencer-specific 43 71 7D meta event can identify the intended CD track;
     selection must still be verified by both audio fingerprints.
     """
+    # Keep filesystem errors separate from mido's OSError for malformed SMF
+    # headers. Consent recognition may reject invalid MIDI as non-Smart content,
+    # but it must report an actual failed read of the local working copy.
+    if isinstance(path, (bytes, bytearray)):
+        payload = path
+    else:
+        with open(str(path), "rb") as source:
+            payload = source.read()
     try:
-        midi = (mido.MidiFile(file=io.BytesIO(path), clip=False)
-                if isinstance(path, (bytes, bytearray))
-                else mido.MidiFile(filename=str(path), clip=False))
+        midi = mido.MidiFile(file=io.BytesIO(payload), clip=False)
         if midi.type not in (0, 1) or midi.ticks_per_beat <= 0:
             raise SynchronizationError("Smart PianoSoft requires a synchronous, PPQN MIDI file.")
         fingerprints = {}
@@ -134,7 +140,7 @@ def parse_sps_midi(path):
                 if data[:3] in {(0x43, 0x71, 0x05), (0x43, 0x71, 0x7E)}:
                     continue
             events.append(TimedMidiEvent(elapsed, bytes(message.bytes())))
-    except (EOFError, ValueError, KeyError, IndexError) as exc:
+    except (EOFError, OSError, ValueError, KeyError, IndexError) as exc:
         if isinstance(exc, SynchronizationError):
             raise
         raise SynchronizationError(f"Could not read Smart PianoSoft MIDI: {exc}") from exc
