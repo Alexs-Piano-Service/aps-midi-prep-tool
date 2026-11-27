@@ -610,12 +610,15 @@ def _write_yamaha_catalogs(plan, folder, records, manifest, journal, cancel=None
                     title = read_music_title(path) or title
                 if _hash(path, cancel) != derivative['sha256']:
                     raise ValueError(f'Prepared MIDI checksum changed before cataloging: {path.name}')
-                source_song = source_songs.get(Path(item.source).name.casefold())
+                # Archive preparation uses descriptive backup paths as sources,
+                # while the archived catalog still names the original files.
+                original_name = Path(item.original_source or item.source)
+                source_song = source_songs.get(original_name.name.casefold())
                 if source_song is None:
                     # Encoded audio inherits the catalog record of its MIDI
                     # companion only when that stem has one unambiguous entry.
                     matching = [song for song in source_songs.values()
-                                if Path(song.filename).stem.casefold() == Path(item.source).stem.casefold()]
+                                if Path(song.filename).stem.casefold() == original_name.stem.casefold()]
                     if len(matching) == 1:
                         source_song = matching[0]
                 if 'PSONG.MNG' in catalog_names:

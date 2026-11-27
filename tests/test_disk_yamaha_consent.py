@@ -4,7 +4,6 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from aps_midi_prep_tool_app import disk_session_worker as workers
@@ -14,11 +13,12 @@ from test_smart_pianosoft import _psong_bytes
 from test_smart_pianosoft_loaded_list import _midi_bytes
 
 
-def _wait(predicate, timeout=2):
+def _wait(predicate, timeout=5):
     deadline = time.monotonic() + timeout
     while not predicate() and time.monotonic() < deadline:
         QApplication.processEvents()
-        QTest.qWait(5)
+        # Yield the GIL so Python worker code can run even when CI is busy.
+        time.sleep(0.005)
     QApplication.processEvents()
     assert predicate(), "Media worker did not reach the expected state"
 

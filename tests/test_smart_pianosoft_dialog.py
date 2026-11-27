@@ -480,7 +480,8 @@ def test_immediate_close_prevents_deferred_loaded_scan(source, tmp_path, qt_appl
 
 
 @pytest.mark.parametrize("cd_track", [None, 3])
-def test_scan_pair_and_clear_leave_sources_untouched(dialog, source, tmp_path, monkeypatch, cd_track):
+@pytest.mark.parametrize("extension", [".wav", ".MP3"])
+def test_scan_pair_and_clear_leave_sources_untouched(dialog, source, tmp_path, monkeypatch, cd_track, extension):
     if cd_track is not None:
         midi = mido.MidiFile(source / "song.mid")
         midi.tracks[0].insert(0, _cd_reference_message(cd_track))
@@ -494,9 +495,12 @@ def test_scan_pair_and_clear_leave_sources_untouched(dialog, source, tmp_path, m
     assert dialog.table.item(0, 3).toolTip() == dialog.text("cd_hint_details")
     assert dialog.pair_button.isEnabled()
     assert dialog.album.source_directory != source
-    paired = tmp_path / "music.wav"
-    _wav(paired)
-    monkeypatch.setattr(dialogs.QFileDialog, "getOpenFileName", lambda *_a, **_k: (str(paired), ""))
+    paired = tmp_path / ("music" + extension)
+    paired.write_bytes(b"unread selected audio")
+    def choose_audio(_parent, _title, _directory, file_filter):
+        assert "*.wav" in file_filter and "*.mp3" in file_filter
+        return str(paired), ""
+    monkeypatch.setattr(dialogs.QFileDialog, "getOpenFileName", choose_audio)
     dialog.pair_audio()
     assert dialog.audio_paths == {1: paired}
     assert dialog.table.item(0, 3).text() == str(paired)

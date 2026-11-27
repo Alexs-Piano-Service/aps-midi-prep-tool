@@ -11,10 +11,11 @@ units and applicability are not assumed.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import io
 import math
 from pathlib import Path, PurePosixPath
+import tempfile
 
 import mido
 
@@ -30,6 +31,7 @@ class PlaybackPair:
     association: str
     cd_track: int | None = None
     sync_links: tuple[dict, ...] = ()
+    association_details: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,39 @@ def _inspect_sync(path, cancel):
     return data, False
 
 
+def _relative_cd_toc(value):
+    """Decode a complete Mark IV CD TOC, normalizing only its initial lead-in."""
+    if not isinstance(value, str) or len(value) < 12 or len(value) % 6:
+        return None
+    try:
+        data = bytes.fromhex(value)
+    except ValueError:
+        return None
+    positions = []
+    for minute, second, frame in zip(data[::3], data[1::3], data[2::3]):
+        if second >= 60 or frame >= 75:
+            return None
+        positions.append((minute * 60 + second) * 75 + frame)
+    if len(positions) < 2 or any(a >= b for a, b in zip(positions, positions[1:])):
+        return None
+    return tuple(position - positions[0] for position in positions)
+
+
+def _synchronize_candidate(metadata, candidate, audio_path, cancel):
+    """Validate a recovery candidate using the exporter's MP3 decoding path."""
+    if PurePosixPath(_original(candidate)).suffix.lower() != '.mp3':
+        return synchronize(metadata, audio_path, cancel=cancel)
+    from ..audio_tools import decode_mp3
+
+    # Source snapshots need not retain the original extension. The plan's
+    # identity determines the format; decoded PCM is private and temporary.
+    with tempfile.TemporaryDirectory(prefix='aps-markiv-sync-') as temporary:
+        pcm = Path(temporary) / 'audio.wav'
+        decode_mp3(audio_path, pcm, cancel=cancel)
+        check_cancel(cancel)
+        return synchronize(metadata, pcm, cancel=cancel)
+
+
 def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) -> PlaybackPairPlan:
     """Resolve candidates without altering files or asserting they are synchronized.
 
@@ -164,6 +199,23 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
 
     links_by_midi = defaultdict(list)
     issues, seen_issues, pairs = [], set(), []
+    audio_tocs = {cd: _relative_cd_toc(cd) for cd, _track in audio_by_cd_track}
+    similar_editions = {}
+
+    def nearby_editions(cd_id):
+        if cd_id not in similar_editions:
+            toc = _relative_cd_toc(cd_id)
+            similar_editions[cd_id] = {}
+            if toc:
+                for other, other_toc in audio_tocs.items():
+                    if other_toc and len(toc) == len(other_toc):
+                        drift = max(abs(a - b) for a, b in zip(toc, other_toc))
+                        # A shortlist, never proof of identity. Every boundary
+                        # (including lead-out) must agree within one CD second;
+                        # both audio fingerprints then establish the recording.
+                        if drift <= 75:
+                            similar_editions[cd_id][other] = drift
+        return similar_editions[cd_id]
 
     def issue(midi, audio, message, code):
         key = (midi, audio, code)
@@ -171,27 +223,35 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
             seen_issues.add(key)
             issues.append(PlaybackIssue(midi, audio, message, code))
 
+    def linked_audio(link):
+        """Resolve the recorded CD edition independently of the MIDI's edition.
+
+        Mark IV retains the source MIDI's TOC in ``miditoc`` and the actual
+        accompaniment disc's TOC in ``cdtoc``. These legitimately differ after
+        synchronizing another pressing. Older rows store only ``track-01``;
+        the exact recorded CD ID and original audio stem identify that file.
+        """
+        cd_id = link.get('cdtoc')
+        source = _source_path(link.get('wave_path'))
+        exact = [a for a in by_source.get(source, ()) if a.source in audio_sources
+                 and (not cd_id or a.metadata.get('cd_id') in (None, '', cd_id))]
+        if exact:
+            return exact
+        value = link.get('wave_path')
+        if not isinstance(value, str) or not cd_id:
+            return []
+        recorded = PurePosixPath(value.replace('\\', '/'))
+        if '..' in recorded.parts or recorded.suffix.lower() not in {'', '.wav', '.mp3'}:
+            return []
+        return audio_by_cd_stem.get((cd_id, recorded.stem.casefold()), [])
+
     for link in getattr(plan, 'sync_links', ()):
         check_cancel(cancel)
         midi_source = _source_path(link.get('midi_path'))
-        audio_source = _source_path(link.get('wave_path'))
         if midi_source:
             links_by_midi[midi_source].append(link)
-        historical_audio = None
-        if audio_source in by_source:
-            matches = [a for a in by_source[audio_source] if a.source in audio_sources]
-            if len(matches) == 1:
-                historical_audio = matches[0]
-        elif isinstance(link.get('wave_path'), str) and link.get('cdtoc'):
-            # Older rows may retain only "track-01" or a former album path.
-            # An exact CD identity plus the original filename stem can explain
-            # a missing performance. This is evidence for a warning, not a
-            # substitute pairing or a timing assertion.
-            recorded = PurePosixPath(link['wave_path'].replace('\\', '/'))
-            if '..' not in recorded.parts:
-                matches = audio_by_cd_stem.get((link['cdtoc'], recorded.stem.casefold()), ())
-                if len(matches) == 1:
-                    historical_audio = matches[0]
+        matches = linked_audio(link)
+        historical_audio = matches[0] if len(matches) == 1 else None
         if historical_audio is not None and midi_source not in by_source:
             missing = midi_source or str(link.get('midi_path') or 'unrecorded MIDI source')
             issue(missing, _original(historical_audio),
@@ -217,8 +277,7 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
                                       if a.source in audio_sources]
         native = {a.source: a for a in same_stem + explicit_companion}
         cd_id = item.metadata.get('cd_id')
-        links = [link for link in links_by_midi.get(source, ())
-                 if not cd_id or not link.get('cdtoc') or link.get('cdtoc') == cd_id]
+        links = links_by_midi.get(source, ())
         declared_sps = str(item.metadata.get('type', '')).upper() == 'SPS'
         if not native and not links and not cd_id and not declared_sps and required_audio_source is None:
             continue  # An ordinary piano-only performance needs no audio pair.
@@ -243,24 +302,69 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
         missing_audio = []
         for link in links:
             audio_source = _source_path(link.get('wave_path'))
-            if not audio_source:
-                continue
-            matches = [a for a in by_source.get(audio_source, ()) if a.source in audio_sources]
+            matches = linked_audio(link)
             if not matches:
-                missing_audio.append(audio_source)
-            for audio in matches:
-                if cd_id and audio.metadata.get('cd_id') not in (None, '', cd_id):
+                if audio_source:
+                    missing_audio.append(audio_source)
+                if audio_source in by_source and any(a.source in audio_sources for a in by_source[audio_source]):
                     issue(source, audio_source, 'The recorded audio association has a different CD ID.',
                           'conflicting_cd_id')
-                    continue
+            for audio in matches:
                 direct[audio.source] = audio
 
         cd_track = metadata.cd_track if metadata else None
         # Track number comes from the MIDI's CD TOC, never its display order.
-        recorded_cd = cd_id or (links[0].get('cdtoc') if links and
-                                len({link.get('cdtoc') for link in links}) == 1 else None)
+        recorded_cd = (links[0].get('cdtoc') if links and
+                       len({link.get('cdtoc') for link in links}) == 1 else None) or cd_id
         indexed = {a.source: a for a in audio_by_cd_track.get((recorded_cd, cd_track), ())}
         candidates = {**native, **direct, **indexed}
+        association_details = {}
+        track_conflict = bool(direct and indexed and set(direct) != set(indexed))
+        if metadata and (not candidates or recorded_cd != cd_id or track_conflict):
+            editions = nearby_editions(cd_id) if cd_track is not None else {}
+            alternatives = {audio.source: audio for edition in editions
+                            for audio in audio_by_cd_track.get((edition, cd_track), ())}
+            # Do not read audio during ordinary catalog resolution. Validation
+            # is necessary only to recover an unavailable edition or resolve a
+            # concrete disagreement between recorded associations.
+            if set(alternatives) - set(candidates) or track_conflict:
+                checked, matched = [], {}
+                for candidate in {**candidates, **alternatives}.values():
+                    check_cancel(cancel)
+                    evidence = {'audio_source': _original(candidate),
+                                'cd_id': candidate.metadata.get('cd_id'),
+                                'track_number': candidate.metadata.get('track_number')}
+                    try:
+                        audio_path = (plan.source / candidate.source if source_paths is None
+                                      else source_paths[candidate.source])
+                        alignment = _synchronize_candidate(metadata, candidate, audio_path, cancel)
+                    except InterruptedError:
+                        raise
+                    except (OSError, ValueError, EOFError, KeyError, RuntimeError) as exc:
+                        check_cancel(cancel)
+                        evidence['error'] = str(exc)
+                    else:
+                        evidence['alignment'] = asdict(alignment)
+                        matched[candidate.source] = candidate
+                    checked.append(evidence)
+                if len(matched) == 1:
+                    selected = next(iter(matched.values()))
+                    association_details = {
+                        'method': ('stored_cd_link_and_two_fingerprints' if track_conflict
+                                   else 'whole_cd_toc_and_two_fingerprints'),
+                        'midi_cd_id': cd_id,
+                        'audio_source': _original(selected),
+                        'audio_cd_id': selected.metadata.get('cd_id'),
+                        'toc_max_difference_frames': editions.get(selected.metadata.get('cd_id')),
+                        'catalog_audio_sources': [_original(a) for a in candidates.values()],
+                        'candidates': checked,
+                    }
+                    candidates = matched
+                    track_conflict = False
+                elif len(matched) > 1:
+                    issue(source, '', 'More than one audio companion matches both fingerprints; '
+                          'no pairing was chosen.', 'ambiguous_audio')
+                    continue
         if len(candidates) != 1 or (len(by_source[source]) != 1):
             if candidates:
                 issue(source, '', 'More than one audio companion is supported by the catalog; '
@@ -271,7 +375,7 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
                       'Album order and song titles were not used as substitutes.', 'missing_audio')
             continue
         audio = next(iter(candidates.values()))
-        if direct and indexed and set(direct) != set(indexed):
+        if track_conflict:
             issue(source, _original(audio), 'The stored audio path and recorded CD track disagree.',
                   'conflicting_audio')
             continue
@@ -280,7 +384,8 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
                   'no pairing was chosen.', 'ambiguous_midi')
             continue
         association = 'sps_metadata' if metadata else 'same_stem' if same_stem else 'catalog_companion'
-        pairs.append(PlaybackPair(item, audio, association, cd_track, tuple(dict(row) for row in links)))
+        pairs.append(PlaybackPair(item, audio, association, cd_track, tuple(dict(row) for row in links),
+                                  association_details))
 
     return PlaybackPairPlan(tuple(pairs), tuple(issues), frozenset(pair.audio.source for pair in pairs))
 
@@ -297,6 +402,8 @@ def prepare_pair(pair: PlaybackPair, midi_path, audio_path, *, cancel=None) -> P
     data, events, has_sync = _read_midi(midi_path, cancel)
     details = {'association': pair.association, 'cd_track': pair.cd_track,
                'stored_sync_links': [dict(row) for row in pair.sync_links]}
+    if pair.association_details:
+        details['association_validation'] = pair.association_details
     if pair.association == 'sps_metadata' or has_sync:
         metadata = parse_sps_midi(data)
         alignment = synchronize(metadata, audio_path, cancel=cancel)

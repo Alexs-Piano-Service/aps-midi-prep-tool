@@ -136,9 +136,9 @@ them automatically. Song-title changes remain staged until Save and can be
 reverted with Undo. E-SEQ conversion omits these MIDI companion catalogs from
 the output while preserving the original files.
 
-Use **Utilities → Disklavier WAV Player...** to hear an encoded Disklavier WAV
-or a MIDI file with a same-name WAV or MP3 in the same folder. The player finds
-the companion automatically and offers a shared piano roll/waveform timeline
+Use **Utilities → Disklavier Audio Player...** to hear encoded Disklavier WAV or
+MP3 audio, or a MIDI file with a same-name WAV or MP3 in the same folder. The
+player finds the companion automatically and offers a shared piano roll/waveform timeline
 and Piano/Accompaniment balance. Opening guidance is available in tooltips.
 The player provides listening and timing checks without offering MIDI export
 in normal use.

@@ -285,19 +285,27 @@ def scan_loaded_album(source: LoadedAlbumSource, destination, *, cancel=None, pr
 
 
 def _copy_wav(source, destination, *, cancel=None):
-    """Preserve a paired music file exactly; never silently resample or truncate."""
+    """Preserve checked PCM exactly; never silently resample or truncate."""
     source, destination = Path(source), Path(destination)
     with wave.open(str(source), "rb") as audio:
         if (audio.getframerate() != 44100 or audio.getsampwidth() != 2
                 or audio.getnchannels() != 2 or audio.getcomptype() != "NONE"):
-            raise ValueError("Paired audio must be stereo, 44.1 kHz, 16-bit PCM WAV.")
-        expected = audio.getnframes() * audio.getnchannels() * 2
-        actual = 0
-        while data := audio.readframes(65536):
-            _check_cancel(cancel)
-            actual += len(data)
-        if not actual or actual != expected:
+            raise ValueError("Paired audio must decode to stereo, 44.1 kHz, 16-bit PCM WAV.")
+        remaining = audio.getnframes()
+        if not remaining:
             raise ValueError(f"The audio file is empty or truncated: {source.name}")
+        while remaining:
+            _check_cancel(cancel)
+            frames = min(remaining, 65536)
+            if len(audio.readframes(frames)) != frames * audio.getnchannels() * 2:
+                raise ValueError(f"The audio file is empty or truncated: {source.name}")
+            remaining -= frames
+    _copy_audio(source, destination, cancel=cancel)
+
+
+def _copy_audio(source, destination, *, cancel=None):
+    """Retain the selected audio bytes and verify the copy before decoding."""
+    source, destination = Path(source), Path(destination)
     # The output album is newly created; exclusive creation protects its files.
     created = False
     try:
@@ -369,7 +377,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
     output folder. Only a successful return represents a completed album.
     """
     from .disklavier_audio import encode_disklavier_wav
-    from .audio_tools import find_lame_command
+    from .audio_tools import decode_mp3, find_lame_command
     from .paired_audio import export_midi_mp3
     from .smart_pianosoft_media import CDReadError, read_cd_toc, rip_cd_track
     from .smart_pianosoft_sync import synchronize
@@ -388,11 +396,15 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
     if set(audio_paths) - known_numbers:
         raise ValueError("An audio pairing refers to an unknown MIDI track.")
     if not cd_device and set(audio_paths) != known_numbers:
-        raise ValueError("Insert the matching audio CD or pair every MIDI with a WAV file.")
+        raise ValueError("Insert the matching audio CD or pair every MIDI with a WAV or MP3 file.")
+    if any(path.suffix.casefold() not in {".wav", ".mp3"} for path in audio_paths.values()):
+        raise ValueError("Paired audio must be a WAV or MP3 file.")
     if not output_parent.is_dir():
         raise ValueError("Select an existing output folder.")
     if output_format == "midi_mp3" and not find_lame_command():
         raise RuntimeError("LAME is required to export paired MIDI/MP3 files. Install LAME or use a package that includes it before ripping the CD.")
+    if any(path.suffix.casefold() == ".mp3" for path in audio_paths.values()) and not find_lame_command():
+        raise RuntimeError("LAME is required to read or export MP3 audio.")
     catalog_names = ({'PDISK.MNG', 'PSONG.MNG'} if generate_yamaha_catalogs else
                      yamaha_catalog_metadata_from_directory(album.source_directory).source_catalog_names
                      if preserve_yamaha_catalogs else set())
@@ -414,7 +426,9 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
             _emit(progress, "rip", 0, 0, "Checking CD track list…")
         toc = read_cd_toc(cd_device, cancel=cancel) if cd_device else ()
         cd_bytes = sum(t.sectors * 2352 for t in toc)
-        required_bytes = cd_bytes * 2 + sum(p.stat().st_size for p in audio_paths.values()) * 2
+        # MP3 expansion is checked against the actual decoded PCM below; a
+        # worst-case bitrate multiplier would reject ordinary albums needlessly.
+        required_bytes = cd_bytes * 2 + sum(path.stat().st_size for path in audio_paths.values()) * 2
         if shutil.disk_usage(output_parent).free < required_bytes + 64 * 1024 * 1024:
             raise ValueError("There is not enough free space for the source audio and prepared music files.")
         _check_cancel(cancel)
@@ -472,14 +486,39 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
             _emit(progress, "rip", cd_bytes, cd_bytes, "Checking CD track list…")
         if toc and tuple(read_cd_toc(cd_device, cancel=cancel)) != tuple(toc):
             raise CDReadError("The audio CD changed while it was being read.")
-        for number, source in audio_paths.items():
+        for index, (number, source) in enumerate(audio_paths.items()):
             _check_cancel(cancel)
+            _emit(progress, "prepare_audio", index, len(audio_paths), source.name)
             destination = wav_folder / f"Paired{number:02d}.wav"
-            _copy_wav(source, destination, cancel=cancel)
+            audio_entry = {"paired_song": number, "file": f"WAV/{destination.name}"}
+            if source.suffix.casefold() == ".mp3":
+                mp3_folder = folder / "MP3"
+                mp3_folder.mkdir(exist_ok=True)
+                original_copy = mp3_folder / f"Paired{number:02d}.mp3"
+                _copy_audio(source, original_copy, cancel=cancel)
+                has_progress = True
+                original_hash = _digest(original_copy)
+                original_relative = f"MP3/{original_copy.name}"
+                report["audio"].append({"paired_song": number, "file": original_relative,
+                                        "sha256": original_hash})
+                _save_report(folder, report)
+                with tempfile.TemporaryDirectory(prefix=".paired-audio-", dir=folder) as staging:
+                    decoded = Path(staging) / "decoded.wav"
+                    decode_mp3(original_copy, decoded, cancel=cancel)
+                    if _digest(original_copy) != original_hash:
+                        raise ValueError(f"The preserved audio copy changed: {original_copy.name}")
+                    if shutil.disk_usage(folder).free < decoded.stat().st_size + 64 * 1024 * 1024:
+                        raise ValueError("There is not enough free space for the source audio and prepared music files.")
+                    _copy_wav(decoded, destination, cancel=cancel)
+                audio_entry["decoded_from"] = original_relative
+            else:
+                _copy_wav(source, destination, cancel=cancel)
             has_progress = True
             explicit[number] = destination
-            report["audio"].append({"paired_song": number, "file": f"WAV/{destination.name}",
-                                    "sha256": _digest(destination)})
+            audio_entry["sha256"] = _digest(destination)
+            report["audio"].append(audio_entry)
+            _save_report(folder, report)
+            _emit(progress, "prepare_audio", index + 1, len(audio_paths), source.name)
 
         audio_hashes = {folder / entry["file"]: entry["sha256"] for entry in report["audio"]}
         audio_identities = {path: _identity(path) for path in audio_hashes}
@@ -515,7 +554,7 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
                     except ValueError:
                         continue
                 if len(matches) != 1 or matches[0][0] in used:
-                    raise ValueError(f"{track.title or track.filename}: no unique matching CD track. Pair the correct WAV file and retry.")
+                    raise ValueError(f"{track.title or track.filename}: no unique matching CD track. Pair the correct WAV or MP3 file and retry.")
                 audio, alignment = matches[0]
                 used.add(audio)
             pairs.append((track, audio, alignment))
@@ -524,6 +563,14 @@ def prepare_album(album, output_parent, *, cd_device="", audio_paths=None,
                 "audio": f"WAV/{audio.name}", "alignment": asdict(alignment)})
             _save_report(folder, report)
 
+        # Use decoded sizes for MP3 input rather than guessing its bitrate.
+        if any(entry.get("decoded_from") for entry in report["audio"]):
+            playback_sizes = [audio.stat().st_size for _track, audio, _alignment in pairs]
+            required_bytes = sum(playback_sizes)
+            if output_format == "midi_mp3":
+                required_bytes += max(playback_sizes, default=0)
+            if shutil.disk_usage(folder).free < required_bytes + 64 * 1024 * 1024:
+                raise ValueError("There is not enough free space for the source audio and prepared music files.")
         # All pairings must be verified before any playback file is produced.
         output_phase = "encode" if output_format == "encoded_wav" else "export_pairs"
         for index, (track, audio, alignment) in enumerate(pairs):

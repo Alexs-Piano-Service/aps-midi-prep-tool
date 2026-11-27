@@ -17,6 +17,8 @@ from .eseq_converter import (
     _encode_vlq,
     _eseq_event_stream_start,
     _has_legacy_block_lengths,
+    _has_legacy_placeholder_length,
+    _has_q11_total_length,
 )
 from .midi_channel_merger import (
     _acoustic_grand_program_event,
@@ -210,19 +212,25 @@ def merge_eseq_channels_to_channel0_bytes(eseq_bytes, filename="", *, overlap_mo
     header = bytearray(data[:stream_start])
     legacy_block_lengths = _has_legacy_block_lengths(
         data, stream_start, container_variant=container_variant,
-    )
+    ) or _has_legacy_placeholder_length(data, stream_start, container_variant=container_variant)
+    q11_total_length = _has_q11_total_length(data, stream_start, container_variant=container_variant)
     # MDA's first seven bytes are a fixed signature, not a length field.
     length_fields = [0x1F] if is_mda else [3, 0x1F]
     for offset in length_fields:
         value = int.from_bytes(header[offset:offset + 4], "little")
-        if offset == 3 and value != stream_end:
+        if offset == 3 and value != stream_end and not q11_total_length:
             # Factory disks also use this word as opaque control metadata.
             # Adjust it only when it demonstrably records the used length.
             continue
         if value:
             # Legacy block counts are not exact lengths. Adding a delta can
             # make them look exact and truncate the song when it is reopened.
-            updated = len(stream) if offset == 0x1F and legacy_block_lengths else value + delta
+            if q11_total_length:
+                # Normalize both Q11 words together: the rewritten 0x1F field
+                # is an exact stream count, not the former padded total size.
+                updated = len(stream) if offset == 0x1F else stream_start + len(stream)
+            else:
+                updated = len(stream) if offset == 0x1F and legacy_block_lengths else value + delta
             if not 0 <= updated <= 0xFFFFFFFF:
                 raise EseqConversionError("E-SEQ output length is out of range.")
             header[offset:offset + 4] = updated.to_bytes(4, "little")

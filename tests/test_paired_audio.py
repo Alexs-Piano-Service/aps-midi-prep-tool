@@ -3,6 +3,7 @@
 from pathlib import Path
 import errno
 import json
+import struct
 import threading
 import wave
 
@@ -114,6 +115,68 @@ def test_silent_audio_tail_is_retained_in_midi_song_length(tmp_path, music, monk
     paired_audio.export_midi_mp3([(0, b"\x90\x3c\x50"), (0.01, b"\x80\x3c\x00")],
                                  source, tmp_path / "song")
     assert mido.MidiFile(tmp_path / "song.mid").length == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize('header_shortfall', [1, 2, 3, 18])
+def test_partial_final_frame_in_wav_header_preserves_all_declared_complete_frames(
+    tmp_path, music, monkeypatch, header_shortfall,
+):
+    source, pcm = music
+    malformed = bytearray(source.read_bytes())
+    for position in (4, 40):
+        size = struct.unpack_from('<I', malformed, position)[0]
+        struct.pack_into('<I', malformed, position, size - header_shortfall)
+    source.write_bytes(malformed)
+    captured = _fake_encoder(monkeypatch)
+
+    result = paired_audio.export_midi_mp3(
+        [(0, b'\x90\x3c\x50'), (.01, b'\x80\x3c\x00')], source, tmp_path / 'song')
+
+    omitted_frames = (header_shortfall + 3) // 4
+    params, payload = captured[0]
+    assert params.nframes == len(pcm) - omitted_frames
+    np.testing.assert_array_equal(np.frombuffer(payload, dtype='<i2').reshape(-1, 2),
+                                  pcm[:-omitted_frames])
+    assert (tmp_path / result['midi']).is_file()
+    assert (tmp_path / result['audio']).is_file()
+    assert source.read_bytes() == malformed
+
+
+def test_riff_metadata_after_audio_is_not_exported_as_pcm(tmp_path, music, monkeypatch):
+    source, pcm = music
+    tagged = bytearray(source.read_bytes())
+    tagged.extend(struct.pack('<4sI', b'JUNK', 12) + b'not-audio!!!')
+    struct.pack_into('<I', tagged, 4, len(tagged) - 8)
+    source.write_bytes(tagged)
+    captured = _fake_encoder(monkeypatch)
+
+    paired_audio.export_midi_mp3(
+        [(0, b'\x90\x3c\x50'), (.01, b'\x80\x3c\x00')], source, tmp_path / 'song')
+
+    params, payload = captured[0]
+    assert params.nframes == len(pcm)
+    assert payload == pcm.astype('<i2').tobytes()
+    assert source.read_bytes() == tagged
+
+
+@pytest.mark.parametrize('missing_bytes', [1, 4, 18])
+def test_genuinely_truncated_pcm_is_rejected_without_playback_outputs(
+    tmp_path, music, monkeypatch, missing_bytes,
+):
+    source, _pcm = music
+    truncated = source.read_bytes()[:-missing_bytes]
+    source.write_bytes(truncated)
+    captured = _fake_encoder(monkeypatch)
+
+    with pytest.raises(ValueError, match='music WAV is truncated'):
+        paired_audio.export_midi_mp3(
+            [(0, b'\x90\x3c\x50'), (.01, b'\x80\x3c\x00')], source, tmp_path / 'song')
+
+    assert not captured
+    assert not (tmp_path / 'song.mid').exists()
+    assert not (tmp_path / 'song.mp3').exists()
+    assert not list(tmp_path.glob('.aps-paired-audio-*'))
+    assert source.read_bytes() == truncated
 
 
 def test_pair_exports_with_full_system_temp_using_destination_recovery(tmp_path, music, monkeypatch):

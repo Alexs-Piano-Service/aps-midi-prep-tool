@@ -39,6 +39,7 @@ _INNER_BASIS = np.column_stack((np.cos(2 * np.pi * _INNER_SAMPLES / 7),
                                 np.sin(2 * np.pi * _INNER_SAMPLES / 7)))
 _INNER_INVERSE = np.linalg.pinv(_INNER_BASIS).T
 _MAX_SYSEX_BYTES = 65536
+_EDGE_IDLE_SYMBOLS = 64
 
 
 class DisklavierDecodeError(ValueError):
@@ -133,7 +134,82 @@ def _acquire(samples, cancel):
     return best[1:]
 
 
-def _read_symbols(reader, channel, offset, threshold, cancel, report):
+def _idle_fragment(reader, channel, start, end, threshold, cancel):
+    """Recognize a short transport preamble on its own symbol clock.
+
+    A CD track boundary can contain idle from the adjacent track. Require
+    every non-silent sample, including partial symbols, to match an idle-only
+    waveform. This does not classify a short unknown carrier as disposable.
+    """
+    _check_cancel(cancel)
+    if not 6 * SAMPLES_PER_SYMBOL <= end - start <= (_EDGE_IDLE_SYMBOLS + 4) * SAMPLES_PER_SYMBOL:
+        return False
+    reader.setpos(start)
+    raw = reader.readframes(end - start)
+    if len(raw) != (end - start) * 4:
+        return False
+    samples = np.frombuffer(raw, dtype='<i2').reshape(-1, 2)[:, channel].astype(float)
+    active = np.flatnonzero(np.abs(samples) > threshold)
+    if not len(active):
+        return False
+    samples = samples[active[0]:active[-1] + 1]
+    if len(samples) < 6 * SAMPLES_PER_SYMBOL:
+        return False
+    for boundary in range(SAMPLES_PER_SYMBOL):
+        positions = np.arange(len(samples)) - boundary
+        angle = (2 * np.pi * (positions % SAMPLES_PER_SYMBOL) / 7
+                 - 7 * _PHASE_QUANTUM * (positions // SAMPLES_PER_SYMBOL))
+        basis = np.column_stack((np.cos(angle), np.sin(angle)))
+        coefficients = np.linalg.lstsq(basis, samples, rcond=None)[0]
+        amplitude = np.linalg.norm(coefficients)
+        if (amplitude > threshold and
+                np.max(np.abs(samples - basis @ coefficients)) <= max(2.0, amplitude * .001)):
+            return True
+    return False
+
+
+def _confirmed_impulse_symbol(reader, channel, offset, index, threshold, expected, cancel):
+    """Confirm unchanged symbols despite up to three isolated PCM outliers.
+
+    Eleven of fourteen samples must independently describe the same precise
+    sinusoid. Both resulting transitions must agree with the original full
+    and inner integration windows; no MIDI symbol is replaced or inferred.
+    """
+    _check_cancel(cancel)
+    reader.setpos(offset + (index - 1) * SAMPLES_PER_SYMBOL)
+    raw = reader.readframes(3 * SAMPLES_PER_SYMBOL)
+    if len(raw) != 3 * SAMPLES_PER_SYMBOL * 4:
+        return False
+    blocks = np.frombuffer(raw, dtype='<i2').reshape(-1, 2)[:, channel].reshape(3, SAMPLES_PER_SYMBOL)
+    phases, _, _ = _measure(blocks)
+    inner = blocks[:, 1:13].astype(float) @ _INNER_INVERSE
+    inner_values, _ = _phase_symbols(np.arctan2(inner[:, 1], inner[:, 0]))
+    if not np.array_equal(inner_values, expected):
+        return False
+    positions = np.arange(SAMPLES_PER_SYMBOL)
+    basis = np.column_stack((np.cos(2 * np.pi * positions / 7), np.sin(2 * np.pi * positions / 7)))
+    samples = blocks[1].astype(float)
+    candidates = []
+    for begin in range(8):
+        coefficients = np.linalg.lstsq(basis[begin:begin + 7], samples[begin:begin + 7], rcond=None)[0]
+        amplitude = np.linalg.norm(coefficients)
+        matching = np.abs(samples - basis @ coefficients) <= max(2.0, amplitude * .001)
+        if amplitude <= threshold or np.count_nonzero(matching) < 11:
+            continue
+        coefficients = np.linalg.lstsq(basis[matching], samples[matching], rcond=None)[0]
+        candidates.append(np.arctan2(coefficients[1], coefficients[0]))
+    if not candidates or np.any(np.abs(np.angle(np.exp(1j * (np.asarray(candidates) - candidates[0])))) > .001):
+        return False
+    phases[1] = candidates[0]
+    values, error = _phase_symbols(phases)
+    return bool(np.array_equal(values, expected) and np.all(error <= .45))
+
+
+def _read_symbols(reader, channel, offset, threshold, cancel, report, *, diagnostics=None):
+    if diagnostics is None:
+        diagnostics = {}
+    diagnostics.update(validated_idle_fragments=[], confirmed_impulse_symbols=0,
+                       confirmed_impulse_times_seconds=[])
     reader.setpos(offset)
     symbols, flags = [], []
     previous_phase = previous_inner = None
@@ -176,6 +252,39 @@ def _read_symbols(reader, channel, offset, threshold, cancel, report):
     values, quality = np.concatenate(symbols), np.concatenate(flags)
     active_indices = np.flatnonzero(quality & 1)
     carrier_indices = np.flatnonzero(quality & 4)
+    gaps = np.flatnonzero(np.diff(active_indices) > 16)
+    if len(gaps):
+        split = int(gaps[-1]) + 1
+        tail = active_indices[split:]
+        if (tail[-1] >= total - 2 and tail[-1] - tail[0] < _EDGE_IDLE_SYMBOLS
+                and _idle_fragment(reader, channel, max(0, offset + (int(tail[0]) - 2) * SAMPLES_PER_SYMBOL),
+                                   reader.getnframes(), threshold, cancel)):
+            diagnostics['validated_idle_fragments'].append({
+                'position': 'trailing',
+                'start_seconds': max(0, offset + (int(tail[0]) - 2) * SAMPLES_PER_SYMBOL) / SAMPLE_RATE,
+                'end_seconds': reader.getnframes() / SAMPLE_RATE,
+            })
+            active_indices = active_indices[:split]
+            carrier_indices = carrier_indices[carrier_indices <= active_indices[-1]]
+    # A leading preamble can similarly change clocks before any MIDI starts.
+    # Only a sample-verified idle prefix may be excluded, followed by a clean
+    # main-clock acquisition interval. Random noise and MIDI-bearing prefixes
+    # retain the strict validation below.
+    limit = min(_EDGE_IDLE_SYMBOLS, len(values))
+    if len(active_indices) and active_indices[0] < limit:
+        early_bad = ((quality[:limit] & 3) != 3) | (values[:limit] != 15)
+        for beginning in range(6, limit - 8):
+            if (not np.any(early_bad[beginning + 2:limit])
+                    and np.any(early_bad[2:beginning + 2])
+                    and _idle_fragment(reader, channel, 0, offset + beginning * SAMPLES_PER_SYMBOL,
+                                       threshold, cancel)):
+                diagnostics['validated_idle_fragments'].append({
+                    'position': 'leading', 'start_seconds': 0.0,
+                    'end_seconds': (offset + beginning * SAMPLES_PER_SYMBOL) / SAMPLE_RATE,
+                })
+                active_indices = active_indices[active_indices >= beginning]
+                carrier_indices = carrier_indices[carrier_indices >= beginning]
+                break
     if len(carrier_indices):
         # Some transfers contain a brief click in the silence outside a valid
         # performance. Amplitude alone must not extend the control interval to
@@ -196,6 +305,21 @@ def _read_symbols(reader, channel, offset, threshold, cancel, report):
     first, last = int(active_indices[0]) + 2, int(active_indices[-1]) - 1
     if last - first < 16 or np.any(values[first:first + 8] != 15) or np.any(values[last - 8:last] != 15):
         raise DisklavierDecodeError("The control signal has no intact acquisition or ending idle interval.")
+    doubtful = np.flatnonzero((quality[first:last] & 3) != 3) + first
+    # A neighboring uncertain symbol or a dropout is never repaired. Confirm
+    # isolated sample outliers only when all three independent readings agree.
+    for index in doubtful:
+        if (quality[index] & 1 and (quality[index - 1] & 3) == 3
+                and (quality[index + 1] & 3) == 3
+                and _confirmed_impulse_symbol(reader, channel, offset, int(index), threshold,
+                                               values[index:index + 2], cancel)):
+            quality[index] |= 2
+            diagnostics['confirmed_impulse_symbols'] += 1
+            if len(diagnostics['confirmed_impulse_times_seconds']) < 100:
+                diagnostics['confirmed_impulse_times_seconds'].append(
+                    (offset + int(index) * SAMPLES_PER_SYMBOL) / SAMPLE_RATE)
+            else:
+                diagnostics['confirmed_impulse_times_truncated'] = True
     if np.any((quality[first:last] & 3) != 3):
         raise DisklavierDecodeError("The control signal is damaged or uncertain; no MIDI was extracted.")
     return values[first:last], first, minimum_fit, maximum_error
@@ -379,8 +503,9 @@ def decode_disklavier_audio(source_path, music_wav_path, *, cancel=None, progres
             else:
                 raise NotEncodedAudioError(
                     "No reliable Yamaha control channel was found in this audio.")
+            diagnostics = {}
             values, first, minimum_fit, maximum_error = _read_symbols(
-                reader, channel, offset, threshold, cancel, report)
+                reader, channel, offset, threshold, cancel, report, diagnostics=diagnostics)
             events = _parse_messages(values, first, offset, cancel)
             report(0.75)
             staged = folder / "music.wav"
@@ -414,6 +539,7 @@ def decode_disklavier_audio(source_path, music_wav_path, *, cancel=None, progres
         "maximum_phase_error_symbols": maximum_error,
         "midi_advance_seconds": 0.0,
         "hardware_verified": False,
+        **diagnostics,
     }
     return DecodedDisklavierAudio(events, destination, control_channel,
                                  frame_count / SAMPLE_RATE, metadata)

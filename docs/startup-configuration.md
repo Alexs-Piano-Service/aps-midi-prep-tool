@@ -191,7 +191,7 @@ Every entry in this table accepts an absolute or relative path string.
 | `emulator_image_output` | Build Emulator Disk Set output folder, such as `./Nalbantov`. |
 | `disk_recovery_image_path` | Initial image path in Recover Damaged Image. |
 
-Disklavier WAV Player remembers `disklavier_wav_folder`, the last folder used
+Disklavier Audio Player remembers `disklavier_wav_folder`, the last folder used
 to open an encoded WAV.
 
 Smart PianoSoft remembers `sps_source` (floppy device, image, or extracted
@@ -214,7 +214,7 @@ it is not treated as agreement and does not suppress the new dialog.
 | `language` | String: `en`, `es`, `fr`, `de`, `it`, `pt-BR`, `bg`, `nl`, `pl`, `ja`, `ko`, `zh-Hans`. |
 | `appearance_mode` | String: `system`, `light`, `dark`. |
 | `font_scale` | String: `large`, `regular`, `small`, `compact`. Large increases text and spacing by 20% over Regular. |
-| `disklavier_wav_balance` | Integer from `0` (piano only) to `100` (accompaniment only). The default `50` plays both equally in Disklavier WAV Player; subsequent slider changes are remembered. |
+| `disklavier_wav_balance` | Integer from `0` (piano only) to `100` (accompaniment only). The default `50` plays both equally in Disklavier Audio Player; subsequent slider changes are remembered. |
 | `hide_status` | Boolean: hide the status area. |
 | `hide_quick_panel` | Boolean: hide the quick controls. |
 | `hide_album_metadata` | Boolean: hide album metadata controls. |

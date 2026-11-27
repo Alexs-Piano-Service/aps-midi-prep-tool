@@ -151,6 +151,126 @@ def test_isolated_noncarrier_edge_impulses_preserve_complete_music_and_midi(tmp_
     assert source.read_bytes() == before
 
 
+def _idle_pcm(frames, boundary=0):
+    positions = np.arange(frames) - boundary
+    angle = (2 * np.pi * (positions % 14) / 7
+             - (positions // 14) * 7 * np.pi / 8 + np.pi / 4)
+    return np.rint(8192 * np.cos(angle)).astype('<i2')
+
+
+@pytest.mark.parametrize('edge', ['leading', 'trailing', 'both'])
+@pytest.mark.parametrize('boundary', [1, 5, 13])
+def test_idle_only_cd_boundary_fragments_keep_complete_performance(tmp_path, edge, boundary):
+    source, expected = _encoded(tmp_path)
+    samples = _read(source)
+    shift = 0
+    if edge in {'leading', 'both'}:
+        # A different clock's idle runs directly into the main preamble.
+        # Remove the encoder's silent leader to model this CD boundary.
+        prefix = np.zeros((13 * 14 + 5, 2), dtype='<i2')
+        prefix[:, 1] = _idle_pcm(len(prefix), boundary)
+        samples = np.r_[prefix, samples[92 * 14:]]
+        shift = (len(prefix) - 92 * 14) / SAMPLE_RATE
+    if edge in {'trailing', 'both'}:
+        # Include a partial symbol at EOF: it must also match idle exactly.
+        suffix = np.zeros((8 * 14 + 4, 2), dtype='<i2')
+        suffix[:, 1] = _idle_pcm(len(suffix), boundary)
+        samples = np.r_[samples, np.zeros((SAMPLE_RATE, 2), dtype='<i2'), suffix]
+    _write(source, samples)
+    before = source.read_bytes()
+    result = decode_disklavier_audio(source, tmp_path / 'clean.wav')
+    assert [event.data for event in result.events] == [data for _, data in expected]
+    for actual, (seconds, _) in zip(result.events, expected):
+        assert actual.time_seconds == pytest.approx(seconds + .5 + shift, abs=1 / 3150)
+    assert np.array_equal(_read(result.music_path)[:, 0], samples[:, 0])
+    assert result.source_duration_seconds == len(samples) / SAMPLE_RATE
+    assert source.read_bytes() == before
+    assert {row['position'] for row in result.report['validated_idle_fragments']} == (
+        {'leading', 'trailing'} if edge == 'both' else {edge})
+    assert all(row['start_seconds'] < row['end_seconds']
+               for row in result.report['validated_idle_fragments'])
+
+
+@pytest.mark.parametrize('damage', ['leading_message', 'trailing_message', 'partial_final_symbol',
+                                    'long_fragment', 'interior_idle_restart'])
+def test_idle_fragment_recognition_never_drops_data_or_interior_gaps(tmp_path, damage):
+    source, _ = _encoded(tmp_path)
+    samples = _read(source)
+    fragment = np.zeros((20 * 14, 2), dtype='<i2')
+    fragment[:, 1] = _idle_pcm(len(fragment), 5)
+    if damage in {'leading_message', 'trailing_message'}:
+        # Two non-idle nibbles carry a realtime MIDI byte. Even a message this
+        # short must not be discarded as an otherwise convincing preamble.
+        from aps_midi_prep_tool_app.disklavier_audio import modulate_nibbles
+        fragment[:, 1], _ = modulate_nibbles([15] * 8 + [12, 8] + [15] * 10)
+    elif damage == 'partial_final_symbol':
+        fragment = np.r_[fragment, np.array([[0, 30000]], dtype='<i2')]
+    elif damage == 'long_fragment':
+        fragment = np.zeros((80 * 14, 2), dtype='<i2')
+        fragment[:, 1] = _idle_pcm(len(fragment), 5)
+    if damage == 'leading_message':
+        samples = np.r_[fragment, samples[92 * 14:]]
+    elif damage == 'interior_idle_restart':
+        start = 14 * round(1.4 * 3150)
+        samples = np.r_[samples[:start], np.zeros((140, 2), dtype='<i2'), fragment, samples[start:]]
+    else:
+        samples = np.r_[samples, np.zeros((SAMPLE_RATE, 2), dtype='<i2'), fragment]
+    _write(source, samples)
+    before = source.read_bytes()
+    destination = tmp_path / 'clean.wav'
+    with pytest.raises(DisklavierDecodeError):
+        decode_disklavier_audio(source, destination)
+    assert not destination.exists()
+    assert source.read_bytes() == before
+
+
+@pytest.mark.parametrize('symbol', [1000, 2514])
+@pytest.mark.parametrize('outliers', [1, 3])
+def test_exact_carrier_consensus_confirms_unchanged_idle_and_message_symbols(tmp_path, symbol, outliers):
+    source, expected = _encoded(tmp_path)
+    samples = _read(source)
+    # These symbols carry idle and a controller status respectively. Keep
+    # eleven or thirteen exact sinusoidal samples, with isolated PCM spikes.
+    positions, changes = (([0], [-14000]) if outliers == 1 else
+                          ([0, 11, 12], [-6000, 6000, -6000]))
+    for position, change in zip(positions, changes):
+        samples[symbol * 14 + position, 1] += change
+    _write(source, samples)
+    before = source.read_bytes()
+    result = decode_disklavier_audio(source, tmp_path / 'clean.wav')
+    assert [event.data for event in result.events] == [data for _, data in expected]
+    for actual, (seconds, _) in zip(result.events, expected):
+        assert actual.time_seconds == pytest.approx(seconds + .5, abs=1 / 3150)
+    assert result.report['minimum_carrier_fit'] < .82
+    assert result.report['confirmed_impulse_symbols'] == 1
+    assert result.report['confirmed_impulse_times_seconds'] == [symbol * 14 / SAMPLE_RATE]
+    assert np.array_equal(_read(result.music_path)[:, 0], samples[:, 0])
+    assert source.read_bytes() == before
+
+
+@pytest.mark.parametrize('damage', ['adjacent_doubtful', 'would_change_symbols', 'insufficient_consensus'])
+def test_carrier_consensus_does_not_repair_missing_or_different_symbols(tmp_path, damage):
+    source, _ = _encoded(tmp_path)
+    samples = _read(source)
+    symbol = 1000
+    if damage == 'adjacent_doubtful':
+        samples[symbol * 14, 1] -= 14000
+        samples[(symbol + 1) * 14, 1] -= 14000
+    elif damage == 'would_change_symbols':
+        # Thirteen samples still describe the original carrier, but both
+        # integration windows now read different nibbles. Never replace them.
+        samples[symbol * 14 + 1, 1] = -32000
+    else:
+        samples[symbol * 14:symbol * 14 + 4, 1] = 30000
+    _write(source, samples)
+    before = source.read_bytes()
+    destination = tmp_path / 'clean.wav'
+    with pytest.raises(DisklavierDecodeError, match='damaged or uncertain'):
+        decode_disklavier_audio(source, destination)
+    assert not destination.exists()
+    assert source.read_bytes() == before
+
+
 @pytest.mark.parametrize("damage", ["second_performance", "short_carrier", "interior_gap",
                                     "last_note_missing", "near_edge_noise", "long_edge_noise"])
 def test_edge_noise_tolerance_never_discards_possible_control_or_incomplete_notes(tmp_path, damage):

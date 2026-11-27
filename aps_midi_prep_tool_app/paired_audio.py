@@ -98,13 +98,18 @@ def _copy_pcm(source, destination, preroll_frames, cancel):
                 frames = min(65536, remaining)
                 outgoing.writeframesraw(bytes(frames * channels * 2))
                 remaining -= frames
-            copied = 0
-            while block := incoming.readframes(65536):
+            # WAV headers can leave an incomplete sample frame at the end of
+            # the data chunk. Preserve every declared complete frame, without
+            # treating those extra bytes as either music or missing PCM.
+            remaining = count
+            while remaining:
                 check_cancel(cancel)
+                frames = min(65536, remaining)
+                block = incoming.readframes(frames)
+                if len(block) != frames * channels * 2:
+                    raise ValueError("The music WAV is truncated.")
                 outgoing.writeframesraw(block)
-                copied += len(block)
-            if copied != count * channels * 2:
-                raise ValueError("The music WAV is truncated.")
+                remaining -= frames
     return count, channels
 
 

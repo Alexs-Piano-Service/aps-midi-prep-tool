@@ -1,12 +1,12 @@
-"""Messages for the standalone Disklavier WAV player utility."""
+"""Messages for the standalone Disklavier Audio Player utility."""
 
 _LANGUAGES = ("en", "es", "fr", "de", "it", "pt-BR", "bg", "nl", "pl", "ja", "ko", "zh-Hans")
 _ROWS = {
     "action": (
-        "Disklavier WAV Player...", "Reproductor WAV Disklavier...", "Lecteur WAV Disklavier...",
-        "Disklavier-WAV-Player...", "Lettore WAV Disklavier...", "Reprodutor WAV Disklavier...",
-        "Плейър за Disklavier WAV...", "Disklavier WAV-speler...", "Odtwarzacz WAV Disklavier...",
-        "Disklavier WAVプレーヤー...", "Disklavier WAV 플레이어...", "Disklavier WAV 播放器...",
+        "Disklavier Audio Player...", "Reproductor de audio Disklavier...", "Lecteur audio Disklavier...",
+        "Disklavier-Audioplayer...", "Lettore audio Disklavier...", "Reprodutor de áudio Disklavier...",
+        "Аудиоплейър Disklavier...", "Disklavier-audiospeler...", "Odtwarzacz audio Disklavier...",
+        "Disklavier オーディオプレーヤー...", "Disklavier 오디오 플레이어...", "Disklavier 音频播放器...",
     ),
     "description": (
         "Open an encoded WAV or MP3, or a MIDI file with a same-name WAV or MP3 in the same folder.",

@@ -379,18 +379,51 @@ def _has_legacy_block_lengths(data, stream_start, *, container_variant=None):
         return False
     stream_length = int.from_bytes(data[0x1F:0x23], "little")
     used_length = int.from_bytes(data[3:7], "little")
-    return stream_length > 0 and stream_length % 2048 == 0 and used_length in {
-        min(stream_start + stream_length - adjustment, 0xFFFF)
-        for adjustment in (0x100, 0x200)
-    }
+    return stream_length > 0 and stream_length % 2048 == 0 and (
+        used_length in {
+            min(stream_start + stream_length - adjustment, 0xFFFF)
+            for adjustment in (0x100, 0x200)
+        }
+        # Some writers saturate the total as soon as the block count reaches
+        # 64 KiB, even though the smaller control-word estimate has not.
+        or (stream_length >= 0x10000 and used_length == 0xFFFF)
+    )
 
 
-def _legacy_eseq_stream_end(data, stream_start):
+def _has_legacy_placeholder_length(data, stream_start, *, container_variant=None):
+    """Recognize the fixed 0x50/0xFFFF lengths in an older detailed-pedal header."""
+    if container_variant is None:
+        container_variant = _detect_eseq_container(data)
+    return (
+        container_variant == ESEQ_CONTAINER_DISKLAVIER and stream_start == ESEQ_HEADER_SIZE
+        and len(data) >= ESEQ_HEADER_SIZE and data[0] == 0xFE
+        and data[0x17:0x1F] == bytes.fromhex("80 00 40 00 50 00 00 00")
+        and int.from_bytes(data[3:7], "little") == 0xFFFF
+        and int.from_bytes(data[0x1F:0x23], "little") == 0x50
+        and data[0x43:0x47] == bytes.fromhex("00 77 01 00")
+    )
+
+
+def _has_q11_total_length(data, stream_start, *, container_variant=None):
+    """Recognize Q11's padded total-size field, distinct from stream counts."""
+    if container_variant is None:
+        container_variant = _detect_eseq_container(data)
+    if (container_variant != ESEQ_CONTAINER_Q11 or stream_start != Q11_EVENT_STREAM_START
+            or len(data) < Q11_EVENT_STREAM_START or data[0] != 0xFE
+            or data[0x17:0x1F] != bytes.fromhex("80 00 00 00 D9 01 00 00")):
+        return False
+    total = int.from_bytes(data[0x1F:0x23], "little")
+    return (total > stream_start and total % 2048 == 0
+            and int.from_bytes(data[3:7], "little") == min(total, 0xFFFF))
+
+
+def _legacy_eseq_stream_end(data, stream_start, *, allow_allocation_slack=False):
     """Validate a legacy stream through its stop opcode, within physical EOF.
 
     A raw F2 search could stop inside a command operand. Apply the same command
-    and payload rules as the parser, and require padding only after the stop.
-    A damaged continuation must fail, never fall back to a plausible short song.
+    and payload rules as the parser. Legacy FIL copies rounded to 1024 bytes can
+    retain opaque allocation slack after the stop in their final block. Other
+    trailing bytes must be padding; damaged commands before the stop still fail.
     """
     pos = stream_start
 
@@ -404,7 +437,10 @@ def _legacy_eseq_stream_end(data, stream_start):
         if status < 0x80 or status == _ESEQ_PADDING_BYTE:
             continue
         if status == 0xF2:
-            if any(value not in (0, _ESEQ_PADDING_BYTE) for value in data[pos:]):
+            allocation_slack = (allow_allocation_slack and len(data) % 1024 == 0
+                                and 0 <= len(data) - pos < 1024)
+            if (not allocation_slack
+                    and any(value not in (0, _ESEQ_PADDING_BYTE) for value in data[pos:])):
                 raise EseqConversionError("Unexpected trailing data after the legacy E-SEQ end marker.")
             return pos
         if status == 0xF0:
@@ -449,7 +485,14 @@ def _declared_stream_end(data, stream_start, *, container_variant=None):
     if container_variant is None:
         container_variant = _detect_eseq_container(data)
     if _has_legacy_block_lengths(data, stream_start, container_variant=container_variant):
+        return _legacy_eseq_stream_end(data, stream_start, allow_allocation_slack=True)
+    if _has_legacy_placeholder_length(data, stream_start, container_variant=container_variant):
         return _legacy_eseq_stream_end(data, stream_start)
+    if _has_q11_total_length(data, stream_start, container_variant=container_variant):
+        total = int.from_bytes(data[0x1F:0x23], "little")
+        if total > len(data):
+            raise EseqConversionError("The Q11 E-SEQ container is incomplete.")
+        return _legacy_eseq_stream_end(data[:total], stream_start)
     if container_variant == ESEQ_CONTAINER_CLAVINOVA_MDA and len(data) >= 0x23:
         used_length = int.from_bytes(data[0x1F:0x23], "little")
         if stream_start < used_length <= len(data):

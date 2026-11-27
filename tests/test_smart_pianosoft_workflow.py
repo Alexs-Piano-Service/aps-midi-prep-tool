@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import struct
 import threading
 import wave
 
@@ -154,6 +155,130 @@ def test_paired_album_reuses_fingerprint_alignment_and_delivers_matching_midi_mp
                                 for event in album.tracks[0].metadata.events], atol=0.00005)
 
 
+@pytest.mark.parametrize("output_format", ["encoded_wav", "midi_mp3"])
+def test_paired_mp3_preserves_source_and_synchronizes_decoded_pcm(tmp_path, album_files, output_format, monkeypatch):
+    if not audio_tools.find_lame_command():
+        pytest.skip("LAME is unavailable")
+    source, audio, _pcm = album_files
+    mp3 = tmp_path / "Accompaniment.MP3"
+    audio_tools.encode_mp3(audio, mp3)
+    original = mp3.read_bytes()
+    decoded = tmp_path / "expected.wav"
+    audio_tools.decode_mp3(mp3, decoded)
+    album = _scan(tmp_path, source)
+    updates = []
+    # Enough for this album's actual PCM and playback files, but less than a
+    # worst-case low-bitrate multiplier would demand for its ordinary MP3.
+    usage_type = type(shutil.disk_usage(tmp_path))
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: usage_type(200 << 20, 120 << 20, 80 << 20))
+
+    folder = prepare_album(album, tmp_path, audio_paths={1: mp3}, output_format=output_format,
+                           progress=updates.append)
+
+    report = json.loads((folder / "manifest.json").read_text())
+    assert report["status"] == "complete"
+    assert mp3.read_bytes() == original == (folder / "MP3/Paired01.mp3").read_bytes()
+    assert (folder / "WAV/Paired01.wav").read_bytes() == decoded.read_bytes()
+    preserved = {entry["file"]: entry for entry in report["audio"]}
+    assert preserved["MP3/Paired01.mp3"]["sha256"] == hashlib.sha256(original).hexdigest()
+    assert preserved["WAV/Paired01.wav"]["sha256"] == hashlib.sha256(decoded.read_bytes()).hexdigest()
+    assert preserved["WAV/Paired01.wav"]["decoded_from"] == "MP3/Paired01.mp3"
+    assert any(event["phase"] == "prepare_audio" for event in updates)
+    track = report["tracks"][0]
+    assert track["audio"] == "WAV/Paired01.wav"
+    assert track["alignment"]["confidence"] > .98
+    if output_format == "encoded_wav":
+        assert (folder / track["encoded"]).is_file()
+    else:
+        midi, music = folder / track["prepared_midi"], folder / track["prepared_audio"]
+        assert midi.is_file() and music.is_file() and midi.stem == music.stem
+        assert [event for _, event in read_midi_events(midi)] == [event.data for event in album.tracks[0].metadata.events]
+
+
+def test_mp3_input_requires_lame_before_creating_encoded_wav_album(tmp_path, album_files, monkeypatch):
+    source, _audio, _pcm = album_files
+    mp3 = tmp_path / "music.mp3"
+    mp3.write_bytes(b"unread compressed source")
+    album = _scan(tmp_path, source)
+    before = set(tmp_path.iterdir())
+    monkeypatch.setattr(audio_tools, "find_lame_command", lambda: "")
+    monkeypatch.setattr(media, "read_cd_toc", lambda *_a, **_kw: pytest.fail("CD accessed before LAME preflight"))
+    with pytest.raises(RuntimeError, match="LAME is required to read or export MP3"):
+        prepare_album(album, tmp_path, audio_paths={1: mp3}, output_format="encoded_wav")
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_cancelled_mp3_decode_retains_verified_original_without_partial_pcm(tmp_path, album_files, monkeypatch):
+    source, _audio, _pcm = album_files
+    mp3 = tmp_path / "music.mp3"
+    original = b"synthetic compressed source"
+    mp3.write_bytes(original)
+    cancelled = threading.Event()
+    monkeypatch.setattr(audio_tools, "find_lame_command", lambda: "synthetic-lame")
+
+    def decode(copied, destination, *, cancel):
+        assert copied != mp3 and copied.read_bytes() == original and cancel is cancelled
+        destination.write_bytes(b"unfinished PCM")
+        cancel.set()
+        raise InterruptedError("Audio conversion cancelled.")
+
+    monkeypatch.setattr(audio_tools, "decode_mp3", decode)
+    with pytest.raises(AlbumBuildError, match="cancelled") as caught:
+        prepare_album(_scan(tmp_path, source), tmp_path, audio_paths={1: mp3}, cancel=cancelled)
+    folder = caught.value.output_directory
+    report = json.loads((folder / "manifest.json").read_text())
+    assert report["status"] == "cancelled" and not report["tracks"]
+    assert report["audio"] == [{"paired_song": 1, "file": "MP3/Paired01.mp3",
+                                "sha256": hashlib.sha256(original).hexdigest()}]
+    assert (folder / "MP3/Paired01.mp3").read_bytes() == mp3.read_bytes() == original
+    assert not list((folder / "WAV").iterdir()) and not list((folder / "Disklavier").iterdir())
+    assert not list(folder.glob(".paired-audio-*"))
+
+
+@pytest.mark.parametrize("sample_rate,channels", [(22050, 2), (44100, 1)])
+def test_mp3_decoding_does_not_silently_resample_or_upmix(tmp_path, album_files, monkeypatch, sample_rate, channels):
+    source, _audio, _pcm = album_files
+    mp3 = tmp_path / "music.mp3"
+    mp3.write_bytes(b"synthetic compressed source")
+    monkeypatch.setattr(audio_tools, "find_lame_command", lambda: "synthetic-lame")
+
+    def decode(_source, destination, **_kwargs):
+        with wave.open(str(destination), "wb") as output:
+            output.setparams((channels, 2, sample_rate, 0, "NONE", "not compressed"))
+            output.writeframes(b"\x01\x00" * channels * 100)
+
+    monkeypatch.setattr(audio_tools, "decode_mp3", decode)
+    with pytest.raises(AlbumBuildError, match="must decode to stereo, 44.1 kHz") as caught:
+        prepare_album(_scan(tmp_path, source), tmp_path, audio_paths={1: mp3})
+    folder = caught.value.output_directory
+    assert not list((folder / "WAV").iterdir()) and not list((folder / "Disklavier").iterdir())
+    assert not list(folder.glob(".paired-audio-*"))
+
+
+@pytest.mark.parametrize("partial_bytes", [1, 2, 3])
+def test_paired_wav_preserves_complete_frames_and_original_trailing_bytes(tmp_path, partial_bytes):
+    from aps_midi_prep_tool_app.smart_pianosoft_workflow import _copy_wav
+
+    source, copied = tmp_path / "source.wav", tmp_path / "copied.wav"
+    with wave.open(str(source), "wb") as audio:
+        audio.setparams((2, 2, 44100, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00\x02\x00" * 10)
+    payload = bytearray(source.read_bytes())
+    struct.pack_into("<I", payload, 40, 40 + partial_bytes)
+    struct.pack_into("<I", payload, 4, len(payload) - 8 + partial_bytes)
+    payload.extend(b"\x7f" * partial_bytes + b"outside RIFF")
+    source.write_bytes(payload)
+
+    _copy_wav(source, copied)
+
+    assert copied.read_bytes() == source.read_bytes() == payload
+    missing_frame = tmp_path / "missing.wav"
+    missing_frame.write_bytes(payload[:44 + 39])
+    with pytest.raises(ValueError, match="empty or truncated"):
+        _copy_wav(missing_frame, tmp_path / "rejected.wav")
+    assert not (tmp_path / "rejected.wav").exists()
+
+
 @pytest.mark.parametrize("catalog_option", ["generate_yamaha_catalogs", "preserve_yamaha_catalogs"])
 def test_compatible_paired_album_writes_current_titles_and_retains_opaque_catalog_fields(tmp_path, album_files,
                                                                                      catalog_option):
@@ -284,9 +409,17 @@ def test_changed_snapshot_refuses_to_encode(tmp_path, album_files):
     assert set(tmp_path.iterdir()) == before
 
 
-def test_wrong_manual_pairing_retains_originals_but_never_encodes_a_guess(tmp_path, album_files):
+@pytest.mark.parametrize("input_format", ["wav", "mp3"])
+def test_wrong_manual_pairing_retains_originals_but_never_encodes_a_guess(tmp_path, album_files, input_format):
     source, audio, pcm = album_files
     _wav(audio, np.random.default_rng(929).integers(-12000, 12000, pcm.shape, dtype=np.int16))
+    if input_format == "mp3":
+        if not audio_tools.find_lame_command():
+            pytest.skip("LAME is unavailable")
+        mp3 = tmp_path / "wrong.mp3"
+        audio_tools.encode_mp3(audio, mp3)
+        audio = mp3
+    original_audio = audio.read_bytes()
     album = _scan(tmp_path, source)
     with pytest.raises(AlbumBuildError, match="does not match") as error:
         prepare_album(album, tmp_path, audio_paths={1: audio})
@@ -294,6 +427,9 @@ def test_wrong_manual_pairing_retains_originals_but_never_encodes_a_guess(tmp_pa
     assert json.loads((folder / "manifest.json").read_text())["status"] == "failed"
     assert not list((folder / "Disklavier").iterdir())
     assert (folder / "MIDI/01.MID").read_bytes() == (source / "01.MID").read_bytes()
+    assert audio.read_bytes() == original_audio
+    if input_format == "mp3":
+        assert (folder / "MP3/Paired01.mp3").read_bytes() == original_audio
 
 
 @pytest.mark.parametrize("ambiguous", [False, True])

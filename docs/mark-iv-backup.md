@@ -176,7 +176,8 @@ folder variant is used if necessary. Each playback folder receives `PDISK.MNG`
 for its album title and `PSONG.MNG` for song titles and order. Titles recovered
 from `PIANODIR.FIL` are carried into these MIDI catalogs. Available compatible
 MNG templates retain their other record fields; the archived catalogs remain
-unchanged.
+unchanged. When preparing an existing backup, APS matches these records using
+the original drive filenames, even if the backup renamed the archived files.
 
 For ENSPIRE / DKC-900, this cataloged playback tree is used only for albums
 with existing MIDI catalogs or `PIANODIR.FIL`. Existing catalogs are updated,
@@ -227,6 +228,14 @@ MIDI. Album names, song titles, and displayed track order are not used to guess
 a match. Both embedded audio fingerprints must pass before APS applies the
 alignment to the performance.
 
+A saved synchronization link can identify a different CD pressing from the
+piano album's original CD identity. APS follows that link's recorded CD identity
+and audio filename, then validates both fingerprints against the selected audio.
+When that edition is unavailable or the saved associations disagree, a complete
+CD track layout can identify alternate pressings to check. Every track boundary
+must agree within one second, and exactly one candidate recording must pass both
+fingerprints. The manifest records the candidates and validation results.
+
 Saved synchronization records, including `sps_offset`, are retained in the
 report as evidence. APS verifies the timing again against the audio instead of
 assuming those stored values have a universal meaning. Missing performances,
@@ -238,6 +247,10 @@ are reported. APS does not create a substitute performance for those songs.
 APS also examines WAV/MP3 files for Yamaha's phase-encoded piano control signal.
 It checks both channels, validates the recovered MIDI stream, and separates the
 music from the control channel. Swapped channels are detected automatically.
+Short idle fragments at track boundaries are accepted only when their samples
+match the idle waveform. Isolated PCM glitches are accepted only when independent
+measurements confirm the same control symbols; APS does not guess replacement
+MIDI bytes. These checks are recorded with the decoding results.
 Recovered music is mono because one channel of the original was used for
 control data. Ordinary paired recordings retain stereo accompaniment when
 exported as MIDI + MP3; new encoded WAVs mix the music to mono to leave a channel
@@ -255,6 +268,11 @@ PCM WAV, or MP3 that decodes to that format. Ordinary paired accompaniment can
 be 44.1 kHz, 16-bit mono or stereo PCM WAV, or suitable MP3. LAME is required to
 read MP3 or create MIDI/MP3 output. APS checks for it before starting an operation
 that needs it; install or restore LAME if that check fails.
+
+Paired export preserves every complete audio frame declared by the WAV header.
+An incomplete final frame does not cause a false truncation error; bytes outside
+the declared audio are not added to the music. If complete frames are missing,
+preparation fails and reports the truncated file. The original WAV is unchanged.
 
 When a standalone encoded WAV supplies the piano performance and encoded WAV
 output is selected, APS validates and copies its original bytes. MIDI/MP3 output

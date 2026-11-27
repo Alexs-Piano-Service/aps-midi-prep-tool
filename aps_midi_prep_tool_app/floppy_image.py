@@ -18,7 +18,7 @@ import uuid
 import zlib
 from bisect import bisect_right
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from .eseq_pianodir import (
     ESEQ_VARIANT_CLAVINOVA,
@@ -866,6 +866,16 @@ def format_floppy_recovery_diagnostics(diagnostics):
             scan = dict(scan or {})
             label = str(scan.get("format_label") or scan.get("format_key") or "Unknown")
             scan_parts = [label]
+            geometry = scan.get("geometry")
+            if geometry:
+                scan_parts.append(
+                    f"{geometry['bytes_per_sector']} bytes/sector, "
+                    f"{geometry['sectors_per_cluster']} sectors/cluster, "
+                    f"reserved sectors {geometry['reserved_sectors']}, "
+                    f"{geometry['num_fats']} FAT(s), "
+                    f"{geometry['sectors_per_fat']} sectors/FAT, "
+                    f"root entries {geometry['root_entries']}"
+                )
             if scan.get("selected_hint"):
                 scan_parts.append("selected")
             if scan.get("boot_hint"):
@@ -9223,23 +9233,18 @@ def _geometry_for_disk_format_hint(disk_format):
 
 
 def _recovery_geometries_for_data(data, disk_format_hint=None):
+    # Capacity does not determine the FAT, root, or cluster offsets. Keep the
+    # validated BPB first, retaining distinct layouts even at the same size.
+    candidates = [
+        _geometry_from_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR]),
+        _geometry_for_disk_format_hint(disk_format_hint),
+        *(_fat12_geometry_from_layout(layout) for layout in _PROTECTED_FAT12_LAYOUTS),
+        _yamaha_720_geometry(),
+    ]
     geometries = []
-    hinted_geometry = _geometry_for_disk_format_hint(disk_format_hint)
-    if hinted_geometry is not None and hinted_geometry.total_size <= len(data):
-        geometries.append(hinted_geometry)
-    geometry = _geometry_from_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR])
-    if (
-        geometry is not None
-        and geometry.total_size <= len(data)
-        and all(existing.total_size != geometry.total_size for existing in geometries)
-    ):
-        geometries.append(geometry)
-    for layout in _PROTECTED_FAT12_LAYOUTS:
-        candidate = _fat12_geometry_from_layout(layout)
-        if candidate.total_size <= len(data) and all(existing.total_size != candidate.total_size for existing in geometries):
+    for candidate in candidates:
+        if candidate is not None and candidate.total_size <= len(data) and candidate not in geometries:
             geometries.append(candidate)
-    if len(data) >= _YAMAHA_TOTAL_SIZE and all(existing.total_size != _YAMAHA_TOTAL_SIZE for existing in geometries):
-        geometries.append(_yamaha_720_geometry())
     return geometries
 
 
@@ -9593,26 +9598,10 @@ def _populate_recovery_scan_diagnostics(data, diagnostics, disk_format_hint=None
         if diagnostics["boot_sector_readable"]
         else None
     )
-    boot_layout = (
-        _protected_layout_hint_from_boot_sector(data[:sector_size])
-        if diagnostics["boot_sector_readable"]
-        else None
-    )
-    trusted_boot_geometry = (
-        boot_geometry
-        if boot_geometry is not None
-        and boot_layout is not None
-        and _layout_total_size(boot_layout) == boot_geometry.total_size
-        else None
-    )
-
     geometries = list(_recovery_geometries_for_data(data, disk_format_hint=disk_format_hint))
     hinted_geometry = _geometry_for_disk_format_hint(disk_format_hint)
-    if (
-        hinted_geometry is not None
-        and all(existing.total_size != hinted_geometry.total_size for existing in geometries)
-    ):
-        geometries.insert(0, hinted_geometry)
+    if hinted_geometry is not None and hinted_geometry not in geometries:
+        geometries.append(hinted_geometry)
 
     scans = []
     for geometry in geometries:
@@ -9620,8 +9609,7 @@ def _populate_recovery_scan_diagnostics(data, diagnostics, disk_format_hint=None
         available = len(data) >= geometry.total_size
         media_descriptor = (
             data[21]
-            if trusted_boot_geometry is not None
-            and trusted_boot_geometry.total_size == geometry.total_size
+            if boot_geometry == geometry
             and len(data) > 21
             else next(
                 (
@@ -9749,13 +9737,16 @@ def _populate_recovery_scan_diagnostics(data, diagnostics, disk_format_hint=None
                 "format_label": format_label,
                 "total_bytes": int(geometry.total_size),
                 "total_sectors": int(geometry.total_sectors),
-                "selected_hint": bool(
-                    isinstance(disk_format_hint, DiskFormat)
-                    and disk_format_hint.size_bytes == geometry.total_size
-                ),
+                "geometry": asdict(geometry),
+                "selected_hint": hinted_geometry == geometry,
                 "boot_hint": bool(
-                    trusted_boot_geometry is not None
-                    and trusted_boot_geometry.total_size == geometry.total_size
+                    boot_geometry == geometry
+                    and (
+                        _recovery_boot_geometry_is_known_layout(data[:sector_size], geometry)
+                        # Nonstandard BPBs need supporting filesystem evidence;
+                        # a plausible capacity alone is not format detection.
+                        or (any(fat_valid) and root_structurally_valid)
+                    )
                 ),
                 "image_has_full_geometry": bool(available),
                 "fat_copies_expected": int(geometry.num_fats),
@@ -9781,16 +9772,7 @@ def _populate_recovery_scan_diagnostics(data, diagnostics, disk_format_hint=None
         )
 
     selected_bytes = int(diagnostics.get("selected_bytes") or 0)
-    detected_scan = None
-    if trusted_boot_geometry is not None:
-        detected_scan = next(
-            (
-                scan
-                for scan in scans
-                if int(scan.get("total_bytes") or 0) == trusted_boot_geometry.total_size
-            ),
-            None,
-        )
+    detected_scan = next((scan for scan in scans if scan["boot_hint"]), None)
     if detected_scan is None:
         credible_scans = [
             scan
@@ -9838,7 +9820,7 @@ def _populate_recovery_scan_diagnostics(data, diagnostics, disk_format_hint=None
             (
                 scan
                 for scan in scans
-                if int(scan.get("total_bytes") or 0) == selected_bytes
+                if scan.get("selected_hint")
             ),
             None,
         )
@@ -9926,40 +9908,74 @@ def _write_recovered_files_to_image(
     )
 
 
+def _recovery_geometry_evidence(scan):
+    """Rank filesystem evidence, never the requested disk capacity."""
+    valid_fats = int(scan.get("fat_copies_valid") or 0)
+    return (
+        bool(valid_fats and scan.get("boot_hint")),
+        bool(valid_fats and scan.get("root_directory_structurally_valid")),
+        bool(valid_fats and scan.get("fat_area_readable") and scan.get("fat_copies_consistent")),
+        valid_fats,
+    )
+
+
 def _recover_file_candidates_from_raw_image_bytes(data, disk_format_hint=None, diagnostics=None):
     """Collect original payloads so multiple scans can share one deduplication pass."""
-    if isinstance(diagnostics, dict):
-        _populate_recovery_scan_diagnostics(
-            data,
-            diagnostics,
-            disk_format_hint=disk_format_hint,
-        )
-    recovered = []
-    scans_by_size = {
-        int(scan.get("total_bytes") or 0): scan
-        for scan in (diagnostics or {}).get("geometry_scans", ())
-        if isinstance(scan, dict)
+    # Evidence must drive the same selection with or without a diagnostic sink.
+    details = diagnostics if isinstance(diagnostics, dict) else {}
+    _populate_recovery_scan_diagnostics(data, details, disk_format_hint=disk_format_hint)
+    scans_by_geometry = {
+        Fat12Geometry(**scan["geometry"]): scan for scan in details["geometry_scans"]
     }
-    for geometry in _recovery_geometries_for_data(data, disk_format_hint=disk_format_hint):
-        scan = scans_by_size.get(int(geometry.total_size))
-        if scan is not None:
-            scan["attempted"] = True
+    geometries = _recovery_geometries_for_data(data, disk_format_hint=disk_format_hint)
+    geometries.sort(key=lambda geometry: _recovery_geometry_evidence(scans_by_geometry[geometry]), reverse=True)
+    recovered = []
+    files_by_entry = {}
+    selected_evidence = None
+    for geometry in geometries:
+        scan = scans_by_geometry[geometry]
+        evidence = _recovery_geometry_evidence(scan)
+        if selected_evidence is not None and evidence < selected_evidence:
+            break
+        scan["attempted"] = True
         try:
             geometry_files = _recover_files_from_fat_context(data, geometry)
+            for item in geometry_files:
+                previous = files_by_entry.get(item.source_entry_offset)
+                if previous is not None and (
+                    previous.source_offset != item.source_offset or previous.data != item.data
+                ):
+                    raise _Fat12RecoveryAmbiguityError(
+                        f"Conflicting FAT12 geometries recover different contents for {item.image_path}. "
+                        "Recovery stopped without choosing a filesystem layout. "
+                        "Keep the original image for manual recovery."
+                    )
+                files_by_entry[item.source_entry_offset] = item
             recovered.extend(geometry_files)
-            if scan is not None:
-                scan["recovered_files"] = len(geometry_files)
+            scan["recovered_files"] = len(geometry_files)
+            if geometry_files:
+                selected_evidence = evidence
         except _Fat12RecoveryAmbiguityError as exc:
-            if isinstance(diagnostics, dict):
-                diagnostics["fat_recovery_ambiguity"] = str(exc)
+            scan["error"] = str(exc)
+            details["fat_recovery_ambiguity"] = str(exc)
             raise
         except FloppyOperationCancelled:
             raise
         except Exception as exc:
-            if scan is not None:
-                scan["error"] = " ".join(str(exc).split())[:240]
+            scan["error"] = " ".join(str(exc).split())[:240]
             continue
-    recovered.extend(_carve_recovery_files_from_bytes(data))
+    # A contiguous carve at a recovered FAT file's start can include unrelated
+    # clusters when that file is fragmented. Its complete chain is stronger
+    # evidence within its declared extent. Keep longer carvings: a damaged
+    # directory size may otherwise hide additional recoverable bytes.
+    fat_extents = {}
+    for item in recovered:
+        source = (item.kind, item.source_offset)
+        fat_extents[source] = max(fat_extents.get(source, 0), len(item.data))
+    recovered.extend(
+        item for item in _carve_recovery_files_from_bytes(data)
+        if len(item.data) > fat_extents.get((item.kind, item.source_offset), 0)
+    )
     return recovered
 
 

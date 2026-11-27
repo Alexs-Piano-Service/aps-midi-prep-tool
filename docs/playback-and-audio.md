@@ -20,7 +20,7 @@ The first audio preview renders the song; subsequent Play clicks reuse that
 audio. Completed previews are cached across inspection sessions, with automatic
 replacement when the song, preview mix, SoundFont, or renderer changes.
 
-Audio preview and the Disklavier WAV Player follow the computer's current
+Audio preview and the Disklavier Audio Player follow the computer's current
 default audio output when headphones connect, disconnect, or become the default.
 They also refresh the output before playback. Switching outputs keeps the song's
 position, volume, and playback state. Choose your headphones in the operating
@@ -62,16 +62,17 @@ PDISK and PSONG are supported companion files for MIDI collections. A conversion
 to E-SEQ omits them from the prepared output; it does not delete the original
 catalog files from the source folder.
 
-## Play a Disklavier WAV or MIDI/audio pair
+## Play encoded Disklavier audio or a MIDI/audio pair
 
-1. Open **Utilities → Disklavier WAV Player...**.
-2. Open an encoded WAV, or a `.mid`/`.midi` file with a same-name WAV or MP3 in
+1. Open **Utilities → Disklavier Audio Player...**.
+2. Open an encoded WAV or MP3, or a `.mid`/`.midi` file with a same-name WAV or MP3 in
    the same folder (for example, `Song.mid` and `Song.mp3`). You can also open
    the audio file to find its matching MIDI. Filename matching accepts
    differences in letter case. If both WAV and MP3 companions exist, opening
    the MIDI prefers WAV; open the MP3 directly to use it instead. Ambiguous
    matches within a format are reported instead of guessed.
-3. The player detects the format and shows the selected pair or **Encoded WAV**.
+3. The player detects the format and shows the selected pair, **Encoded WAV**,
+   or **Encoded MP3**.
    Wait for preparation and piano rendering, then choose **Play**.
 4. Listen to the piano alone or together with the accompaniment. The audio
    waveform below the piano roll shares its timeline and moving playhead.
@@ -87,9 +88,9 @@ catalog files from the source folder.
 Hover over **Open file...** for supported-file guidance. The empty piano roll
 also has a tooltip; introductory instructions do not occupy the playback area.
 
-For an encoded WAV, the player recovers the embedded MIDI and separates the
+For encoded audio, the player recovers the embedded MIDI and separates the
 music from the control channel; the original MIDI, CD, and export manifest are
-not required. Opening an encoded WAV uses its embedded performance even if a
+not required. Opening encoded audio uses its embedded performance even if a
 same-name MIDI is present. Opening a MIDI uses that selected performance and
 removes recoverable encoded control data from its accompaniment when necessary.
 
@@ -219,9 +220,12 @@ shown in the dialog.
    pairs. Loaded songs come from the existing session; the physical floppy is
    not read again. The source media are read-only.
 3. For an existing music file, choose **Scan floppy**, select its MIDI row, and
-   choose **Pair WAV...** (or double-click the row). Pair every song and select
-   **Use paired WAV files** to work without a CD. The implementation accepts
-   stereo, 16-bit, 44.1-kHz PCM WAV files; other audio formats need conversion first.
+   choose **Pair audio...** (or double-click the row). Pair every song and select
+   **Use paired WAV/MP3 files** to work without a CD. WAV input must be stereo,
+   16-bit, 44.1-kHz PCM. MP3 input must contain stereo, 44.1-kHz audio; LAME
+   decodes it before synchronization, preserving encoder-delay and padding handling.
+   The original MP3 and the decoded PCM used for matching are retained separately
+   and recorded with checksums in the manifest.
    The start button identifies the selected export format when using paired files.
 
 Track pairing and audio synchronization run automatically after starting; there
@@ -261,7 +265,7 @@ Direct USB-floppy and physical CD reading in this dialog require Linux;
 Greaseweazle uses the app's regular floppy-reading backend. Secure CD reading
 uses `cdparanoia`, bundled by default in Linux AppImages; source installations
 need the `cdparanoia` package. Windows can use Greaseweazle, saved floppy
-images/folders, or an already loaded song list with paired WAV files.
+images/folders, or an already loaded song list with paired WAV/MP3 files.
 Pre-emphasized CDs are rejected because
 automatic de-emphasis has not yet been implemented.
 
@@ -271,7 +275,8 @@ Each run creates a new album directory containing:
 
 - **MIDI:** the source snapshot and catalogs. These files retain the original
   performance timing; they are not the synchronized ENSPIRE export.
-- **WAV:** unchanged CD PCM or paired WAV copies.
+- **WAV:** unchanged CD PCM, paired WAV copies, or PCM decoded from paired MP3s.
+- **MP3**, when using MP3 input: unchanged copies of the paired source MP3s.
 - **ENSPIRE**, for paired export: synchronized `.mid` and clean `.mp3` files
   with identical basenames. Copy this folder to USB as an album, optionally
   rename the folder, and keep both files for each song together.
@@ -386,7 +391,7 @@ For verification:
    each pairing's `offset_seconds`, `time_scale`, and match scores under
    `alignment`. A constant offset fixes a displaced start; a speed ratio fixes
    a difference that accumulates toward the end. An uncertain match stops export.
-2. For encoded output, open the finished WAV in **Disklavier WAV Player** and listen to
+2. For encoded output, open the finished WAV in **Disklavier Audio Player** and listen to
    **Piano + accompaniment** near the beginning, middle, and end. This checks
    the piano data actually recovered from the exported waveform. The software
    regression suite also compares decoded note times against a known alignment

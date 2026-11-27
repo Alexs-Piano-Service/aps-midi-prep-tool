@@ -17,21 +17,21 @@ with release sections grouped by version and date.
 - Include standalone Mark IV MIDI performances in a separate album-organized
   playback folder, with verified byte-for-byte copies. Exclude metadata-only
   MIDI and songs whose required accompaniment is missing.
-- Let the Disklavier WAV Player open a MIDI file with its same-name WAV or MP3
+- Let the Disklavier Audio Player open a MIDI file with its same-name WAV or MP3
   accompaniment automatically. Detect encoded audio or existing pairs, show the
   loaded format, and preserve stereo audio, timing, waveform, and balance controls.
 - Add **Utilities → Decode Audio for ENSPIRE...** in Admin Mode to process
   individual WAV/MP3 files or entire directory trees. Recover matching MIDI and
   clean MP3 pairs in a new output folder, with progress, cancellation, and a
   per-file report; preserve originals and skip audio without encoded control data.
-- Add a Piano/Accompaniment balance slider to the Disklavier WAV Player,
+- Add a Piano/Accompaniment balance slider to the Disklavier Audio Player,
   with a remembered mix, separate master volume, and unchanged playback timing.
 - Add **Settings → Save Options → Add Random Suffixes to Output Names**.
   Turn it off for clean Smart PianoSoft album, Mark IV backup, extraction
   progress, and recovery-report names, with numbered suffixes only on conflicts.
-- Show the accompaniment waveform below the Disklavier WAV Player's piano roll,
+- Show the accompaniment waveform below the Disklavier Audio Player's piano roll,
   with a shared timeline, synchronized playheads, and click-to-seek in either view.
-- Add a separate Disklavier WAV Player utility that decodes the completed WAV's
+- Add a separate Disklavier Audio Player utility that decodes the completed WAV's
   control channel and previews the recovered performance with a software piano,
   alone or with accompaniment. Playback includes seeking and pause/stop without
   changing the source WAV. Saving decoded MIDI requires session-only Admin Mode.
@@ -57,6 +57,13 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Center Smart PianoSoft's form labels vertically beside their fields.
+- Rename the playback utility to **Disklavier Audio Player** throughout the
+  interface and documentation, reflecting its encoded audio and MIDI/audio pair
+  support.
+- Accept paired MP3 accompaniment in Smart PianoSoft alongside WAV input, for
+  both encoded WAV and MIDI/MP3 exports. Preserve source MP3s and the decoded
+  PCM used for fingerprint synchronization, with checksums in the manifest.
 - Replace Mark IV backup's audio-decoding checkbox with an explicit playback
   format choice. **Preparing for** defaults to MIDI + MP3 for ENSPIRE and encoded
   WAV for other targets. Existing backups show **Prepare playback files** and
@@ -70,7 +77,7 @@ with release sections grouped by version and date.
   manual changes apply to saving, bulk extraction, emulator sets, Mark IV
   backups, and paired playback exports.
 
-- Move the Disklavier WAV Player's introductory instructions into tooltips,
+- Move the Disklavier Audio Player's introductory instructions into tooltips,
   leaving more room for the piano roll and accompaniment waveform.
 - Read Smart PianoSoft's embedded CD track references so songs omitted from
   the floppy do not make the displayed CD numbers shift. Show automatic matching
@@ -79,7 +86,7 @@ with release sections grouped by version and date.
 - Widen the Smart PianoSoft playback-format selector, align dialog spacing,
   and remove the Beta label and extra explanatory paragraphs from the
   Smart PianoSoft and Mark IV backup windows.
-- Keep the Disklavier WAV Player's moving marker a constant width at fractional
+- Keep the Disklavier Audio Player's moving marker a constant width at fractional
   display scaling, in both the piano roll and accompaniment waveform.
 - Hide decoded MIDI export during normal playback and require Admin Mode to
   enable it. Compact the About dialog around its contents.
@@ -104,8 +111,24 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Export MIDI/MP3 pairs when a WAV header leaves an incomplete final sample
+  frame. Preserve every declared complete frame, continue to reject missing
+  audio samples, and leave the original WAV unchanged.
+- Read factory E-SEQ length variants without rejecting final allocation slack
+  or cutting off later notes, and preserve complete performances when merging
+  channels or making archival round trips.
+- Follow the accompaniment CD identity saved in Mark IV synchronization links
+  when it differs from the piano album's original CD identity. Recover alternate
+  pressings only when a close whole-disc track layout yields one recording that
+  passes both audio fingerprints, and record the matching evidence. Decode MP3
+  candidates before validation, with cancellation and temporary-file cleanup.
+- Preserve original PSONG song-record fields when preparing playback files from
+  a Mark IV backup whose archived filenames were renamed from the drive originals.
 - Accept a complete Yamaha control stream followed by an isolated brief noise
   spike, while continuing to reject sustained or damaged control data.
+- Recognize sample-validated idle fragments at encoded-audio track boundaries
+  and confirm isolated PCM glitches without changing recovered control symbols.
+  Retain strict rejection of ambiguous symbols, damaged streams, and invalid MIDI.
 - Use a valid simulated Windows floppy drive in capture-consent regression tests
   and exercise both platform paths, retaining the destination safety check.
 - Acknowledge each new Smart PianoSoft attempt immediately in the status and
@@ -173,10 +196,10 @@ with release sections grouped by version and date.
   guidance. Keep the scanned Smart PianoSoft floppy and pairings available,
   restore the controls, and restart into a fresh output folder without reusing
   partial tracks or overwriting files from the failed attempt.
-- Keep Disklavier WAV Player playback continuous when adjusting the balance
+- Keep Disklavier Audio Player playback continuous when adjusting the balance
   or switching to piano alone. Mix the prepared piano and accompaniment in one
   audio stream with smooth level changes instead of reloading a new WAV.
-- Speed up Disklavier WAV Player preparation of MIDI/audio pairs while retaining
+- Speed up Disklavier Audio Player preparation of MIDI/audio pairs while retaining
   the full check for encoded piano data. Show accompaniment-check progress
   instead of claiming to decode piano data from ordinary audio.
 - Accept the strongest Smart PianoSoft fingerprint match in repeating intros,

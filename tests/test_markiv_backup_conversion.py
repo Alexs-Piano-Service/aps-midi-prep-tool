@@ -135,6 +135,44 @@ def test_cataloged_conversion_preserves_archived_mng_bytes_and_opaque_fields(tmp
     assert backup.verify_backup(result.folder) == []
 
 
+@pytest.mark.parametrize('catalog_option', ['generate_yamaha_catalogs', 'preserve_yamaha_catalogs'])
+@pytest.mark.parametrize('filename', ['SONG.MID', 'SONG.V1.MID'])
+def test_archive_preparation_matches_original_catalog_names_after_backup_renaming(tmp_path, catalog_option, filename):
+    song_record = bytearray(build_smart_pianosoft_song_record(filename, 'Named performance'))
+    song_record[0x90:0x94] = b'KEEP'
+    originals = {
+        f'songs/user/1/{filename}': convert_eseq_bytes_to_midi_bytes(
+            _fil(), filename='SONG.FIL', title_override='Named performance'),
+        'songs/user/1/PSONG.MNG': build_smart_pianosoft_song_catalog(b'', [
+            bytes(song_record), build_smart_pianosoft_song_record('ABSENT.FIL', 'Missing song'),
+        ]),
+        'songs/user/1/PDISK.MNG': update_smart_pianosoft_disk_title(b'', 'Named album'),
+    }
+    source = _source(tmp_path, originals)
+    archive = backup.run_backup(scan_library(source), tmp_path / 'archive')
+    archive_manifest = (archive.folder / backup.MANIFEST).read_bytes()
+    plan = scan_library(archive.folder)
+    performance = next(item for item in plan.files if item.original_source.endswith('/' + filename))
+    assert Path(performance.source).name != filename
+
+    result = backup.run_backup(plan, tmp_path / 'prepared', audio_output='encoded_wav',
+                               **{catalog_option: True})
+
+    assert result.status == 'complete', result.errors
+    manifest = _manifest(result)
+    midi = next(record for record in manifest['derivatives'] if record['kind'] == 'MIDI')
+    playback = result.folder / Path(midi['destination']).parent
+    song, = parse_smart_pianosoft_song_catalog((playback / 'PSONG.MNG').read_bytes())
+    assert song.raw_record[0x90:0x94] == b'KEEP'
+    assert song.title == 'Named performance'
+    assert song.filename == Path(midi['destination']).name
+    assert (playback / song.filename).is_file()
+    assert all(record['status'] == 'referenced' for record in manifest['files'])
+    assert backup.verify_backup(result.folder) == []
+    assert (archive.folder / backup.MANIFEST).read_bytes() == archive_manifest
+    _assert_originals(archive, source, originals)
+
+
 @pytest.mark.parametrize('catalog_payload', [None, b'not a Yamaha catalog'])
 def test_preservation_only_conversion_does_not_invent_catalogs_for_uncataloged_album(tmp_path, catalog_payload):
     files = {'songs/user/1/Descriptive source name.FIL': _fil('Descriptive song title'),

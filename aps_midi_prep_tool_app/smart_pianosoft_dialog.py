@@ -409,7 +409,8 @@ class SmartPianoSoftDialog(QDialog):
         label = label_type(self.text(key))
         label.setTextFormat(Qt.PlainText)
         label.setWordWrap(wrap)
-        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        # Let form labels fill the row so their text centers beside controls.
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed if wrap else QSizePolicy.Preferred)
         return label
 
     @property
@@ -698,7 +699,7 @@ class SmartPianoSoftDialog(QDialog):
         row = self.table.currentRow()
         if self.is_busy or self.album is None or row < 0:
             return
-        filename, _ = QFileDialog.getOpenFileName(self, self.text("pair"), "", "PCM WAV (*.wav)")
+        filename, _ = QFileDialog.getOpenFileName(self, self.text("pair"), "", self.text("audio_filter"))
         if filename:
             self.audio_paths[self.album.tracks[row].number] = Path(filename)
             self._populate()

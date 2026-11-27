@@ -88,7 +88,7 @@ def _check_ui(directory, state):
             raise RuntimeError("The Smart PianoSoft utility is missing from the release UI.")
         decoder_action = getattr(window, "utilitiesDisklavierWavAction", None)
         if decoder_action is None or decoder_action not in window.utilitiesMenu.actions():
-            raise RuntimeError("The Disklavier WAV Player is missing from the release UI.")
+            raise RuntimeError("The Disklavier Audio Player is missing from the release UI.")
         settings_file = Path(window.settings.fileName()).resolve()
         if not settings_file.is_relative_to(settings_dir.resolve()):
             raise RuntimeError("The package check did not isolate application settings.")
@@ -448,7 +448,7 @@ def _check_smart_pianosoft(directory, state):
             recovered.setpos(round(result["encoding"]["audio_preroll_seconds"] * 44100))
             if not np.array_equal(np.frombuffer(recovered.readframes(len(mono)), dtype="<i2"), mono):
                 raise RuntimeError("Decoded accompaniment differs from the encoded music channel.")
-        # The backup receiver and the live WAV player use independent decoding
+        # The backup receiver and the live audio player use independent decoding
         # paths. Exercise both in a frozen package, then exercise the new paired
         # export through its actual workflow and bundled MP3 helper.
         backup_music = directory / "Decoded Mark IV package music.wav"

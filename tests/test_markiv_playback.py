@@ -93,6 +93,38 @@ def test_original_paths_resolve_renamed_archived_files(tmp_path):
     assert result.paired_audio_sources == {audio.source}
 
 
+@pytest.mark.parametrize('stored_wave', ['track-03', '/home/songs/audio/old/track-03.WAV',
+                                       '/home/songs/audio/9/track-03.WAV'])
+def test_saved_sync_link_identifies_actual_cd_edition_independently_of_midi_cd_id(tmp_path, stored_wave):
+    midi = _midi(tmp_path, cd_track=3, cd_id='original-midi-edition')
+    audio = _audio(tmp_path, cd_id='recorded-audio-edition', track_number=3)
+    other = _audio(tmp_path, 'songs/audio/10/track-03.WAV', cd_id='original-midi-edition', track_number=3)
+    link = {**_link(midi, audio, cd_id='recorded-audio-edition'), 'wave_path': stored_wave}
+    result = resolve_playback_pairs(_plan(tmp_path, midi, audio, other, links=[link]))
+    assert not result.issues
+    assert [(pair.midi, pair.audio) for pair in result.pairs] == [(midi, audio)]
+    assert result.pairs[0].sync_links == (link,)
+
+
+def test_saved_audio_basename_does_not_match_a_different_cd_edition(tmp_path):
+    midi = _midi(tmp_path, cd_track=3, cd_id='original-midi-edition')
+    audio = _audio(tmp_path, cd_id='unrelated-edition', track_number=3)
+    link = {**_link(midi, audio, cd_id='recorded-audio-edition'), 'wave_path': 'track-03'}
+    result = resolve_playback_pairs(_plan(tmp_path, midi, audio, links=[link]))
+    assert not result.pairs
+    assert [issue.code for issue in result.issues] == ['missing_audio']
+
+
+def test_saved_cd_and_basename_with_two_recordings_remains_ambiguous(tmp_path):
+    midi = _midi(tmp_path, cd_track=3, cd_id='original-midi-edition')
+    first = _audio(tmp_path, cd_id='recorded-audio-edition', track_number=3)
+    second = _audio(tmp_path, 'songs/audio/10/track-03.WAV', cd_id='recorded-audio-edition', track_number=3)
+    link = {**_link(midi, first, cd_id='recorded-audio-edition'), 'wave_path': 'track-03'}
+    result = resolve_playback_pairs(_plan(tmp_path, midi, first, second, links=[link]))
+    assert not result.pairs
+    assert [issue.code for issue in result.issues] == ['ambiguous_audio']
+
+
 def test_planning_uses_verified_copy_when_original_drive_is_absent(tmp_path):
     midi = _midi(tmp_path, cd_track=3, cd_id='disc')
     audio = _audio(tmp_path, cd_id='disc', track_number=3)
@@ -383,3 +415,217 @@ def test_wrong_recording_fails_even_when_catalog_links_and_offsets_exist(fingerp
         output.writeframes(bytes(14 * 44100 * 4))
     with pytest.raises(SynchronizationError, match='does not match'):
         prepare_pair(pair, midi, audio)
+
+
+def _different_cd_edition(pair):
+    # The same full TOC with a one-frame lead-in change and a two-frame
+    # boundary change: close enough to shortlist, but insufficient to pair.
+    pair.midi.metadata['cd_id'] = '000200001400002800010000'
+    pair.audio.metadata['cd_id'] = '000201001403002801010001'
+
+
+def test_alternate_cd_edition_requires_both_fingerprints_and_records_evidence(fingerprint_pair, tmp_path):
+    pair, midi, audio = fingerprint_pair
+    _different_cd_edition(pair)
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio))
+    assert not result.issues
+    assert [p.audio for p in result.pairs] == [pair.audio]
+    evidence = result.pairs[0].association_details
+    assert evidence['method'] == 'whole_cd_toc_and_two_fingerprints'
+    assert evidence['toc_max_difference_frames'] == 2
+    assert evidence['candidates'][0]['alignment']['confidence'] > .98
+    assert prepare_pair(result.pairs[0], midi, audio).alignment_details['association_validation'] == evidence
+    # Planning does not allow stale fingerprints to bypass export validation.
+    with wave.open(str(audio), 'wb') as output:
+        output.setparams((2, 2, 44100, 0, 'NONE', 'not compressed'))
+        output.writeframes(bytes(14 * 44100 * 4))
+    with pytest.raises(SynchronizationError):
+        prepare_pair(result.pairs[0], midi, audio)
+
+
+def test_alternate_cd_edition_does_not_accept_only_the_opening_fingerprint(fingerprint_pair, tmp_path):
+    pair, _midi_path, audio = fingerprint_pair
+    _different_cd_edition(pair)
+    with wave.open(str(audio), 'rb') as source:
+        pcm = source.readframes(source.getnframes())
+    with wave.open(str(audio), 'wb') as output:
+        output.setparams((2, 2, 44100, 0, 'NONE', 'not compressed'))
+        output.writeframes(pcm[:6 * 44100 * 4] + bytes(len(pcm) - 6 * 44100 * 4))
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio))
+    assert not result.pairs
+    assert [issue.code for issue in result.issues] == ['missing_audio']
+
+
+@pytest.mark.parametrize('other_toc', [
+    '000201001603002801010001',  # One boundary differs by more than one second.
+    '000201001403002801003000010001',  # Different number of tracks.
+    '000201003C03002801010001',  # Invalid seconds in one position.
+])
+def test_matching_audio_without_a_matching_whole_toc_is_not_guessed(fingerprint_pair, tmp_path, other_toc):
+    pair, _midi_path, _audio_path = fingerprint_pair
+    _different_cd_edition(pair)
+    pair.audio.metadata['cd_id'] = other_toc
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio))
+    assert not result.pairs
+    assert [issue.code for issue in result.issues] == ['missing_audio']
+
+
+def test_two_fingerprint_matches_in_alternate_editions_remain_ambiguous(fingerprint_pair, tmp_path):
+    pair, _midi_path, audio = fingerprint_pair
+    _different_cd_edition(pair)
+    second = _audio(tmp_path, 'songs/audio/10/track-03.WAV',
+                    cd_id=pair.audio.metadata['cd_id'], track_number=3)
+    (tmp_path / second.source).write_bytes(audio.read_bytes())
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio, second))
+    assert not result.pairs
+    assert [issue.code for issue in result.issues] == ['ambiguous_audio']
+
+
+def test_wrong_saved_edition_can_be_replaced_only_by_unique_full_fingerprint_match(fingerprint_pair, tmp_path):
+    pair, _midi_path, _audio_path = fingerprint_pair
+    _different_cd_edition(pair)
+    wrong = _audio(tmp_path, 'songs/audio/10/track-03.WAV', cd_id='wrong-edition', track_number=3)
+    link = _link(pair.midi, wrong, cd_id='wrong-edition')
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio, wrong, links=[link]))
+    assert not result.issues
+    assert [p.audio for p in result.pairs] == [pair.audio]
+    assert result.pairs[0].sync_links == (link,)
+    assert result.pairs[0].association_details['catalog_audio_sources'] == [wrong.original_source]
+    assert 'error' in result.pairs[0].association_details['candidates'][0]
+
+
+def test_explicit_saved_track_reordering_requires_unique_two_fingerprint_match(fingerprint_pair, tmp_path):
+    pair, _midi_path, _audio_path = fingerprint_pair
+    # The actual saved track is 1 although the original MIDI CD reference is 3.
+    pair.audio.metadata['track_number'] = 1
+    wrong = _audio(tmp_path, 'songs/audio/10/track-03.WAV', cd_id='disc', track_number=3)
+    link = _link(pair.midi, pair.audio)
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio, wrong, links=[link]))
+    assert not result.issues
+    assert [p.audio for p in result.pairs] == [pair.audio]
+    assert result.pairs[0].cd_track == 3
+    assert result.pairs[0].association_details['method'] == 'stored_cd_link_and_two_fingerprints'
+
+
+def test_alternate_edition_validation_reads_only_supplied_snapshots(fingerprint_pair, tmp_path):
+    pair, midi, audio = fingerprint_pair
+    _different_cd_edition(pair)
+    snapshot = tmp_path / 'verified.wav'
+    audio.rename(snapshot)
+    audio.write_bytes(b'unverified original')
+    plan = _plan(tmp_path, pair.midi, pair.audio)
+    result = resolve_playback_pairs(plan, source_paths={pair.midi.source: midi, pair.audio.source: snapshot})
+    assert len(result.pairs) == 1
+    missing = resolve_playback_pairs(plan, source_paths={pair.midi.source: midi})
+    assert not missing.pairs
+    assert [issue.code for issue in missing.issues] == ['missing_audio']
+
+
+@pytest.mark.parametrize('recovery', ['alternate_edition', 'saved_track_conflict'])
+def test_mp3_recovery_decodes_verified_snapshot_privately_before_matching(
+        fingerprint_pair, tmp_path, monkeypatch, recovery):
+    from aps_midi_prep_tool_app import audio_tools
+
+    pair, midi, audio = fingerprint_pair
+    if recovery == 'alternate_edition':
+        _different_cd_edition(pair)
+    compressed = _audio(tmp_path, 'songs/audio/10/track-03.MP3', **pair.audio.metadata)
+    snapshot = tmp_path / 'verified-audio.input'
+    snapshot.write_bytes(b'verified MP3 snapshot')
+    original_bytes = (tmp_path / compressed.source).read_bytes()
+    decoded_paths = []
+    cancel = threading.Event()
+
+    def decode(source, destination, *, cancel):
+        assert source == snapshot
+        assert source.read_bytes() == b'verified MP3 snapshot'
+        assert cancel is event
+        assert destination.parent != snapshot.parent
+        decoded_paths.append(destination)
+        destination.write_bytes(audio.read_bytes())
+
+    event = cancel
+    monkeypatch.setattr(audio_tools, 'decode_mp3', decode)
+    items, links = [pair.midi, compressed], []
+    if recovery == 'saved_track_conflict':
+        compressed.metadata['track_number'] = 1
+        wrong = _audio(tmp_path, 'songs/audio/11/track-03.WAV', cd_id='disc', track_number=3)
+        items.append(wrong)
+        links.append(_link(pair.midi, compressed))
+    result = resolve_playback_pairs(
+        _plan(tmp_path, *items, links=links), cancel,
+        source_paths={pair.midi.source: midi, compressed.source: snapshot},
+    )
+    assert not result.issues
+    assert [p.audio for p in result.pairs] == [compressed]
+    evidence = result.pairs[0].association_details['candidates'][0]
+    assert evidence['audio_source'] == compressed.original_source
+    assert evidence['alignment']['confidence'] > .98
+    assert len(decoded_paths) == 1 and not decoded_paths[0].parent.exists()
+    assert (tmp_path / compressed.source).read_bytes() == original_bytes
+    assert snapshot.read_bytes() == b'verified MP3 snapshot'
+
+
+@pytest.mark.parametrize('failure', ['decode_failure', 'cancelled_decode', 'cancelled_after_decode'])
+def test_mp3_recovery_cleans_temporary_pcm_and_preserves_cancellation(
+        fingerprint_pair, tmp_path, monkeypatch, failure):
+    from aps_midi_prep_tool_app import audio_tools
+
+    pair, _midi, _audio_path = fingerprint_pair
+    _different_cd_edition(pair)
+    compressed = _audio(tmp_path, 'songs/audio/10/track-03.mp3', **pair.audio.metadata)
+    original_bytes = (tmp_path / compressed.source).read_bytes()
+    decoded_paths = []
+    cancel = threading.Event()
+
+    def decode(_source, destination, *, cancel):
+        decoded_paths.append(destination)
+        destination.write_bytes(b'partial decoded PCM')
+        if failure == 'cancelled_decode':
+            raise InterruptedError('Audio conversion cancelled.')
+        if failure == 'cancelled_after_decode':
+            cancel.set()
+            return
+        raise RuntimeError('LAME audio conversion failed')
+
+    monkeypatch.setattr(audio_tools, 'decode_mp3', decode)
+    plan = _plan(tmp_path, pair.midi, compressed)
+    if failure == 'decode_failure':
+        result = resolve_playback_pairs(plan, cancel)
+        assert not result.pairs
+        assert [issue.code for issue in result.issues] == ['missing_audio']
+    else:
+        with pytest.raises((InterruptedError, CancelledError)):
+            resolve_playback_pairs(plan, cancel)
+    assert len(decoded_paths) == 1 and not decoded_paths[0].parent.exists()
+    assert (tmp_path / compressed.source).read_bytes() == original_bytes
+
+
+def test_direct_mp3_pair_defers_decoding_until_export(fingerprint_pair, tmp_path, monkeypatch):
+    from aps_midi_prep_tool_app import audio_tools
+
+    pair, _midi, _audio_path = fingerprint_pair
+    compressed = _audio(tmp_path, 'songs/audio/10/track-03.mp3', **pair.audio.metadata)
+    monkeypatch.setattr(audio_tools, 'decode_mp3', lambda *_args, **_kwargs: pytest.fail('Decoded direct pair'))
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, compressed))
+    assert not result.issues
+    assert [p.audio for p in result.pairs] == [compressed]
+
+
+def test_real_mp3_alternate_edition_passes_both_fingerprints(fingerprint_pair, tmp_path):
+    from aps_midi_prep_tool_app import audio_tools
+
+    if not audio_tools.find_lame_command():
+        pytest.skip('LAME is unavailable')
+    pair, _midi, audio = fingerprint_pair
+    _different_cd_edition(pair)
+    compressed = _audio(tmp_path, 'songs/audio/10/track-03.mp3', **pair.audio.metadata)
+    destination = tmp_path / compressed.source
+    destination.unlink()
+    audio_tools.encode_mp3(audio, destination)
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, compressed))
+    assert not result.issues
+    assert [p.audio for p in result.pairs] == [compressed]
+    evidence = result.pairs[0].association_details['candidates'][0]
+    assert evidence['alignment']['head_correlation'] > .98
+    assert evidence['alignment']['tail_correlation'] > .98
