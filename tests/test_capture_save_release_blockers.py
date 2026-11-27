@@ -33,6 +33,9 @@ def test_scp_save_failure_retries_captured_bytes_without_reread(window, tmp_path
         calls.append(dst)
         if len(calls) == 1:
             Path(dst).write_bytes(b'partial')
+            # A full or disconnected user volume can invalidate every probed
+            # default before the user chooses a different destination.
+            monkeypatch.setattr(capture_save, '_writable_directory', lambda _: False)
             raise failure
         return real_copy(src, dst)
     monkeypatch.setattr(main_window.QFileDialog, 'getSaveFileName', choose)
@@ -87,6 +90,21 @@ def test_capture_default_is_absolute_and_ignores_program_files_cwd(tmp_path, mon
     expected = saved if saved_writable else documents if documents_writable else home
     assert Path(capture_save.capture_save_path(settings, 'partial-recovery.img')) == expected / 'partial-recovery.img'
     assert list(program.iterdir()) == []
+
+
+def test_no_writable_default_still_allows_browsing_another_drive(tmp_path, monkeypatch):
+    program = tmp_path / 'Program Files'; program.mkdir()
+    documents = tmp_path / 'Documents'; documents.mkdir()
+    monkeypatch.chdir(program)
+    settings = QSettings(str(tmp_path / 'settings.ini'), QSettings.IniFormat)
+    monkeypatch.setattr(capture_save.QStandardPaths, 'writableLocation', lambda _: str(documents))
+    monkeypatch.setattr(capture_save, '_writable_directory', lambda _: False)
+    def no_temp():
+        raise OSError(errno.ENOSPC, 'No writable temporary directory')
+    monkeypatch.setattr(capture_save.tempfile, 'gettempdir', no_temp)
+    assert Path(capture_save.capture_save_path(settings, 'raw.scp')) == documents / 'raw.scp'
+    assert list(program.iterdir()) == []
+    assert not settings.value(capture_save.SETTING_CAPTURE_DIRECTORY)
 
 
 def test_partial_save_remembers_only_success(window, tmp_path, monkeypatch):

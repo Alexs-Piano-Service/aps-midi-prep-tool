@@ -30,10 +30,21 @@ def capture_save_path(settings, filename):
         os.path.expanduser("~"),
         QStandardPaths.writableLocation(QStandardPaths.DesktopLocation),
         QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation),
-        tempfile.gettempdir(),
     ]
+    try:
+        candidates.append(tempfile.gettempdir())
+    except OSError:
+        # A full user volume can also make temporary-directory discovery fail.
+        pass
     for directory in dict.fromkeys(candidates):
         if _writable_directory(directory):
+            return os.path.join(directory, os.path.basename(filename))
+    # No writable default exists when every user volume is full or unavailable.
+    # Still open the chooser in an absolute user directory so another drive can
+    # be selected. In particular, do not interrupt an unsaved capture's retry
+    # loop or fall back to the application's working directory.
+    for directory in candidates[1:]:
+        if directory and os.path.isabs(directory) and os.path.isdir(directory):
             return os.path.join(directory, os.path.basename(filename))
     raise OSError("No writable user directory is available for saving captures.")
 
