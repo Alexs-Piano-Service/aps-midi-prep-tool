@@ -7,6 +7,8 @@ music drive or prepare playback files from an existing APS Mark IV backup.
 Choose paired MIDI + MP3 for ENSPIRE USB playback or encoded WAV for a compatible
 audio playback route. APS can use separately stored MIDI and accompaniment,
 including Smart PianoSoft songs, as well as recoverable Yamaha-encoded audio.
+Pairing runs automatically during playback preparation for both drives and
+existing APS backups; no separate pairing step is needed.
 
 A drive backup copies and verifies the originals into named album folders.
 Preparing an existing backup reads those originals and writes a separate
@@ -235,6 +237,17 @@ When that edition is unavailable or the saved associations disagree, a complete
 CD track layout can identify alternate pressings to check. Every track boundary
 must agree within one second, and exactly one candidate recording must pass both
 fingerprints. The manifest records the candidates and validation results.
+
+If the catalog association is missing, APS detects Smart PianoSoft fingerprints
+inside the MIDI and checks the recovered library's WAV/MP3 recordings
+automatically. Exactly one recording must match both fingerprints before APS
+pairs it and aligns the performance. This search can take longer for a large
+library; progress and cancellation remain available in the same backup window.
+The manifest records the selected recording, candidates, and fingerprint results.
+An unresolved or ambiguous Smart PianoSoft song appears in the existing report
+and is kept out of the piano-only playback output. Ordinary MIDI without these
+fingerprints still needs its original filename or catalog association to be
+paired with audio.
 
 Saved synchronization records, including `sps_offset`, are retained in the
 report as evidence. APS verifies the timing again against the audio instead of

@@ -3,10 +3,11 @@
 """Resolve Mark IV music associations and validate their playback timelines.
 
 Album titles and MIDI display order are not evidence of a CD pairing. A
-separate CD recording needs the piano's recorded association, or the MIDI's
-actual CD-track reference and an exact catalog CD ID, followed by fingerprint
-validation. Stored ``sps_offset`` values are retained as provenance; their
-units and applicability are not assumed.
+separate CD recording uses the piano's recorded association or the MIDI's
+actual CD-track reference and catalog CD ID, followed by fingerprint validation.
+When catalog identities are missing, both embedded fingerprints must uniquely
+identify the recording in the recovered library. Stored ``sps_offset`` values
+are retained as provenance; their units and applicability are not assumed.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import tempfile
 
 import mido
 
-from .library import BackupPlan, PlannedFile, check_cancel
+from .library import BackupPlan, CancelledError, PlannedFile, check_cancel
 from ..disklavier_audio import is_pianosmart_message
 from ..smart_pianosoft_sync import parse_sps_midi, synchronize
 
@@ -159,7 +160,8 @@ def _synchronize_candidate(metadata, candidate, audio_path, cancel):
         return synchronize(metadata, pcm, cancel=cancel)
 
 
-def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) -> PlaybackPairPlan:
+def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None,
+                           progress=None) -> PlaybackPairPlan:
     """Resolve candidates without altering files or asserting they are synchronized.
 
     ``paired_audio_sources`` identifies plan source paths claimed by unique
@@ -169,6 +171,9 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
     issues instead of guessed matches. ``source_paths`` may map plan source
     identities to verified archived copies. When supplied it is authoritative:
     an absent entry is not read from the original drive as a fallback.
+    Missing catalog associations trigger automatic two-fingerprint matching
+    against the library's audio, with progress through the existing preparation
+    flow. Ordinary piano-only performances do not trigger an audio search.
     """
     files = [item for item in plan.files
              if item.kind not in {'Metadata', 'PianoSoft package'}
@@ -177,7 +182,7 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
     by_source = defaultdict(list)
     audio_by_stem, audio_by_cd_track, midi_by_stem = defaultdict(list), defaultdict(list), defaultdict(list)
     audio_by_cd_stem = defaultdict(list)
-    audio_sources, midi_items = set(), []
+    audio_sources, audio_items, midi_items = set(), [], []
     for item in files:
         check_cancel(cancel)
         source = _original(item)
@@ -185,6 +190,7 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
         suffix = PurePosixPath(source).suffix.lower()
         if suffix in {'.wav', '.mp3'}:
             audio_sources.add(item.source)
+            audio_items.append(item)
             path = PurePosixPath(source)
             audio_by_stem[(str(path.parent), path.stem.casefold())].append(item)
             cd_id, track = item.metadata.get('cd_id'), item.metadata.get('track_number')
@@ -279,22 +285,28 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
         cd_id = item.metadata.get('cd_id')
         links = links_by_midi.get(source, ())
         declared_sps = str(item.metadata.get('type', '')).upper() == 'SPS'
-        if not native and not links and not cd_id and not declared_sps and required_audio_source is None:
-            continue  # An ordinary piano-only performance needs no audio pair.
+        unassociated = not (native or links or cd_id or declared_sps or required_audio_source)
         if required_audio_source is not None and not explicit_companion:
             issue(source, required_audio_source,
                   'The catalog requires an audio companion absent from this backup; '
                   'the MIDI was not treated as a piano-only performance.', 'missing_audio')
             continue
+        has_sync = False
         try:
             midi_path = plan.source / item.source if source_paths is None else source_paths[item.source]
             data, has_sync = _inspect_sync(midi_path, cancel)
+            if unassociated and not has_sync:
+                continue  # An ordinary piano-only performance needs no audio pair.
             if str(item.metadata.get('type', '')).upper() == 'AUDIO' and not any(
                     not message.is_meta for track in mido.MidiFile(file=io.BytesIO(data)).tracks
                     for message in track):
                 continue  # Audio-only catalog entries can have metadata-only SMF wrappers.
             metadata = parse_sps_midi(data) if has_sync or links or declared_sps else None
         except (OSError, ValueError, EOFError, KeyError, IndexError, TypeError) as exc:
+            if unassociated and not has_sync:
+                # Standalone MIDI validation and optional E-SEQ conversion
+                # report their own unreadable or unsupported source files.
+                continue
             issue(source, '', f'Could not validate the MIDI playback metadata: {exc}', 'invalid_midi')
             continue
 
@@ -324,13 +336,26 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
             editions = nearby_editions(cd_id) if cd_track is not None else {}
             alternatives = {audio.source: audio for edition in editions
                             for audio in audio_by_cd_track.get((edition, cd_track), ())}
+            missing_catalog = not candidates and not links and not cd_id and required_audio_source is None
+            if missing_catalog:
+                # Recovery can retain the MIDI's fingerprints after losing its
+                # catalog link. Search all recovered recordings, without using
+                # renamed titles or display order, and require a unique match.
+                # Known catalog identities still constrain edition recovery.
+                alternatives = {audio.source: audio for audio in audio_items}
             # Do not read audio during ordinary catalog resolution. Validation
-            # is necessary only to recover an unavailable edition or resolve a
-            # concrete disagreement between recorded associations.
+            # recovers missing catalog links or unavailable editions, or resolves
+            # a concrete disagreement between recorded associations.
             if set(alternatives) - set(candidates) or track_conflict:
                 checked, matched = [], {}
-                for candidate in {**candidates, **alternatives}.values():
+                to_check = {**candidates, **alternatives}
+                for completed, candidate in enumerate(to_check.values()):
                     check_cancel(cancel)
+                    if progress:
+                        progress({'event': 'audio_prepare',
+                                  'message': f'Matching accompaniment for {item.destination}',
+                                  'completed': completed, 'total': len(to_check),
+                                  'audio_total': len(to_check)})
                     evidence = {'audio_source': _original(candidate),
                                 'cd_id': candidate.metadata.get('cd_id'),
                                 'track_number': candidate.metadata.get('track_number')}
@@ -339,7 +364,7 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
                                       else source_paths[candidate.source])
                         alignment = _synchronize_candidate(metadata, candidate, audio_path, cancel)
                     except InterruptedError:
-                        raise
+                        raise CancelledError('Cancelled by user') from None
                     except (OSError, ValueError, EOFError, KeyError, RuntimeError) as exc:
                         check_cancel(cancel)
                         evidence['error'] = str(exc)
@@ -347,10 +372,16 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None) 
                         evidence['alignment'] = asdict(alignment)
                         matched[candidate.source] = candidate
                     checked.append(evidence)
+                if progress:
+                    progress({'event': 'audio_prepare',
+                              'message': f'Checked accompaniment for {item.destination}',
+                              'completed': len(to_check), 'total': len(to_check),
+                              'audio_total': len(to_check)})
                 if len(matched) == 1:
                     selected = next(iter(matched.values()))
                     association_details = {
-                        'method': ('stored_cd_link_and_two_fingerprints' if track_conflict
+                        'method': ('missing_catalog_and_two_fingerprints' if missing_catalog
+                                   else 'stored_cd_link_and_two_fingerprints' if track_conflict
                                    else 'whole_cd_toc_and_two_fingerprints'),
                         'midi_cd_id': cd_id,
                         'audio_source': _original(selected),

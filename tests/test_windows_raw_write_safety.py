@@ -226,12 +226,31 @@ def test_no_second_writer_starts_until_cancelled_helper_exits(tmp_path, monkeypa
     assert len(starts) == len(errors) == 2
 
 
-def test_helper_acknowledges_cancellation_and_persists_partial_write(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cancel_source", ["marker", "watchdog"])
+def test_helper_acknowledges_cancellation_and_persists_partial_write(tmp_path, monkeypatch, cancel_source):
     _windows_mode(monkeypatch)
     marker, result = tmp_path / "cancel", tmp_path / "result.json"
+    stopped = threading.Event()
+    stop_requests = []
+
+    def start_watchdog(cancel_path, request_stop, force_exit):
+        assert cancel_path == str(marker)
+        stop_requests.append(request_stop)
+        return stopped
+
+    # This helper runs inside pytest, not a disposable writer process. Its real
+    # watchdog would terminate pytest if final fsync takes past the cancellation
+    # grace period on Windows. Watchdog timing/termination is tested separately
+    # with harmless callbacks; drive the helper's stop request directly here.
+    monkeypatch.setattr(windows_write_guard, "start_watchdog", start_watchdog)
+
     def direct(image, device, *, diagnostics, progress_callback, cancel_callback):
+        assert not stopped.is_set()
         diagnostics.update(stage="write", bytes_written=512, target_mutation_attempted=True)
-        marker.touch()
+        if cancel_source == "marker":
+            marker.touch()
+        else:
+            stop_requests[0]("cancelled")
         assert cancel_callback()
         raise floppy_image.FloppyOperationCancelled("cancelled")
     monkeypatch.setattr(floppy_image, "_write_block_device_windows_direct", direct)
@@ -242,6 +261,8 @@ def test_helper_acknowledges_cancellation_and_persists_partial_write(tmp_path, m
     assert status == 1 and payload["ok"] is False
     assert payload["stop_reason"] == "cancelled"
     assert payload["diagnostics"]["bytes_written"] == 512
+    assert payload["diagnostics"]["target_mutation_attempted"] is True
+    assert stopped.is_set()
 
 
 def test_fallback_capacity_probe_uses_bounded_full_sectors(monkeypatch):

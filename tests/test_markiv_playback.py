@@ -1,4 +1,5 @@
 """Mark IV catalog associations never substitute display order for CD identity."""
+import json
 import threading
 import wave
 
@@ -417,6 +418,137 @@ def test_wrong_recording_fails_even_when_catalog_links_and_offsets_exist(fingerp
         prepare_pair(pair, midi, audio)
 
 
+def test_missing_catalog_automatically_uses_unique_two_fingerprint_match(fingerprint_pair, tmp_path):
+    pair, midi, audio = fingerprint_pair
+    pair.midi.metadata.clear()
+    pair.audio.metadata.clear()
+    wrong = _audio(tmp_path, 'songs/audio/10/01.wav', title='Same title', track_number=1)
+    progress = []
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, wrong, pair.audio), progress=progress.append)
+    assert not result.issues
+    recovered, = result.pairs
+    assert recovered.midi == pair.midi and recovered.audio == pair.audio
+    assert result.paired_audio_sources == {pair.audio.source}
+    evidence = recovered.association_details
+    assert evidence['method'] == 'missing_catalog_and_two_fingerprints'
+    assert evidence['audio_source'] == pair.audio.original_source
+    assert 'error' in evidence['candidates'][0]
+    assert evidence['candidates'][1]['alignment']['head_correlation'] > .98
+    assert evidence['candidates'][1]['alignment']['tail_correlation'] > .98
+    assert [event['completed'] for event in progress] == [0, 1, 2]
+    assert all(event['event'] == 'audio_prepare' and event['audio_total'] == 2 for event in progress)
+    prepared = prepare_pair(recovered, midi, audio)
+    assert prepared.offset_seconds == pytest.approx(.18, abs=.008)
+    assert prepared.alignment_details['association_validation'] == evidence
+
+
+@pytest.fixture
+def uncataloged_library(fingerprint_pair, tmp_path):
+    # The catalog metadata in fingerprint_pair lives only in its plan. A fresh
+    # scan of these files has neither a catalog nor a saved synchronization link.
+    source = tmp_path / 'drive'
+    source.mkdir()
+    (tmp_path / 'songs').rename(source / 'songs')
+    return source
+
+
+@pytest.mark.parametrize('output', ['midi_mp3', 'encoded_wav'])
+@pytest.mark.parametrize('archive', [False, True])
+def test_uncataloged_pair_is_automatically_prepared_during_markiv_recovery(
+        uncataloged_library, tmp_path, output, archive):
+    from aps_midi_prep_tool_app.audio_tools import find_lame_command
+    from aps_midi_prep_tool_app.disklavier_audio import read_midi_events
+    from aps_midi_prep_tool_app.disklavier_audio_decode import decode_disklavier_audio
+    from aps_midi_prep_tool_app.markiv_backup import backup
+    from aps_midi_prep_tool_app.markiv_backup.library import scan_library
+
+    if output == 'midi_mp3' and not find_lame_command():
+        pytest.skip('LAME is required for paired export')
+    source = uncataloged_library
+    if archive:
+        source = backup.run_backup(scan_library(source), tmp_path / 'archives').folder
+    originals = {path: path.read_bytes() for path in source.rglob('*') if path.is_file()}
+    result = backup.run_backup(scan_library(source), tmp_path / 'output', audio_output=output)
+    assert (result.status, result.decoded, result.audio_skipped) == ('complete', 1, 0), result.errors
+    manifest = json.loads((result.folder / 'manifest.json').read_text())
+    assert not manifest['playback_issues']
+    midi_record = next(row for row in manifest['files'] if row['kind'] == 'MIDI')
+    alignment = midi_record['playback_prepare']['alignment']
+    assert alignment['association_validation']['method'] == 'missing_catalog_and_two_fingerprints'
+    assert alignment['offset_seconds'] == pytest.approx(.18, abs=.008)
+    derivatives = manifest['derivatives']
+    assert [row['kind'] for row in derivatives] == (['MIDI', 'MP3'] if output == 'midi_mp3' else ['WAV'])
+    if output == 'midi_mp3':
+        midi = result.folder / derivatives[0]['destination']
+        assert midi.with_suffix('.mp3') == result.folder / derivatives[1]['destination']
+        events = read_midi_events(midi)
+        note_time = next(time for time, data in events if data[0] == 0x90)
+        assert note_time == pytest.approx(.68, abs=.01)
+    else:
+        decoded = decode_disklavier_audio(result.folder / derivatives[0]['destination'], tmp_path / 'decoded.wav')
+        note = next(event for event in decoded.events if event.data[0] == 0x90)
+        assert note.time_seconds == pytest.approx(1.18, abs=.01)
+    assert backup.verify_backup(result.folder) == []
+    assert all(path.read_bytes() == content for path, content in originals.items())
+
+
+@pytest.mark.parametrize('problem', ['missing', 'wrong_ending', 'ambiguous', 'incomplete_fingerprints'])
+def test_unresolved_uncataloged_sps_is_reported_in_markiv_recovery_without_solo_output(
+        uncataloged_library, tmp_path, problem):
+    from aps_midi_prep_tool_app.markiv_backup import backup
+    from aps_midi_prep_tool_app.markiv_backup.library import scan_library
+
+    source = uncataloged_library
+    audio = source / 'songs/audio/9/track-03.WAV'
+    if problem == 'missing':
+        audio.unlink()
+    elif problem == 'wrong_ending':
+        with wave.open(str(audio), 'rb') as stream:
+            pcm = stream.readframes(stream.getnframes())
+        with wave.open(str(audio), 'wb') as stream:
+            stream.setparams((2, 2, 44100, 0, 'NONE', 'not compressed'))
+            stream.writeframes(pcm[:6 * 44100 * 4] + bytes(len(pcm) - 6 * 44100 * 4))
+    elif problem == 'ambiguous':
+        duplicate = source / 'songs/audio/10/other.wav'
+        duplicate.parent.mkdir()
+        duplicate.write_bytes(audio.read_bytes())
+    else:
+        midi = source / 'songs/pianosoft/1/01.mid'
+        parsed = mido.MidiFile(midi)
+        parsed.tracks[0] = mido.MidiTrack(message for message in parsed.tracks[0]
+                                       if not (message.type == 'sysex' and message.data[3] == 2))
+        parsed.save(midi)
+    originals = {path: path.read_bytes() for path in source.rglob('*') if path.is_file()}
+    result = backup.run_backup(scan_library(source), tmp_path / 'output', audio_output='encoded_wav')
+    assert result.status == 'incomplete' and result.decoded == 0
+    manifest = json.loads((result.folder / 'manifest.json').read_text())
+    issue, = manifest['playback_issues']
+    assert issue['code'] == {'ambiguous': 'ambiguous_audio', 'incomplete_fingerprints': 'invalid_midi'}.get(
+        problem, 'missing_audio')
+    assert issue['midi_source'] == 'songs/pianosoft/1/01.mid'
+    assert not manifest['derivatives']
+    assert all(path.read_bytes() == content for path, content in originals.items())
+
+
+def test_uncataloged_fingerprint_search_can_be_cancelled_in_markiv_recovery(uncataloged_library, tmp_path):
+    from aps_midi_prep_tool_app.markiv_backup import backup
+    from aps_midi_prep_tool_app.markiv_backup.library import scan_library
+
+    cancel = threading.Event()
+
+    def progress(event):
+        if event.get('message', '').startswith('Matching accompaniment'):
+            cancel.set()
+
+    result = backup.run_backup(scan_library(uncataloged_library), tmp_path / 'output',
+                               audio_output='encoded_wav', progress=progress, cancel=cancel)
+    assert cancel.is_set()
+    assert result.status == 'cancelled' and not result.errors
+    manifest = json.loads((result.folder / 'manifest.json').read_text())
+    assert not manifest['derivatives']
+    assert all(row['status'] == 'verified' for row in manifest['files'])
+
+
 def _different_cd_edition(pair):
     # The same full TOC with a one-frame lead-in change and a two-frame
     # boundary change: close enough to shortlist, but insufficient to pair.
@@ -507,9 +639,13 @@ def test_explicit_saved_track_reordering_requires_unique_two_fingerprint_match(f
     assert result.pairs[0].association_details['method'] == 'stored_cd_link_and_two_fingerprints'
 
 
-def test_alternate_edition_validation_reads_only_supplied_snapshots(fingerprint_pair, tmp_path):
+@pytest.mark.parametrize('missing_catalog', [False, True])
+def test_fingerprint_validation_reads_only_supplied_snapshots(fingerprint_pair, tmp_path, missing_catalog):
     pair, midi, audio = fingerprint_pair
-    _different_cd_edition(pair)
+    if missing_catalog:
+        pair.midi.metadata.clear()
+    else:
+        _different_cd_edition(pair)
     snapshot = tmp_path / 'verified.wav'
     audio.rename(snapshot)
     audio.write_bytes(b'unverified original')
@@ -521,7 +657,7 @@ def test_alternate_edition_validation_reads_only_supplied_snapshots(fingerprint_
     assert [issue.code for issue in missing.issues] == ['missing_audio']
 
 
-@pytest.mark.parametrize('recovery', ['alternate_edition', 'saved_track_conflict'])
+@pytest.mark.parametrize('recovery', ['alternate_edition', 'saved_track_conflict', 'missing_catalog'])
 def test_mp3_recovery_decodes_verified_snapshot_privately_before_matching(
         fingerprint_pair, tmp_path, monkeypatch, recovery):
     from aps_midi_prep_tool_app import audio_tools
@@ -529,6 +665,8 @@ def test_mp3_recovery_decodes_verified_snapshot_privately_before_matching(
     pair, midi, audio = fingerprint_pair
     if recovery == 'alternate_edition':
         _different_cd_edition(pair)
+    elif recovery == 'missing_catalog':
+        pair.midi.metadata.clear()
     compressed = _audio(tmp_path, 'songs/audio/10/track-03.MP3', **pair.audio.metadata)
     snapshot = tmp_path / 'verified-audio.input'
     snapshot.write_bytes(b'verified MP3 snapshot')

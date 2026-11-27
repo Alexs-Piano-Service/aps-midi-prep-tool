@@ -53,7 +53,7 @@ def prepare_playback_copies(plan, folder, original_root, records, manifest, jour
 
     if resolution is None:
         resolution = resolve_playback_pairs(
-            plan, cancel=cancel,
+            plan, cancel=cancel, progress=progress,
             source_paths={item.source: _contained(original_root, item.destination) for item in plan.files},
         )
     indexed = {item.source: (index, item, record)
