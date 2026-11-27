@@ -1,5 +1,4 @@
 param(
-    [string]$PyInstaller = "pyinstaller",
     [string]$Python = "python",
     [string]$Name = "APS MIDI Prep Tool",
     [switch]$OneFile,
@@ -12,6 +11,10 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RepoRoot
+# Requirements on disk do not establish what is installed in the interpreter
+# that freezes the app. Fail here instead of shipping a missing-module warning.
+& $Python -c "import numpy as np; import mido; from PySide6 import QtCore; import PyInstaller; assert np.isfinite(np.fft.rfft(np.arange(16))).all(); print('Build runtime:', np.__version__, QtCore.__version__, PyInstaller.__version__)"
+if ($LASTEXITCODE -ne 0) { throw 'Required Windows build runtime is missing or broken.' }
 & $Python scripts/release_metadata.py
 if ($LASTEXITCODE -ne 0) { throw 'Release metadata validation failed.' }
 $PackageKind = if ($OneFile) { 'windows-onefile' } else { 'windows-onedir' }
@@ -40,6 +43,8 @@ function Resolve-Executable {
 $PyInstallerArgs = @(
     "--noconfirm",
     "--windowed",
+    "--clean",
+    "--collect-all", "numpy",
     "--collect-data", "certifi",
     "--add-data", "build/build-info.json;aps_midi_prep_tool_app",
     "--name", $Name,
@@ -84,5 +89,7 @@ if ($BundleLame) {
     $PyInstallerArgs += @('--add-data', "$LameDirectory;bin")
 }
 
-& $PyInstaller @PyInstallerArgs (Join-Path $RepoRoot "aps_midi_prep_tool.py")
+# Use the same interpreter as the preflight. A PATH-selected pyinstaller can
+# otherwise freeze from another environment without NumPy installed.
+& $Python -m PyInstaller @PyInstallerArgs (Join-Path $RepoRoot "aps_midi_prep_tool.py")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE." }

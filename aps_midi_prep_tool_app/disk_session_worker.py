@@ -1,4 +1,6 @@
+import errno
 import threading
+import traceback
 
 from PySide6.QtCore import QThread, Signal
 
@@ -10,6 +12,8 @@ from .floppy_image import (
     BlankDiskImageError,
     FloppyImageSession,
     FloppyImageError,
+    FloppyDependencyError,
+    FloppyWorkingCopyError,
     FloppyCaptureReadError,
     FloppyOperationCancelled,
     GreaseweazleConversionError,
@@ -86,7 +90,9 @@ class _CancellableDiskWorker(QThread):
             self._confirm_yamaha_session(session, session.list_entries())
         except FloppyOperationCancelled:
             raise
-        except (FloppyImageError, OSError, ValueError):
+        except (FloppyDependencyError, FloppyWorkingCopyError):
+            raise
+        except (FloppyImageError, ValueError):
             # Exact captures are allowed to preserve unformatted/non-FAT data;
             # failed classification does not authorize inventing Yamaha data.
             pass
@@ -137,6 +143,41 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
         self.final_total = int(final_total or 0)
         self.final_message = final_message or ""
         self.read_diagnostics = {}
+        self.failure_stage = "acquisition"
+        self.failure_details = {}
+
+    def _failure_details(self, exc):
+        # Read evidence describes acquisition, not the cause of a later failure.
+        # Inspect chained exceptions as native/storage errors can be wrapped.
+        causes = []
+        cause = exc
+        while cause is not None and cause not in causes:
+            causes.append(cause)
+            cause = cause.__cause__ or cause.__context__
+        if any(isinstance(error, (ImportError, FloppyDependencyError)) for error in causes):
+            category = "dependency"
+        elif (isinstance(exc, FloppyWorkingCopyError)
+              or self.read_diagnostics.get("failure_scope") == "local_working_copy"
+              or any(isinstance(error, OSError) and (
+                  error.errno in {errno.ENOSPC, errno.EACCES, errno.EPERM, errno.EROFS,
+                                  errno.ENOENT, errno.EDQUOT}
+                  or getattr(error, "winerror", None) in {2, 3, 5, 39, 112}
+              ) for error in causes)):
+            category = "local_storage"
+        elif (self.failure_stage in {"acquisition", "listing"}
+              and isinstance(exc, FloppyImageError)):
+            category = "media_filesystem"
+        else:
+            category = "application"
+        return {
+            "type": "floppy_read" if category == "media_filesystem" else category,
+            "failure_stage": self.failure_stage,
+            "exception_type": type(exc).__name__,
+            "recoverable": category == "media_filesystem",
+            "message": str(exc), "source": self.source,
+            "read_diagnostics": self.read_diagnostics,
+            "traceback": traceback.format_exc(),
+        }
 
     def _remember_read_diagnostics(self, source):
         value = getattr(source, "read_diagnostics", None)
@@ -147,6 +188,8 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
         session = None
         capture = None
         self.read_diagnostics = {}
+        self.failure_stage = "acquisition"
+        self.failure_details = {}
         try:
             if self.load_kind == "image":
                 session = FloppyImageSession.load(
@@ -175,6 +218,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                     progress_callback=self._emit_progress,
                     cancel_callback=self._cancel_requested,
                 )
+                self.failure_stage = "consent"
                 self._confirm_yamaha_capture(capture.capture_path, capture.sector_map)
                 if self.final_message:
                     self._emit_progress(self.final_total, self.final_total, self.final_message)
@@ -206,9 +250,12 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                 self._emit_progress(self.final_total, self.final_total, self.final_message)
 
             self._raise_if_cancelled()
+            self.failure_stage = "listing"
             listing = session.list_entries()
+            self.failure_stage = "consent"
             self._confirm_yamaha_session(session, listing)
             self._raise_if_cancelled()
+            self.failure_stage = "handoff"
             self.sessionLoaded.emit(session, listing)
             session = None
         except FloppyOperationCancelled as exc:
@@ -220,6 +267,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
             self._emit_cancelled(exc)
         except Exception as exc:
             self._remember_read_diagnostics(exc)
+            self.failure_details = self._failure_details(exc)
             if session is not None:
                 session.cleanup()
             if capture is not None:
@@ -227,8 +275,12 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
             if self._should_treat_as_cancelled(exc):
                 self._emit_cancelled(exc)
                 return
+            if not self.failure_details["recoverable"]:
+                self.loadFailedWithDetails.emit(self.failure_details)
+                return
             if isinstance(exc, BlankDiskImageError):
                 details = {
+                    **self.failure_details,
                     "type": "blank_disk_image",
                     "message": str(exc),
                     "sector_map": exc.sector_map,
@@ -242,6 +294,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                 return
             if isinstance(exc, GreaseweazleConversionError):
                 details = {
+                    **self.failure_details,
                     "type": "greaseweazle_conversion",
                     "message": str(exc),
                     "sector_map": exc.sector_map,
@@ -256,13 +309,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                     details["read_diagnostics"] = self.read_diagnostics
                 self.loadFailedWithDetails.emit(details)
                 return
-            if self.read_diagnostics:
-                self.loadFailedWithDetails.emit({
-                    "type": "floppy_read", "message": str(exc), "source": self.source,
-                    "read_diagnostics": self.read_diagnostics,
-                })
-                return
-            self.loadFailed.emit(str(exc))
+            self.loadFailedWithDetails.emit(self.failure_details)
 
 
 class BulkExtractionWorker(_CancellableDiskWorker):

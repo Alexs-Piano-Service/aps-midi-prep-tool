@@ -6,7 +6,14 @@ changelog, and AppStream metadata. `unreleased` has no publication date;
 day, use `ready`, set `date` to the actual UTC release date, and update the matching
 documentation. The tagging helper and packaging workflow check this identity.
 
-The current checkout is **0.9.0, unreleased development**. The 0.9.x branch is
+The current checkout is a **0.9.0 rerelease candidate**. The original
+[0.9.0 (Ankylosaurus)](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/tag/v0.9.0)
+was published on November 26, 2026 in America/New_York (November 27 UTC).
+Its Windows installer and standalone EXE omitted NumPy. The candidate retains
+unreleased metadata until the corrected packages complete release acceptance;
+source tests and Wine checks alone do not make it ready to republish.
+
+The 0.9.x branch is
 reserved for bug fixes, reliability, and polish of existing workflows, with no
 major feature additions, in preparation for a stable 1.0 release. No 1.0 release
 date is scheduled. The example release commands and acceptance record below
@@ -44,9 +51,14 @@ does not change old clients. Upload only one accepted standalone name, since
 multiple candidates are rejected as ambiguous. Filename compatibility does not
 replace the native old-client update acceptance checks below.
 
-The signed Windows workflow produces `APSMIDIPrepTool.exe` and a test kit,
-retains them as CI artifacts, and stages both when a release tag is supplied.
-It does not produce an installer, portable ZIP, or Linux AppImage. Build and
+The signed Windows workflow produces `APSMIDIPrepTool.exe`, an installer, and a
+test kit, retains them as CI artifacts, and stages all three when a release tag
+is supplied. The installer contains the already-tested signed standalone EXE
+under the existing installed filename, `APS MIDI Prep Tool.exe`; it does not
+freeze a separate dependency bundle. The installer is then signed and its
+installed payload must pass the same smoke checks with an identical EXE hash.
+The runner needs Inno Setup 6 (`ISCC.exe`). It does not produce a portable ZIP
+or Linux AppImage. Build and
 stage every package declared for the next release. The test kit can be an
 optional upload without being listed as a required release asset.
 An incomplete draft remains private if a build or acceptance test fails.
@@ -71,8 +83,11 @@ Results and a SHA-256 of the complete AppImage are retained under
 creates a release checksum. These local checks do not establish clean-machine
 acceptance or change an unreleased version's publication status.
 
-The default package checks cover six cases: `ui`, `img`,
-`image_source_changes`, `hfe`, `mp3`, and `smart_pianosoft`. The UI check requires
+The default package checks cover seven cases: `ui`, `img`, `disk_loading`,
+`image_source_changes`, `hfe`, `mp3`, and `smart_pianosoft`. The disk-loading
+check uses the normal reader with a synthetic protected block-device fixture,
+requires consent, and compares songs and catalog bytes. It does not establish
+physical floppy acceptance. The UI check requires
 the restored Smart PianoSoft utility. Its workflow check uses an original
 synthetic recording and MIDI fingerprints to check the loaded song-list path,
 source preservation, synchronization, and encoded WAV channels without a CD
@@ -102,7 +117,18 @@ check locally on Windows with:
 ./scripts/test_windows_package.ps1 -ExecutablePath dist/APSMIDIPrepTool.exe -OutputDirectory C:/Temp/aps-package-smoke
 ```
 
-This removes development tools from PATH, enforces a deadline, and records the
+The build script checks NumPy (including native FFT execution) in the same
+Python interpreter that runs PyInstaller and explicitly collects its runtime.
+A requirements declaration alone is not evidence that a package contains it.
+
+Test the installer itself with `scripts/test_windows_installer.ps1`, passing
+`-InstallerPath`, `-StandalonePath`, `-OutputDirectory`, and `-ExpectedVersion`.
+It installs into a disposable folder, verifies the installed payload hash, and
+runs all seven checks from that folder. Keep native standard-user tests from
+Program Files and the known-good protected Yamaha floppy in the acceptance
+record; Wine and synthetic fixtures do not establish either result.
+
+The standalone runner removes development tools from PATH, enforces a deadline, and records the
 actual executable hash. Passing on a development machine or hosted CI runner
 does not establish clean-machine acceptance.
 

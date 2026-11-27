@@ -111,6 +111,19 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Keep Yamaha disk recognition and MIDI fingerprint parsing independent of
+  NumPy while preserving consent for protected and Smart PianoSoft disks.
+- Preserve disk-load failure stage and exception type. Report dependency and
+  local storage failures as application errors instead of offering recovery.
+- Retain raw SCP captures after save failures and retry another destination
+  without rereading the floppy. Verify saves before cleanup; require explicit
+  discard when cancelling an unsaved capture.
+- Share a writable capture-save default across SCP, image, and partial recovery
+  dialogs: the last successful directory, Documents, then another user folder.
+- Validate NumPy in the Windows build interpreter, collect its native runtime,
+  and package the same standalone payload in the installer. Check protected
+  ordinary reads and Smart PianoSoft audio in both package acceptance runs.
+
 - Export MIDI/MP3 pairs when a WAV header leaves an incomplete final sample
   frame. Preserve every declared complete frame, continue to reject missing
   audio samples, and leave the original WAV unchanged.

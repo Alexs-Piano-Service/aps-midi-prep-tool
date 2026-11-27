@@ -514,6 +514,8 @@ def test_zip_source_survives_worker_finish_inside_failure_conversion_prompt(wind
 
 
 def test_zip_non_fat_export_retains_source_until_capture_worker_finishes(window, tmp_path, monkeypatch):
+    from aps_midi_prep_tool_app.capture_save import remember_capture_directory
+    remember_capture_directory(window.settings, str(tmp_path / "previous.img"))
     archive = _archive(tmp_path, "capture.zip", {"capture.scp": b"non-FAT capture"})
 
     def start_load(**kwargs):

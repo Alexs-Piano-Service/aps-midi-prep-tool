@@ -167,6 +167,36 @@ jobs:
           $metadata = Get-Content packaging/release.json -Raw | ConvertFrom-Json
           ./scripts/test_windows_package.ps1 -ExecutablePath dist/APSMIDIPrepTool.exe -OutputDirectory "$env:RUNNER_TEMP/aps-package-smoke" -ExpectedVersion $metadata.version
 
+      - name: Build installer from the tested signed EXE
+        shell: pwsh
+        run: ./scripts/build_windows_installer.ps1
+
+      - name: Sign installer with Trusted Signing
+        uses: azure/trusted-signing-action@v0.5.9
+        with:
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT || secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT || secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_PROFILE || secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          files-folder: dist
+          files-folder-filter: APS-MIDI-Prep-Tool-Setup-*.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify and exercise the signed installer payload
+        shell: pwsh
+        timeout-minutes: 8
+        run: |
+          $metadata = Get-Content packaging/release.json -Raw | ConvertFrom-Json
+          $installer = "dist/APS-MIDI-Prep-Tool-Setup-$($metadata.version).exe"
+          if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'Valid') {
+            throw 'Installer signature is invalid.'
+          }
+          ./scripts/test_windows_installer.ps1 -InstallerPath $installer -StandalonePath dist/APSMIDIPrepTool.exe -OutputDirectory "$env:RUNNER_TEMP/aps-installer-smoke" -ExpectedVersion $metadata.version
+
       - name: Upload package smoke evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -175,12 +205,24 @@ jobs:
           path: ${{ runner.temp }}/aps-package-smoke/
           if-no-files-found: warn
 
+      - name: Upload installer smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-smoke
+          path: |
+            ${{ runner.temp }}/aps-installer-smoke/smoke/
+            ${{ runner.temp }}/aps-installer-smoke/installer-acceptance.json
+            ${{ runner.temp }}/aps-installer-smoke/install.log
+          if-no-files-found: warn
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: APSMIDIPrepTool-windows-signed
           path: |
             dist/APSMIDIPrepTool.exe
+            dist/APS-MIDI-Prep-Tool-Setup-*.exe
             dist/windows-test-kit.zip
           if-no-files-found: error
 
@@ -190,4 +232,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: python scripts/release_assets.py stage "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --files dist/APSMIDIPrepTool.exe dist/windows-test-kit.zip
+        run: |
+          $metadata = Get-Content packaging/release.json -Raw | ConvertFrom-Json
+          python scripts/release_assets.py stage "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --files dist/APSMIDIPrepTool.exe "dist/APS-MIDI-Prep-Tool-Setup-$($metadata.version).exe" dist/windows-test-kit.zip

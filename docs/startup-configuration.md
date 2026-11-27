@@ -179,6 +179,7 @@ Every entry in this table accepts an absolute or relative path string.
 | `open_folder_location` | Starting folder for Open MIDI Folder; remembers subsequent folder selections. |
 | `open_image_location` | Starting folder for Open Image; remembers the selected image's folder. |
 | `save_as_location` | Shared starting folder for Save As dialogs. |
+| `capture_save_location` | Last successful capture-save folder. Capture dialogs use it when writable, then Documents or another writable user folder. |
 | `bulk_extraction_source` | Bulk Extraction source folder. |
 | `bulk_extraction_output` | Bulk Extraction output folder. |
 | `bulk_extraction_last_job` | Suggested extraction job record file when resuming. |

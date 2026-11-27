@@ -88,7 +88,7 @@ def is_smart_pianosoft_source(source):
     Ordinary Yamaha MIDI albums also use PDISK/PSONG. Their presence or a
     filename alone is not enough to identify Smart playback.
     """
-    from .smart_pianosoft_sync import parse_sps_midi
+    from .smart_pianosoft_midi import parse_sps_midi
 
     if not isinstance(source, LoadedAlbumSource) or source.error or not source.tracks:
         return False
@@ -128,7 +128,7 @@ def _identity(path):
 def scan_album(source, destination, *, cancel=None, progress=None):
     """Snapshot a floppy/folder/image, then require real SPS synchronization data."""
     from .smart_pianosoft_media import read_floppy_source
-    from .smart_pianosoft_sync import parse_sps_midi
+    from .smart_pianosoft_midi import parse_sps_midi
     from .floppy_image import FloppyDriveInfo, GreaseweazleFloppySource
 
     _check_cancel(cancel)
@@ -199,7 +199,7 @@ def scan_loaded_album(source: LoadedAlbumSource, destination, *, cancel=None, pr
     blank so a subset keeps those identities. Audio fingerprints determine the
     actual CD track, whose number may differ from the catalog position.
     """
-    from .smart_pianosoft_sync import parse_sps_midi
+    from .smart_pianosoft_midi import parse_sps_midi
 
     _check_cancel(cancel)
     if not isinstance(source, LoadedAlbumSource):

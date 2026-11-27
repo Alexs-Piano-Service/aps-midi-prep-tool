@@ -152,3 +152,29 @@ On other platforms the Windows directory skips. Existing cross-platform tests
 continue to cover catalog reconstruction, retained recovery diagnostics, GUI
 shutdown decisions, and conversion logic. No automated test touches a physical
 drive. CI publishes the portable kit and separate JUnit results as artifacts.
+
+## 0.9.0 rerelease regression checks
+
+Run these against both the final signed standalone EXE and the installed
+application as a standard user, with the installed shortcut starting in
+Program Files. Retain asset hashes and package-smoke reports.
+
+- Open a known-good protected Yamaha PianoSoft floppy through **Read Floppy**
+  without selecting recovery. Accept the Yamaha notice and verify song count,
+  titles, catalog order, and exported song/catalog hashes against the known
+  source. Record the actual drive, Windows version, and consent behavior.
+- Run the bundled `--aps-package-smoke` command and require `disk_loading` and
+  `smart_pianosoft` to pass along with the other cases. The latter executes
+  numerical fingerprint synchronization and verifies encoded WAV channels.
+- Attempt an SCP save to denied and full disposable destinations. The captured
+  bytes must remain available, an existing destination must stay intact, and
+  selecting another folder must save without another physical read. Cancelling
+  the file dialog must require explicit confirmation before discarding data.
+- Check partial-image, image-capture, and SCP dialogs before any successful
+  save, after a successful save, and after the remembered folder becomes
+  unavailable. Defaults must be absolute writable user paths: remembered
+  directory, Documents, then another user directory. Failed saves must not
+  update the preference.
+
+Use read-only source floppies and disposable output destinations for these
+checks. Keep Wine results labelled separately from native Windows acceptance.

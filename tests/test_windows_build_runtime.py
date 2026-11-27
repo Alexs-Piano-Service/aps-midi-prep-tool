@@ -63,7 +63,8 @@ def test_windows_packaging_scripts_parse(tmp_path):
     parser.write_text('''param([string]$Repo)
 $ErrorActionPreference = 'Stop'
 foreach ($file in @('build/build_windows_main.ps1', 'scripts/stage_windows_hfe_tool.ps1',
-                    'scripts/stage_windows_lame.ps1', 'scripts/test_windows_package.ps1')) {
+                    'scripts/stage_windows_lame.ps1', 'scripts/test_windows_package.ps1',
+                    'scripts/build_windows_installer.ps1', 'scripts/test_windows_installer.ps1')) {
     $parseErrors = $null
     $tokens = $null
     [System.Management.Automation.Language.Parser]::ParseFile(

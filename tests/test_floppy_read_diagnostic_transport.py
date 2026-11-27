@@ -53,10 +53,15 @@ def test_load_worker_emits_structured_acquisition_failure(monkeypatch, diagnosti
     worker.loadFailed.connect(plain.append)
     worker.run()
     assert plain == []
-    assert detailed == [{
+    details, = detailed
+    assert {key: details[key] for key in ("type", "message", "source", "read_diagnostics")} == {
         "type": "floppy_read", "message": str(error), "source": "A:",
         "read_diagnostics": diagnostics,
-    }]
+    }
+    assert details["failure_stage"] == "acquisition"
+    assert details["exception_type"] == "FloppyImageError"
+    assert details["recoverable"] is True
+    assert str(error) in details["traceback"]
     assert worker.read_diagnostics == diagnostics
 
 
