@@ -30,7 +30,7 @@ from array import array
 from math import exp, pi, sin
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QProcess, QRectF, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
+from PySide6.QtCore import QCoreApplication, QEventLoop, QPoint, QPointF, QProcess, QRectF, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QPolygonF, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -14114,15 +14114,97 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self._set_progress_dialog_message(dialog, message)
         return self._prepare_progress_dialog(dialog)
 
-    def _connect_disk_read_stages(self, dialog, worker, *success_signals):
+    def _connect_disk_read_stages(self, dialog, worker, *success_signals, finish_on_worker=True):
         stages = getattr(dialog, "_aps_disk_read_stages", None)
         if stages is None:
             return
         worker.readPhaseChanged.connect(stages.set_phase)
         worker.operationCancelled.connect(stages.stop)
-        worker.finished.connect(stages.stop)
+        if finish_on_worker:
+            worker.finished.connect(stages.stop)
         for signal in success_signals:
             signal.connect(stages.complete)
+
+    def _organizing_disk_read_dialog(self):
+        for name in ("diskLoadProgressDialog", "diskRecoveryProgressDialog"):
+            dialog = getattr(self, name, None)
+            if dialog is not None and getattr(dialog, "_aps_read_result_pending", False):
+                return dialog
+        return None
+
+    def _pulse_disk_read_result(self):
+        dialog = self._organizing_disk_read_dialog()
+        if dialog is None:
+            return
+        now = time.monotonic()
+        if now - getattr(dialog, "_aps_organize_updated", 0) >= .04:
+            dialog._aps_organize_updated = now
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+    def _file_conversion_progress(self, message, total, *, reuse_read=False):
+        dialog = self._organizing_disk_read_dialog() if reuse_read else None
+        if dialog is not None:
+            dialog.setRange(0, total)
+            self._set_progress_dialog_message(dialog, message)
+            return dialog, False
+        dialog = QProgressDialog(message, "Cancel", 0, total, self)
+        self._prepare_progress_dialog(dialog)
+        return dialog, True
+
+    @contextlib.contextmanager
+    def _organize_disk_read_result(self, dialog_name, worker_name, finished_handler):
+        dialog = getattr(self, dialog_name, None)
+        if dialog is None:
+            yield
+            return
+        dialog._aps_read_result_pending = True
+        dialog._aps_building_read_result = True
+        stages = getattr(dialog, "_aps_disk_read_stages", None)
+        if stages is not None:
+            stages.set_phase("organize")
+            dialog.installEventFilter(stages)
+        for button in dialog.findChildren(QPushButton):
+            button.setEnabled(False)
+        dialog.setRange(0, 0)
+        self._set_progress_dialog_message(dialog, "Organizing Files")
+        update_disk_activity(self, dialog, "Organizing Files")
+        succeeded = False
+        try:
+            self._pulse_disk_read_result()
+            yield
+            succeeded = True
+        finally:
+            dialog._aps_building_read_result = False
+            if not succeeded:
+                self._close_disk_progress_dialog(dialog)
+                if getattr(self, dialog_name, None) is dialog:
+                    setattr(self, dialog_name, None)
+            worker = getattr(self, worker_name, None)
+            if worker is not None and worker.isFinished():
+                # finished can arrive inside a title/conversion event loop.
+                # Defer its cleanup until the initial table build has returned.
+                QTimer.singleShot(0, self, lambda: finished_handler() if getattr(self, worker_name, None) is worker else None)
+            if succeeded:
+                QTimer.singleShot(0, dialog, lambda: self._finish_disk_read_result_when_ready(dialog_name, dialog))
+
+    def _finish_disk_read_result_when_ready(self, dialog_name, dialog):
+        if getattr(self, dialog_name, None) is not dialog or not getattr(dialog, "_aps_read_result_pending", False):
+            return
+        if (self._disk_worker_busy()
+                or getattr(dialog, "_aps_building_read_result", False)
+                or getattr(self, "_destination_preparation_queued", False)
+                or getattr(self, "_preparing_destination", False)
+                or getattr(self, "_floppy_read_conversion_active", False)
+                or self.pendingFloppyReadConvertToMidi):
+            QTimer.singleShot(25, dialog, lambda: self._finish_disk_read_result_when_ready(dialog_name, dialog))
+            return
+        # Paint the populated, prepared rows before revealing the main window.
+        self.table.viewport().repaint()
+        stages = getattr(dialog, "_aps_disk_read_stages", None)
+        if stages is not None:
+            stages.complete()
+        self._close_disk_progress_dialog(dialog)
+        setattr(self, dialog_name, None)
 
     def _prepare_floppy_file_progress_dialog(self, dialog):
         dialog._aps_floppy_file_progress = True
@@ -14588,6 +14670,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
     @staticmethod
     def _close_disk_progress_dialog(dialog):
+        dialog._aps_read_result_pending = False
+        stages = getattr(dialog, "_aps_disk_read_stages", None)
+        if stages is not None:
+            stages.stop()
         blocked = dialog.blockSignals(True)
         try:
             dialog.close()
@@ -14680,7 +14766,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         progress_dialog.canceled.connect(
             lambda owner=worker, dialog=progress_dialog: cancel_disk_activity(self, owner, dialog)
         )
-        self._connect_disk_read_stages(progress_dialog, worker, worker.sessionLoaded, worker.captureReady)
+        self._connect_disk_read_stages(progress_dialog, worker, worker.captureReady, finish_on_worker=False)
         worker.sessionLoaded.connect(self._on_disk_load_success)
         worker.captureReady.connect(self._on_greaseweazle_capture_ready)
         worker.loadFailedWithDetails.connect(self._on_disk_load_failure_with_details)
@@ -14733,14 +14819,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self._remember_disk_read_diagnostics(session)
         read_kind = self.diskLoadContext.get("load_kind", "")
         should_offer_capture = bool(self.diskLoadShouldOfferCapture)
-        if self.diskLoadProgressDialog is not None:
-            self._close_disk_progress_dialog(self.diskLoadProgressDialog)
-            self.diskLoadProgressDialog = None
 
-        self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
         if getattr(session, "read_only_format", "") == "pianodisc_system3":
             try:
-                self._open_pianodisc_system3_session_as_midi(session, listing)
+                with self._organize_disk_read_result("diskLoadProgressDialog", "diskLoadWorker", self._on_disk_load_finished):
+                    self._open_pianodisc_system3_session_as_midi(session, listing)
+                    self.pendingFloppyReadConvertToMidi = False
+                    self.pendingFloppyReadLongFilenames = False
+                    self.pendingFloppyReadTrimTitles = False
             except Exception as exc:
                 try:
                     session.cleanup()
@@ -14763,7 +14849,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             )
 
         try:
-            self._activate_disk_session(session, listing)
+            with self._organize_disk_read_result("diskLoadProgressDialog", "diskLoadWorker", self._on_disk_load_finished):
+                self._activate_disk_session(session, listing)
+                self._apply_pending_floppy_read_title_trim()
+                self._apply_pending_floppy_read_long_filenames()
         except Exception as exc:
             try:
                 session.cleanup()
@@ -14776,8 +14865,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             )
             return
 
-        self._apply_pending_floppy_read_title_trim()
-        self._apply_pending_floppy_read_long_filenames()
+        self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
         counts = self._log_listing_counts(listing)
         self._log_event(
             "Disk",
@@ -17144,12 +17232,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
     @zip_import_operation
     def _on_disk_load_finished(self):
+        if getattr(self.diskLoadProgressDialog, "_aps_building_read_result", False):
+            return
         cancelled_status = self.diskLoadContext.get("cancelled_status")
         self.diskLoadShouldOfferCapture = False
         if self.diskLoadWorker is not None:
             self.diskLoadWorker.deleteLater()
             self.diskLoadWorker = None
-        if self.diskLoadProgressDialog is not None:
+        if (self.diskLoadProgressDialog is not None
+                and not getattr(self.diskLoadProgressDialog, "_aps_read_result_pending", False)):
             self._close_disk_progress_dialog(self.diskLoadProgressDialog)
             self.diskLoadProgressDialog = None
         self._set_disk_load_busy(False)
@@ -17388,7 +17479,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         progress_dialog.canceled.connect(
             lambda owner=worker, dialog=progress_dialog: cancel_disk_activity(self, owner, dialog)
         )
-        self._connect_disk_read_stages(progress_dialog, worker, worker.sessionRecovered)
+        self._connect_disk_read_stages(progress_dialog, worker, finish_on_worker=False)
         worker.sessionRecovered.connect(self._on_disk_recovery_success)
         worker.recoveryFailed.connect(self._on_disk_recovery_failure)
         worker.operationCancelled.connect(self._on_disk_recovery_cancelled)
@@ -17419,13 +17510,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self._on_disk_recovery_cancelled("Operation cancelled.")
             return
         read_kind = self.diskRecoveryContext.get("load_kind", "")
-        if self.diskRecoveryProgressDialog is not None:
-            self._close_disk_progress_dialog(self.diskRecoveryProgressDialog)
-            self.diskRecoveryProgressDialog = None
 
         self._remember_disk_recovery_diagnostics(session, self.diskRecoveryWorker)
         try:
-            self._activate_disk_session(session, listing)
+            with self._organize_disk_read_result("diskRecoveryProgressDialog", "diskRecoveryWorker", self._on_disk_recovery_finished):
+                self._activate_disk_session(session, listing)
+                self._apply_pending_floppy_read_title_trim()
+                self._apply_pending_floppy_read_long_filenames()
         except Exception as exc:
             self._log_error_event(
                 "Recovery",
@@ -17445,8 +17536,6 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             return
 
         self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
-        self._apply_pending_floppy_read_title_trim()
-        self._apply_pending_floppy_read_long_filenames()
 
         song_count = sum(1 for entry in listing.entries if not is_pianodir_path(entry.path))
         self._log_event(
@@ -17537,6 +17626,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
     @zip_import_operation
 
     def _on_disk_recovery_finished(self):
+        if getattr(self.diskRecoveryProgressDialog, "_aps_building_read_result", False):
+            return
         cancelled_status = self.diskRecoveryContext.get("cancelled_status")
         self._remember_disk_recovery_diagnostics(self.diskRecoveryWorker)
         self.diskLoadContext = {}
@@ -17544,7 +17635,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         if self.diskRecoveryWorker is not None:
             self.diskRecoveryWorker.deleteLater()
             self.diskRecoveryWorker = None
-        if self.diskRecoveryProgressDialog is not None:
+        if (self.diskRecoveryProgressDialog is not None
+                and not getattr(self.diskRecoveryProgressDialog, "_aps_read_result_pending", False)):
             self._close_disk_progress_dialog(self.diskRecoveryProgressDialog)
             self.diskRecoveryProgressDialog = None
         self._set_disk_load_busy(False)
@@ -26846,6 +26938,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
         row_specs = []
         for entry in entries:
+            self._pulse_disk_read_result()
             if is_eseq_directory_path(entry.path):
                 continue
 
@@ -26942,6 +27035,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         else:
             row_specs.sort(key=lambda spec: spec["filename"].upper())
         for spec in row_specs:
+            self._pulse_disk_read_result()
             self.add_image_table_row(
                 spec["image_path"],
                 spec["filename"],
@@ -29148,6 +29242,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         return rows
 
     def _convert_loaded_floppy_to_midi_after_read(self):
+        self._floppy_read_conversion_active = True
+        try:
+            return self._convert_loaded_floppy_to_midi_after_read_impl()
+        finally:
+            self._floppy_read_conversion_active = False
+
+    def _convert_loaded_floppy_to_midi_after_read_impl(self):
         if not self.pendingFloppyReadConvertToMidi:
             return
         use_long_filenames = self.pendingFloppyReadLongFilenames
@@ -29179,14 +29280,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
         midi_catalog_order = self._yamaha_midi_conversion_order()
 
-        progressDialog = QProgressDialog(
-            "Converting E-SEQ files...",
-            "Cancel",
-            0,
-            len(conversion_rows),
-            self,
+        progressDialog, owns_progress = self._file_conversion_progress(
+            "Converting E-SEQ files...", len(conversion_rows), reuse_read=True,
         )
-        self._prepare_progress_dialog(progressDialog)
 
         converted = []
         errors = []
@@ -29217,7 +29313,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             progressDialog.setValue(index + 1)
             QApplication.processEvents()
 
-        progressDialog.close()
+        if owns_progress:
+            progressDialog.close()
         self._apply_yamaha_midi_conversion_order(midi_catalog_order)
         has_eseq_remaining = False
         for row in range(self.table.rowCount()):
@@ -29477,14 +29574,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         midi_catalog_order = (self._yamaha_midi_conversion_order()
                               if source_kind == "eseq" and target_kind == "midi" else [])
 
-        progressDialog = QProgressDialog(
+        progressDialog, owns_progress = self._file_conversion_progress(
             self._lt("Converting {format} files...", format=localize_music_format(source_kind.upper())),
-            "Cancel",
-            0,
-            len(applicable_paths),
-            self,
+            len(applicable_paths), reuse_read=not confirm,
         )
-        self._prepare_progress_dialog(progressDialog)
 
         converted_count = 0
         trimmed_title_count = 0
@@ -29570,7 +29663,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             progressDialog.setValue(index + 1)
             QApplication.processEvents()
 
-        progressDialog.close()
+        if owns_progress:
+            progressDialog.close()
         self._apply_yamaha_midi_conversion_order(midi_catalog_order)
 
         if target_kind == "eseq" and converted_count and not self._regular_midi_file_count():
@@ -29709,14 +29803,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         midi_catalog_order = (self._yamaha_midi_conversion_order()
                               if source_kind == "eseq" and target_kind == "midi" else [])
 
-        progressDialog = QProgressDialog(
+        progressDialog, owns_progress = self._file_conversion_progress(
             self._lt("Converting {format} files...", format=localize_music_format(source_kind.upper())),
-            "Cancel",
-            0,
-            len(applicable_rows),
-            self,
+            len(applicable_rows), reuse_read=not confirm,
         )
-        self._prepare_progress_dialog(progressDialog)
 
         converted = []
         trimmed_title_count = 0
@@ -29759,7 +29849,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             progressDialog.setValue(index + 1)
             QApplication.processEvents()
 
-        progressDialog.close()
+        if owns_progress:
+            progressDialog.close()
         self._apply_yamaha_midi_conversion_order(midi_catalog_order)
         if target_kind == "eseq" and converted and not self._preparation_song_counts().get("midi", 0):
             self._drop_mng_catalog_rows_for_eseq()

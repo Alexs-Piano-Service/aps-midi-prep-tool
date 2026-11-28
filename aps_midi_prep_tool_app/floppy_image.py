@@ -4256,10 +4256,85 @@ class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
         return self.read_at_recovery(offset, size, label)
 
 
+class _LinuxFloppyReadHandle:
+    """Read only the requested sectors, without Linux's buffered page reads.
+
+    A protected/unreadable boot sector must not make a readable neighbouring
+    FAT sector fail too. Even with readahead disabled, buffered block reads
+    fetch whole pages. Direct I/O keeps that failure confined to its sector.
+    Like ordinary POSIX reads, these calls remain synchronous.
+    """
+
+    def __init__(self, device_path):
+        import array
+        import fcntl
+
+        self._descriptor = None
+        if not getattr(os, "O_DIRECT", 0) or not hasattr(os, "preadv"):
+            raise FloppyImageError("Sector-isolated Linux floppy reads require direct I/O support.")
+        try:
+            self._descriptor = os.open(
+                device_path, os.O_RDONLY | os.O_DIRECT | getattr(os, "O_CLOEXEC", 0),
+            )
+            if not stat.S_ISBLK(os.fstat(self._descriptor).st_mode):
+                raise FloppyImageError("The floppy source is no longer a Linux block device.")
+            sector = array.array("I", [0])
+            fcntl.ioctl(self._descriptor, 0x1268, sector, True)  # Linux BLKSSZGET.
+            self.sector_size = int(sector[0])
+            if (self.sector_size <= 0 or self.sector_size > 64 * 1024
+                    or self.sector_size & (self.sector_size - 1)):
+                raise FloppyImageError("The floppy reported an unsupported direct-I/O sector size.")
+        except BaseException:
+            self.close()
+            raise
+
+    def read_at(self, offset, size, label):
+        import ctypes
+        import mmap
+
+        if self._descriptor is None:
+            raise ValueError("The floppy read handle is closed.")
+        offset, size = int(offset), int(size)
+        if offset < 0 or size < 0:
+            raise ValueError("Floppy read offset and size must be non-negative.")
+        if not size:
+            return b""
+        sector = self.sector_size
+        prefix = offset % sector
+        aligned_offset = offset - prefix
+        aligned_size = ((prefix + size + sector - 1) // sector) * sector
+        # Shared memory is safe if another thread launches a subprocess while
+        # the kernel is using this buffer; its address must also be aligned.
+        with mmap.mmap(-1, aligned_size + sector, flags=mmap.MAP_SHARED) as buffer:
+            address = ctypes.addressof(ctypes.c_char.from_buffer(buffer))
+            start = (-address) % sector
+            view = memoryview(buffer)[start:start + aligned_size]
+            try:
+                count = os.preadv(self._descriptor, [view], aligned_offset)
+                if (not isinstance(count, int) or count <= 0 or count > aligned_size
+                        or count % sector):
+                    raise FloppyImageError(
+                        f"Could not read {label}: the drive returned an incomplete or unaligned sector "
+                        f"at byte {aligned_offset:,}."
+                    )
+                # Preserve short aligned reads; _read_device_exact reads the
+                # remainder. Never expose the unused, zero-initialized buffer.
+                return bytes(view[prefix:min(count, prefix + size)])
+            finally:
+                view.release()
+
+    def close(self):
+        if self._descriptor is not None:
+            descriptor, self._descriptor = self._descriptor, None
+            os.close(descriptor)
+
+
 def _open_block_device_for_read(device_path):
     if os.name == "nt":
         return _WindowsRecoveryVolumeHandle(device_path, write=False)
     try:
+        if sys.platform.startswith("linux") and stat.S_ISBLK(os.stat(device_path).st_mode):
+            return _LinuxFloppyReadHandle(device_path)
         return os.open(device_path, os.O_RDONLY)
     except OSError as exc:
         detail = f"Could not open floppy device {device_path}: {exc}"

@@ -47,6 +47,11 @@ the progress window visible while the current read or helper process stops and
 temporary files are cleaned up. The controls become available when cleanup
 finishes. A finished disk read does not leave a MIDI-processing lock behind.
 
+On Linux, file-level and recovery reads access disk sectors directly. This
+keeps an unreadable or protected boot sector from causing readable neighbouring
+FAT sectors to fail through Linux's page cache. The drive may still spend
+several seconds rejecting a difficult sector before APS can continue.
+
 Protected Yamaha or Smart PianoSoft media may pause for a personal-use
 agreement. **Agree** continues reading and **Cancel** stops the operation.
 **Never show this again** is checked by default and remembers only an agreement.

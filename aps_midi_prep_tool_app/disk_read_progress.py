@@ -2,7 +2,7 @@
 
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QVariantAnimation, Slot
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QVariantAnimation, Slot
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import QLabel, QWidget
 
@@ -87,6 +87,14 @@ class DiskReadStages(QWidget):
     def hideEvent(self, event):
         self.animation.stop()
         super().hideEvent(event)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Close and getattr(watched, "_aps_read_result_pending", False):
+            # The hardware worker has handed off its result. Closing here
+            # cannot cancel the local table update already being applied.
+            event.ignore()
+            return True
+        return super().eventFilter(watched, event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

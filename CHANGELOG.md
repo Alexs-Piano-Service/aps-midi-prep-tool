@@ -111,6 +111,10 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Read Linux floppy sectors with aligned direct I/O so an unreadable boot
+  sector cannot cause neighbouring FAT sectors to fail through the page cache.
+- Keep **Organizing Files** visible through automatic conversion and table
+  preparation, closing the read dialog after the populated list is painted.
 - Check stored catalog filenames in the Save As regression test so Windows
   case-insensitive path lookup does not falsely report uppercase duplicates.
 - Keep Yamaha disk recognition and MIDI fingerprint parsing independent of
