@@ -111,6 +111,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Check stored catalog filenames in the Save As regression test so Windows
+  case-insensitive path lookup does not falsely report uppercase duplicates.
 - Keep Yamaha disk recognition and MIDI fingerprint parsing independent of
   NumPy while preserving consent for protected and Smart PianoSoft disks.
 - Preserve disk-load failure stage and exception type. Report dependency and

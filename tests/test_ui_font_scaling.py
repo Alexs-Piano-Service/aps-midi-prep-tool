@@ -155,3 +155,23 @@ def test_pixel_sized_desktop_font_keeps_heading_proportions(make_window, density
     assert heading_font.pixelSize() == heading_pixels
     assert heading_font.family() == body_font.family()
     assert heading_font.bold()
+
+
+@pytest.mark.parametrize('appearance', ['light', 'dark'])
+@pytest.mark.parametrize('pixel_size', [None, 16])
+def test_active_preparation_controls_update_fonts_without_changing_profile(make_window, appearance, pixel_size):
+    window = make_window(12, pixel_size=pixel_size)
+    window.settings.setValue('preparation_profile', 'mark_i')
+    window._apply_appearance_mode(appearance)
+    window._refresh_preparation_ui()
+    text = window.preparationLabel.text()
+    for scale in ['large', 'compact', 'small', 'regular']:
+        window.fontSizeActions[scale].trigger()
+        QApplication.processEvents()
+        body = window.backup_checkbox.font()
+        for widget in (window.preparationButton, window.preparationLabel, window.preparationCustomButton):
+            assert widget.font().pointSizeF() == body.pointSizeF()
+            assert widget.font().pixelSize() == body.pixelSize()
+            assert widget.contentsRect().height() >= widget.fontMetrics().height()
+        assert window.preparationLabel.text() == text
+        assert window.settings.value('preparation_profile') == 'mark_i'

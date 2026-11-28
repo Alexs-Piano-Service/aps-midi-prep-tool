@@ -16,13 +16,14 @@ from dataclasses import asdict, dataclass, field
 import io
 import math
 from pathlib import Path, PurePosixPath
+import shutil
 import tempfile
 
 import mido
 
 from .library import BackupPlan, CancelledError, PlannedFile, check_cancel
 from ..disklavier_audio import is_pianosmart_message
-from ..smart_pianosoft_sync import parse_sps_midi, synchronize
+from ..smart_pianosoft_sync import FingerprintMismatch, parse_sps_midi, synchronize
 
 
 @dataclass(frozen=True)
@@ -145,15 +146,18 @@ def _relative_cd_toc(value):
     return tuple(position - positions[0] for position in positions)
 
 
-def _synchronize_candidate(metadata, candidate, audio_path, cancel):
+def _synchronize_candidate(metadata, candidate, audio_path, cancel, *, work_dir=None):
     """Validate a recovery candidate using the exporter's MP3 decoding path."""
     if PurePosixPath(_original(candidate)).suffix.lower() != '.mp3':
         return synchronize(metadata, audio_path, cancel=cancel)
     from ..audio_tools import decode_mp3
+    from .backup import _audio_working_allowance
 
     # Source snapshots need not retain the original extension. The plan's
     # identity determines the format; decoded PCM is private and temporary.
-    with tempfile.TemporaryDirectory(prefix='aps-markiv-sync-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='aps-markiv-sync-', dir=work_dir) as temporary:
+        if shutil.disk_usage(temporary).free < _audio_working_allowance(candidate):
+            raise OSError('Not enough free space to decode accompaniment for fingerprint matching.')
         pcm = Path(temporary) / 'audio.wav'
         decode_mp3(audio_path, pcm, cancel=cancel)
         check_cancel(cancel)
@@ -161,7 +165,7 @@ def _synchronize_candidate(metadata, candidate, audio_path, cancel):
 
 
 def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None,
-                           progress=None) -> PlaybackPairPlan:
+                           progress=None, work_dir=None) -> PlaybackPairPlan:
     """Resolve candidates without altering files or asserting they are synchronized.
 
     ``paired_audio_sources`` identifies plan source paths claimed by unique
@@ -174,6 +178,8 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None,
     Missing catalog associations trigger automatic two-fingerprint matching
     against the library's audio, with progress through the existing preparation
     flow. Ordinary piano-only performances do not trigger an audio search.
+    Export callers supply ``work_dir`` on the selected destination filesystem
+    for temporary PCM and its storage check.
     """
     files = [item for item in plan.files
              if item.kind not in {'Metadata', 'PianoSoft package'}
@@ -347,7 +353,7 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None,
             # recovers missing catalog links or unavailable editions, or resolves
             # a concrete disagreement between recorded associations.
             if set(alternatives) - set(candidates) or track_conflict:
-                checked, matched = [], {}
+                checked, matched, unresolved = [], {}, []
                 to_check = {**candidates, **alternatives}
                 for completed, candidate in enumerate(to_check.values()):
                     check_cancel(cancel)
@@ -362,13 +368,20 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None,
                     try:
                         audio_path = (plan.source / candidate.source if source_paths is None
                                       else source_paths[candidate.source])
-                        alignment = _synchronize_candidate(metadata, candidate, audio_path, cancel)
+                        alignment = _synchronize_candidate(
+                            metadata, candidate, audio_path, cancel, work_dir=work_dir,
+                        )
                     except InterruptedError:
                         raise CancelledError('Cancelled by user') from None
+                    except FingerprintMismatch as exc:
+                        check_cancel(cancel)
+                        evidence.update(status='mismatch', error=str(exc))
                     except (OSError, ValueError, EOFError, KeyError, RuntimeError) as exc:
                         check_cancel(cancel)
-                        evidence['error'] = str(exc)
+                        evidence.update(status='unresolved', error=str(exc))
+                        unresolved.append(evidence)
                     else:
+                        evidence['status'] = 'matched'
                         evidence['alignment'] = asdict(alignment)
                         matched[candidate.source] = candidate
                     checked.append(evidence)
@@ -377,6 +390,11 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None,
                               'message': f'Checked accompaniment for {item.destination}',
                               'completed': len(to_check), 'total': len(to_check),
                               'audio_total': len(to_check)})
+                if unresolved:
+                    details = '; '.join(f"{entry['audio_source']}: {entry['error']}" for entry in unresolved)
+                    issue(source, '', 'Could not establish a unique audio companion because some '
+                          f'candidates could not be conclusively evaluated: {details}', 'audio_verification_incomplete')
+                    continue
                 if len(matched) == 1:
                     selected = next(iter(matched.values()))
                     association_details = {
@@ -396,6 +414,10 @@ def resolve_playback_pairs(plan: BackupPlan, cancel=None, *, source_paths=None,
                     issue(source, '', 'More than one audio companion matches both fingerprints; '
                           'no pairing was chosen.', 'ambiguous_audio')
                     continue
+                else:
+                    # A catalog candidate that failed comparison cannot be
+                    # reused after the fingerprint search rejected every file.
+                    candidates = {}
         if len(candidates) != 1 or (len(by_source[source]) != 1):
             if candidates:
                 issue(source, '', 'More than one audio companion is supported by the catalog; '

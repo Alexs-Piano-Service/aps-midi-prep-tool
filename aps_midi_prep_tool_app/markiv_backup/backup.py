@@ -850,7 +850,7 @@ def run_backup(plan: BackupPlan, target: Path, progress=None, cancel=None, *,
             if progress:
                 progress({'event': 'audio_prepare', 'completed': 0, 'total': 0, 'audio_total': 0})
             resolution = resolve_playback_pairs(
-                plan, cancel=cancel, progress=progress,
+                plan, cancel=cancel, progress=progress, work_dir=folder,
                 source_paths={item.source: _contained(original_root, item.destination) for item in plan.files},
             )
             decoded, audio_skipped, audio_failed = prepare_playback_copies(

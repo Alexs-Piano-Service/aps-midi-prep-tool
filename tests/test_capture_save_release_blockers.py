@@ -22,7 +22,7 @@ def test_scp_save_failure_retries_captured_bytes_without_reread(window, tmp_path
                                       str(source), str(scratch), {})
     choices = iter([str(existing), str(saved)])
     defaults, loads = [], []
-    def choose(*args):
+    def choose(*args, **kwargs):
         assert source.read_bytes() == b'SCP captured data'
         assert existing.read_bytes() == b'previous capture'
         defaults.append(args[2])
@@ -40,6 +40,7 @@ def test_scp_save_failure_retries_captured_bytes_without_reread(window, tmp_path
         return real_copy(src, dst)
     monkeypatch.setattr(main_window.QFileDialog, 'getSaveFileName', choose)
     monkeypatch.setattr(image.shutil, 'copy2', copy)
+    monkeypatch.setattr(main_window.QMessageBox, 'question', lambda *args: QMessageBox.Yes)
     monkeypatch.setattr(window, '_show_greaseweazle_sector_reports', lambda *_: None)
     monkeypatch.setattr(window, '_start_disk_load_worker', lambda **kwargs: loads.append(kwargs))
     window._handle_greaseweazle_capture_ready({'capture': capture})
@@ -59,7 +60,7 @@ def test_cancel_save_needs_explicit_discard(window, tmp_path, monkeypatch):
                                       str(source), str(scratch), {})
     decisions = iter([QMessageBox.No, QMessageBox.Yes])
     prompts = []
-    def choose(*args):
+    def choose(*args, **kwargs):
         assert source.read_bytes() == b'SCP bytes'
         prompts.append(args)
         return '', ''
@@ -69,6 +70,44 @@ def test_cancel_save_needs_explicit_discard(window, tmp_path, monkeypatch):
     assert len(prompts) == 2
     assert not scratch.exists()
     assert not window.settings.value(capture_save.SETTING_CAPTURE_DIRECTORY)
+
+
+@pytest.mark.parametrize('filename', ['archive', 'archive.backup', 'archive.SCP'])
+@pytest.mark.parametrize('replace', [False, True])
+def test_scp_save_confirms_normalized_destination(window, tmp_path, monkeypatch, filename, replace):
+    scratch = tmp_path / 'capture'
+    scratch.mkdir()
+    source = scratch / 'raw.scp'
+    source.write_bytes(b'SCP new capture')
+    selected = tmp_path / filename
+    output = selected if filename.endswith('.SCP') else Path(str(selected) + '.scp')
+    output.write_bytes(b'previous capture')
+    alternate = tmp_path / 'alternate.scp'
+    capture = image.GreaseweazleCapture(
+        image.GreaseweazleFloppySource('test', 'A', image.DISK_FORMAT_BY_KEY['ibm.720']),
+        str(source), str(scratch), {},
+    )
+    choices = iter([str(selected), str(alternate)])
+    prompts, loads = [], []
+
+    def confirm(_parent, _title, text, _buttons, default):
+        assert output.name in text and str(output.parent) in text
+        assert default == QMessageBox.No
+        assert output.read_bytes() == b'previous capture'
+        prompts.append(text)
+        return QMessageBox.Yes if replace else QMessageBox.No
+
+    monkeypatch.setattr(main_window.QFileDialog, 'getSaveFileName', lambda *a, **k: (next(choices), ''))
+    monkeypatch.setattr(main_window.QMessageBox, 'question', confirm)
+    monkeypatch.setattr(window, '_show_greaseweazle_sector_reports', lambda *_: None)
+    monkeypatch.setattr(window, '_start_disk_load_worker', lambda **kwargs: loads.append(kwargs))
+    window._handle_greaseweazle_capture_ready({'capture': capture})
+    assert len(prompts) == 1 and not window._test_errors
+    assert output.read_bytes() == (b'SCP new capture' if replace else b'previous capture')
+    saved = output if replace else alternate
+    assert saved.read_bytes() == b'SCP new capture'
+    assert loads[0]['source']['capture_path'] == str(saved)
+    assert not scratch.exists()
 
 
 @pytest.mark.parametrize('saved_writable,documents_writable', [(True, True), (False, True), (False, False)])

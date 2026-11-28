@@ -417,14 +417,8 @@ def _has_q11_total_length(data, stream_start, *, container_variant=None):
             and int.from_bytes(data[3:7], "little") == min(total, 0xFFFF))
 
 
-def _legacy_eseq_stream_end(data, stream_start, *, allow_allocation_slack=False):
-    """Validate a legacy stream through its stop opcode, within physical EOF.
-
-    A raw F2 search could stop inside a command operand. Apply the same command
-    and payload rules as the parser. Legacy FIL copies rounded to 1024 bytes can
-    retain opaque allocation slack after the stop in their final block. Other
-    trailing bytes must be padding; damaged commands before the stop still fail.
-    """
+def _validated_eseq_stop(data, stream_start):
+    """Validate commands through F2, without interpreting bytes after the song."""
     pos = stream_start
 
     def require(size):
@@ -437,11 +431,6 @@ def _legacy_eseq_stream_end(data, stream_start, *, allow_allocation_slack=False)
         if status < 0x80 or status == _ESEQ_PADDING_BYTE:
             continue
         if status == 0xF2:
-            allocation_slack = (allow_allocation_slack and len(data) % 1024 == 0
-                                and 0 <= len(data) - pos < 1024)
-            if (not allocation_slack
-                    and any(value not in (0, _ESEQ_PADDING_BYTE) for value in data[pos:])):
-                raise EseqConversionError("Unexpected trailing data after the legacy E-SEQ end marker.")
             return pos
         if status == 0xF0:
             while pos < len(data):
@@ -479,6 +468,30 @@ def _legacy_eseq_stream_end(data, stream_start, *, allow_allocation_slack=False)
         pos += size
 
     raise EseqConversionError("Missing end marker in an E-SEQ file with legacy block length fields.")
+
+
+def _legacy_eseq_stream_end(data, stream_start, *, allow_allocation_slack=False):
+    """Validate a legacy song and the padding or final allocation block after it."""
+    end = _validated_eseq_stop(data, stream_start)
+    allocation_slack = (allow_allocation_slack and len(data) % 1024 == 0
+                        and 0 <= len(data) - end < 1024)
+    if (not allocation_slack
+            and any(value not in (0, _ESEQ_PADDING_BYTE) for value in data[end:])):
+        raise EseqConversionError("Unexpected trailing data after the legacy E-SEQ end marker.")
+    return end
+
+
+def _legacy_eseq_recovery_end(data, stream_start):
+    """Find a recognized legacy song within allocated clusters or a bounded carve.
+
+    Recovery does not know the original file's physical EOF. Validate the same
+    musical commands as conversion, but leave allocation slack outside the song.
+    Q11 total-size containers retain their physical-size requirement instead.
+    """
+    if (_has_legacy_block_lengths(data, stream_start)
+            or _has_legacy_placeholder_length(data, stream_start)):
+        return _validated_eseq_stop(data, stream_start)
+    return None
 
 
 def _declared_stream_end(data, stream_start, *, container_variant=None):

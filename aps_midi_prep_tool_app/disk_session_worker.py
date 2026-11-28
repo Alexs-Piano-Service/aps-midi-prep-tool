@@ -28,6 +28,7 @@ from .floppy_image import (
 
 class _CancellableDiskWorker(QThread):
     progressChanged = Signal(int, int, str)
+    readPhaseChanged = Signal(str)
     yamahaConsentRequested = Signal(object)
     operationCancelled = Signal(str)
     CANCELLED_MESSAGE = "Operation cancelled."
@@ -109,6 +110,9 @@ class _CancellableDiskWorker(QThread):
 
     def _emit_progress(self, step, total, message):
         self._raise_if_cancelled()
+        phase = getattr(message, "read_phase", None)
+        if phase is not None:
+            self.readPhaseChanged.emit(phase)
         if "yamaha copy protection?" in str(message).casefold():
             self._request_yamaha_consent()
         self.progressChanged.emit(int(step or 0), int(total or 0), str(message or ""))
@@ -154,10 +158,27 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
         while cause is not None and cause not in causes:
             causes.append(cause)
             cause = cause.__cause__ or cause.__context__
+        source_path = getattr(self.source, "path", self.source if isinstance(self.source, str) else "")
+        local_copy_failure = (
+            any(isinstance(error, FloppyWorkingCopyError) for error in causes)
+            or self.read_diagnostics.get("failure_scope") == "local_working_copy"
+        )
+        source_access_denied = not local_copy_failure and any(
+            (getattr(error, "errno", None) in {errno.EACCES, errno.EPERM}
+             or getattr(error, "winerror", None) == 5)
+            and (
+                (source_path and getattr(error, "filename", None) == source_path)
+                or (self.load_kind == "floppy_usb" and self.failure_stage == "acquisition"
+                    and isinstance(error, FloppyImageError)
+                    and getattr(error, "winerror", None) == 5)
+            )
+            for error in causes
+        )
         if any(isinstance(error, (ImportError, FloppyDependencyError)) for error in causes):
             category = "dependency"
-        elif (isinstance(exc, FloppyWorkingCopyError)
-              or self.read_diagnostics.get("failure_scope") == "local_working_copy"
+        elif source_access_denied:
+            category = "source_access"
+        elif (local_copy_failure
               or any(isinstance(error, OSError) and (
                   error.errno in {errno.ENOSPC, errno.EACCES, errno.EPERM, errno.EROFS,
                                   errno.ENOENT, errno.EDQUOT}
@@ -246,6 +267,7 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                 raise ValueError(f"Unsupported disk session load kind: {self.load_kind}")
 
             self._remember_read_diagnostics(session)
+            self.readPhaseChanged.emit("organize")
             if self.final_message:
                 self._emit_progress(self.final_total, self.final_total, self.final_message)
 
@@ -658,6 +680,7 @@ class DiskSessionRecoveryWorker(_CancellableDiskWorker):
             self.recovery_diagnostics = self._diagnostics_payload(
                 getattr(session, "recovery_diagnostics", None)
             )
+            self.readPhaseChanged.emit("organize")
             if self.final_message:
                 self._emit_progress(self.final_total, self.final_total, self.final_message)
             self._raise_if_cancelled()

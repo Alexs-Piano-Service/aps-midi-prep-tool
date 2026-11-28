@@ -5,11 +5,12 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEvent, QRect, QSettings, QTimer, Qt
-from PySide6.QtGui import QFont, QScreen
+from PySide6.QtCore import QEvent, QMargins, QRect, QSettings, QTimer, Qt
+from PySide6.QtGui import QFont, QScreen, QWindow
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QLabel, QProgressDialog, QPushButton, QTextEdit, QVBoxLayout,
+    QApplication, QDialog, QFileDialog, QInputDialog, QLabel, QProgressDialog,
+    QPushButton, QTextEdit, QVBoxLayout,
 )
 
 from aps_midi_prep_tool_app import main_window
@@ -85,9 +86,99 @@ def _form(window):
 
 
 def _assert_centered(dialog, parent):
-    distance = dialog.frameGeometry().center() - parent.frameGeometry().center()
+    def frame(widget):
+        handle = widget.windowHandle()
+        return handle.frameGeometry() if handle and handle.isExposed() else widget.frameGeometry()
+
+    distance = frame(dialog).center() - frame(parent).center()
     assert abs(distance.x()) <= 2
     assert abs(distance.y()) <= 2
+
+
+def test_initial_centering_waits_for_valid_native_frame_margins(window, monkeypatch):
+    dialog, _label = _form(window)
+    dialog.resize(360, 180)
+    dialog.winId()
+    original_margins = QWindow.frameMargins
+    decorated = False
+
+    def frame_margins(handle):
+        if handle is dialog.windowHandle() and not decorated:
+            # Observed on X11/KWin at the first Expose, before decoration.
+            return QMargins(0, 0, 1 - dialog.width(), -dialog.height())
+        return original_margins(handle)
+
+    monkeypatch.setattr(QWindow, "frameMargins", frame_margins)
+    center_dialog_on_parent(dialog, window, adjust_size=False)
+    dialog.show()
+    QTest.qWait(25)
+    # Invalid margins must not place the top-left corner at the owner's center.
+    assert (dialog.geometry().center() - window.frameGeometry().center()).manhattanLength() <= 2
+    decorated = True
+    QTest.qWait(80)
+    _assert_centered(dialog, window)
+    assert dialog.windowHandle().transientParent() is window.windowHandle()
+    assert dialog.size().toTuple() == (360, 180)
+    dialog.close()
+
+
+@pytest.mark.parametrize("kind", ["form", "input", "file", "message", "progress"])
+def test_dialogs_opened_directly_by_nested_tools_are_owned_and_centered(window, kind):
+    owner = QDialog(window)
+    owner.resize(600, 420)
+    owner.show()
+    QTest.qWait(80)
+    if kind == "input":
+        dialog = QInputDialog(owner)
+        dialog.setLabelText("Song title")
+    elif kind == "file":
+        dialog = QFileDialog(owner)
+        dialog.setOption(QFileDialog.DontUseNativeDialog)
+        dialog.resize(500, 350)
+    elif kind == "message":
+        dialog = main_window.QMessageBox(owner)
+        dialog.setText("Save the prepared songs?")
+    elif kind == "progress":
+        dialog = QProgressDialog("Preparing songs", "Cancel", 0, 100, owner)
+    else:
+        dialog, _label = _form(owner)
+        dialog.resize(360, 180)
+    try:
+        # No explicit call to a centering helper: nested tools use show/exec.
+        dialog.move(0, 0)
+        dialog.show()
+        QTest.qWait(100)
+        _assert_centered(dialog, owner)
+        assert dialog.parentWidget() is owner
+        assert dialog.windowHandle().transientParent() is owner.windowHandle()
+        dialog.move(18, 27)
+        QTest.qWait(50)
+        position = dialog.pos()
+        dialog.hide()
+        dialog.show()
+        QTest.qWait(80)
+        assert dialog.pos() == position
+    finally:
+        dialog.close()
+        owner.close()
+
+
+def test_main_progress_preparation_keeps_its_nested_owner(window):
+    owner = QDialog(window)
+    owner.resize(600, 420)
+    owner.show()
+    QTest.qWait(80)
+    progress = QProgressDialog("Looking for drives", "Cancel", 0, 100, owner)
+    try:
+        window._prepare_disk_read_progress_dialog(progress)
+        window._show_centered_progress_dialog(progress)
+        QTest.qWait(80)
+        _assert_centered(progress, owner)
+        assert progress.parentWidget() is owner
+        assert progress.windowHandle().transientParent() is owner.windowHandle()
+    finally:
+        progress.close()
+        owner.close()
 
 
 @pytest.mark.parametrize("font_size", [9, 14, 18])
@@ -310,6 +401,10 @@ def test_initial_show_size_is_centered_synchronously_and_only_once(window):
     dialog.resize(420, 250)
     window._center_child_dialog(dialog)
     dialog.show()
+    if QApplication.platformName() == "xcb":
+        # X11 supplies decorations asynchronously; a synchronous frame query
+        # can still report the invalid 1x0 frame reproduced in the regression.
+        QTest.qWait(80)
     _assert_centered(dialog, window)
     assert dialog.adjustments == 0
 
@@ -475,7 +570,8 @@ def test_pending_native_exposure_preserves_geometry_chosen_after_show(window, ch
         # Choose geometry before pumping events that deliver the native Expose.
         # An initial frame correction must not undo this explicit user choice.
         if change == "move":
-            dialog.move(18, 27)
+            # Leave room for the title bar; KWin clamps a pre-map y=27 to 32.
+            dialog.move(118, 127)
         else:
             dialog.resize(500, 260)
         geometry = dialog.geometry()

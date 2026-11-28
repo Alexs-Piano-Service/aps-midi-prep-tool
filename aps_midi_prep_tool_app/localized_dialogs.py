@@ -1,11 +1,12 @@
 """Application-language message boxes shared by primary and nested dialogs."""
 
-from PySide6.QtCore import QCoreApplication, QEvent, QLibraryInfo, QLocale, QTranslator
+from PySide6.QtCore import QCoreApplication, QEvent, QLibraryInfo, QLocale, QTranslator, Qt
 from PySide6.QtWidgets import QDialogButtonBox, QMessageBox as QtQMessageBox
 
 from .icon_utils import apply_window_icon
 from .message_catalog import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, normalize_language_code, translate_text
 from .ui_utils import center_dialog_on_parent
+from .error_presentation import brief_error_detail
 
 
 class _ApplicationTranslator(QTranslator):
@@ -170,11 +171,18 @@ class QMessageBox(QtQMessageBox):
         _translate_message_box_buttons(self, _message_parent_language(self.parent()))
 
     @staticmethod
-    def _exec_static(parent, icon, title, text, buttons, defaultButton):
+    def _exec_static(parent, icon, title, text, buttons, defaultButton, *, detailed_text=""):
         box = QMessageBox(parent)
         apply_window_icon(box)
         box.setIcon(icon)
         box.setWindowTitle(title)
+        if detailed_text:
+            box.setTextFormat(Qt.PlainText)
+            brief = brief_error_detail(detailed_text)
+            if brief:
+                text += "\n\n" + brief
+            if brief != detailed_text:
+                box.setDetailedText(detailed_text)
         box.setText(text)
         box.setStandardButtons(buttons)
         if defaultButton != QtQMessageBox.StandardButton.NoButton:
@@ -210,6 +218,7 @@ class QMessageBox(QtQMessageBox):
         text,
         buttons=QtQMessageBox.StandardButton.Ok,
         defaultButton=QtQMessageBox.StandardButton.NoButton,
+        *, detailed_text="",
     ):
         return QMessageBox._exec_static(
             parent,
@@ -218,6 +227,7 @@ class QMessageBox(QtQMessageBox):
             text,
             buttons,
             defaultButton,
+            detailed_text=detailed_text,
         )
 
     @staticmethod

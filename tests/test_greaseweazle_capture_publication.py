@@ -54,7 +54,7 @@ def test_capture_copy_failure_preserves_saved_destination(tmp_path, monkeypatch,
     reads = _acquire_capture(monkeypatch, tmp_path, partial=partial)
     source = image.GreaseweazleFloppySource(
         "mock-device", "A", image.DISK_FORMAT_BY_KEY["ibm.720"],
-        archival_quality=True, capture_save_path=str(output),
+        archival_quality=True, capture_save_path=str(output), capture_replace_existing=True,
     )
     copies = []
 
@@ -103,7 +103,7 @@ def test_capture_verification_or_publication_failure_keeps_previous_output(tmp_p
         message = f"SCP {failure} failed"
 
     with pytest.raises(expected_error, match=message):
-        image._save_greaseweazle_capture_copy(acquired, output)
+        image._save_greaseweazle_capture_copy(acquired, output, replace_existing=True)
 
     assert acquired.read_bytes() == CAPTURE
     _assert_saved_capture_unchanged(output, existing)
@@ -132,9 +132,28 @@ def test_saved_capture_is_synced_and_verified_before_replacement(tmp_path, monke
     monkeypatch.setattr(image.os, "fsync", fsync)
     monkeypatch.setattr(image.os, "replace", replace)
 
-    assert image._save_greaseweazle_capture_copy(acquired, output) == str(output)
+    assert image._save_greaseweazle_capture_copy(acquired, output, replace_existing=True) == str(output)
     assert acquired.read_bytes() == output.read_bytes() == CAPTURE
     assert list(output.parent.iterdir()) == [output]
+
+
+@pytest.mark.parametrize("appears_during_copy", [False, True])
+def test_capture_publication_without_consent_never_replaces_destination(tmp_path, monkeypatch, appears_during_copy):
+    output = _saved_capture(tmp_path, existing=not appears_during_copy)
+    acquired = tmp_path / "acquired.scp"
+    acquired.write_bytes(CAPTURE)
+    real_copy = image.shutil.copy2
+
+    def copy(source, destination):
+        real_copy(source, destination)
+        if appears_during_copy:
+            output.write_bytes(PREVIOUS_CAPTURE)
+
+    monkeypatch.setattr(image.shutil, "copy2", copy)
+    with pytest.raises(FileExistsError):
+        image._save_greaseweazle_capture_copy(acquired, output)
+    assert acquired.read_bytes() == CAPTURE
+    _assert_saved_capture_unchanged(output, existing=True)
 
 
 @pytest.mark.parametrize("partial", [False, True])
@@ -143,7 +162,7 @@ def test_recovery_converts_the_complete_saved_capture_copy(tmp_path, monkeypatch
     reads = _acquire_capture(monkeypatch, tmp_path, partial=partial)
     source = image.GreaseweazleFloppySource(
         "mock-device", "A", image.DISK_FORMAT_BY_KEY["ibm.720"],
-        archival_quality=True, capture_save_path=str(output),
+        archival_quality=True, capture_save_path=str(output), capture_replace_existing=True,
     )
 
     def convert(capture, destination, disk_format, **kwargs):

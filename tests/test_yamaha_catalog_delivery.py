@@ -452,8 +452,9 @@ def test_save_as_reviews_existing_lowercase_catalogs(window, monkeypatch, tmp_pa
     window.save_as_changes()
     assert questions
     assert 'psong.mng' in str(questions)
-    assert not (output / 'PSONG.MNG').exists()
-    assert not (output / 'PDISK.MNG').exists()
+    # Check stored names; exists() also matches lowercase files on Windows.
+    catalog_names = {path.name for path in output.iterdir() if path.suffix.lower() == '.mng'}
+    assert catalog_names == {'psong.mng', 'pdisk.mng'}
     if approve:
         catalog = parse_smart_pianosoft_song_catalog((output / 'psong.mng').read_bytes())
         assert [(song.filename, song.title) for song in catalog] == [('SONG.MID', 'New song title')]

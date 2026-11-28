@@ -9,6 +9,8 @@ from aps_midi_prep_tool_app.eseq_converter import (
 )
 from test_eseq_inspection import _fixture
 from test_eseq_legacy_lengths import PRELUDE, TAIL, _legacy
+from aps_midi_prep_tool_app import floppy_image as image
+from test_yamaha_root_reconstruction import _rebuild
 
 
 def _placeholder(stream):
@@ -42,6 +44,48 @@ def test_legacy_final_allocation_block_is_not_part_of_the_performance(slack):
     assert changed
     assert merged.endswith(source[len(expected):])
     assert parse_eseq_bytes(merged).end_tick == 512
+
+
+@pytest.mark.parametrize('workflow', ['fat', 'carve'])
+@pytest.mark.parametrize('header', ['block', 'placeholder'])
+def test_factory_song_recovery_uses_validated_end_before_opaque_slack(workflow, header):
+    stream = PRELUDE.ljust(1800 - 0x77 - len(TAIL), b'\xF6') + TAIL
+    source = bytearray(_legacy(stream) if header == 'block' else _placeholder(stream))
+    source[0x27:0x32] = b'SONG       '
+    source = bytes(source).ljust(2048, b'\xE5')
+    if header == 'block':
+        assert int.from_bytes(source[3:7], 'little') == 1911
+        assert parse_eseq_bytes(source).end_tick == 512
+        with pytest.raises(EseqConversionError, match='Unexpected trailing data'):
+            parse_eseq_bytes(source[:1911])
+    expected = source[:1800]
+    if workflow == 'fat':
+        entry, recovered, allocated = _rebuild(source)
+        assert allocated == 2048
+        assert entry['size'] == 1800
+    else:
+        # A carve includes unrelated disk space; its length is not the FIL EOF.
+        neighbor = bytes(_fixture(PRELUDE + TAIL))
+        raw = bytes(8192) + source + b'\xE5' * 4096 + neighbor + bytes(3072)
+        songs = image._carve_recovery_files_from_bytes(raw)
+        assert len(songs) == 2
+        recovered = songs[0].data
+        assert songs[1].data == neighbor
+    assert recovered == expected
+    assert convert_eseq_bytes_to_midi_bytes(recovered) == convert_eseq_bytes_to_midi_bytes(expected)
+    assert parse_eseq_bytes(recovered).end_tick == 512
+
+
+@pytest.mark.parametrize('workflow', ['fat', 'carve'])
+@pytest.mark.parametrize('tail', [b'\x95\xF2\x40\xF2', b'\xF0\x43\xF2\xF7', b'\xF5\xF2'])
+def test_legacy_recovery_does_not_validate_an_end_inside_damaged_events(workflow, tail):
+    source = bytearray(_legacy(PRELUDE + tail))
+    source[0x27:0x32] = b'SONG       '
+    source = bytes(source).ljust(2048, b'\xE5')
+    recovered = _rebuild(source)[1] if workflow == 'fat' else image._carve_recovery_files_from_bytes(source)[0].data
+    assert recovered == source
+    with pytest.raises(EseqConversionError):
+        parse_eseq_bytes(recovered)
 
 
 @pytest.mark.parametrize('extra', [1, 1024])

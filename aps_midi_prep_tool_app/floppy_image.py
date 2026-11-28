@@ -20,6 +20,8 @@ from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 
+from .read_progress import ReadProgressMessage
+
 from .eseq_pianodir import (
     ESEQ_VARIANT_CLAVINOVA,
     ESEQ_VARIANT_DISKLAVIER,
@@ -48,7 +50,9 @@ from .eseq_pianodir import (
     read_eseq_order_key_from_file,
     update_eseq_order_key,
 )
-from .eseq_converter import _eseq_event_stream_start, is_eseq_file
+from .eseq_converter import (
+    EseqConversionError, _eseq_event_stream_start, _legacy_eseq_recovery_end, is_eseq_file,
+)
 from .dos83_renamer import is_dos83_filename
 from .midi_metadata import (
     read_first_title_from_midi,
@@ -392,6 +396,7 @@ class GreaseweazleFloppySource:
     retries: int = 0
     capture_save_path: str = ""
     capture_output_ext: str = ""
+    capture_replace_existing: bool = False
 
     @property
     def display_name(self):
@@ -1342,9 +1347,11 @@ def _unsupported_image_type_message(output_ext, *, for_output=False):
     return f"Unsupported image type '{label}'. The app cannot {action} that format. {_supported_image_type_hint()}"
 
 
-def _notify_progress(progress_callback, step, total, message, *, allow_cancel=True):
+def _notify_progress(progress_callback, step, total, message, *, allow_cancel=True, read_phase=None):
     if progress_callback is not None:
         try:
+            if read_phase is not None:
+                message = ReadProgressMessage(message, read_phase)
             progress_callback(step, total, message)
         except FloppyOperationCancelled:
             # Completion notices must not interrupt bookkeeping after the
@@ -3598,6 +3605,7 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
             progress_state["command_failed"] = clean_line
         _handle_gw_read_progress_line(progress_callback, progress_state, line)
 
+    _notify_progress(progress_callback, 0, 100, "Reading floppy via Greaseweazle...", read_phase="read")
     output = _run_streaming_command(
         args,
         "Greaseweazle read failed",
@@ -4298,6 +4306,7 @@ def _read_windows_block_device_bytes(device_path, size_bytes, progress_callback=
         details.update(requested_bytes=int(size_bytes), exact_capture_completed=False)
         details.setdefault("successful_ranges", [])
         details.setdefault("split_read_requests", 0)
+        _notify_progress(progress_callback, 0, 100, "Reading floppy image...", read_phase="read")
 
         def read_range(device, offset, size):
             _raise_if_cancelled(cancel_callback)
@@ -4457,6 +4466,7 @@ def _read_block_device(device_path, output_path, size_bytes, progress_callback=N
             output.write(data)
         return
 
+    _notify_progress(progress_callback, 0, 100, "Reading floppy image...", read_phase="read")
     total_size = int(size_bytes or 0)
     details = diagnostics if diagnostics is not None else {}
     details.update(selected_capacity_bytes=total_size, exact_capture_completed=False)
@@ -4547,8 +4557,10 @@ def _finish_capture_output(temp_path, output_path):
     return _finish_temp_output(temp_path, output_path)
 
 
-def _save_greaseweazle_capture_copy(source_path, output_path, *, cancel_callback=None):
-    """Verify and sync a sibling copy before replacing a saved flux capture."""
+def _save_greaseweazle_capture_copy(
+    source_path, output_path, *, cancel_callback=None, replace_existing=False,
+):
+    """Verify and sync a sibling copy; replacement requires explicit consent."""
     output_path = os.path.abspath(os.fspath(output_path))
     staged_path = _capture_temp_output_path(output_path, suffix=".scp")
     try:
@@ -4565,7 +4577,11 @@ def _save_greaseweazle_capture_copy(source_path, output_path, *, cancel_callback
                 raise FloppyImageError("The saved SCP capture copy did not match the acquired data.")
             _raise_if_cancelled(cancel_callback)
 
-        return _finish_temp_output(staged_path, output_path, before_replace=verify_staged)
+        return _finish_temp_output(
+            staged_path, output_path, before_replace=verify_staged,
+            replace_existing=replace_existing,
+            check_cancel=lambda: _raise_if_cancelled(cancel_callback),
+        )
     finally:
         try:
             if os.name == "nt" and os.path.isfile(staged_path):
@@ -4634,6 +4650,7 @@ def capture_floppy_drive_image(
             }) from exc
         _raise_if_cancelled(cancel_callback)
 
+        _notify_progress(progress_callback, 85, 100, "Preparing floppy contents...", read_phase="organize")
         if before_publish is not None:
             before_publish(raw_temp_path, {})
             _raise_if_cancelled(cancel_callback)
@@ -4744,12 +4761,18 @@ def capture_logical_floppy_image(
         "source_modified": False, "files_independently_verified": False,
         "exact_capture_failure": dict(exact_failure or {}),
     }
+
+    def candidate_progress(step, total, message):
+        if getattr(message, "read_phase", None) == "organize":
+            message = str(message)
+        _notify_progress(progress_callback, step, total, message)
+
     try:
         try:
             repair = _read_floppy_device_fast_image(
                 drive_info.path, stage,
                 disk_format.size_bytes if isinstance(disk_format, DiskFormat) else drive_info.size_bytes,
-                progress_callback=progress_callback, cancel_callback=cancel_callback,
+                progress_callback=candidate_progress, cancel_callback=cancel_callback,
                 diagnostics=diagnostics, allow_incomplete=True,
             )
             listing = read_image_listing(stage)
@@ -4774,6 +4797,7 @@ def capture_logical_floppy_image(
                 boot_sector_reconstructed=session.source_boot_sector_repaired,
             )
         _raise_if_cancelled(cancel_callback)
+        _notify_progress(progress_callback, 90, 100, "Preparing floppy contents...", read_phase="organize")
         if before_publish is not None:
             before_publish(stage, {
                 "boot_sector_reconstructed": diagnostics.get("boot_sector_reconstructed", False),
@@ -4869,6 +4893,7 @@ def capture_greaseweazle_floppy_image(
             cancel_callback=cancel_callback,
         )
         _raise_if_cancelled(cancel_callback)
+        _notify_progress(progress_callback, 90, 100, "Preparing floppy contents...", read_phase="organize")
         if before_publish is not None:
             before_publish(temp_path, sector_map)
             _raise_if_cancelled(cancel_callback)
@@ -8052,6 +8077,14 @@ def _dos_directory_entry(name_bytes, first_cluster, size, attr=0x20):
 def _reconstructed_eseq_file_size(payload):
     """Recover a file boundary within a FAT chain or a bounded carve candidate."""
     stream_start = _eseq_event_stream_start(payload)
+    try:
+        legacy_end = _legacy_eseq_recovery_end(payload, stream_start)
+    except EseqConversionError:
+        # Preserve damaged legacy evidence; unreliable lengths must not turn an
+        # invalid command stream into an apparently complete shorter song.
+        return len(payload)
+    if legacy_end is not None:
+        return legacy_end
     declared_sizes = (
         int.from_bytes(payload[3:7], "little"),
         stream_start + int.from_bytes(payload[0x1F:0x23], "little"),
@@ -8346,7 +8379,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
         fallback_allowed = False
         try:
             _raise_if_cancelled(cancel_callback)
-            _notify_progress(progress_callback, 0, 100, "Fast floppy read: checking boot sector and FAT...")
+            _notify_progress(progress_callback, 0, 100, "Fast floppy read: checking boot sector and FAT...", read_phase="inspect")
             sector0 = _try_read_device_exact(
                 device,
                 0,
@@ -8579,6 +8612,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                 25,
                 100,
                 f"Fast floppy read: reading {display_bytes(total_data_bytes)} of file data in {len(sector_runs)} {pass_label}...",
+                read_phase="read",
             )
             read_data_bytes = 0
             last_progress = 25
@@ -8620,7 +8654,7 @@ def _read_floppy_device_fast_image(device_path, output_path, size_bytes, progres
                                 f"Fast floppy read: {display_bytes(read_data_bytes)} of {display_bytes(total_data_bytes)}...",
                             )
 
-            _notify_progress(progress_callback, 97, 100, "Preparing floppy contents...")
+            _notify_progress(progress_callback, 97, 100, "Preparing floppy contents...", read_phase="organize")
             _raise_if_cancelled(cancel_callback)
             if bad_file_ranges:
                 sector_word = "sector" if len(bad_file_ranges) == 1 else "sectors"
@@ -11078,7 +11112,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     # Recognition follows a completed raw capture, never a
                     # partially acquired FAT working image. The proprietary
                     # source stays read-only while its songs become MIDI files.
-                    _notify_progress(progress_callback, 90, 100, "Decoding PianoDisc System 3 songs...")
+                    _notify_progress(progress_callback, 90, 100, "Decoding PianoDisc System 3 songs...", read_phase="organize")
                     _raise_if_cancelled(cancel_callback)
                     try:
                         with open(source_copy, "wb") as handle:
@@ -11096,7 +11130,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     acquisition.update(detected_capacity_bytes=len(raw_data), stage="complete")
                     session.read_diagnostics = acquisition
                     return session
-                _notify_progress(progress_callback, 75, 100, "Creating working copy...")
+                _notify_progress(progress_callback, 75, 100, "Creating working copy...", read_phase="organize")
                 try:
                     repair_result = prepare_yamaha_bytes(raw_data, working_img)
                 except OSError as exc:
@@ -11307,7 +11341,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 cancel_callback=cancel_callback,
             )
             _raise_if_cancelled(cancel_callback)
-            _notify_progress(progress_callback, 2, 2, "Greaseweazle SCP capture ready to save...")
+            _notify_progress(progress_callback, 2, 2, "Greaseweazle SCP capture ready to save...", read_phase="organize")
             return GreaseweazleCapture(gw_source, source_capture, temp_dir, sector_map=sector_map)
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -11353,10 +11387,12 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 ):
                     _save_greaseweazle_capture_copy(
                         source_capture, gw_source.capture_save_path, cancel_callback=cancel_callback,
+                        replace_existing=gw_source.capture_replace_existing,
                     )
                 raise
             progress_step += 1
             conversion_sector_map = {}
+            _notify_progress(progress_callback, progress_step, total_steps, "Preparing floppy contents...", read_phase="organize")
             if gw_source.archival_quality:
                 saved_capture = os.path.abspath(gw_source.capture_save_path) if gw_source.capture_save_path else ""
                 if saved_capture:
@@ -11364,6 +11400,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     _notify_progress(progress_callback, progress_step, total_steps, "Saving raw SCP capture...")
                     source_capture = _save_greaseweazle_capture_copy(
                         source_capture, saved_capture, cancel_callback=cancel_callback,
+                        replace_existing=gw_source.capture_replace_existing,
                     )
                 _notify_progress(progress_callback, progress_step, total_steps, "Converting raw SCP capture...")
                 try:
@@ -11964,6 +12001,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 0,
                 100,
                 "Copying a floppy image for recovery (five-minute soft limit)...",
+                read_phase="read",
             )
             diagnostics = _read_block_device_recovery_image(
                 drive_info.path,
@@ -12016,6 +12054,11 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         if not isinstance(gw_source, GreaseweazleFloppySource):
             raise FloppyImageError("Invalid Greaseweazle source selection.")
 
+        def candidate_progress(step, total, message):
+            # Failed decoding/repair may trigger another physical capture.
+            # Reading is complete only when a usable candidate is established.
+            _notify_progress(progress_callback, step, total, str(message))
+
         temp_dir = tempfile.mkdtemp(prefix="aps_recover_gw_")
         try:
             attempts = [
@@ -12028,6 +12071,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     retries=max(gw_source.retries, 5),
                     capture_save_path=gw_source.capture_save_path,
                     capture_output_ext=gw_source.capture_output_ext,
+                    capture_replace_existing=gw_source.capture_replace_existing,
                 )
             ]
             if not gw_source.archival_quality:
@@ -12080,6 +12124,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                     _notify_progress(progress_callback, 68, 100, save_message)
                     capture = _save_greaseweazle_capture_copy(
                         capture, attempt.capture_save_path, cancel_callback=cancel_callback,
+                        replace_existing=attempt.capture_replace_existing,
                     )
 
                 if attempt.archival_quality:
@@ -12109,7 +12154,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                 try:
                     note = read_note or "Greaseweazle recovery read completed."
                     note += " The source floppy was not modified."
-                    return cls._recover_from_raw_image(
+                    session = cls._recover_from_raw_image(
                         source_img,
                         temp_dir,
                         source_name=f"Recovered from {attempt.display_name}",
@@ -12130,9 +12175,11 @@ class FloppyImageSession(_WindowsFileSaveMixin):
                                 disk_format=attempt.disk_format,
                             ),
                         ),
-                        progress_callback=progress_callback,
+                        progress_callback=candidate_progress,
                         cancel_callback=cancel_callback,
                     )
+                    _notify_progress(progress_callback, 100, 100, "Opening recovered files...", read_phase="organize")
+                    return session
                 except (FloppyOperationCancelled, _Fat12RecoveryAmbiguityError):
                     raise
                 except Exception as exc:
@@ -12161,6 +12208,7 @@ class FloppyImageSession(_WindowsFileSaveMixin):
         progress_callback=None,
         cancel_callback=None,
     ):
+        _notify_progress(progress_callback, 70, 100, "Preparing floppy contents...", read_phase="organize")
         source_img = os.path.abspath(source_img)
         prepared = os.path.join(temp_dir, "recovery_prepared.img")
         working_img = os.path.join(temp_dir, "working.img")

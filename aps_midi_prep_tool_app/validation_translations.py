@@ -12,6 +12,36 @@ def _add(sources, copies):
         VALIDATION_TRANSLATIONS[source] = dict(zip(_LANGUAGES, copies))
 
 
+_add("APS does not have permission to read this disk or image.", (
+    "APS does not have permission to read this disk or image.",
+    "APS no tiene permiso para leer este disco o imagen.",
+    "APS n’a pas l’autorisation de lire ce disque ou cette image.",
+    "APS hat keine Berechtigung, diesen Datenträger oder dieses Image zu lesen.",
+    "APS non ha il permesso di leggere questo disco o immagine.",
+    "O APS não tem permissão para ler este disco ou imagem.",
+    "APS няма разрешение да чете този диск или образ.",
+    "APS heeft geen toestemming om deze schijf of image te lezen.",
+    "APS nie ma uprawnień do odczytu tego dysku lub obrazu.",
+    "APS にはこのディスクまたはイメージを読み取る権限がありません。",
+    "APS에 이 디스크 또는 이미지에 대한 읽기 권한이 없습니다.",
+    "APS 没有读取此磁盘或映像的权限。",
+))
+_add("Check read access to the selected drive or file, then try again.", (
+    "Check read access to the selected drive or file, then try again.",
+    "Comprueba el permiso de lectura de la unidad o archivo seleccionado y vuelve a intentarlo.",
+    "Vérifiez les droits de lecture du lecteur ou du fichier sélectionné, puis réessayez.",
+    "Prüfen Sie die Leseberechtigung für das ausgewählte Laufwerk oder die Datei und versuchen Sie es erneut.",
+    "Controlla i permessi di lettura dell’unità o del file selezionato, poi riprova.",
+    "Verifique a permissão de leitura da unidade ou arquivo selecionado e tente novamente.",
+    "Проверете правата за четене на избраното устройство или файл и опитайте отново.",
+    "Controleer de leesrechten voor het geselecteerde station of bestand en probeer opnieuw.",
+    "Sprawdź uprawnienia odczytu wybranego napędu lub pliku i spróbuj ponownie.",
+    "選択したドライブまたはファイルの読み取り権限を確認してから、再試行してください。",
+    "선택한 드라이브 또는 파일의 읽기 권한을 확인한 후 다시 시도하세요.",
+    "请检查所选驱动器或文件的读取权限，然后重试。",
+))
+
+
 _add("Use printable Latin-1 characters only. Unsupported characters: {characters}", (
     "Use printable Latin-1 characters only. Unsupported characters: {characters}",
     "Usa solo caracteres imprimibles de Latin-1. Caracteres no compatibles: {characters}",

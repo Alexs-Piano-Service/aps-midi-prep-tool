@@ -26,6 +26,10 @@ FINGERPRINT_SIZE = 256
 _STEP = DECIMATION / SAMPLE_RATE
 
 
+class FingerprintMismatch(SynchronizationError):
+    """A completed comparison found no matching audio fingerprint."""
+
+
 @dataclass(frozen=True)
 class Alignment:
     offset_seconds: float
@@ -135,7 +139,7 @@ def _match(audio, fingerprint, radius, cancel):
     peak = int(np.argmax(search_scores))
     correlation = float(np.clip(scores[peak], -1, 1))
     if correlation < 0.95:
-        raise SynchronizationError(f"The audio does not match the Smart PianoSoft CD reference (correlation {correlation:.3f}).")
+        raise FingerprintMismatch(f"The audio does not match the Smart PianoSoft CD reference (correlation {correlation:.3f}).")
     # Yamaha's testFile selects the strongest correlation; a similar later
     # phrase is not by itself a reason to reject the winning reference. The
     # former fixed 0.025 runner-up margin rejected valid repeating intros.

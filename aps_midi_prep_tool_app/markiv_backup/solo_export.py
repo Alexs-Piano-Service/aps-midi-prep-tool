@@ -40,7 +40,7 @@ def prepare_solo_midi_copies(plan, folder, original_root, records, manifest, jou
 
     if resolution is None:
         resolution = resolve_playback_pairs(
-            plan, cancel=cancel, progress=progress,
+            plan, cancel=cancel, progress=progress, work_dir=folder,
             source_paths={item.source: _contained(original_root, item.destination) for item in plan.files},
         )
     paired = {pair.midi.source for pair in resolution.pairs}

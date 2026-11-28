@@ -65,7 +65,7 @@ def _exercise_resize(dialog, change=None):
                         bounds = button.rect().translated(button.mapTo(dialog, QPoint()))
                         assert dialog.rect().contains(bounds), button.text()
         # A full render also exercises the paint path after each geometry change.
-        assert dialog.grab().size() == dialog.size()
+        assert dialog.grab().deviceIndependentSize().toSize() == dialog.size()
 
 
 def _run_live(window, dialog, inspect=None):
@@ -229,7 +229,7 @@ def test_other_option_forms_preserve_user_geometry(window, monkeypatch, method, 
     "_choose_format_floppy_options", "_choose_write_image_floppy_target",
     "_choose_save_to_floppy_drive",
 ])
-def test_drive_choices_and_refresh_keep_resized_window(window, monkeypatch, method):
+def test_drive_choices_fit_read_method_and_refresh_keeps_resized_window(window, monkeypatch, method):
     drive = FloppyDriveInfo("/dev/test-floppy", 737280, label="Test floppy")
     device = GreaseweazleDeviceInfo("/dev/test-greaseweazle", "Test Greaseweazle")
     monkeypatch.setattr(window, "_discover_floppy_devices", lambda **_: ([drive], [device]))
@@ -242,19 +242,48 @@ def test_drive_choices_and_refresh_keep_resized_window(window, monkeypatch, meth
 
         def check():
             try:
-                # Both device pages fit comfortably: a source change should not
-                # contract the manually enlarged window to either page's hint.
+                source = next((combo for combo in dialog.findChildren(QComboBox)
+                               if combo.findData("floppy_gw") >= 0), None)
+                if method == "_choose_floppy_read_options":
+                    source.setCurrentIndex(source.findData("floppy_usb"))
+                    QTest.qWait(40)
+                    compact_size = dialog.size()
+                    for _ in range(2):
+                        source.setCurrentIndex(source.findData("floppy_gw"))
+                        QTest.qWait(40)
+                        assert dialog.height() > compact_size.height()
+                        source.setCurrentIndex(source.findData("floppy_usb"))
+                        QTest.qWait(40)
+                        assert dialog.size() == compact_size
+
+                # Explicit read-method changes refit the form; other choosers
+                # continue preserving the user's size across source changes.
                 dialog.resize(1300, 1100)
                 dialog.move(24, 32)
                 QTest.qWait(40)
                 geometry = dialog.geometry()
-                source = next((combo for combo in dialog.findChildren(QComboBox)
-                               if combo.findData("floppy_gw") >= 0), None)
                 if source is not None:
                     for target in ("floppy_gw", "floppy_usb", "floppy_gw"):
                         source.setCurrentIndex(source.findData(target))
                         QTest.qWait(110)
-                        assert dialog.geometry() == geometry
+                        if method == "_choose_floppy_read_options":
+                            assert dialog.height() == dialog.sizeHint().height()
+                            actual = dialog.windowHandle().frameGeometry()
+                            expected = dialog.windowHandle().frameGeometry()
+                            expected.moveCenter(window.windowHandle().frameGeometry().center())
+                            available = window.screen().availableGeometry()
+                            expected.moveLeft(max(available.left(), min(
+                                expected.left(), available.right() - expected.width() + 1,
+                            )))
+                            expected.moveTop(max(available.top(), min(
+                                expected.top(), available.bottom() - expected.height() + 1,
+                            )))
+                            assert actual.topLeft() == expected.topLeft()
+                        else:
+                            assert dialog.geometry() == geometry
+                dialog.resize(1300, 1100)
+                QTest.qWait(40)
+                geometry = dialog.geometry()
                 refresh = dialog.findChild(QPushButton, "refreshFloppyDrives")
                 refresh.click()
                 QTest.qWait(110)

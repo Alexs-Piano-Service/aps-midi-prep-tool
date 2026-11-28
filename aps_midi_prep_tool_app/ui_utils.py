@@ -1,9 +1,9 @@
 import os
 import sys
 
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
-from PySide6.QtGui import QPalette, QPixmap
-from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtGui import QPalette, QPixmap, QTextLayout, QTextOption
+from PySide6.QtCore import QByteArray, QEvent, QMargins, QObject, QPoint, QRect, QSize, Qt, QTimer
 
 from .logo_assets import embedded_logo_dt, embedded_logo_lt
 
@@ -32,6 +32,49 @@ class WrappedProgressLabel(QLabel):
 
     def minimumSizeHint(self):
         return self.sizeHint()
+
+
+class FixedProgressLabel(QLabel):
+    """Reserve four readable status lines without changing dialog geometry."""
+
+    def __init__(self, dialog, text_width):
+        super().__init__(dialog)
+        self._text_width = text_width
+        self._line_count = 4
+        self.setTextFormat(Qt.PlainText)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * self._line_count)
+
+    def sizeHint(self):
+        return QSize(self._text_width, self.height())
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def elided_message(self, message):
+        lines = []
+        paragraphs = message.split('\n')
+        for index, paragraph in enumerate(paragraphs):
+            # QTextLayout offsets count UTF-16 units, unlike Python's string
+            # indices. Preserve supplementary characters in device/file names.
+            encoded = paragraph.encode('utf-16-le')
+            layout = QTextLayout(paragraph or ' ', self.font())
+            options = QTextOption()
+            options.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            layout.setTextOption(options)
+            layout.beginLayout()
+            while (line := layout.createLine()).isValid():
+                line.setLineWidth(self._text_width)
+                start = line.textStart() * 2
+                end = start + line.textLength() * 2
+                if len(lines) == self._line_count - 1:
+                    remainder = ' '.join([encoded[start:].decode('utf-16-le'), *paragraphs[index + 1:]])
+                    lines.append(self.fontMetrics().elidedText(remainder, Qt.ElideMiddle, self._text_width))
+                    layout.endLayout()
+                    return '\n'.join(lines)
+                lines.append(encoded[start:end].decode('utf-16-le').rstrip())
+            layout.endLayout()
+        return '\n'.join(lines)
 
 
 def is_dark_theme():
@@ -64,16 +107,39 @@ class _CenterDialogOnShow(QObject):
         self.window_handle = dialog.windowHandle()
         self.shown = False
         self.geometry_changed = False
+        self.frame_attempts = 0
+        self.frame_timer = QTimer(self)
+        self.frame_timer.setSingleShot(True)
+        self.frame_timer.timeout.connect(self._finish_positioning)
         if self.window_handle is not None:
             self.window_handle.installEventFilter(self)
 
     def _detach(self):
+        self.frame_timer.stop()
         dialog = self.parent()
         dialog.removeEventFilter(self)
         if self.window_handle is not None:
             self.window_handle.removeEventFilter(self)
         dialog._aps_center_on_show = None
         self.deleteLater()
+
+    def _finish_positioning(self):
+        dialog = self.parent()
+        if self.geometry_changed or not dialog.isVisible():
+            self._detach()
+            return
+        margins = self.window_handle.frameMargins()
+        if min(margins.left(), margins.top(), margins.right(), margins.bottom()) < 0:
+            # X11 can briefly report a 1x0 native frame with negative margins
+            # while KWin decorates the window. Never center that bogus frame.
+            self.frame_attempts += 1
+            if self.frame_attempts < 20:
+                self.frame_timer.start(16)
+            else:
+                self._detach()
+            return
+        self._detach()
+        _position_dialog_on_parent(dialog, self.parent_widget)
 
     def eventFilter(self, watched, event):
         # Qt owns this filter through the dialog. Keeping a Python reference
@@ -97,9 +163,9 @@ class _CenterDialogOnShow(QObject):
               and self.shown and self.window_handle.isExposed()):
             # On X11 the window manager supplies the decorated frame after
             # showEvent. Finish positioning once that native frame is known.
-            self._detach()
-            if not self.geometry_changed:
-                _position_dialog_on_parent(dialog, self.parent_widget)
+            # Process the native event first so frame margins are current.
+            if not self.frame_timer.isActive():
+                self.frame_timer.start(0)
         return False
 
 
@@ -123,7 +189,7 @@ def _position_dialog_on_parent(dialog, parent_widget):
         if parent_window is not None:
             screen = parent_window.screen()
             if parent_window.isVisible() and not parent_window.isMinimized():
-                target_geometry = parent_window.frameGeometry()
+                target_geometry = _window_frame_geometry(parent_window)
         if screen is None:
             screen = parent_widget.screen()
 
@@ -133,9 +199,7 @@ def _position_dialog_on_parent(dialog, parent_widget):
             return
         target_geometry = screen.availableGeometry()
 
-    dialog_geometry = dialog.frameGeometry()
-    if dialog_geometry.width() <= 0 or dialog_geometry.height() <= 0:
-        dialog_geometry.setSize(dialog.sizeHint())
+    dialog_geometry = _window_frame_geometry(dialog)
     dialog_geometry.moveCenter(target_geometry.center())
     if screen is not None:
         available = screen.availableGeometry()
@@ -145,12 +209,32 @@ def _position_dialog_on_parent(dialog, parent_widget):
         dialog_geometry.moveTop(max(available.top(), min(
             dialog_geometry.top(), available.bottom() - dialog_geometry.height() + 1,
         )))
-    dialog.move(dialog_geometry.topLeft())
+    # QWidget's cached frame strut can be stale after native window creation
+    # on X11, even reporting a 1x0 frame for a fully sized dialog. Position the
+    # client rectangle explicitly instead of letting move() use that cache.
+    margins = _window_frame_margins(dialog)
+    client_position = dialog_geometry.topLeft() + QPoint(margins.left(), margins.top())
+    dialog.setGeometry(QRect(client_position, dialog.size()))
 
 
-def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
-    """Place a dialog once, retaining its owner and later user geometry."""
-    if getattr(dialog, "_aps_dialog_positioned", False):
+def _window_frame_margins(widget):
+    handle = widget.windowHandle()
+    margins = handle.frameMargins() if handle is not None else QMargins()
+    return QMargins(*(max(0, value) for value in (
+        margins.left(), margins.top(), margins.right(), margins.bottom(),
+    )))
+
+
+def _window_frame_geometry(widget):
+    # Use the current client size: a hidden QWindow may still have its initial
+    # 100x30 size until QWidget maps it. Native margins become available when
+    # the window manager decorates it, before the first exposed-frame pass.
+    return widget.geometry().marginsAdded(_window_frame_margins(widget))
+
+
+def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True, recenter=False):
+    """Place a dialog once, or recenter after an explicit change of form."""
+    if getattr(dialog, "_aps_dialog_positioned", False) and not recenter:
         return
     parent_widget = parent or dialog.parentWidget()
     parent_window = _dialog_parent_window(dialog, parent_widget)
@@ -167,6 +251,9 @@ def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
         dialog.adjustSize()
     _position_dialog_on_parent(dialog, parent_widget)
 
+    if dialog.isVisible() and getattr(dialog, "_aps_dialog_positioned", False):
+        return
+
     on_show = getattr(dialog, "_aps_center_on_show", None)
     if on_show is None:
         on_show = _CenterDialogOnShow(dialog, parent_widget)
@@ -174,6 +261,30 @@ def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
         dialog.installEventFilter(on_show)
     else:
         on_show.parent_widget = parent_widget
+
+
+class _DialogPlacementFilter(QObject):
+    def eventFilter(self, watched, event):
+        if (event.type() == QEvent.Show and isinstance(watched, QDialog)
+                and not getattr(watched, "_aps_dialog_positioned", False)
+                and getattr(watched, "_aps_center_on_show", None) is None):
+            # Cover dialogs opened directly by nested tools as well as those
+            # opened through the main window's exec/progress helpers.
+            parent = watched.parentWidget()
+            owner = parent
+            while owner is not None and owner is not self.parent():
+                owner = owner.parentWidget()
+            if owner is self.parent():
+                center_dialog_on_parent(watched, parent, adjust_size=False)
+        return False
+
+
+def install_dialog_placement(window):
+    """Center all dialogs belonging to this window when they first open."""
+    if getattr(window, "_aps_dialog_placement_filter", None) is None:
+        placement = _DialogPlacementFilter(window)
+        window._aps_dialog_placement_filter = placement
+        QApplication.instance().installEventFilter(placement)
 
 
 def resize_dialog_to_screen(dialog, *, width, height):

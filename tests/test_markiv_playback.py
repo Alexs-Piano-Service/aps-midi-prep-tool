@@ -62,6 +62,15 @@ def _audio(root, source='songs/audio/9/track-03.WAV', *, archive=None, **metadat
     return item
 
 
+def _mismatching_audio(root, source, **metadata):
+    item = _audio(root, source, **metadata)
+    with wave.open(str(root / item.source), 'wb') as output:
+        output.setparams((2, 2, 44100, 0, 'NONE', 'not compressed'))
+        output.writeframes(bytes(14 * 44100 * 4))
+    item.size = (root / item.source).stat().st_size
+    return item
+
+
 def _plan(root, *items, links=()):
     result = BackupPlan(root, list(items), [], [], sum(item.size for item in items))
     result.sync_links = list(links)
@@ -158,7 +167,8 @@ def test_stored_audio_path_and_cd_track_conflict_is_not_guessed(tmp_path):
     three = _audio(tmp_path, cd_id='disc', track_number=3)
     result = resolve_playback_pairs(_plan(tmp_path, midi, one, three, links=[_link(midi, one)]))
     assert not result.pairs
-    assert result.issues[0].code == 'ambiguous_audio'
+    # Unreadable placeholders cannot rule out either recorded candidate.
+    assert result.issues[0].code == 'audio_verification_incomplete'
 
 
 def test_two_recordings_with_the_same_cd_track_are_ambiguous(tmp_path):
@@ -422,7 +432,7 @@ def test_missing_catalog_automatically_uses_unique_two_fingerprint_match(fingerp
     pair, midi, audio = fingerprint_pair
     pair.midi.metadata.clear()
     pair.audio.metadata.clear()
-    wrong = _audio(tmp_path, 'songs/audio/10/01.wav', title='Same title', track_number=1)
+    wrong = _mismatching_audio(tmp_path, 'songs/audio/10/01.wav', title='Same title', track_number=1)
     progress = []
     result = resolve_playback_pairs(_plan(tmp_path, pair.midi, wrong, pair.audio), progress=progress.append)
     assert not result.issues
@@ -455,7 +465,7 @@ def uncataloged_library(fingerprint_pair, tmp_path):
 @pytest.mark.parametrize('output', ['midi_mp3', 'encoded_wav'])
 @pytest.mark.parametrize('archive', [False, True])
 def test_uncataloged_pair_is_automatically_prepared_during_markiv_recovery(
-        uncataloged_library, tmp_path, output, archive):
+        uncataloged_library, tmp_path, monkeypatch, output, archive):
     from aps_midi_prep_tool_app.audio_tools import find_lame_command
     from aps_midi_prep_tool_app.disklavier_audio import read_midi_events
     from aps_midi_prep_tool_app.disklavier_audio_decode import decode_disklavier_audio
@@ -467,6 +477,12 @@ def test_uncataloged_pair_is_automatically_prepared_during_markiv_recovery(
     source = uncataloged_library
     if archive:
         source = backup.run_backup(scan_library(source), tmp_path / 'archives').folder
+    from aps_midi_prep_tool_app.markiv_backup import playback
+    original_resolve = playback.resolve_playback_pairs
+    def resolve_on_destination(*args, **kwargs):
+        assert kwargs['work_dir'].is_relative_to(tmp_path / 'output')
+        return original_resolve(*args, **kwargs)
+    monkeypatch.setattr(playback, 'resolve_playback_pairs', resolve_on_destination)
     originals = {path: path.read_bytes() for path in source.rglob('*') if path.is_file()}
     result = backup.run_backup(scan_library(source), tmp_path / 'output', audio_output=output)
     assert (result.status, result.decoded, result.audio_skipped) == ('complete', 1, 0), result.errors
@@ -613,12 +629,19 @@ def test_two_fingerprint_matches_in_alternate_editions_remain_ambiguous(fingerpr
     assert [issue.code for issue in result.issues] == ['ambiguous_audio']
 
 
-def test_wrong_saved_edition_can_be_replaced_only_by_unique_full_fingerprint_match(fingerprint_pair, tmp_path):
-    pair, _midi_path, _audio_path = fingerprint_pair
+@pytest.mark.parametrize('matches', [True, False])
+def test_wrong_saved_edition_can_be_replaced_only_by_unique_full_fingerprint_match(fingerprint_pair, tmp_path, matches):
+    pair, _midi_path, audio_path = fingerprint_pair
     _different_cd_edition(pair)
-    wrong = _audio(tmp_path, 'songs/audio/10/track-03.WAV', cd_id='wrong-edition', track_number=3)
+    wrong = _mismatching_audio(tmp_path, 'songs/audio/10/track-03.WAV', cd_id='wrong-edition', track_number=3)
+    if not matches:
+        audio_path.write_bytes((tmp_path / wrong.source).read_bytes())
     link = _link(pair.midi, wrong, cd_id='wrong-edition')
     result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio, wrong, links=[link]))
+    if not matches:
+        assert not result.pairs
+        assert [issue.code for issue in result.issues] == ['missing_audio']
+        return
     assert not result.issues
     assert [p.audio for p in result.pairs] == [pair.audio]
     assert result.pairs[0].sync_links == (link,)
@@ -630,7 +653,7 @@ def test_explicit_saved_track_reordering_requires_unique_two_fingerprint_match(f
     pair, _midi_path, _audio_path = fingerprint_pair
     # The actual saved track is 1 although the original MIDI CD reference is 3.
     pair.audio.metadata['track_number'] = 1
-    wrong = _audio(tmp_path, 'songs/audio/10/track-03.WAV', cd_id='disc', track_number=3)
+    wrong = _mismatching_audio(tmp_path, 'songs/audio/10/track-03.WAV', cd_id='disc', track_number=3)
     link = _link(pair.midi, pair.audio)
     result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio, wrong, links=[link]))
     assert not result.issues
@@ -654,7 +677,7 @@ def test_fingerprint_validation_reads_only_supplied_snapshots(fingerprint_pair, 
     assert len(result.pairs) == 1
     missing = resolve_playback_pairs(plan, source_paths={pair.midi.source: midi})
     assert not missing.pairs
-    assert [issue.code for issue in missing.issues] == ['missing_audio']
+    assert [issue.code for issue in missing.issues] == ['audio_verification_incomplete']
 
 
 @pytest.mark.parametrize('recovery', ['alternate_edition', 'saved_track_conflict', 'missing_catalog'])
@@ -678,7 +701,7 @@ def test_mp3_recovery_decodes_verified_snapshot_privately_before_matching(
         assert source == snapshot
         assert source.read_bytes() == b'verified MP3 snapshot'
         assert cancel is event
-        assert destination.parent != snapshot.parent
+        assert destination.parent.parent == tmp_path
         decoded_paths.append(destination)
         destination.write_bytes(audio.read_bytes())
 
@@ -687,12 +710,14 @@ def test_mp3_recovery_decodes_verified_snapshot_privately_before_matching(
     items, links = [pair.midi, compressed], []
     if recovery == 'saved_track_conflict':
         compressed.metadata['track_number'] = 1
-        wrong = _audio(tmp_path, 'songs/audio/11/track-03.WAV', cd_id='disc', track_number=3)
+        wrong = _mismatching_audio(tmp_path, 'songs/audio/11/track-03.WAV', cd_id='disc', track_number=3)
         items.append(wrong)
         links.append(_link(pair.midi, compressed))
     result = resolve_playback_pairs(
         _plan(tmp_path, *items, links=links), cancel,
-        source_paths={pair.midi.source: midi, compressed.source: snapshot},
+        source_paths={pair.midi.source: midi, compressed.source: snapshot,
+                      **{item.source: tmp_path / item.source for item in items if item not in [pair.midi, compressed]}},
+        work_dir=tmp_path,
     )
     assert not result.issues
     assert [p.audio for p in result.pairs] == [compressed]
@@ -729,9 +754,9 @@ def test_mp3_recovery_cleans_temporary_pcm_and_preserves_cancellation(
     monkeypatch.setattr(audio_tools, 'decode_mp3', decode)
     plan = _plan(tmp_path, pair.midi, compressed)
     if failure == 'decode_failure':
-        result = resolve_playback_pairs(plan, cancel)
+        result = resolve_playback_pairs(plan, cancel, work_dir=tmp_path)
         assert not result.pairs
-        assert [issue.code for issue in result.issues] == ['missing_audio']
+        assert [issue.code for issue in result.issues] == ['audio_verification_incomplete']
     else:
         with pytest.raises((InterruptedError, CancelledError)):
             resolve_playback_pairs(plan, cancel)
@@ -748,6 +773,50 @@ def test_direct_mp3_pair_defers_decoding_until_export(fingerprint_pair, tmp_path
     result = resolve_playback_pairs(_plan(tmp_path, pair.midi, compressed))
     assert not result.issues
     assert [p.audio for p in result.pairs] == [compressed]
+
+
+@pytest.mark.parametrize('failure', ['decode', 'storage', 'unreadable_wav', 'ambiguous_fingerprint'])
+def test_matching_recording_cannot_establish_uniqueness_with_unevaluated_candidate(
+        fingerprint_pair, tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+    from aps_midi_prep_tool_app import audio_tools
+    from aps_midi_prep_tool_app.markiv_backup import playback
+
+    pair, _midi, audio = fingerprint_pair
+    pair.midi.metadata.clear()
+    other = _audio(tmp_path, 'songs/audio/10/other.wav' if failure == 'unreadable_wav'
+                   else 'songs/audio/10/other.mp3')
+    work_dir = tmp_path / 'destination'
+    work_dir.mkdir()
+    decoded_paths = []
+
+    def decode(_source, destination, **kwargs):
+        assert destination.parent.parent == work_dir
+        decoded_paths.append(destination)
+        destination.write_bytes(audio.read_bytes())  # Would be a second match.
+        if failure == 'decode':
+            raise OSError('No space left on device')
+
+    monkeypatch.setattr(audio_tools, 'decode_mp3', decode)
+    if failure == 'storage':
+        def disk_usage(path):
+            assert path.startswith(str(work_dir))
+            return SimpleNamespace(free=0)
+        monkeypatch.setattr(playback.shutil, 'disk_usage', disk_usage)
+    if failure == 'ambiguous_fingerprint':
+        real_sync = playback.synchronize
+        def ambiguous(metadata, path, **kwargs):
+            if path != audio:
+                raise SynchronizationError('The audio fingerprint has ambiguous matches')
+            return real_sync(metadata, path, **kwargs)
+        monkeypatch.setattr(playback, 'synchronize', ambiguous)
+    result = resolve_playback_pairs(_plan(tmp_path, pair.midi, pair.audio, other), work_dir=work_dir)
+    assert not result.pairs and not result.paired_audio_sources
+    issue, = result.issues
+    assert issue.code == 'audio_verification_incomplete'
+    assert other.original_source in issue.message
+    assert not list(work_dir.iterdir())
+    assert len(decoded_paths) == (1 if failure in {'decode', 'ambiguous_fingerprint'} else 0)
 
 
 def test_real_mp3_alternate_edition_passes_both_fingerprints(fingerprint_pair, tmp_path):

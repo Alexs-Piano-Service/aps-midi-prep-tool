@@ -151,9 +151,12 @@ from .write_safety_messages import localize_write_message
 from .eseq_inspection_report import format_eseq_header_details
 from .bulk_extraction_job import localize_extraction_job_error, read_extraction_job
 from .eseq_converter import CC7_POLICY_PRESERVE, DEFAULT_ESEQ_TO_MIDI_CC7_POLICY
+from .disk_read_progress import DiskReadProgressLabel
 from .ui_utils import (
     WrappedProgressLabel,
+    FixedProgressLabel,
     center_dialog_on_parent,
+    install_dialog_placement,
     embedded_logo_dt,
     embedded_logo_lt,
     is_dark_theme,
@@ -161,6 +164,7 @@ from .ui_utils import (
     resize_dialog_to_screen,
     scrollable_dialog_layout,
 )
+from .error_presentation import brief_error_detail
 from .drop_table_widget import DropTableWidget, zip_import_operation
 from .disk_device_discovery import discover_floppy_devices
 from .disk_activity import (
@@ -5659,7 +5663,8 @@ class BatchAudioRenderDialog(QDialog):
         QMessageBox.warning(
             self,
             self.t("Audio Render Failed"),
-            f"{self.t('The files could not be rendered.')}\n\n{message}",
+            self.t("The files could not be rendered."),
+            detailed_text=message,
         )
         self.status_label.setText(self.t("Audio render failed."))
         self._log_event("Failed", message=message)
@@ -7494,8 +7499,8 @@ class FileInspectionDialog(QDialog):
                         "The selected song could not be rendered."
                     )
                 )
-                + f"\n\n{message}"
             ),
+            detailed_text=message,
         )
 
     def _on_inspection_render_worker_finished(self):
@@ -7826,7 +7831,8 @@ class FileInspectionDialog(QDialog):
         QMessageBox.warning(
             self,
             self.t("MIDI Output Failed"),
-            f"{self.t('The MIDI file could not be sent to the selected output.')}\n\n{self.t(message)}",
+            self.t("The MIDI file could not be sent to the selected output."),
+            detailed_text=self.t(message),
         )
 
     def _on_midi_output_finished(self):
@@ -8113,8 +8119,8 @@ class FileInspectionDialog(QDialog):
         QMessageBox.warning(
             self,
             catalog_tr("playback.failed.title", language),
-            f"{catalog_tr('playback.failed.message', language)}\n\n"
-            f"{catalog_tr('error.details_label', language)}: {message}",
+            catalog_tr("playback.failed.message", language),
+            detailed_text=message,
         )
 
     def _on_preview_render_finished(self, worker):
@@ -9147,6 +9153,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
 
     def __init__(self, *, initial_settings=None, settings=None):
         super().__init__()
+        install_dialog_placement(self)
         # Unlocked through About for this window/session; never persisted.
         self._admin_mode_enabled = False
         install_tooltip_delay_style()
@@ -10443,6 +10450,13 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
     def _refresh_scaled_widget_fonts(self):
         app_font = QApplication.font()
         self.setFont(app_font)
+        # Qt's stylesheet proxy caches inherited fonts, even for styles that
+        # only set colors. Reapply those styles when the application font
+        # changes so active preparation controls and other styled panels update.
+        for widget in self.findChildren(QWidget):
+            stylesheet = widget.styleSheet()
+            if stylesheet:
+                widget.setStyleSheet(stylesheet)
         menu_bar = self.menuBar()
         if menu_bar is not None:
             menu_bar.setFont(app_font)
@@ -13971,7 +13985,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         # frame. Later content changes, re-shows, and interactive resizing must
         # preserve the user's geometry.
         center_dialog_on_parent(
-            dialog, self,
+            dialog, dialog.parentWidget() or self,
             adjust_size=isinstance(dialog, (QMessageBox, QProgressDialog))
             or not dialog.testAttribute(Qt.WA_Resized),
         )
@@ -13984,7 +13998,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         else:
             # Scrollable forms own their initial size. Center once and leave
             # later layout changes and user resizing to the window manager.
-            center_dialog_on_parent(dialog, self, adjust_size=False)
+            center_dialog_on_parent(dialog, dialog.parentWidget() or self, adjust_size=False)
         return dialog.exec()
 
     def _translate_dialog_tree(self, dialog):
@@ -14079,6 +14093,37 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self._set_progress_dialog_message(dialog, initial_message)
         return dialog
 
+    def _prepare_disk_read_progress_dialog(self, dialog, *, show_stages=True):
+        screen = dialog.screen() or QApplication.primaryScreen()
+        width = self._scaled_int(640, minimum=480)
+        if screen:
+            width = min(width, max(240, screen.availableGeometry().width() - 40))
+        message = dialog.labelText()
+        text_width = width - self._scaled_int(64, minimum=48)
+        if show_stages:
+            label = DiskReadProgressLabel(dialog, text_width, self._lt)
+            dialog._aps_disk_read_stages = label.stages
+            dialog.canceled.connect(label.stages.stop)
+        else:
+            label = FixedProgressLabel(dialog, text_width)
+        dialog.setLabel(label)
+        dialog._aps_stable_progress_label = label
+        dialog.setFixedSize(width, max(dialog.sizeHint().height(), self._scaled_int(200, minimum=160)))
+        dialog.setAutoReset(False)
+        dialog.setAutoClose(False)
+        self._set_progress_dialog_message(dialog, message)
+        return self._prepare_progress_dialog(dialog)
+
+    def _connect_disk_read_stages(self, dialog, worker, *success_signals):
+        stages = getattr(dialog, "_aps_disk_read_stages", None)
+        if stages is None:
+            return
+        worker.readPhaseChanged.connect(stages.set_phase)
+        worker.operationCancelled.connect(stages.stop)
+        worker.finished.connect(stages.stop)
+        for signal in success_signals:
+            signal.connect(stages.complete)
+
     def _prepare_floppy_file_progress_dialog(self, dialog):
         dialog._aps_floppy_file_progress = True
         self._stabilize_progress_dialog_width(dialog)
@@ -14101,6 +14146,11 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self._language_code() if hasattr(self, "_language_code") else None,
         )
         label = getattr(dialog, "_aps_stable_progress_label", None)
+        if isinstance(label, FixedProgressLabel):
+            dialog.setLabelText(label.elided_message(full_message))
+            label.setToolTip("<qt>" + html.escape(full_message).replace("\n", "<br>") + "</qt>")
+            label.setAccessibleDescription(full_message)
+            return
         if label is None:
             dialog.setLabelText(full_message)
             if fit_height:
@@ -14324,7 +14374,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         return text
 
     def _show_reportable_error_message(
-        self, icon, title, message, *, offer_report=True, extra_action=None, plain_text=False,
+        self, icon, title, message, *, offer_report=True, extra_action=None, plain_text=True,
+        detailed_text="",
     ):
         box = QMessageBox(self)
         apply_window_icon(box)
@@ -14333,6 +14384,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         if plain_text:
             box.setTextFormat(Qt.PlainText)
         box.setText(message)
+        if detailed_text:
+            box.setDetailedText(detailed_text)
         ok_button = box.addButton(QMessageBox.Ok)
         report_button = None
         if offer_report:
@@ -14345,7 +14398,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         if report_button is not None and box.clickedButton() is report_button:
             self.show_bug_report_dialog(
                 summary=self._lt(title),
-                description=self._prefilled_bug_report_details(message),
+                description=self._prefilled_bug_report_details(
+                    "\n\n".join(filter(None, (message, detailed_text))),
+                ),
                 include_logs=True,
             )
         elif action_button is not None and box.clickedButton() is action_button:
@@ -14362,12 +14417,15 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         offer_floppy_image_recovery=False,
     ):
         detail_text = self._clean_error_detail(detail)
+        display_detail = localize_write_message(detail_text, self._language_code())
+        brief_detail = brief_error_detail(display_detail)
+        dialog_options = {"detailed_text": display_detail} if display_detail != brief_detail else {}
         if is_missing_source_file_error(detail_text):
-            message = self._source_files_missing_error_message(detail_text, guidance=guidance)
+            message = self._source_files_missing_error_message(brief_detail, guidance=guidance)
         else:
             message = self._ensure_sentence(self._lt(summary))
-            if detail_text:
-                message += f"\n\n{self._t('error.details_label')}: {localize_write_message(detail_text, self._language_code())}"
+            if brief_detail and brief_detail != message:
+                message += f"\n\n{brief_detail}"
             guidance_text = self._lt(guidance) if guidance is not None else self._guidance_for_error_detail(detail_text)
             if guidance_text:
                 message += f"\n\n{self._ensure_sentence(guidance_text)}"
@@ -14386,9 +14444,10 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             self._show_reportable_error_message(
                 QMessageBox.Critical, title, message,
                 extra_action=("Save Image and Apply to Floppy...", self._request_floppy_image_recovery),
+                **dialog_options,
             )
         else:
-            self._show_reportable_error_message(QMessageBox.Critical, title, message)
+            self._show_reportable_error_message(QMessageBox.Critical, title, message, **dialog_options)
 
     def _floppy_image_recovery_explanation(self):
         return self._lt(
@@ -14458,10 +14517,20 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         return preview or self._t("error.no_detail")
 
     def _show_error_list(self, title, summary, errors, *, max_rows=10, warning=False, guidance=""):
-        raw_details = self._limited_message_list(errors, max_rows=max_rows)
-        details = self._limited_message_list(
-            [localize_music_error(error, self._language_code()) for error in errors], max_rows=max_rows,
-        )
+        errors = list(errors or ())
+        raw_details = "\n\n".join(str(error) for error in errors)
+        translated_errors = [localize_music_error(error, self._language_code()) for error in errors]
+        preview = []
+        for error in translated_errors[:min(max_rows, 3)]:
+            brief = brief_error_detail(error, max_chars=160, max_lines=2)
+            if not brief:
+                break
+            preview.append(brief)
+        details = "\n".join(preview)
+        if len(errors) > len(preview):
+            details += ("\n" if details else "") + self._t("error.more_count", count=len(errors) - len(preview))
+        full_details = "\n\n".join(translated_errors)
+        dialog_options = {"detailed_text": full_details} if preview != translated_errors else {}
         if any(is_missing_source_file_error(error) for error in errors or ()):
             message = self._source_files_missing_error_message(details, guidance=guidance or None)
         else:
@@ -14476,10 +14545,14 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             count=len(errors or ()),
             detail=raw_details,
         )
-        if warning:
+        if warning and not dialog_options:
             QMessageBox.warning(self, self._lt(title), message)
         else:
-            self._show_reportable_error_message(QMessageBox.Critical, title, message)
+            if warning:
+                dialog_options["offer_report"] = False
+            self._show_reportable_error_message(
+                QMessageBox.Warning if warning else QMessageBox.Critical, title, message, **dialog_options,
+            )
 
     def _apply_stage_progress(self, dialog, step, total, message):
         if dialog is None:
@@ -14588,7 +14661,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         self._reset_gw_sector_report_dedupe()
         progress_dialog = QProgressDialog(progress_title, "Cancel", 0, progress_total, self)
         progress_dialog.setWindowTitle(progress_title)
-        self._prepare_progress_dialog(progress_dialog)
+        self._prepare_disk_read_progress_dialog(progress_dialog, show_stages=load_kind.startswith("floppy"))
         progress_dialog.setAutoClose(False)
 
         worker = DiskSessionLoadWorker(
@@ -14607,6 +14680,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         progress_dialog.canceled.connect(
             lambda owner=worker, dialog=progress_dialog: cancel_disk_activity(self, owner, dialog)
         )
+        self._connect_disk_read_stages(progress_dialog, worker, worker.sessionLoaded, worker.captureReady)
         worker.sessionLoaded.connect(self._on_disk_load_success)
         worker.captureReady.connect(self._on_greaseweazle_capture_ready)
         worker.loadFailedWithDetails.connect(self._on_disk_load_failure_with_details)
@@ -16593,6 +16667,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             output_path, _ = QFileDialog.getSaveFileName(
                 self, self._lt("Save Raw SCP Capture"), default_path,
                 f"{self._lt('SCP flux capture')} (*.scp *.SCP)",
+                options=QFileDialog.DontConfirmOverwrite,
             )
             if not output_path:
                 discard = QMessageBox.question(
@@ -16610,6 +16685,16 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 return
             if image_extension(output_path) != "scp":
                 output_path = f"{output_path}.scp"
+            replace_existing = False
+            if os.path.lexists(output_path):
+                replace_existing = QMessageBox.question(
+                    self, self._t("save_as.overwrite.title"),
+                    self._t("save_as.overwrite.prompt", count=1,
+                            folder=os.path.dirname(output_path), files=os.path.basename(output_path)),
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                ) == QMessageBox.Yes
+                if not replace_existing:
+                    continue
             try:
                 temporary_directory = os.path.realpath(capture.temp_dir)
                 destination = os.path.realpath(output_path)
@@ -16617,7 +16702,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
                 # saved copy at cleanup (including aliases to the source).
                 if Path(destination).is_relative_to(temporary_directory):
                     raise OSError("Choose a destination outside the temporary capture folder.")
-                _save_greaseweazle_capture_copy(capture_path, output_path)
+                _save_greaseweazle_capture_copy(
+                    capture_path, output_path, replace_existing=replace_existing,
+                )
             except Exception as exc:
                 self._show_operation_error(
                     "SCP Save Failed",
@@ -16824,22 +16911,35 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             message=message,
         )
         if (details.get("recoverable") is False
-                or details.get("type") in {"dependency", "local_storage", "application"}
+                or details.get("type") in {"dependency", "local_storage", "source_access", "application"}
                 or (details.get("read_diagnostics") or {}).get("failure_scope") == "local_working_copy"):
             self.pendingDiskRecoveryRequest = None
             self.pendingGwConversionDetails = None
             self.pendingFloppyReadConvertToMidi = False
             self.pendingFloppyReadLongFilenames = False
             self.pendingFloppyReadTrimTitles = False
+            title = "Application Error"
+            summary = "The application could not finish opening the disk"
+            guidance = "Check the application installation and local storage. Disk recovery cannot fix this error"
+            if details.get("type") == "source_access":
+                title = self.diskLoadFailureTitle
+                summary = "APS does not have permission to read this disk or image."
+                guidance = (
+                    self._t("guidance.windows_device_access")
+                    if os.name == "nt" and self.diskLoadContext.get("load_kind") == "floppy_usb"
+                    else "Check read access to the selected drive or file, then try again."
+                )
+            elif details.get("type") == "local_storage":
+                guidance = "Check that the destination folder is writable and that enough disk space is available"
             self._show_operation_error(
-                "Application Error",
-                "The application could not finish opening the disk",
+                title,
+                summary,
                 "\n".join(filter(None, [
                     f"Stage: {details.get('failure_stage', 'unknown')}",
                     f"{details.get('exception_type', details.get('type', 'Error'))}: {message}",
                     details.get("traceback", ""),
                 ])),
-                guidance="Check the application installation and local storage. Disk recovery cannot fix this error",
+                guidance=guidance,
             )
             return
         if details.get("type") == "blank_disk_image":
@@ -17267,7 +17367,9 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         progress_text = request.get("progress_title", "Recovering Disk Data")
         progress_dialog = QProgressDialog(progress_text, "Cancel", 0, 100, self)
         progress_dialog.setWindowTitle(progress_text)
-        self._prepare_progress_dialog(progress_dialog)
+        self._prepare_disk_read_progress_dialog(
+            progress_dialog, show_stages=str(request.get("load_kind", "")).startswith("floppy")
+        )
         progress_dialog.setAutoClose(False)
 
         worker = DiskSessionRecoveryWorker(
@@ -17286,6 +17388,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         progress_dialog.canceled.connect(
             lambda owner=worker, dialog=progress_dialog: cancel_disk_activity(self, owner, dialog)
         )
+        self._connect_disk_read_stages(progress_dialog, worker, worker.sessionRecovered)
         worker.sessionRecovered.connect(self._on_disk_recovery_success)
         worker.recoveryFailed.connect(self._on_disk_recovery_failure)
         worker.operationCancelled.connect(self._on_disk_recovery_cancelled)
@@ -23730,7 +23833,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         result = discover_floppy_devices(
             parent,
             include_greaseweazle=include_greaseweazle,
-            prepare_dialog=self._prepare_progress_dialog,
+            prepare_dialog=lambda dialog: self._prepare_disk_read_progress_dialog(dialog, show_stages=False),
             translate=self._lt,
         )
         if result is None:
@@ -24729,6 +24832,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             preparation_hint.setWordWrap(True)
             trim_layout.addWidget(preparation_hint, 1, 1)
         layout.addLayout(trim_layout)
+        # Keep form rows together when the user enlarges the window.
+        layout.addStretch(1)
 
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         buttons.accepted.connect(dialog.accept)
@@ -24753,16 +24858,22 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         for label in form_labels:
             label.setMinimumWidth(form_label_width)
 
-        def resize_dialog_to_content():
-            # Fit the initial form only; later option changes belong to the
-            # layout and must preserve the user's chosen window dimensions.
-            if dialog.isVisible():
+        def resize_dialog_to_content(*, source_changed=False):
+            # The two read methods have very different forms. Fit an explicit
+            # method change, while device refreshes retain the user's size.
+            if dialog.isVisible() and not source_changed:
                 return
+            dialog.layout().invalidate()
             dialog.layout().activate()
             hint = dialog.sizeHint()
             dialog.resize(max(dialog.minimumWidth(), hint.width()), hint.height())
+            if source_changed and dialog.isVisible():
+                center_dialog_on_parent(dialog, self, adjust_size=False, recenter=True)
+
+        last_source_kind = source_combo.currentData()
 
         def refresh_dialog_state():
+            nonlocal last_source_kind
             source_kind = source_combo.currentData()
             is_gw = source_kind == "floppy_gw"
             is_recovery = recovery_checkbox.isChecked()
@@ -24789,7 +24900,8 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
             if ok_button is not None:
                 ok_button.setEnabled(ok_enabled)
                 ok_button.setText(self._lt("Recover" if is_recovery else "Read"))
-            resize_dialog_to_content()
+            resize_dialog_to_content(source_changed=source_kind != last_source_kind)
+            last_source_kind = source_kind
 
         source_combo.currentIndexChanged.connect(refresh_dialog_state)
         recovery_checkbox.toggled.connect(refresh_dialog_state)
@@ -26411,7 +26523,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         progress_label = "Converting image..." if is_image_conversion else "Imaging floppy..."
         progress_dialog = QProgressDialog(progress_label, "Cancel", 0, 100, self)
         progress_dialog.setWindowTitle(progress_title)
-        self._prepare_progress_dialog(progress_dialog)
+        self._prepare_disk_read_progress_dialog(progress_dialog, show_stages=not is_image_conversion)
         progress_dialog.setAutoClose(False)
 
         worker = DiskImageCaptureWorker(
@@ -26432,6 +26544,7 @@ class MidiTitleWindow(SelfUpdateMixin, PendingChangesMixin, CatalogActionsMixin,
         progress_dialog.canceled.connect(
             lambda owner=worker, dialog=progress_dialog: cancel_disk_activity(self, owner, dialog)
         )
+        self._connect_disk_read_stages(progress_dialog, worker, worker.captureFinished)
         worker.captureFinished.connect(self._on_floppy_image_capture_success)
         worker.captureFailed.connect(self._on_floppy_image_capture_failure)
         worker.captureRecoveryAvailable.connect(self._on_floppy_image_capture_recovery_available)

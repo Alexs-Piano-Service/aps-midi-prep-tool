@@ -1022,6 +1022,24 @@ _add_recovery_copy("Writing preview WAV...", (
     "Salvataggio dell'anteprima WAV...", "Salvando a prévia WAV...", "Записване на WAV за прослушване...",
     "WAV-voorvertoning opslaan...", "Zapisywanie pliku WAV do odsłuchu...", "プレビューの WAV を保存中...", "미리 듣기 WAV 저장 중...", "正在保存试听 WAV...",
 ))
+_add_recovery_copy("Inspecting Disk", (
+    "Inspeccionando el disco", "Inspection du disque", "Datenträger prüfen",
+    "Analisi del disco", "Inspecionando o disco", "Проверка на диска",
+    "Schijf controleren", "Sprawdzanie dysku", "ディスクを確認中",
+    "디스크 검사 중", "正在检查磁盘",
+))
+_add_recovery_copy("Reading Disk", (
+    "Leyendo el disco", "Lecture du disque", "Datenträger lesen",
+    "Lettura del disco", "Lendo o disco", "Четене на диска",
+    "Schijf lezen", "Odczytywanie dysku", "ディスクの読み取り中",
+    "디스크 읽는 중", "正在读取磁盘",
+))
+_add_recovery_copy("Organizing Files", (
+    "Organizando archivos", "Organisation des fichiers", "Dateien ordnen",
+    "Organizzazione dei file", "Organizando arquivos", "Подреждане на файловете",
+    "Bestanden ordenen", "Porządkowanie plików", "ファイルを整理中",
+    "파일 정리 중", "正在整理文件",
+))
 _add_recovery_copy("Finalizing exported files...", (
     "Finalizando la exportación...", "Finalisation de l'exportation...", "Export wird abgeschlossen...", "Completamento dell'esportazione...",
     "Finalizando a exportação...", "Завършване на експортирането...", "Export afronden...", "Kończenie eksportu...",
